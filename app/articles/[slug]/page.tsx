@@ -30,6 +30,12 @@ export async function generateMetadata({
       canonical: `/articles/${slug}`,
       types: { "text/markdown": `/articles/${slug}.md` },
     },
+    openGraph: {
+      type: "article",
+      publishedTime: article.date,
+      modifiedTime: article.updated ?? article.date,
+      tags: article.tags,
+    },
   }
 }
 

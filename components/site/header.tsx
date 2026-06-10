@@ -3,7 +3,12 @@
 import { useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { ListIcon, TerminalWindowIcon, XIcon } from "@phosphor-icons/react/dist/ssr"
+import {
+  ListIcon,
+  MagnifyingGlassIcon,
+  TerminalWindowIcon,
+  XIcon,
+} from "@phosphor-icons/react/dist/ssr"
 
 import { ThemeToggle } from "@/components/site/theme-toggle"
 import { cn } from "@/lib/utils"
@@ -86,6 +91,15 @@ export function SiteHeader() {
           >
             <TerminalWindowIcon size={16} weight="fill" />
             <kbd className="rounded border px-1 py-0.5 text-[10px]">⌘K</kbd>
+          </button>
+          <button
+            type="button"
+            onClick={openPalette}
+            className="flex cursor-pointer items-center text-muted-foreground transition-colors hover:text-foreground sm:hidden"
+            aria-label="Search"
+            title="Search"
+          >
+            <MagnifyingGlassIcon size={18} weight="bold" />
           </button>
           <ThemeToggle />
           <button

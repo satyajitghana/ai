@@ -20,7 +20,7 @@ export default function Page() {
       lede="Curated long-form writing on AI — explainers and essays."
       agentPath={{ json: "/api/articles" }}
     >
-      <ul className="space-y-8">
+      <ul className="space-y-8" data-stagger>
         {articles.map((a) => (
           <li key={a.slug}>
             <Link href={`/articles/${a.slug}`} className="group block">

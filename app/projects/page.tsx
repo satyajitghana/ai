@@ -21,22 +21,14 @@ export default function Page() {
       lede="Things I've built — UI libraries, generative and creative tools, 3D/WASM visualizations, and AI apps."
       agentPath={{ json: "/api/projects" }}
     >
-      <ul className="space-y-10">
+      <ul className="space-y-6" data-stagger>
         {projects.map((p) => (
           <li key={p.slug}>
-            <Link href={`/projects/${p.slug}`} className="group block">
-              {p.cover ? (
-                <div className="relative mb-3 aspect-[16/9] overflow-hidden rounded-md border bg-muted">
-                  <Image
-                    src={p.cover}
-                    alt={`${p.title} screenshot`}
-                    fill
-                    sizes="(max-width: 768px) 100vw, 768px"
-                    className="object-cover transition-opacity group-hover:opacity-90"
-                  />
-                </div>
-              ) : null}
-              <div className="flex items-baseline justify-between gap-4">
+            <Link
+              href={`/projects/${p.slug}`}
+              className="group flex items-start justify-between gap-4"
+            >
+              <div className="min-w-0 flex-1">
                 <h2 className="font-heading text-lg font-semibold underline-offset-4 group-hover:underline">
                   {p.title}
                   {p.featured ? (
@@ -45,13 +37,24 @@ export default function Page() {
                     </span>
                   ) : null}
                 </h2>
-                <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                <p className="mt-1 font-mono text-xs text-muted-foreground">
                   {p.stack.slice(0, 4).join(" · ")}
-                </span>
+                </p>
+                <p className="mt-1 line-clamp-2 leading-7 text-muted-foreground">
+                  {p.description}
+                </p>
               </div>
-              <p className="mt-1 leading-7 text-muted-foreground">
-                {p.description}
-              </p>
+              {p.cover ? (
+                <div className="relative w-24 shrink-0 overflow-hidden rounded border bg-muted aspect-[16/10] sm:w-32">
+                  <Image
+                    src={p.cover}
+                    alt={`${p.title} screenshot`}
+                    fill
+                    sizes="112px"
+                    className="object-cover transition-opacity group-hover:opacity-90"
+                  />
+                </div>
+              ) : null}
             </Link>
           </li>
         ))}

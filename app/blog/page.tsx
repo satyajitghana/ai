@@ -20,7 +20,7 @@ export default function Page() {
       lede="Deep learning, 3D perception, CUDA, and the systems that ship them."
       agentPath={{ json: "/api/posts" }}
     >
-      <ul className="space-y-8">
+      <ul className="space-y-8" data-stagger>
         {posts.map((p) => (
           <li key={p.slug}>
             <Link href={`/blog/${p.slug}`} className="group block">
