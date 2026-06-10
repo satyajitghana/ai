@@ -4,6 +4,10 @@ import type { ComponentPropsWithoutRef } from "react"
 import { AttentionMatrix } from "@/components/mdx/attention-matrix"
 import { CoroutineStepper } from "@/components/mdx/coroutine-stepper"
 import { Diagram } from "@/components/mdx/diagram"
+import { MoeArchitecture } from "@/components/mdx/moe-architecture"
+import { MoeLoadBalance } from "@/components/mdx/moe-load-balance"
+import { MoeRouter } from "@/components/mdx/moe-router"
+import { MoeRouting } from "@/components/mdx/moe-routing"
 import { Plot } from "@/components/mdx/plot"
 import { StepThrough } from "@/components/mdx/step-through"
 import { cn } from "@/lib/utils"
@@ -138,6 +142,10 @@ export const mdxComponents: MDXComponents = {
   AttentionMatrix,
   CoroutineStepper,
   Diagram,
+  MoeArchitecture,
+  MoeLoadBalance,
+  MoeRouter,
+  MoeRouting,
   Plot,
   StepThrough,
 }
