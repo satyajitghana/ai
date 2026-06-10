@@ -19,7 +19,7 @@ export default function Page() {
       lede="Daily build logs — what I shipped, learned, and broke. Mostly written by the crew, reviewed by me."
       agentPath={{ json: "/api/posts?type=logs" }}
     >
-      <ul className="space-y-5">
+      <ul className="space-y-5" data-stagger>
         {logs.map((l) => (
           <li key={l.slug}>
             <Link href={`/logs/${l.slug}`} className="group block">

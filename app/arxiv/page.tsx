@@ -20,7 +20,7 @@ export default function Page() {
       lede="A personalized daily arXiv digest — new papers ranked against my interests by the paper-scout agent, each with a short take. Links only; read them on arXiv."
       agentPath={{ json: "/api/arxiv" }}
     >
-      <ul className="space-y-6">
+      <ul className="space-y-6" data-stagger>
         {digests.map((d) => {
           const standout = d.papers.find((p) => p.standout)
           return (
