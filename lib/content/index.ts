@@ -53,6 +53,22 @@ function readingTime(body: string): number {
   return Math.max(1, Math.round(words / 200))
 }
 
+// Article MDX may import its own colocated components at the top of the body
+// (after frontmatter). Those ESM import lines are for the rendered page only —
+// strip them from the `body` we expose so the `.md` agent variants and the
+// reading-time count stay clean prose. Only removes the leading import block.
+function stripLeadingImports(body: string): string {
+  const lines = body.split("\n")
+  let i = 0
+  while (
+    i < lines.length &&
+    (lines[i].trim() === "" || /^import\s.+\sfrom\s.+$/.test(lines[i].trim()))
+  ) {
+    i++
+  }
+  return lines.slice(i).join("\n").replace(/^\n+/, "")
+}
+
 // Load + validate every file of one kind. Throws (with the file path) on bad
 // frontmatter so the build / `pnpm validate` fails loudly.
 function load<T>(kind: ContentKind, schema: ZodType<T>): ContentItem<T>[] {
@@ -71,12 +87,13 @@ function load<T>(kind: ContentKind, schema: ZodType<T>): ContentItem<T>[] {
       )
     }
     const slug = path.basename(file, ".mdx")
+    const body = stripLeadingImports(content)
     return {
       ...parsed.data,
       kind,
       slug,
-      body: content,
-      readingTimeMins: readingTime(content),
+      body,
+      readingTimeMins: readingTime(body),
       url: absoluteUrl(`/${kind}/${slug}`),
     } as ContentItem<T>
   })
