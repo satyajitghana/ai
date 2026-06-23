@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { CaretDownIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
 
@@ -92,14 +93,7 @@ function Box({
 function Arrow() {
   return (
     <div className="flex justify-center py-1 text-muted-foreground/50" aria-hidden>
-      <svg width="12" height="14" viewBox="0 0 12 14">
-        <path
-          d="M6 0 V12 M2 8 L6 12 L10 8"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.2"
-        />
-      </svg>
+      <CaretDownIcon size={14} weight="fill" />
     </div>
   )
 }

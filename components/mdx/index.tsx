@@ -1,13 +1,8 @@
 import type { MDXComponents } from "mdx/types"
 import type { ComponentPropsWithoutRef } from "react"
 
-import { AttentionMatrix } from "@/components/mdx/attention-matrix"
-import { CoroutineStepper } from "@/components/mdx/coroutine-stepper"
+import { BenchBars } from "@/components/mdx/bench-bars"
 import { Diagram } from "@/components/mdx/diagram"
-import { MoeArchitecture } from "@/components/mdx/moe-architecture"
-import { MoeLoadBalance } from "@/components/mdx/moe-load-balance"
-import { MoeRouter } from "@/components/mdx/moe-router"
-import { MoeRouting } from "@/components/mdx/moe-routing"
 import { Plot } from "@/components/mdx/plot"
 import { StepThrough } from "@/components/mdx/step-through"
 import { cn } from "@/lib/utils"
@@ -137,15 +132,13 @@ export const mdxComponents: MDXComponents = {
   ),
   Callout,
   Figure,
-  // Interactive explainer kit — every component degrades to meaningful static
-  // output (SSR/no-JS), and the .md agent variants carry the raw prose anyway.
-  AttentionMatrix,
-  CoroutineStepper,
+  // Generic explainer kit — shared across articles, so registered globally.
+  // Article-SPECIFIC interactive components live next to their article in
+  // components/articles/<slug>/ and are imported directly at the top of that
+  // article's .mdx (keeps this global list from bloating). Every component
+  // degrades to meaningful static output; the .md agent variants carry the prose.
+  BenchBars,
   Diagram,
-  MoeArchitecture,
-  MoeLoadBalance,
-  MoeRouter,
-  MoeRouting,
   Plot,
   StepThrough,
 }
