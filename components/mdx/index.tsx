@@ -5,6 +5,8 @@ import { BenchBars } from "@/components/mdx/bench-bars"
 import { Diagram } from "@/components/mdx/diagram"
 import { Plot } from "@/components/mdx/plot"
 import { StepThrough } from "@/components/mdx/step-through"
+import { Video } from "@/components/mdx/video"
+import { Zoomable } from "@/components/mdx/zoomable"
 import { cn } from "@/lib/utils"
 
 // Editorial × terminal element styling for MDX-rendered markdown.
@@ -48,8 +50,10 @@ function Figure({
 }) {
   return (
     <figure className="my-8">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={src} alt={alt} className="w-full rounded-md border" />
+      <Zoomable label="figure">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={src} alt={alt} className="w-full rounded-md border" />
+      </Zoomable>
       {caption ? (
         <figcaption className="mt-2 text-center font-mono text-xs text-muted-foreground">
           {caption}
@@ -141,4 +145,5 @@ export const mdxComponents: MDXComponents = {
   Diagram,
   Plot,
   StepThrough,
+  Video,
 }
