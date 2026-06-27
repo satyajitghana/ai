@@ -1,6 +1,10 @@
+import { Zoomable } from "@/components/mdx/zoomable"
+
 // Architecture diagrams for explainers. Two modes, both server-rendered:
 // - `ascii` prop: monospace box-drawing diagram (agent/print friendly by nature)
 // - children: inline SVG you author directly in MDX
+// SVG diagrams get an expand-to-fullscreen control (via Zoomable); ascii stays
+// plain text. Both degrade to static output with no JS.
 export function Diagram({
   ascii,
   caption,
@@ -17,7 +21,9 @@ export function Diagram({
           {ascii.replace(/^\n+|\s+$/g, "")}
         </pre>
       ) : (
-        <div className="overflow-x-auto rounded-md border p-4">{children}</div>
+        <Zoomable label="diagram">
+          <div className="overflow-x-auto rounded-md border p-4">{children}</div>
+        </Zoomable>
       )}
       {caption ? (
         <figcaption className="mt-2 text-center font-mono text-xs text-muted-foreground">
