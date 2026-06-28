@@ -1,0 +1,188 @@
+---
+title: "How LLM inference works: prefill, decode, and where the time goes"
+description: "Every generate() call runs two phases with opposite bottlenecks — a compute-bound prefill and a memory-bound decode — and almost every inference optimization targets one or the other. A walk through the full path from tokens to streamed output, the KV cache that dominates the economics, and how to tell which phase is actually slow."
+date: 2026-06-28
+tags:
+  - llm
+  - inference-optimization
+  - systems
+  - kv-cache
+  - explainer
+draft: false
+---
+
+import { PrefillDecode } from "@/components/articles/llm-inference/prefill-decode"
+import { KVCache } from "@/components/articles/llm-inference/kv-cache"
+import { Quantization } from "@/components/articles/llm-inference/quantization"
+
+When a model feels slow in production, the first question I ask is *which phase* is
+slow. Because a single `generate()` call isn't one workload — it's two, with opposite
+bottlenecks running on the same GPU:
+
+- **prefill** processes the prompt and is **compute-bound**,
+- **decode** generates tokens one at a time and is **memory-bound**.
+
+Almost every inference optimization you'll read about targets one of these two phases.
+So before reaching for a fix, you have to know which one is hurting. Here's the whole
+pipeline, and where the time actually goes.
+
+<PrefillDecode />
+
+## From text to vectors
+
+Before either phase, the text becomes numbers. A tokenizer — usually byte-pair encoding
+(BPE) — splits the string into integer IDs from a vocabulary of roughly 50,000 entries.
+Each ID indexes a row of the embedding table, a learned `[vocab_size, hidden_dim]`
+matrix, so for `hidden_dim = 4096` every token becomes a 4096-dimensional vector.
+
+Position is injected here. Modern models use rotary position embeddings (RoPE), which
+encode position by *rotating* each query/key vector by an angle proportional to its
+index, rather than adding a separate positional vector. It's cheap and it's what lets
+the same weights generalize across lengths.
+
+## Inside a layer
+
+The embedded sequence flows through a stack of transformer layers — 32 for a 7B, 80+ for
+the big ones. Each layer is two operations:
+
+1. **Self-attention** projects every token into a query `Q`, key `K`, and value `V`.
+   Each token's query is scored against every token's key; scale, softmax, and the scores
+   become weights that mix the values. This is the only place information moves *between*
+   positions.
+2. **Feed-forward network (FFN)** — a two-layer MLP applied to each token independently.
+   Attention routes information across positions; the FFN transforms it in place.
+
+After the last layer, the final position's hidden state is projected back to vocabulary
+size, softmaxed, and sampled — that's one output token. How that projection-and-sample
+gets *driven* is exactly what differs between the two phases.
+
+## Prefill: compute-bound
+
+Prefill processes the entire prompt at once. `Q`, `K`, `V` are computed for every prompt
+token in parallel, and attention is a big **matrix-matrix multiply**. That's dense
+arithmetic, and it saturates the GPU's math units — utilization runs near 100%. The
+metric that captures this phase is **Time To First Token (TTFT)**: how long before the
+first output appears.
+
+Prefill also populates the **KV cache** — the `K` and `V` tensors for every layer get
+written to GPU memory so they never have to be recomputed. That cache is what makes the
+next phase cheap, and also what makes it expensive.
+
+## Decode: memory-bound
+
+Once the first token exists, generation switches to one token per step. For each new
+token the model computes `Q`, `K`, `V` for *that token only*; the keys and values for
+everything before it are already cached. So the attention is one query vector against a
+cached key matrix — a **matrix-vector** multiply, almost no arithmetic.
+
+And yet decode is the slow part per token, because the GPU still has to **stream every
+weight matrix and the entire KV cache out of memory** to do that tiny computation. The
+bottleneck flips from arithmetic to **memory bandwidth**. The metric here is **Inter-Token
+Latency (ITL)** — the gap between consecutive tokens, which is what makes a stream feel
+fast or sluggish. GPU utilization during decode can sit at 30% on a fully loaded server,
+because the math units are starved waiting on memory.
+
+| | prefill | decode |
+|---|---|---|
+| Work | whole prompt, parallel | one token at a time |
+| Attention shape | matrix × matrix | matrix × vector |
+| Bottleneck | compute (arithmetic) | memory bandwidth |
+| Metric | TTFT | ITL |
+| GPU util | ~95% | ~30% |
+| Optimize by | more FLOPs, better kernels | smaller cache, faster memory, batching |
+
+## The KV cache runs the economics
+
+The cache is the single most important object in LLM serving. Without it, generating a
+1000-token response would re-attend over the whole growing sequence every step —
+quadratic work. With it, each step appends one token's `K`/`V` and does constant new
+work — linear. Toggle it and watch the per-step cost, then drag the context length to
+see what the cache costs in memory:
+
+<KVCache />
+
+The trade is brutal and unavoidable: the cache grows linearly with sequence length, *per
+layer*. For a 13B model it's roughly **1 MB per token**, so a 4K context is ~4 GB of VRAM
+spent on cache alone — before a single weight. And that memory competes directly with
+batch size: every gigabyte on cache is a gigabyte not serving another request. Long
+contexts are expensive not because of compute, but because they evict concurrency.
+
+The standard mitigations all attack the cache from different angles:
+
+- **Quantize it** to INT8 or INT4 (it's just tensors).
+- **Sliding-window attention** — drop tokens outside a fixed window.
+- **Grouped-query attention (GQA)** — share `K`/`V` across attention heads so there are
+  fewer cached tensors. (This is exactly the change [iLLaDA](/articles/illada-diffusion-language-model)
+  and most modern models make.)
+- **PagedAttention** — the trick behind vLLM: page the cache in fixed-size blocks like an
+  OS pages virtual memory, killing fragmentation and packing in more concurrent requests.
+
+## Redesigning attention around the cache
+
+The deeper move is to make the cache structurally smaller from the start, by changing
+attention itself. DeepSeek's V4 series does this with a hybrid of two compressed
+mechanisms: **Compressed Sparse Attention** (compress KV ~4× with softmax-gated pooling,
+then attend sparsely) and **Heavily Compressed Attention** (consolidate KV across 128
+tokens into one entry, attend densely over those). At a 1M-token context, V4-Pro needs
+about **27% of the single-token inference FLOPs and 10% of the KV cache** of its
+predecessor — in absolute terms, ~9.62 GiB of cache per sequence in bf16 versus an
+estimated ~83.9 GiB for the older design, and fp4/fp8 halves it again. (I went deeper on
+V4's drafter in the [DSpark write-up](/articles/deepseek-dspark).) The cache has become
+the constraint the architecture is being designed *around*.
+
+## Quantization
+
+Training needs FP32/BF16 for gradient stability. Inference doesn't. Dropping bit-width
+saves memory linearly, and quality barely moves. Pick a size and precision:
+
+<Quantization />
+
+INT4 is the reason a 7B model runs on a 4–6 GB laptop GPU at all. Methods like GPTQ and
+AWQ use per-channel scaling to keep the lossy compression within 1–2 points of full
+precision on standard benchmarks. And going FP16 → INT8 often roughly halves latency with
+negligible quality loss — which makes quantization the highest-leverage single change for
+most deployments.
+
+## The serving layer
+
+On top of the prefill/decode loop sits the infrastructure that makes a GPU economical:
+
+- **Continuous batching** interleaves tokens from many requests on the same GPU step. This
+  is the big one: decode leaves most of the arithmetic idle, so you fill that idle
+  capacity with other requests' tokens. It's why one GPU serves dozens of users at once.
+- **Speculative decoding** drafts several tokens with a cheap model and verifies them in
+  one pass of the big model — turning sequential decode steps into one parallel
+  verification when acceptance is high. (Two whole articles' worth:
+  [DSpark](/articles/deepseek-dspark) and
+  [multi-token prediction](/articles/multi-token-prediction).)
+- **PagedAttention** for the cache memory, as above.
+
+Frameworks like vLLM, TensorRT-LLM, and TGI combine all of this. The throughput they get
+comes mostly from the fact that decode is memory-bound, so there's spare arithmetic lying
+around for batching to soak up.
+
+## The full path
+
+1. **Tokenize** — text → integer IDs via BPE.
+2. **Embed** — IDs → vectors; RoPE rotates in position.
+3. **Prefill** — all prompt tokens through every layer in parallel; compute-bound; KV
+   cache populated; first token emitted (TTFT).
+4. **Decode loop** — one token per step: project `Q`, attend over cached `K`/`V`, run FFN,
+   sample, append to cache; memory-bound (ITL).
+5. **Detokenize** — IDs → text, streamed out.
+
+## How to actually use this
+
+The whole point of splitting it this way is diagnosis. When something is slow:
+
+- **Slow to start** → you're prefill-bound. Long prompts dominate TTFT; optimize the
+  prompt path (caching, chunked prefill, more compute).
+- **Slow to stream** → you're decode-bound. Long outputs dominate ITL; the fix is *not*
+  more compute — it's a smaller cache, faster memory, or better batching.
+- **Context length is never free.** It bloats the KV cache and directly cuts how many
+  requests fit on the GPU, so it shows up as reduced throughput long before it shows up as
+  an out-of-memory error.
+
+That last instinct is the one I'd internalize: during decode the arithmetic units are
+mostly idle, so when a decode-bound server is slow, throwing a bigger compute budget at it
+does nothing. The bottleneck is the memory bus. Optimize the thing that's actually full.
