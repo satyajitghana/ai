@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 
@@ -15,13 +15,7 @@ const N = 14 // decode steps to animate
 
 export function KVCache() {
   const [cache, setCache] = useState(true)
-  const [ptr, setPtr] = useState(0)
   const [ctxK, setCtxK] = useState(4) // context length in thousands of tokens
-
-  useEffect(() => {
-    const id = setInterval(() => setPtr((p) => (p >= N ? 0 : p + 1)), 380)
-    return () => clearInterval(id)
-  }, [])
 
   const work = (k: number) => (cache ? 1 : k + 1)
   // normalize both modes to the same scale (the without-cache peak) so "with
@@ -29,7 +23,6 @@ export function KVCache() {
   const maxWork = N
   const cumWith = N
   const cumWithout = (N * (N + 1)) / 2
-  const cum = Array.from({ length: ptr }, (_, k) => work(k)).reduce((a, b) => a + b, 0)
 
   // cache memory: 13B ~ 1 MB/token; context in thousands → MB → GB
   const cacheGB = (ctxK * 1000 * 1) / 1024
@@ -63,34 +56,28 @@ export function KVCache() {
       </div>
 
       <div className="space-y-4 p-4">
-        {/* per-step work bars */}
-        <div className="flex h-28 items-end gap-1">
-          {Array.from({ length: N }).map((_, k) => {
-            const filled = k < ptr
-            return (
-              <div key={k} className="flex flex-1 flex-col items-center justify-end">
-                <div
-                  className="w-full rounded-sm transition-all duration-300"
-                  style={{
-                    height: `${(work(k) / maxWork) * 100}%`,
-                    background: filled
-                      ? cache
-                        ? "oklch(0.72 0.15 150)"
-                        : "oklch(0.72 0.15 25)"
-                      : "var(--muted)",
-                  }}
-                />
-              </div>
-            )
-          })}
+        {/* per-step work bars — always rendered, coloured by mode (no animation,
+            so the chart never flickers blank on a loop) */}
+        <div className="flex h-28 items-end gap-1 rounded-md border bg-muted/20 p-2">
+          {Array.from({ length: N }).map((_, k) => (
+            <div key={k} className="flex h-full flex-1 flex-col items-center justify-end">
+              <div
+                className="w-full rounded-sm transition-all duration-500"
+                style={{
+                  height: `${Math.max((work(k) / maxWork) * 100, 3)}%`,
+                  background: cache ? "oklch(0.72 0.15 150)" : "oklch(0.72 0.15 25)",
+                }}
+              />
+            </div>
+          ))}
         </div>
         <div className="text-center font-mono text-[10px] text-muted-foreground">
           decode step → (work per step ∝ height)
         </div>
 
         <div className="grid grid-cols-3 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">
-          <Stat label="this step" value={`${ptr > 0 ? work(ptr - 1) : 0}×`} />
-          <Stat label="total work" value={cache ? `${cumWith} (linear)` : `${cumWithout} (n²)`} highlight />
+          <Stat label="per step" value={cache ? "1× (flat)" : "1→N (grows)"} />
+          <Stat label="total work" value={cache ? `${cumWith} · linear` : `${cumWithout} · n²`} highlight />
           <Stat label="cache speedup" value={`~${(cumWithout / cumWith).toFixed(1)}×`} />
         </div>
 

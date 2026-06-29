@@ -65,8 +65,10 @@ export function Unmasking() {
       </div>
 
       <div className="space-y-4 p-4">
-        {/* token sequence */}
-        <div className="flex min-h-[64px] flex-wrap items-center gap-1.5 rounded-md border bg-muted/20 p-3">
+        {/* token sequence — every word occupies its full width whether masked or
+            not (masked = transparent text in a dashed box), so revealing tokens
+            never reflows the rows and shifts the layout */}
+        <div className="flex flex-wrap items-center gap-1.5 rounded-md border bg-muted/20 p-3">
           {TOKENS.map((t, i) => {
             const shown = revealStep(i) <= step
             const fresh = justRevealed(i)
@@ -79,11 +81,11 @@ export function Unmasking() {
                     ? fresh
                       ? "text-background"
                       : "border border-transparent text-foreground"
-                    : "border border-dashed border-foreground/30 text-muted-foreground/40"
+                    : "border border-dashed border-foreground/30 text-transparent"
                 )}
                 style={fresh ? { background: "oklch(0.72 0.15 150)" } : undefined}
               >
-                {shown ? t : "▢"}
+                {t}
               </span>
             )
           })}
