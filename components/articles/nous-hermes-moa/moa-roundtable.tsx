@@ -82,7 +82,7 @@ export function MoARoundtable() {
                   </span>
                   <span className="text-muted-foreground">{p.got}</span>
                 </div>
-                <p className="mt-1 text-sm leading-6">{shown ? p.text : "…"}</p>
+                <p className={cn("mt-1 text-sm leading-6 transition-opacity duration-300", shown ? "opacity-100" : "opacity-0")}>{p.text}</p>
               </div>
             )
           })}
@@ -108,7 +108,7 @@ export function MoARoundtable() {
           <div className="font-mono text-[11px] text-muted-foreground">
             aggregator · Hermes 4 — synthesize, don&rsquo;t vote
           </div>
-          <p className="mt-1 text-sm leading-6">{showSynth ? SYNTHESIS : "…"}</p>
+          <p className={cn("mt-1 text-sm leading-6 transition-opacity duration-300", showSynth ? "opacity-100" : "opacity-0")}>{SYNTHESIS}</p>
         </div>
 
         {/* win-rate bars */}

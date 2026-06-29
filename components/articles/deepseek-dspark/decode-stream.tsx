@@ -69,45 +69,52 @@ export function DecodeStream() {
       </div>
 
       <div className="space-y-4 p-4">
-        {/* the stream */}
-        <div className="min-h-[92px] rounded-md border bg-muted/20 p-3 font-mono text-sm leading-7">
-          {TOKENS.slice(0, s.committed).map((t, i) => (
-            <span key={i} className="text-foreground">
-              {t}{" "}
-            </span>
-          ))}
-          {s.phase !== "commit" &&
-            TOKENS.slice(s.committed, s.committed + draftLen).map((t, i) => {
-              const accepted = i < accept
-              const isBonus = i === accept
-              if (s.phase === "draft") {
+        {/* the stream — an invisible full-text spacer fixes the height so the
+            layout never shifts as tokens stream in (the visible text is always a
+            prefix, so it wraps identically). */}
+        <div className="relative overflow-hidden rounded-md border bg-muted/20 font-mono text-sm leading-7">
+          <div aria-hidden className="invisible p-3">
+            {TOKENS.join(" ")}
+          </div>
+          <div className="absolute inset-0 p-3">
+            {TOKENS.slice(0, s.committed).map((t, i) => (
+              <span key={i} className="text-foreground">
+                {t}{" "}
+              </span>
+            ))}
+            {s.phase !== "commit" &&
+              TOKENS.slice(s.committed, s.committed + draftLen).map((t, i) => {
+                const accepted = i < accept
+                const isBonus = i === accept
+                if (s.phase === "draft") {
+                  return (
+                    <span key={i} className="text-muted-foreground/40">
+                      {t}{" "}
+                    </span>
+                  )
+                }
                 return (
-                  <span key={i} className="text-muted-foreground/40">
+                  <span
+                    key={i}
+                    className={cn(
+                      "rounded px-0.5",
+                      accepted
+                        ? "text-background"
+                        : isBonus
+                          ? "text-foreground underline decoration-dotted"
+                          : "text-destructive line-through opacity-50"
+                    )}
+                    style={accepted ? { background: "oklch(0.72 0.15 150)" } : undefined}
+                  >
                     {t}{" "}
                   </span>
                 )
-              }
-              return (
-                <span
-                  key={i}
-                  className={cn(
-                    "rounded px-0.5",
-                    accepted
-                      ? "text-background"
-                      : isBonus
-                        ? "text-foreground underline decoration-dotted"
-                        : "text-destructive line-through opacity-50"
-                  )}
-                  style={accepted ? { background: "oklch(0.72 0.15 150)" } : undefined}
-                >
-                  {t}{" "}
-                </span>
-              )
-            })}
-          <span
-            className="inline-block h-4 w-1.5 translate-y-0.5 animate-pulse bg-foreground/60"
-            aria-hidden
-          />
+              })}
+            <span
+              className="inline-block h-4 w-1.5 translate-y-0.5 animate-pulse bg-foreground/60"
+              aria-hidden
+            />
+          </div>
         </div>
 
         <div className="font-mono text-[11px] text-muted-foreground">
