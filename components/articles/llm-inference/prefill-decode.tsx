@@ -100,41 +100,58 @@ export function PrefillDecode() {
           </div>
         </div>
 
-        {/* KV cache */}
+        {/* KV cache — all slots always rendered (inactive ones faint) so the row
+            never grows and shifts the layout */}
         <div>
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">
             KV cache · {cacheSize} tokens
           </div>
           <div className="flex flex-wrap gap-1">
-            {Array.from({ length: cacheSize }).map((_, i) => (
-              <span
-                key={i}
-                className="h-4 w-4 rounded-sm"
-                style={{
-                  background: i < PROMPT.length ? "oklch(0.72 0.13 195 / 0.5)" : "oklch(0.72 0.14 150 / 0.7)",
-                }}
-                title={i < PROMPT.length ? "from prefill" : "appended during decode"}
-              />
-            ))}
+            {Array.from({ length: PROMPT.length + GEN.length }).map((_, i) => {
+              const active = i < cacheSize
+              return (
+                <span
+                  key={i}
+                  className="h-4 w-4 rounded-sm transition-colors"
+                  style={{
+                    background: !active
+                      ? "var(--muted)"
+                      : i < PROMPT.length
+                        ? "oklch(0.72 0.13 195 / 0.5)"
+                        : "oklch(0.72 0.14 150 / 0.7)",
+                    opacity: active ? 1 : 0.35,
+                  }}
+                  title={i < PROMPT.length ? "from prefill" : "appended during decode"}
+                />
+              )
+            })}
           </div>
         </div>
 
-        {/* generated */}
+        {/* generated — all tokens always present (future ones invisible) to keep a
+            fixed height */}
         <div>
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">output</div>
-          <div className="flex min-h-[28px] flex-wrap gap-1.5">
-            {GEN.slice(0, s.phase === "decode" ? s.step : 0).map((t, i) => (
-              <span
-                key={i}
-                className={cn(
-                  "rounded px-2 py-1 font-mono text-xs",
-                  i === s.step - 1 ? "text-background" : "border text-foreground"
-                )}
-                style={i === s.step - 1 ? { background: "oklch(0.72 0.15 150)" } : undefined}
-              >
-                {t}
-              </span>
-            ))}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {GEN.map((t, i) => {
+              const shown = s.phase === "decode" && i < s.step
+              return (
+                <span
+                  key={i}
+                  className={cn(
+                    "rounded px-2 py-1 font-mono text-xs transition-all",
+                    !shown
+                      ? "border border-transparent opacity-0"
+                      : i === s.step - 1
+                        ? "text-background"
+                        : "border text-foreground"
+                  )}
+                  style={shown && i === s.step - 1 ? { background: "oklch(0.72 0.15 150)" } : undefined}
+                >
+                  {t}
+                </span>
+              )
+            })}
             <span className="inline-block h-5 w-1.5 animate-pulse self-center bg-foreground/50" aria-hidden />
           </div>
         </div>
