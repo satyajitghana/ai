@@ -3,17 +3,19 @@ fastlio2_mini.py — a minimal, ROS-free FAST-LIO2-style LiDAR-inertial odometry
 
 A teaching reimplementation of the FAST-LIO2 core: an iterated error-state Kalman
 filter on SO(3), fed a high-rate IMU and corrected by raw point-to-plane LiDAR
-residuals over an incremental k-d-tree map. Simplifications vs. the paper (called
-out where they matter): identity LiDAR->IMU extrinsic, gravity fixed after init,
-and a scipy cKDTree rebuilt per scan instead of a true ikd-Tree. Everything else —
-the manifold state, forward/backward propagation, the reformulated Kalman gain — is
-faithful.
+residuals over an incremental k-d-tree map. It supports a LiDAR->IMU extrinsic and
+per-scan voxel downsampling; the simplifications vs. the paper (called out where
+they matter) are gravity fixed after init and a scipy cKDTree rebuilt per scan
+instead of a true ikd-Tree. Everything else — the manifold state, forward/backward
+propagation, the reformulated Kalman gain — is faithful.
 
     pip install numpy scipy rosbags
     python fastlio2_mini.py                 # runs a synthetic demo (no bag needed)
+    python fastlio2_mini.py avia.bag        # runs a real Livox Avia bag (calibrated)
     # or: from fastlio2_mini import read_bag, run_offline
 
-Validated: tracks an 8 s synthetic trajectory at ~4 cm ATE RMSE.
+Validated: ~4 cm ATE on an 8 s synthetic trajectory, and it tracks the real HKU
+Livox Avia bag (491 scans, ~50 s) — see run_offline's calibration arguments.
 """
 import numpy as np
 from scipy.spatial import cKDTree
@@ -154,6 +156,16 @@ def deskew(points, point_dts, imu_poses, t_end):
         out[i] = R_end.T @ (wpt - p_end)       # back into the scan-end frame
     return out
 
+# ============================================================ downsample (voxel grid)
+def voxel_downsample(pts, voxel=0.5):
+    """One representative point per occupied voxel — FAST-LIO's per-scan downsample.
+    100k raw points per scan is overkill; a sparse, even set keeps the update real-time."""
+    if len(pts) == 0:
+        return pts
+    keys = np.floor(pts / voxel).astype(np.int64)
+    _, idx = np.unique(keys, axis=0, return_index=True)
+    return pts[np.sort(idx)]
+
 # ============================================================ offline driver
 def imu_init(imu_samples, g_mag=9.81):
     """Estimate gravity direction and gyro bias from a short static window."""
@@ -162,13 +174,23 @@ def imu_init(imu_samples, g_mag=9.81):
     g = -a / np.linalg.norm(a) * g_mag            # gravity opposes measured accel
     return g, w
 
-def run_offline(imu_stream, lidar_scans, voxel=0.4):
+def run_offline(imu_stream, lidar_scans, voxel=0.4, scan_voxel=0.5,
+                T_LI=None, R_LI=None, acc_cov=1e-2, gyr_cov=1e-2,
+                bacc_cov=1e-4, bgyr_cov=1e-4, init_secs=0.5):
     """imu_stream: list of (t, acc[3], gyro[3]); lidar_scans: list of dict with
-       't_end', 'points'(N,3 body), 'dts'(N per-point time before scan end)."""
-    Q = np.diag([1e-4]*3 + [1e-3]*3 + [1e-6]*3 + [1e-6]*3)
-    # --- init from the first 0.5 s of IMU ---
+       't_end', 'points'(N,3 body), 'dts'(N per-point time before scan end).
+
+    T_LI / R_LI: LiDAR->IMU extrinsic (point in IMU frame = R_LI @ p_lidar + T_LI).
+    acc_cov/gyr_cov: IMU noise densities (Avia's avia.yaml uses 0.1; the synthetic
+    demo is quieter). The process-noise Q is built from these — too small and the
+    filter trusts a stale prediction and refuses to move, too large and it's jumpy."""
+    Q = np.diag([gyr_cov]*3 + [acc_cov]*3 + [bgyr_cov]*3 + [bacc_cov]*3)
+    R_LI = np.eye(3) if R_LI is None else np.asarray(R_LI, float)
+    T_LI = np.zeros(3) if T_LI is None else np.asarray(T_LI, float)
+    to_imu = lambda p: (R_LI @ p.T).T + T_LI         # LiDAR points -> IMU body frame
+    # --- init gravity + gyro bias from the first static window of IMU ---
     t0 = imu_stream[0][0]
-    static = [s for s in imu_stream if s[0] < t0 + 0.5]
+    static = [s for s in imu_stream if s[0] < t0 + init_secs]
     g, bg = imu_init(static)
     kf = ESEKF(g); kf.x.bg = bg
     lmap = LocalMap(voxel)
@@ -185,7 +207,9 @@ def run_offline(imu_stream, lidar_scans, voxel=0.4):
             imu_i += 1
         if not poses:
             poses = [(scan['t_end'], kf.x.R.copy(), kf.x.p.copy())]
-        pts = deskew(scan['points'], scan['dts'], poses, scan['t_end'])
+        body = to_imu(scan['points'])                       # into the IMU body frame
+        pts = deskew(body, scan['dts'], poses, scan['t_end'])
+        pts = voxel_downsample(pts, scan_voxel)             # sparse, even set for the update
         if not bootstrapped:                    # seed the map from the first scan
             lmap.add((kf.x.R @ pts.T).T + kf.x.p); bootstrapped = True
         else:
@@ -221,8 +245,8 @@ def read_bag(path, imu_topic='/livox/imu', lidar_topic='/livox/lidar', g_mag=9.8
                 a, w = msg.linear_acceleration, msg.angular_velocity
                 imu_stream.append((t * 1e-9, np.array([a.x, a.y, a.z]), np.array([w.x, w.y, w.z])))
             elif 'CustomMsg' in conn.msgtype:                      # Livox
-                pts, dts, t_end = parse_livox(msg)
-                lidar_scans.append({'t_end': t_end, 'points': pts, 'dts': dts})
+                pts, dts = parse_livox(msg)
+                lidar_scans.append({'t_end': t * 1e-9, 'points': pts, 'dts': dts})
             else:                                                   # PointCloud2
                 pts, dts = parse_pointcloud2(msg)
                 lidar_scans.append({'t_end': t * 1e-9, 'points': pts, 'dts': dts})
@@ -231,15 +255,19 @@ def read_bag(path, imu_topic='/livox/imu', lidar_topic='/livox/lidar', g_mag=9.8
     return imu_stream, lidar_scans
 
 def parse_livox(msg):
-    """Decode a livox_ros_driver/CustomMsg into (N,3) xyz, per-point dt, scan-end time."""
+    """Decode a livox_ros_driver/CustomMsg into (N,3) xyz and per-point dt-before-scan-end.
+
+    Note: we deliberately ignore msg.header.stamp here. On real Avia bags the Livox
+    header runs on the sensor's own clock (seconds-since-boot), while the IMU is stamped
+    with the bag's record clock (Unix time). Mixing them silently breaks IMU/LiDAR sync,
+    so read_bag uses the bag record time `t` for every scan's t_end and only uses the
+    per-point offsets here for deskew."""
     P = msg.points
     xyz = np.array([[p.x, p.y, p.z] for p in P], float)
     off = np.array([p.offset_time for p in P], float) * 1e-9        # ns -> s from scan start
     keep = np.linalg.norm(xyz, axis=1) > 0.5
     xyz, off = xyz[keep], off[keep]
-    t0 = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-    t_end = t0 + (off.max() if len(off) else 0.0)
-    return xyz, (off.max() - off if len(off) else off), t_end
+    return xyz, (off.max() - off if len(off) else off)             # dt before scan end
 
 def parse_pointcloud2(msg):
     """Decode a sensor_msgs/PointCloud2 into (N,3) xyz + per-point time offset."""
@@ -327,9 +355,14 @@ def _ate(traj, truth):
 if __name__ == '__main__':
     import sys
     if len(sys.argv) > 1:                       # python fastlio2_mini.py path/to/real.bag
-        imu, scans = read_bag(sys.argv[1])
-        traj, lmap = run_offline(imu, scans)
-        print(f"{len(traj)} poses, map={len(lmap.pts)} pts")
+        # defaults target the HKU Livox Avia bag: its avia.yaml extrinsic + noise
+        imu, scans = read_bag(sys.argv[1], imu_topic='/livox/imu', lidar_topic='/livox/lidar')
+        traj, lmap = run_offline(imu, scans, T_LI=[0.04165, 0.02326, -0.0284],
+                                 acc_cov=0.1, gyr_cov=0.1, scan_voxel=0.5)
+        ps = np.array([p for _, p, _ in traj])
+        plen = float(np.sum(np.linalg.norm(np.diff(ps, axis=0), axis=1)))
+        print(f"{len(traj)} poses, map={len(lmap.pts)} pts, path={plen:.2f} m, "
+              f"final={np.round(ps[-1], 2)}")
     else:                                       # self-contained demo: in-memory + a real .bag
         imu, scans, truth = simulate_room()
         traj, _ = run_offline(imu, scans)
