@@ -1,0 +1,175 @@
+---
+title: "MegaTrain: training a 120B model on one GPU by inverting where memory lives"
+description: "Most large-model training is bottlenecked by GPU memory. MegaTrain flips the layout — host RAM holds every parameter, gradient, and optimizer moment, and the GPU is a transient compute engine that streams one layer at a time. A walk through the memory-centric design, the double-buffered CUDA-stream pipeline that hides PCIe, and the honest scope of training 120B params at full precision on a single H200."
+date: 2026-06-28
+tags:
+  - llm
+  - training
+  - systems
+  - cuda
+  - explainer
+draft: false
+---
+
+import { PipelineStreams } from "@/components/articles/megatrain/pipeline-streams"
+import { MemoryPlacement } from "@/components/articles/megatrain/memory-placement"
+
+The thing that stops most people from training a big model isn't FLOPs — it's GPU
+memory. A 70B model's parameters, gradients, and Adam moments don't fit in an 80GB card,
+so you reach for tensor/pipeline parallelism across a cluster you may not have, or for
+offloading systems that thrash and OOM as the model grows.
+
+**MegaTrain** takes the other path: invert the memory hierarchy. Host CPU memory becomes
+the authoritative store for *all* persistent state — parameters, gradients, and optimizer
+moments — and the GPU is demoted to a **transient compute engine** that holds only the
+layer it's working on right now. On a single H200 with 1.5 TB of host RAM, that's enough
+to train models up to **120B parameters at full precision** — no quantization, no second
+GPU. It's a systems paper, and a good one, so let's read it as systems.
+
+## The inversion
+
+Start with the accounting. Mixed-precision Adam costs about **12 bytes per parameter**: 2
+for the BF16 weight, 2 for the BF16 gradient, and 8 for the FP32 first and second moments.
+A GPU-centric trainer keeps all of that in HBM, so the moment $12 \times \text{params}$
+exceeds the card, you're done. Move that state to host memory and stream one layer at a
+time, and the device footprint goes flat while the host's terabytes set the ceiling. Drag
+the model size and watch where it OOMs:
+
+<MemoryPlacement />
+
+That's the whole idea in one slider: a single H200's 141 GB HBM caps a GPU-centric run
+around 11–12B parameters, but with the persistent state in 1.5 TB of host RAM and only a
+streamed layer resident, the same card reaches past 120B. The paper's own architecture
+makes the split concrete — everything lives in the CPU domain; the GPU domain is scratch:
+
+<Figure
+  src="/articles/megatrain/fig2.png"
+  alt="MegaTrain architecture: the CPU domain holds the parameter store, optimizer states, and CPU Adam in pinned memory; the GPU domain holds transient layer templates, a weight buffer, gradient slabs, and activation checkpoints, connected over PCIe/NVLink-C2C with double buffers."
+  caption="MegaTrain's architecture (paper, Figure 2): the CPU domain is the authoritative store — layer parameters, optimizer moments (m, v), CPU Adam — in pinned memory. The GPU domain is transient: stateless layer templates, a weight buffer, gradient slabs, and an activation-checkpoint workspace, fed over PCIe / NVLink-C2C through two alternating buffers."
+/>
+
+## The bottleneck, and the step
+
+Inverting the layout creates one obvious problem: **PCIe bandwidth**. Every layer's
+weights now have to cross the bus into the GPU, and its gradients have to cross back —
+~128 GB/s on H200's PCIe Gen5, versus 4.8 TB/s of on-card HBM. If you did this naively the
+GPU would spend most of its life waiting on DMA.
+
+The training step is three phases built to keep that traffic off the critical path:
+
+1. **Streaming forward** — stream each layer's weights in (H2D), compute, checkpoint
+   activations every $K$ layers, release the weights immediately.
+2. **Block-wise backward** — recompute activations from the nearest checkpoint, stream the
+   layer's weights back in, compute gradients in reverse, offload them (D2H), release.
+3. **Optimizer update** — run Adam **entirely on the CPU** (AVX-512), so the freshly
+   computed gradients and the moments never make another round trip to the device.
+
+Block-wise recomputation bounds activation memory at $O(N \cdot A_{\max} \cdot L/K)$ —
+independent of total depth — which is what lets depth scale without the activation memory
+exploding.
+
+## The double-buffered pipeline
+
+This is the optimization that makes it fast instead of merely possible. MegaTrain runs
+**three CUDA streams** concurrently — one for compute, one for H2D weight transfer, one
+for D2H gradient evacuation — and double-buffers the weights so that while the compute
+stream works on layer $i$ out of one buffer, the next layer's weights prefetch into the
+other. Flip between naive serialization and the double-buffered schedule:
+
+<PipelineStreams />
+
+The coordination is three events — *weights-ready*, *backward-done*, *buffer-free* — and
+the payoff is a compute lane with no gaps: the GPU never stalls on PCIe. The ablation
+makes the importance unambiguous. Remove double-buffering and throughput drops **31.3%**
+(266 → 183 TFLOPS at 14B) — by far the largest single contributor, more than the gradient
+slab pool (−3.3%) or tighter checkpointing. Here's the paper's own timeline of the overlap:
+
+<Figure
+  src="/articles/megatrain/fig3.png"
+  alt="MegaTrain's end-to-end pipelined execution timeline across three CUDA streams, showing weight transfer, forward/backward compute, and gradient offload overlapping in a double-buffered schedule."
+  caption="The pipelined execution timeline (paper, Figure 3): weight transfer, compute, and gradient offload overlap across three CUDA streams in a double-buffered schedule, with the synchronization events that keep the buffers from colliding."
+/>
+
+A few more systems details earn their keep:
+
+- **Stateless layer templates.** A persistent autograd graph assumes weights stay
+  resident — incompatible with streaming and eviction. MegaTrain uses kernel templates
+  with no baked-in weight pointers and a `Bind` primitive that maps streamed buffer views
+  into the template's input slots, so device memory never exceeds a single layer.
+- **Layer-contiguous tiling.** BF16 weights, BF16 grads, and FP32 moments for a layer are
+  packed into one 4 KB-aligned block, so a layer moves as a single large-burst DMA that
+  saturates PCIe instead of many fragmented transfers.
+- **Pinned slab pool.** A fixed pool of pinned staging slabs (default 12), each sized to
+  the *largest layer* rather than the whole model, JIT-packed by a CPU worker — you get
+  pinned-memory transfer speed without pinning the entire model.
+
+## What it delivers
+
+The headline is a capability, and it's the most convincing part: **120B parameters on one
+H200**, and a **512K-token context on a single GH200**. These are regimes where the
+offload baselines simply OOM — so the comparison is binary, which is the strongest kind.
+
+<Figure
+  src="/articles/megatrain/fig1.png"
+  alt="Sustained TFLOPS versus model scale from 7B to 120B; MegaTrain stays high and stable while DeepSpeed ZeRO-3, ZeRO-Infinity, and PyTorch degrade and then fail to run."
+  caption="Throughput vs scale (paper, Figure 1): MegaTrain holds sustained throughput from 7B to 120B, where ZeRO-3 / ZeRO-Infinity / PyTorch degrade and then fall off entirely (they can't fit)."
+/>
+
+Where the baselines *can* run but are memory-starved — a 14B model on a PCIe A100 — the
+margin is large:
+
+<BenchBars
+  title="14B on a single A100 PCIe — throughput (TFLOPS)"
+  unit=""
+  bars={[
+    { label: "MegaTrain", value: 122, highlight: true },
+    { label: "Gemini", value: 15 },
+    { label: "ZeRO-3 Offload", value: 10 },
+  ]}
+/>
+
+That's 8.1× over Gemini and 12.2× over ZeRO-3 — and on a 48 GB A6000 or a 24 GB RTX 3090,
+MegaTrain trains 14B at all (56.8 and 30.2 TFLOPS) while ZeRO-3 OOMs. Crucially, accuracy
+doesn't move — full precision means no drift:
+
+| MetaMathQA accuracy | MegaTrain | ZeRO-3 | ZeRO-Infinity | PyTorch |
+|---|---|---|---|---|
+| 7B | 88.99 | 88.93 | 88.97 | 88.91 |
+| 14B | 92.52 | 92.41 | — | — |
+
+On depth, it's the only system that keeps going: ZeRO-3 OOMs by 132 layers and FSDP by 84,
+while MegaTrain runs the whole range and is **6.14× faster than FSDP at 56 layers**. On
+width, both baselines OOM at 4.0× while MegaTrain alone reaches 5.0×.
+
+## What I make of it
+
+- **The capability claims are real and well-supported.** Training 120B at full precision
+  on one GPU, 512K context on one GH200, and 14B on a 3090 — in each case the baseline
+  *cannot run*. "Only system that works here" is the most honest result a systems paper
+  can have, and the accuracy-parity table backs the full-precision claim.
+- **Double-buffering is the load-bearing idea, and the ablation proves it.** −31.3% without
+  it is a clean, isolated attribution. The rest — contiguous tiling, stateless templates,
+  CPU Adam — are the supporting cast that make the streaming viable.
+- **Read the throughput claims with the regime attached.** This is single-GPU only — no
+  multi-node scaling, and the metric is TFLOPS, not MFU, which a recomputation-heavy design
+  inflates (you do extra FLOPs re-deriving activations). At small or unconstrained sizes
+  the baselines are actually *faster* (FSDP 501 vs MegaTrain 406 TFLOPS at 1.0× width);
+  MegaTrain wins specifically once the model is large enough that offload systems are
+  thrashing or out of memory. The 1.84× and 6–12× numbers live near that memory cliff, not
+  everywhere.
+- **The best numbers lean on expensive hardware.** GH200's 900 GB/s NVLink-C2C and H200's
+  1.5 TB host RAM do a lot of work; on a plain PCIe Gen4 box the absolute throughput is far
+  lower (122 vs 266 TFLOPS). So it democratizes *what fits*, more than it democratizes
+  *speed*.
+
+The honest summary: MegaTrain redefines the memory ceiling for single-GPU training —
+provably, at full precision, with public code — and the double-buffered pipeline is a
+genuinely nice piece of CUDA-stream engineering. Just don't read "1.84× faster" as a
+general speedup; read it as "it runs, fast enough, where nothing else runs at all."
+
+---
+
+*Built on [MegaTrain: Full Precision Training of 100B+ Parameter Large Language Models on a
+Single GPU](https://arxiv.org/abs/2604.05091) (Yuan et al., 2026;
+[code](https://github.com/DLYuanGod/MegaTrain)). All numbers are from the paper's tables
+and figures.*
