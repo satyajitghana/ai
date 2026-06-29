@@ -1,0 +1,411 @@
+---
+title: "FAST-LIO2 from scratch: LiDAR-inertial odometry you can actually reproduce"
+description: "A direct, tightly-coupled LiDAR-inertial SLAM system built on an iterated error-state Kalman filter and an incremental k-d tree. A full walk through the math and the real code — IMU propagation, scan deskewing, the point-to-plane iterated update with its reformulated Kalman gain, and the ikd-Tree map — with C++ from a clean reimplementation and simplified Python, so you can rebuild it without ROS and understand SLAM."
+date: 2026-06-28
+tags:
+  - slam
+  - lidar
+  - state-estimation
+  - point-cloud
+  - explainer
+draft: false
+---
+
+import { Deskew } from "@/components/articles/fastlio2/deskew"
+import { IEKFRegister } from "@/components/articles/fastlio2/iekf-register"
+import { IkdMap } from "@/components/articles/fastlio2/ikd-map"
+
+FAST-LIO2 is the LiDAR-inertial odometry I keep coming back to: it's accurate, it runs at
+100 Hz on a laptop, it survives 1000 deg/s rotations, and the whole thing is one tight loop
+around a Kalman filter. But the official code is a maze of templates, and the cleanest
+annotated fork is in Chinese. So this is the article I wanted: what FAST-LIO2 actually
+*does*, derived from first principles, with real code — and a path to rebuild the core
+without ROS, because once you can do that, you understand SLAM.
+
+If the Kalman filter isn't fresh, read [my Kalman piece](/articles/kalman-filter) first —
+FAST-LIO2 is exactly the "iterated, error-state, on-manifold" filter that article ends on,
+fed by a high-rate IMU and corrected by thousands of LiDAR points per scan.
+
+## The whole system in one loop
+
+The problem: a LiDAR gives you ~100k 3D points per scan at 10 Hz, but a scan takes ~100 ms
+during which the sensor moves, so the points are distorted; and LiDAR alone is slow to
+register and fragile under fast motion. An IMU gives you 200–1000 Hz acceleration and
+angular velocity — great for short-term motion, but it drifts. Fuse them tightly and each
+fixes the other's weakness.
+
+<Figure
+  src="/articles/fastlio2/x1.png"
+  alt="FAST-LIO2 system overview: IMU and LiDAR inputs feed forward propagation, points accumulation, backward propagation, residual computation, and an iterated state update that loops until converged; on the right an ikd-Tree map handles point-wise insert, box-wise delete, and kNN search."
+  caption="FAST-LIO2's system overview (paper, Figure 1). Left: the state-estimation loop — IMU forward propagation, point accumulation, backward-propagation deskew, point-to-plane residual, iterated state update, repeat until converged. Right: the ikd-Tree map — incremental insert with on-tree downsampling, box-wise delete as the map window moves, and kNN search feeding the residual."
+/>
+
+Two contributions set FAST-LIO2 apart from its predecessor:
+
+1. **Direct registration.** No edge/plane feature extraction — it registers *raw* points to
+   the map by point-to-plane residuals. Less to tune, and it uses all the geometry.
+2. **The ikd-Tree.** An incremental k-d tree that inserts, deletes, downsamples, and
+   re-balances in place, so the map updates in real time instead of being rebuilt.
+
+Underneath both is a **tightly-coupled iterated error-state Kalman filter on a manifold**.
+Let's build it piece by piece. I'll quote C++ from
+[`zlwang7/S-FAST_LIO`](https://github.com/zlwang7/S-FAST_LIO) — a clean reimplementation
+that writes the filter out explicitly instead of hiding it in template magic — and give
+simplified NumPy alongside.
+
+## The state lives on a manifold
+
+You can't store an orientation as a 3-vector and add to it — rotations live on the manifold
+$SO(3)$. FAST-LIO2 tracks a **24-dimensional nominal state** but a **23-dimensional error
+state** (and covariance), because each $SO(3)$ rotation needs 3 tangent dimensions, not the
+4 of a quaternion, and gravity lives on the sphere $S^2$ (2 dimensions). The state is:
+
+$$
+\mathbf{x} = \big[\ \mathbf{p},\ \mathbf{R},\ \mathbf{R}_{L}^{I},\ \mathbf{t}_{L}^{I},\
+\mathbf{v},\ \mathbf{b}_g,\ \mathbf{b}_a,\ \mathbf{g}\ \big]
+$$
+
+position, attitude, LiDAR→IMU extrinsic rotation and translation, velocity, gyro bias,
+accel bias, and gravity. In the clean code that's one manifold declaration:
+
+```cpp
+// include/use-ikfom.hpp  — 24-D nominal, 23-D tangent
+MTK_BUILD_MANIFOLD(state_ikfom,
+  ((vect3, pos))      ((SO3, rot))
+  ((SO3, offset_R_L_I)) ((vect3, offset_T_L_I))
+  ((vect3, vel))      ((vect3, bg)) ((vect3, ba))
+  ((S2, grav)));
+```
+
+We update on the manifold with $\boxplus$ (retraction) and measure differences with
+$\boxminus$ — for the $SO(3)$ part, $\mathbf{R}\boxplus\delta = \mathbf{R}\,\mathrm{Exp}(\delta)$
+and $\mathbf{R}_1\boxminus\mathbf{R}_2 = \mathrm{Log}(\mathbf{R}_2^{\!\top}\mathbf{R}_1)$.
+Everything else is ordinary vector $+/-$.
+
+## Forward propagation: ride the IMU
+
+Between LiDAR scans, the IMU drives the state forward. The continuous kinematics are the
+standard strapdown model — position integrates velocity, attitude integrates de-biased
+angular velocity, velocity integrates de-biased, gravity-corrected acceleration:
+
+$$
+\dot{\mathbf{p}} = \mathbf{v}, \qquad
+\dot{\mathbf{R}} = \mathbf{R}\,(\boldsymbol{\omega}_m - \mathbf{b}_g)^\wedge, \qquad
+\dot{\mathbf{v}} = \mathbf{R}(\mathbf{a}_m - \mathbf{b}_a) + \mathbf{g},
+$$
+
+with the biases doing a slow random walk. That's `get_f` verbatim:
+
+```cpp
+// f(x,u): continuous-time kinematics
+vect3 omega      = in.gyro - s.bg;            // ω = ω_m − b_g
+vect3 a_inertial = s.rot * (in.acc - s.ba);   // R(a_m − b_a)
+res(i)      = s.vel[i];                        // ṗ = v
+res(i + 3)  = omega[i];                        // Ṙ ← ω
+res(i + 12) = a_inertial[i] + s.grav[i];       // v̇ = R(a_m−b_a) + g
+```
+
+The predict step pushes the *mean* forward by $\mathbf{x} \boxplus (\Delta t\,\mathbf{f})$ and
+the *covariance* forward with the error-state Jacobians $\mathbf{F_x},\mathbf{F_w}$:
+
+$$
+\hat{\mathbf{x}} = \mathbf{x}\boxplus(\Delta t\,\mathbf{f}), \qquad
+\hat{\mathbf{P}} = \mathbf{F_x}\,\mathbf{P}\,\mathbf{F_x}^{\!\top} +
+(\Delta t\,\mathbf{F_w})\,\mathbf{Q}\,(\Delta t\,\mathbf{F_w})^{\!\top}.
+$$
+
+```cpp
+void predict(double &dt, Matrix<double,12,12> &Q, const input_ikfom &i_in) {
+    Matrix<double,24,1>  f_     = get_f(x_, i_in);    // 24×1
+    Matrix<double,24,23> df_dx_ = df_dx(x_, i_in);    // ∂f/∂x
+    Matrix<double,24,12> df_dw_ = df_dw(x_, i_in);    // ∂f/∂w
+    x_ = x_.plus(f_, dt);                              // x ⊞ (dt·f)
+    // F_x = I + dt·A·df_dx ,  F_w = dt·df_dw  (assembled via the boxplus Jacobian)
+    P_ = F_x1 * P_ * F_x1.transpose() + (dt*F_w1) * Q * (dt*F_w1).transpose();
+}
+```
+
+In NumPy the shape of it is just:
+
+```python
+def predict(x, P, imu, dt, Q):
+    f      = get_f(x, imu)              # kinematics above
+    F_x, F_w = jacobians(x, imu, dt)   # error-state transition + noise maps
+    x = boxplus(x, f * dt)             # advance the mean on the manifold
+    P = F_x @ P @ F_x.T + F_w @ Q @ F_w.T
+    return x, P
+```
+
+This runs once per IMU sample, and the per-sample poses are cached — we need them next.
+
+## Backward propagation: deskew the scan
+
+Because the scan sweeps over time while the platform moves, every point was measured from a
+slightly different pose. Stack them naively and a flat wall comes out sheared:
+
+<Deskew />
+
+FAST-LIO2 fixes this with **backward propagation**: walk the cached IMU poses from the
+scan-end time backward, and transform each point from the pose it was *actually* sampled at
+into the scan-end frame. For a point sampled at time $\rho_j$ with the IMU pose
+$(\mathbf{R}_j,\mathbf{t}_j)$ relative to the scan-end pose $(\mathbf{R}_e,\mathbf{t}_e)$:
+
+$$
+\mathbf{p}^{\text{end}}_j = \mathbf{R}_{L}^{I\,\top}\!\Big(\mathbf{R}_e^{\!\top}\big(\mathbf{R}_j(\mathbf{R}_{L}^{I}\mathbf{p}_j + \mathbf{t}_{L}^{I}) + (\mathbf{t}_j - \mathbf{t}_e)\big) - \mathbf{t}_{L}^{I}\Big)
+$$
+
+which is exactly the compensation in `UndistortPcl`:
+
+```cpp
+M3D R_i(R_imu * Exp(angvel_avr, dt));        // attitude at this point's sample time
+V3D T_ei(pos_imu + vel_imu*dt + 0.5*acc_imu*dt*dt - imu_state.pos);
+V3D P_compensate = imu_state.offset_R_L_I.conjugate() *
+    (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i
+     + imu_state.offset_T_L_I) + T_ei) - imu_state.offset_T_L_I);
+```
+
+Now every point lives in one consistent frame and it's safe to register against the map.
+
+## The measurement: point-to-plane
+
+FAST-LIO2 doesn't extract features. For each deskewed point it transforms it into the world
+with the current state, finds its 5 nearest map points via the ikd-Tree, fits a plane to
+them, and the **residual is the point-to-plane distance** — zero when the point sits exactly
+on the surface:
+
+<Figure
+  src="/articles/fastlio2/x2.png"
+  alt="The point-to-plane measurement model: a scan point (red) and the corresponding plane fit from nearby map points (blue), with the plane normal u_j; the residual is the signed distance from the point to the plane."
+  caption="The measurement model (paper, Figure 2): a scan point (red) is matched to the local plane fit from its nearest map points (blue). The residual is the signed point-to-plane distance along the normal uⱼ — minimized when the estimated pose lands the point on the surface."
+/>
+
+For a point $\mathbf{p}$ in the body frame, transformed to world
+$\mathbf{p}^W = \mathbf{R}(\mathbf{R}_L^I\mathbf{p}+\mathbf{t}_L^I)+\mathbf{p}$, a plane with
+unit normal $\mathbf{u}$ and offset $d$ gives residual $z = \mathbf{u}^{\!\top}\mathbf{p}^W + d$.
+That's `h_share_model`:
+
+```cpp
+V3D p_global(s.rot * (s.offset_R_L_I * p_body + s.offset_T_L_I) + s.pos);  // to world
+ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, sqDis); // 5 nearest
+if (esti_plane(pabcd, points_near, 0.1f)) {                                 // fit plane (a,b,c,d)
+    float pd2 = pabcd(0)*x + pabcd(1)*y + pabcd(2)*z + pabcd(3);            // point-to-plane dist
+    ...
+}
+// Jacobian row (w.r.t. attitude θ and extrinsic), residual = −distance
+V3D C(s.rot.conjugate() * norm_vec);          // Rᵀu
+V3D A(point_I_crossmat * C);                  // (R_L^I p + t_L^I)^∧ Rᵀu
+ekfom_data.h_x.block<1,12>(i,0) << norm_p.x, norm_p.y, norm_p.z, A, ...;   // [ u | A | … ]
+ekfom_data.h(i) = -norm_p.intensity;          // the residual
+```
+
+The crucial detail: the Jacobian $\mathbf{H}$ is $m\times 12$ — $m$ thousands of points,
+but only **12 columns** (6 for pose, 6 for the extrinsic), because a single LiDAR scan can't
+observe velocity, biases, or gravity directly. Hold that thought; it's why the next step is
+fast. In NumPy:
+
+```python
+def build_H_z(points_body, x, ikdtree, map_pts, R_LI, t_LI):
+    H, z = [], []
+    for p in points_body:
+        pw = x.R @ (R_LI @ p + t_LI) + x.p          # body → world
+        nn = ikdtree.nearest(pw, k=5)               # 5 nearest map points
+        n, d = fit_plane(map_pts[nn])               # unit normal, offset
+        r = n @ pw + d                              # point-to-plane distance
+        if abs(r) < 0.1:                            # keep confident matches
+            pI = R_LI @ p + t_LI
+            A  = skew(pI) @ (x.R.T @ n)             # ∂r/∂θ  (attitude block)
+            H.append(np.concatenate([n, A]))        # [ normal | attitude ]
+            z.append(-r)
+    return np.array(H), np.array(z)                 # H: m×6 (here), z: m
+```
+
+## The iterated update, and the gain that makes it cheap
+
+A single EKF update would linearize the very-nonlinear point-to-plane fit once, at a
+possibly-wrong pose, and be off. So FAST-LIO2 **iterates**: re-associate, rebuild $\mathbf{H}$
+at the latest estimate, take one Kalman step, repeat until the correction is tiny. Watch the
+scan snap onto the map:
+
+<IEKFRegister />
+
+Each iteration is
+
+$$
+\delta\mathbf{x} = \mathbf{K}\,\mathbf{z} + (\mathbf{I}-\mathbf{K}\mathbf{H})(\mathbf{x}^\kappa \boxminus \hat{\mathbf{x}}),
+\qquad \mathbf{x}^{\kappa+1} = \mathbf{x}^\kappa \boxplus \delta\mathbf{x},
+$$
+
+iterating $\kappa$ until every component of $\delta\mathbf{x}$ drops below $10^{-3}$. The
+piece that makes FAST-LIO *fast* is the **reformulated Kalman gain**. The textbook form,
+
+$$
+\mathbf{K} = \hat{\mathbf{P}}\mathbf{H}^{\!\top}(\mathbf{H}\hat{\mathbf{P}}\mathbf{H}^{\!\top}+\mathbf{R})^{-1},
+$$
+
+inverts an $m\times m$ matrix — and $m$ is *thousands* of points. FAST-LIO uses the
+information-form identity to rewrite it as
+
+$$
+\mathbf{K} = (\mathbf{H}^{\!\top}\mathbf{R}^{-1}\mathbf{H} + \hat{\mathbf{P}}^{-1})^{-1}\mathbf{H}^{\!\top}\mathbf{R}^{-1},
+$$
+
+which inverts a $23\times 23$ matrix — the **state** dimension — no matter how many points
+there are. That's the whole trick, and in clean code it's one block:
+
+```cpp
+// R is a scalar (LASER_POINT_COV = 0.001), so R⁻¹ = 1/R
+auto K_front = (HTH / R + P_.inverse()).inverse();      // (HᵀR⁻¹H + P⁻¹)⁻¹  — 23×23
+K = K_front.block<23,12>(0,0) * H.transpose() / R;      // … Hᵀ R⁻¹
+Matrix<double,23,1> dx_ = K * dyn_share.h               // K z
+       + (Matrix<double,23,23>::Identity() - K*H) * dx_new;  // (I−KH)(x ⊟ x̂)
+x_ = x_.boxplus(dx_);
+// convergence: every |dx_[j]| < epsi (0.001); then update covariance
+P_ = (Matrix<double,23,23>::Identity() - K*H) * P_;
+```
+
+The same loop in NumPy, with the cheap gain spelled out:
+
+```python
+def update_iterated(x, P, points_body, ikdtree, map_pts, R=1e-3, max_iter=4, eps=1e-3):
+    x_prior = x.copy()
+    n = P.shape[0]                                   # 23 (error-state dim)
+    for _ in range(max_iter):
+        H, z = build_H_z(points_body, x, ikdtree, map_pts, R_LI, t_LI)  # relinearize
+        # information-form gain: invert (state × state), independent of len(z)
+        S = H.T @ H / R + np.linalg.inv(P)           # n×n
+        K = np.linalg.solve(S, H.T) / R              # K = S⁻¹ Hᵀ R⁻¹
+        dx = K @ z + (np.eye(n) - K @ H) @ (-boxminus(x, x_prior))
+        x  = boxplus(x, dx)
+        if np.max(np.abs(dx)) < eps:
+            break
+    P = (np.eye(n) - K @ H) @ P
+    return x, P
+```
+
+That's the engine. The converged $\mathbf{x}$ is your odometry output, published at LiDAR
+rate.
+
+## The map: an incremental k-d tree
+
+The nearest-neighbor search in the measurement step is the hot path, and the map is
+*growing and moving*. A static k-d tree would be rebuilt every scan — fatal. The **ikd-Tree**
+instead inserts points in place, downsamples on the tree, deletes whole regions with one
+box-wise delete as the local map window slides with the sensor, and lazily re-balances only
+the subtrees that get lopsided:
+
+<IkdMap />
+
+<Figure
+  src="/articles/fastlio2/x3.png"
+  alt="2D illustration of ikd-Tree map region management: a local map cube around the sensor that slides as the platform moves, with regions added at the leading edge and removed at the trailing edge."
+  caption="Map region management (paper, Figure 3): the ikd-Tree keeps a local map window around the sensor. As the platform moves, new regions are inserted and far regions are removed with box-wise deletes — keeping the active map bounded and the kNN query fast."
+/>
+
+In code it's a handful of calls:
+
+```cpp
+ikdtree.Build(feats_down_world->points);          // first scan
+ikdtree.Add_Points(PointToAdd, true);             // incremental insert + on-tree downsample
+ikdtree.Delete_Point_Boxes(cub_needrm);           // box-wise delete (window slid)
+ikdtree.Nearest_Search(point_world, 5, near, d);  // kNN, inside the measurement step
+```
+
+The payoff is real: on the authors' benchmarks FAST-LIO2 spends *less* time per scan than
+FAST-LIO while holding a *larger* map, on both Intel and Arm.
+
+<Figure
+  src="/articles/fastlio2/x6.png"
+  alt="Processing time per LiDAR scan over time for FAST-LIO and FAST-LIO2 on Intel and Arm CPUs (log scale, top), and the number of map points held over time (bottom); FAST-LIO2 is consistently faster while keeping more map points."
+  caption="Per-scan processing time (paper, Figure 8): FAST-LIO2 (cyan/red) stays below FAST-LIO (green/purple) on both Intel and Arm — while the bottom panel shows it maintaining a larger map. The ikd-Tree is why the direct, all-points approach is still real-time."
+/>
+
+## Putting it together — and dropping ROS
+
+Here's the entire main loop, which is shorter than you'd expect:
+
+```cpp
+while (running) {
+  if (sync_packages(Measures)) {                  // group IMU + one LiDAR scan by time
+    p_imu->Process(Measures, kf, feats_undistort); // forward-propagate + deskew
+    downSizeFilterSurf.filter(*feats_down_body);   // voxel-downsample the scan
+    kf.update_iterated_dyn_share_modified(         // the iterated point-to-plane EKF
+        LASER_POINT_COV, feats_down_body, ikdtree, Nearest_Points,
+        NUM_MAX_ITERATIONS, extrinsic_est_en);
+    state_point = kf.get_x();                      // odometry output
+    map_incremental();                             // ikdtree.Add_Points(...)
+  }
+}
+```
+
+Notice what's *not* algorithm here: `sync_packages` is just time-aligning two streams,
+`publish_odometry`/`publish_frame_world` are ROS topics, and `tf` is bookkeeping. **None of
+that is the filter.** To reproduce FAST-LIO2 without ROS you only need:
+
+| You need | You don't need |
+|---|---|
+| read IMU samples (t, ω, a) from a file/array | ROS subscribers / message types |
+| read LiDAR points (x, y, z, per-point time) | rosbag, nodelets |
+| forward-propagate + deskew (the IMU code) | tf tree |
+| a k-d tree over the map (ikd-Tree, or even scipy `cKDTree` rebuilt per scan to start) | rviz, publishers |
+| the iterated point-to-plane update | the IKFoM template layer |
+
+A no-ROS skeleton is just the loop, fed from arrays:
+
+```python
+x, P = init_state(), init_cov()
+ikdtree = KDMap(voxel=0.5)                 # or scipy cKDTree to begin with
+for scan in lidar_scans:                   # each: points + per-point timestamps
+    imu_batch = imu_between(prev_t, scan.t_end)
+    for imu in imu_batch:                  # 1) forward propagation
+        x, P = predict(x, P, imu, imu.dt, Q)
+    pts = deskew(scan.points, imu_poses, x)        # 2) backward propagation
+    pts = voxel_downsample(pts, 0.5)               # 3) downsample
+    x, P = update_iterated(x, P, pts, ikdtree, ikdtree.points)  # 4) iterated EKF
+    ikdtree.add(transform_to_world(pts, x))        # 5) grow the map
+    yield x.p, x.R                                 # pose = odometry
+```
+
+Start with a `cKDTree` rebuilt each scan to get the algorithm working end to end, then swap
+in a true incremental tree once you care about speed. That ordering — correctness first,
+then the ikd-Tree — is exactly how to learn it.
+
+To anchor yourself in the real repo, here's the file → concept map for the clean version:
+
+| File | What it owns |
+|---|---|
+| `use-ikfom.hpp` | the state manifold, `get_f`, `df_dx`, `df_dw` |
+| `esekfom.hpp` | the explicit ESEKF: `predict`, `h_share_model`, `update_iterated_dyn_share_modified`, the reformulated gain |
+| `IMU_Processing.hpp` | IMU init, forward propagation, `UndistortPcl` (deskew) |
+| `ikd_Tree.cpp` | `Build`, `Add_Points`, `Delete_Point_Boxes`, `Nearest_Search` |
+| `laserMapping.cpp` | the ROS glue + main loop (the part you replace) |
+
+## Honest notes
+
+- **It needs a decent IMU and initialization.** The filter assumes a high-rate IMU
+  (200 Hz+) and a short static period at start to estimate the gravity direction and biases.
+  Garbage init, garbage trajectory.
+- **Geometric degeneracy is the real failure mode.** Point-to-plane constraints vanish in a
+  long featureless tunnel or an open field — the update becomes unobservable along the
+  degenerate direction and the IMU drift takes over. This is fundamental to LiDAR odometry,
+  not a bug.
+- **It's odometry, not loop-closing SLAM.** FAST-LIO2 drifts slowly but has no global loop
+  closure; pair it with a pose-graph backend (e.g. a FAST-LIO-SLAM setup) if you need
+  globally consistent maps.
+- **The "100 Hz" is real but hardware-shaped.** The headline rates assume the ikd-Tree and a
+  reasonable CPU; the per-scan cost grows with map density and point count, which is exactly
+  what the downsampling and the moving window are there to bound.
+
+The thing I'd take away: FAST-LIO2 is not a pile of heuristics — it's *one* iterated
+error-state Kalman filter, fed a deskewed point cloud, corrected by point-to-plane residuals,
+over an incremental map, with a gain rewritten so thousands of measurements cost the same as
+a few. Understand those five steps and you can rebuild it, and you understand the spine of
+modern LiDAR SLAM.
+
+---
+
+*Built on [FAST-LIO2: Fast Direct LiDAR-Inertial Odometry](https://arxiv.org/abs/2107.06829)
+(Xu, Cai, Bai, Zhang, 2021), the original [FAST-LIO](https://arxiv.org/abs/2010.08196) and
+[ikd-Tree](https://arxiv.org/abs/2102.10808) papers, and the
+[HKU-MARS/FAST_LIO](https://github.com/hku-mars/FAST_LIO) source. C++ snippets are from the
+clean reimplementation [zlwang7/S-FAST_LIO](https://github.com/zlwang7/S-FAST_LIO); Python is
+simplified for teaching.*
