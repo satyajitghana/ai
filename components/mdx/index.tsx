@@ -2,6 +2,7 @@ import type { MDXComponents } from "mdx/types"
 import type { ComponentPropsWithoutRef } from "react"
 
 import { BenchBars } from "@/components/mdx/bench-bars"
+import { CodeCollapse } from "@/components/mdx/code-collapse"
 import { Diagram } from "@/components/mdx/diagram"
 import { Plot } from "@/components/mdx/plot"
 import { StepThrough } from "@/components/mdx/step-through"
@@ -142,6 +143,7 @@ export const mdxComponents: MDXComponents = {
   // article's .mdx (keeps this global list from bloating). Every component
   // degrades to meaningful static output; the .md agent variants carry the prose.
   BenchBars,
+  CodeCollapse,
   Diagram,
   Plot,
   StepThrough,
