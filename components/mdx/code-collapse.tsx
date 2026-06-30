@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { ArrowsOutSimpleIcon, ArrowsInSimpleIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
@@ -22,8 +22,9 @@ export function CodeCollapse({
   const [mounted, setMounted] = useState(false)
   const [open, setOpen] = useState(false)
 
-  // only collapse once mounted — SSR/no-JS shows the whole thing
-  if (typeof window !== "undefined" && !mounted) setMounted(true)
+  // collapse only after hydration — the server (and no-JS) render shows the whole
+  // file, so the first client render matches it and the collapse happens post-mount.
+  useEffect(() => setMounted(true), [])
   const collapsed = mounted && !open
 
   return (

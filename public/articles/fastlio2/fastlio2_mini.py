@@ -99,7 +99,14 @@ class ESEKF:
                 if not ok:
                     continue
                 r = nrm @ pw[i] + off          # point-to-plane distance
-                if abs(r) > 0.5:
+                # FAST-LIO weights acceptance by range (`s = 1 - 0.9|d|/sqrt(range)`),
+                # but on a sparse, voxel-downsampled scan that gate can starve a slightly-
+                # off prediction of *all* correspondences — the update is then skipped and
+                # the pose dead-reckons away. We keep a plain metric gate (correct deskew
+                # already removes the smear a tight gate was meant to fight) with a mild
+                # range allowance so far points must still fit reasonably.
+                rng = np.linalg.norm(pts_body[i])
+                if abs(r) > 0.3 + 0.05 * rng:
                     continue
                 Hr = np.zeros(15)
                 Hr[0:3] = nrm
@@ -142,18 +149,30 @@ class LocalMap:
 
 # ============================================================ deskew (backward propagation)
 def deskew(points, point_dts, imu_poses, t_end):
-    """Transform each point from the pose at its capture time to the scan-end pose.
-    imu_poses: list of (t, R, p) sampled across the sweep; point_dts: per-point time."""
+    """Backward propagation: transform each point from the pose it was *sampled* at
+    into the single scan-end frame, undoing the shear a moving sensor bakes into a
+    sweep. imu_poses: list of (t, R, p) propagated across the sweep; point_dts:
+    per-point time before scan end. We interpolate the propagated trajectory to each
+    point's capture time — SO(3) for rotation, linear for position — so the
+    within-sweep *rotation and velocity* are both compensated (using only the nearest
+    pose, as a naive version does, leaves fast scans warped and smears the map)."""
     ts = np.array([q[0] for q in imu_poses])
     R_end, p_end = imu_poses[-1][1], imu_poses[-1][2]
+    n = len(imu_poses)
     out = np.empty_like(points)
     for i, pb in enumerate(points):
         t = t_end - point_dts[i]
-        j = max(0, np.searchsorted(ts, t) - 1)
-        tj, Rj, pj = imu_poses[j]
-        Ri = Rj @ Exp(np.zeros(3))             # (interpolate if you want sub-sample accuracy)
-        wpt = Ri @ pb + pj                     # point in world at its capture pose
-        out[i] = R_end.T @ (wpt - p_end)       # back into the scan-end frame
+        j = min(max(np.searchsorted(ts, t) - 1, 0), n - 2) if n >= 2 else 0
+        if n >= 2:
+            t0, R0, p0 = imu_poses[j][0], imu_poses[j][1], imu_poses[j][2]
+            t1, R1, p1 = imu_poses[j + 1][0], imu_poses[j + 1][1], imu_poses[j + 1][2]
+            a = 0.0 if t1 == t0 else min(max((t - t0) / (t1 - t0), 0.0), 1.0)
+            R_c = R0 @ Exp(a * Log(R0.T @ R1))     # interpolate rotation on SO(3)
+            p_c = p0 + a * (p1 - p0)               # interpolate position (carries velocity)
+        else:
+            R_c, p_c = imu_poses[0][1], imu_poses[0][2]
+        wpt = R_c @ pb + p_c                       # point in world at its capture pose
+        out[i] = R_end.T @ (wpt - p_end)           # back into the scan-end frame
     return out
 
 # ============================================================ downsample (voxel grid)
@@ -358,7 +377,7 @@ if __name__ == '__main__':
         # defaults target the HKU Livox Avia bag: its avia.yaml extrinsic + noise
         imu, scans = read_bag(sys.argv[1], imu_topic='/livox/imu', lidar_topic='/livox/lidar')
         traj, lmap = run_offline(imu, scans, T_LI=[0.04165, 0.02326, -0.0284],
-                                 acc_cov=0.1, gyr_cov=0.1, scan_voxel=0.5)
+                                 acc_cov=0.1, gyr_cov=0.1, scan_voxel=0.5, init_secs=1.5)
         ps = np.array([p for _, p, _ in traj])
         plen = float(np.sum(np.linalg.norm(np.diff(ps, axis=0), axis=1)))
         print(f"{len(traj)} poses, map={len(lmap.pts)} pts, path={plen:.2f} m, "
