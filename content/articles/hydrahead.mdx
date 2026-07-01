@@ -1,0 +1,186 @@
+---
+title: "HydraHead: hybrid attention at the head, not the layer"
+description: "Full attention is quadratic; linear attention is cheap but forgets. Everyone mixes them — but per layer, in blunt all-or-nothing blocks. HydraHead's finding is that the specialization lives at the head level: inside one layer, a few heads do long-range retrieval (which needs full attention) and the rest do local work (which linear attention handles fine). So it hybridizes along the head axis, keeps full attention only for the retrieval-critical heads it identifies by causal analysis, and holds long-context accuracy where other hybrids collapse."
+date: 2026-07-01
+tags:
+  - llm
+  - attention
+  - long-context
+  - interpretability
+  - explainer
+draft: false
+---
+
+import { Complexity } from "@/components/articles/hydrahead/complexity"
+import { RetrievalHeads } from "@/components/articles/hydrahead/retrieval-heads"
+import { HeadVsLayer } from "@/components/articles/hydrahead/head-vs-layer"
+
+The attention that made transformers work is also what makes them expensive: every token
+attends to every other, so cost grows with the **square** of the context length. That
+quadratic term is fine at 4K tokens and ruinous at 512K — exactly the regime long-context
+models are pushing into. **Linear attention** (LA) fixes the scaling by keeping a
+fixed-size recurrent state instead of a full attention matrix, so cost grows linearly. But
+that fixed state is lossy: it can't do exact, long-range token retrieval — the "find the
+one sentence 400K tokens ago" trick that full attention nails.
+
+<Complexity />
+
+So the field mixes them — **hybrid attention**. Almost everyone does it *per layer*:
+interleave whole full-attention (FA) layers with whole linear-attention layers at some
+fixed ratio (3:1, 7:1), sometimes searched with NAS (as in [GLM-5](/articles/glm-5-2)).
+**HydraHead**, from Alibaba, argues that the layer is the wrong unit — and backs it with an
+interpretability result.
+
+## The finding: layers are smooth, heads are not
+
+HydraHead's authors probe a pretrained dense model (Qwen3-1.7B) and look at two things:
+
+- **Across layers**, the outputs vary *smoothly* — the layer-to-layer output-similarity
+  matrix is one gradual block, with no crisp boundary that says "put full attention here,
+  linear attention there." Layer-wise hybridization is cutting where there's no clean seam.
+- **Within a layer**, the heads are sharply *heterogeneous*. Reading the same input, they do
+  different jobs — and only a few do the long-range retrieval that genuinely needs FA. The
+  per-layer Gini coefficient of head importance averages **0.62**: importance is concentrated
+  in a handful of heads. Across all 448 query heads, only about **6.5% are essential** for
+  retrieval; ~91% can be swapped to linear attention with negligible loss. And the critical
+  ones are *scattered* — almost every layer mixes a couple of retrieval heads with a dozen
+  replaceable ones.
+
+You can see the heterogeneity directly — heads in one layer specialize, and only some need
+to reach far back:
+
+<RetrievalHeads />
+
+That's the whole argument in one observation. If retrieval capability lives in a sparse,
+scattered set of *heads*, then the head — not the layer — is the natural granularity for
+deciding where to spend full attention.
+
+<HeadVsLayer />
+
+## Picking the retrieval-critical heads
+
+HydraHead keeps FA for about **25% of heads** by default and runs the rest as **Gated
+DeltaNet** (GDN, the linear-attention variant it builds on). The question is *which* 25%.
+The selection is a causal interpretability procedure, not a guess:
+
+- Build **counterfactual pairs** from RULER needle-in-a-haystack probes — swap the needle's
+  value for a same-length distractor while holding the rest of the context fixed, so
+  activations stay in-distribution.
+- Run **activation patching** (for heads that *receive* the retrieved information) and
+  **path patching** (for heads that *send* it), scoring each head by how much restoring it
+  recovers the correct-answer logit.
+- Fuse the per-capability scores, rank all heads, and keep the top-K as FA.
+
+It's cheap — the ranking stabilizes from roughly **six calibration samples** — and it's
+*faithful*: knock out just the top ~1% of heads by this score and needle-retrieval accuracy
+collapses, while ablating random heads barely moves it. Crucially, the ablation confirms the
+selection **beats fixed or random head assignment** — the interpretability signal is doing
+real work.
+
+## Reconciling two kinds of output
+
+You can't just concatenate FA and GDN heads and project them — their outputs live on
+different scales. Softmax attention is **query-magnitude-modulated**: it produces sharp,
+low-entropy distributions peaked on a few tokens. Linear attention cancels that magnitude
+out, giving smoother, higher-entropy, more uniform outputs. Splice the two naively and the
+model degrades badly.
+
+HydraHead's **scale-normalized fusion** handles it with two moves: an **independent per-head
+RMSNorm** on every head's output, then a **learnable per-head scalar** $\gamma_h$ that
+re-weights each head before the shared output projection. It's a small module, but it's
+load-bearing — remove the normalization and RULER's extended-context score drops from
+**87.5 to 71.4**. A learnable *scale* also beats a learnable *gate* by ~20 points, so the
+model keeps every head's contribution and just rescales it, rather than gating heads off.
+
+## Building it cheaply
+
+You don't train HydraHead from scratch — you *convert* a pretrained FA model in a three-stage
+transfer pipeline that reuses as much as possible:
+
+1. **Parameter migration + alignment** — the FA heads keep their pretrained weights; the new
+   GDN heads reuse the base model's Q/K/V projections (repeated channel-wise to bridge the
+   GQA→multi-head shape gap), so nothing starts from random. A per-layer MSE loss aligns the
+   hybrid's hidden states to the original.
+2. **Logit distillation** — unfreeze the whole model and match its output distribution to the
+   original FA teacher with a KL objective.
+3. **Long-context fine-tuning** — ordinary next-token prediction at 16K context.
+
+The controlled conversion runs on **~2.3B tokens**; the scaled-up model in the paper uses
+**~15B**. Either way it's a rounding error next to pretraining — the capability is inherited,
+not learned fresh.
+
+## The payoff: long context that doesn't collapse
+
+The headline result is retention. On RULER single-needle retrieval, most hybrid models — and
+the base model itself — fall to **near zero** by 256K. HydraHead holds:
+
+<BenchBars
+  title="RULER single-needle retrieval @ 256K context (%)"
+  unit="%"
+  bars={[
+    { label: "HydraHead (hybrid)", value: 94.53, highlight: true },
+    { label: "HypeNet-2B (hybrid)", value: 68.93 },
+    { label: "Qwen3-1.7B + YaRN", value: 40.2 },
+    { label: "Jet-Nemotron-2B", value: 1.07 },
+    { label: "Qwen3-1.7B (base)", value: 0.0 },
+  ]}
+/>
+
+The harder multi-key retrieval shows the same shape — everything else craters, HydraHead
+degrades gracefully:
+
+<BenchBars
+  title="RULER multi-key retrieval @ 256K context (%)"
+  unit="%"
+  bars={[
+    { label: "HydraHead (hybrid)", value: 52.7, highlight: true },
+    { label: "Qwen3-1.7B + YaRN", value: 14.2 },
+    { label: "Jet-Nemotron-2B", value: 0.0 },
+    { label: "Qwen3-1.7B (base)", value: 0.0 },
+  ]}
+/>
+
+And it buys that without wrecking short-context ability — the usual tax on linear-attention
+conversions. On general reasoning it lands within ~3.4 points of the full-attention base
+model, and on MMLU it essentially matches it:
+
+<BenchBars
+  title="General reasoning — average of MMLU, BBH, MBPP, GSM8k (%)"
+  unit="%"
+  bars={[
+    { label: "Qwen3-1.7B (FA base)", value: 54.02 },
+    { label: "HydraHead", value: 50.62, highlight: true },
+    { label: "Qwen3-1.7B + YaRN", value: 50.37 },
+    { label: "Gemma-3n-E2B", value: 39.29 },
+  ]}
+/>
+
+The efficiency claim is the one to internalize: at a **7:1** GDN-to-FA head ratio — only one
+head in eight keeping full attention — HydraHead matches a **3:1 layer-wise** hybrid's
+long-context average, while doing *better* on hard reasoning. Same quality, far less full
+attention, which means a smaller KV cache (HydraHead's is ~0.35× a full-attention model's).
+If you've read the [inference write-up](/articles/how-llm-inference-works), that cache number
+is the whole game at long context — it's what decides how many requests fit on the GPU.
+
+## The take
+
+What I like here is that the architecture change *follows from* an interpretability result
+instead of being reverse-justified by one. The claim "retrieval lives in a sparse, scattered
+set of heads" is measured with causal patching, the ablations show fixed/random selection is
+worse, and the fix — hybridize per head, keep FA where the retrieval heads are — falls
+straight out of the measurement. It's a clean example of interpretability paying rent.
+
+Two honest caveats. The flashiest numbers — *"69% improvement at 512K"* and *"approaching
+Qwen3.5"* — come only from a figure, with no supporting table; the tabulated results stop at
+256K, so treat the 512K story as directional. And this is all at the **1.7B** scale on
+retrieval-style benchmarks; whether head-level hybridization holds its edge at 30B+ and on
+messier long-context reasoning is the open question. But the core idea — that the *head* is
+the right unit for spending your quadratic-attention budget — is the kind of insight that
+tends to generalize.
+
+---
+
+*Built on [HydraHead: From Head-Level Functional Heterogeneity to Specialized Attention
+Hybridization](https://arxiv.org/abs/2606.20097) (Tan, Chen, Shen, Liu, Shen, Wu, Ye;
+Alibaba Group, 2026). Benchmark figures are quoted from the paper's tables; the 512K and
+Qwen3.5 comparisons are from its Figure 1.*
