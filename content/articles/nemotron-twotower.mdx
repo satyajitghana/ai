@@ -1,0 +1,156 @@
+---
+title: "TwoTower: giving a diffusion LM a frozen autoregressive memory"
+description: "Diffusion language models generate in parallel, but they've all shared one network between two jobs that fight each other — causally representing the clean context, and bidirectionally denoising the noisy block. NVIDIA's Nemotron-Labs-TwoTower splits them: a frozen autoregressive tower holds the context, a trainable denoiser refines each block by cross-attending to it. Built on a 30B Mamba-Transformer MoE, it keeps 98.7% of the autoregressive baseline's quality at 2.42× the generation throughput. A walk through the architecture and the honest numbers."
+date: 2026-07-02
+tags:
+  - llm
+  - diffusion
+  - inference-optimization
+  - architecture
+  - explainer
+draft: false
+---
+
+import { TwoTower } from "@/components/articles/twotower/two-tower"
+import { BlockDiffusion } from "@/components/articles/twotower/block-diffusion"
+import { Decouple } from "@/components/articles/twotower/decouple"
+
+An autoregressive (AR) language model emits one token per forward pass — the sequential axis
+is the entire sequence, which is exactly why decode is the slow, [memory-bound half of
+inference](/articles/how-llm-inference-works). **Diffusion language models** ([like
+iLLaDA](/articles/illada-diffusion-language-model)) offer the escape: denoise many tokens per
+step and refine iteratively, so generation can be *parallel*. The catch is that every diffusion
+LM so far has made one network do two jobs at once — and those jobs pull in opposite directions.
+
+NVIDIA's **Nemotron-Labs-TwoTower** fixes that by refusing to share. It splits the model into
+two towers: a **frozen autoregressive context tower** and a **trainable diffusion denoiser
+tower** that reads from it. Built on a 30B Mamba-Transformer MoE, it retains **98.7%** of the
+autoregressive baseline's quality while generating **2.42× faster**.
+
+<TwoTower />
+
+## One network, two jobs that fight
+
+Here's the tension existing diffusion LMs live with. At every denoising step, the same decoder
+has to (1) *represent the clean tokens* already committed — which wants strong **causal**
+processing, the thing AR pretraining is great at — and (2) *denoise the corrupted block* —
+which wants **bidirectional** attention over the noisy tokens. As the paper puts it, this
+"entanglement pulls the same set of weights in different directions, limiting their capacity to
+excel at either." A single set of weights forced to be both a causal reader and a bidirectional
+denoiser ends up mediocre at both.
+
+TwoTower's move is to stop asking one network to be both:
+
+- The **context tower** is the *frozen* pretrained AR model. It causally processes clean tokens
+  and never gets a gradient — so it keeps every bit of the 25T-token backbone's context ability
+  intact. It carries the persistent left-context (KV cache and Mamba states) across blocks.
+- The **denoiser tower** is trained from the diffusion objective and does nothing but refine the
+  current noisy block with bidirectional attention. It reads the context through **layer-aligned
+  cross-attention**: denoiser layer *i* attends to context layer *i*, over both the frozen
+  tower's committed blocks and its own in-block tokens.
+
+The base is `Nemotron-3-Nano-30B-A3B`, an open hybrid **Mamba-Transformer MoE** — 30B total,
+~3B active, 52 layers (23 Mamba-2, 6 attention, 23 MoE). Cross-attending *into* a Mamba-hybrid
+sounds awkward (Mamba is a recurrence, not a KV cache), and the trick is neat: the **Mamba chunk
+size is matched to the diffusion block size**, so the existing kernel exposes clean recurrent
+states exactly at block boundaries — right where the denoiser needs them.
+
+## Block-wise autoregressive diffusion
+
+TwoTower isn't fully parallel and isn't fully sequential — it's **autoregressive across blocks,
+diffusion within a block**. Text is chunked into blocks (size **16** by default); blocks are
+generated left-to-right, each conditioned on the finished ones, but *within* a block all tokens
+are denoised together over a few steps:
+
+<BlockDiffusion />
+
+The diffusion is masked/absorbing-state — the same LLaDA-style "replace tokens with `[MASK]`
+and predict them back" as [iLLaDA](/articles/illada-diffusion-language-model), with a linear
+noise schedule. The number of denoising steps is *adaptive*: a confidence sampler commits any
+token whose prediction clears a threshold (γ = 0.8) immediately and lets the uncertain ones wait
+another step. In practice most tokens of a block resolve in the **first** step, so a block costs
+far fewer forward passes than its token count — which is the whole source of the speedup. The
+sequential axis is now the number of *blocks*, not the number of *tokens*.
+
+One sharp constraint falls out of this: you have to **sample with the same block size you
+trained on**. Sample with blocks *larger* than training and generation collapses — GSM8K drops
+from 89.8 to 2.2 at a sampling block of 64. The block size isn't a free inference knob; it's
+baked in at training time.
+
+## Why decoupling is the whole point
+
+The paper's central experiment is an ablation that isolates the decoupling. Build the model
+three ways from the same backbone and measure how much quality survives versus the AR baseline:
+
+<Decouple />
+
+The entangled single tower — one network trained jointly for both roles — loses 21–26% across
+general, code, and math. Continued AR training does better. But freezing the context tower and
+training a *separate* denoiser keeps the most, losing only 6–11%. That gap is the argument:
+neither role compromises the other when they don't share weights. It's the same instinct as
+[HydraHead](/articles/hydrahead) — match the mechanism to the job — applied to whole towers
+instead of individual heads.
+
+## The numbers
+
+The released checkpoint is a genuinely strong model in absolute terms — this isn't a toy that
+trades away quality for speed:
+
+<BenchBars
+  title="Nemotron-Labs-TwoTower — released checkpoint (S=16), accuracy (%)"
+  unit="%"
+  bars={[
+    { label: "GSM8K", value: 89.84, highlight: true },
+    { label: "MATH-500", value: 81.05, highlight: true },
+    { label: "MMLU", value: 78.32, highlight: true },
+    { label: "Multilingual", value: 77.15, highlight: true },
+    { label: "HumanEval", value: 76.4, highlight: true },
+  ]}
+/>
+
+Aggregated, that's **98.7%** of the autoregressive baseline's quality — the headline claim.
+And the speed lever is the block size: bigger blocks mean more tokens denoised in parallel per
+step, so higher throughput (the released checkpoint reaches **2.42×**):
+
+<BenchBars
+  title="Generation throughput vs AR baseline, by block size (×)"
+  unit="×"
+  bars={[
+    { label: "block 32", value: 2.25, highlight: true },
+    { label: "block 16", value: 2.02, highlight: true },
+    { label: "block 8", value: 1.71, highlight: true },
+  ]}
+/>
+
+A few honest caveats, because this is a fresh preprint and the framing invites them. The
+quality "retention" is an aggregate; the per-category drops aren't uniform — **code (−10.5%) and
+math (−11.3%)** take the biggest hits, exactly the tasks where a single wrong token derails the
+answer. The paper reports **no comparison to other diffusion LMs** (LLaDA, Dream, external
+block-diffusion) — only its own AR baseline and internal ablations — so "best diffusion LM"
+is not a claim it makes or supports. Throughput is reported only as a relative speedup (no
+tokens/sec), the 2.42× is the released checkpoint while the ablation tables show 2.02× at the
+same block size under a different recipe, and running two towers means the frozen context
+tower's weights sit resident in memory on top of the denoiser.
+
+## The take
+
+The appeal here is architectural honesty. Diffusion LMs have quietly been asking one network to
+be a causal historian and a bidirectional editor simultaneously, and TwoTower's contribution is
+mostly the observation that you shouldn't — plus the engineering to make cross-attention into a
+frozen Mamba-hybrid actually work (the chunk-size-equals-block-size trick is the load-bearing
+detail). Keeping the pretrained AR tower *frozen* is the elegant part: you inherit a 25T-token
+backbone's context ability for free and spend all your training budget teaching the one thing
+that's genuinely new, bidirectional block refinement.
+
+Whether this is the design that finally makes diffusion decoding a default is still open — the
+code/math gap is real, and 2.42× on two H100s with extra resident weights is a solid but not
+seismic win. But "give the diffusion model a frozen autoregressive memory instead of making it
+grow its own" is the kind of clean decomposition that tends to stick, and the weights are out
+(CC BY 4.0) if you want to poke at it.
+
+---
+
+*Built on [Nemotron-Labs-TwoTower: Diffusion Language Modeling with Pretrained Autoregressive
+Context](https://arxiv.org/abs/2606.26493) (Reda, Kamalu, Waleffe, Patwary, Shoeybi, Catanzaro;
+NVIDIA, 2026). Benchmark and throughput figures are quoted from the paper's tables; category-level
+AR-vs-TwoTower comparisons are from its Figure 2.*
