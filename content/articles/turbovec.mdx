@@ -1,0 +1,123 @@
+---
+title: "TurboVec: FAISS-competitive vector search with no training phase"
+description: "Product quantization made approximate nearest-neighbor search cheap — but it needs a training pass to learn codebooks, and rebuilds as your corpus drifts. TurboVec drops that: it's a Rust vector index built on Google's TurboQuant, which rotates every embedding into a known distribution and quantizes it with a data-free optimal scalar quantizer. No train() step, online ingest, ~16× compression, and it matches or beats FAISS IndexPQ recall while running 12–19% faster on ARM. A 10M-vector corpus in 4 GB instead of 31."
+date: 2026-07-02
+tags:
+  - vector-search
+  - information-retrieval
+  - quantization
+  - rust
+  - explainer
+---
+
+import { MemoryFit } from "@/components/articles/turbovec/memory-fit"
+import { ConfigExplorer } from "@/components/articles/turbovec/config-explorer"
+
+Vector search is memory-bound. A few million embeddings at float32 are gigabytes of RAM, and
+the standard fix — **product quantization** (PQ), the workhorse inside FAISS — compresses them by
+learning a codebook: run k-means over a sample of your data, replace each sub-vector with the
+nearest centroid's index. It works well, but it has a cost that's easy to forget: a **training
+phase**. You need representative data up front, you call `train()` before you can add anything,
+and as your corpus drifts the learned codebook goes stale and wants a rebuild.
+
+**TurboVec** ([`RyanCodrai/turbovec`](https://github.com/RyanCodrai/turbovec)) removes the training
+phase entirely. It's a Rust vector index built on **TurboQuant** — the same
+[rotate-then-quantize algorithm](/articles/turboquant-kv-cache) that compresses LLM KV caches —
+whose quantizer is *data-free*, so there's nothing to learn. The headline: a 10-million-vector
+corpus that costs ~31 GB as float32 fits in ~4 GB, and searches faster than FAISS.
+
+<MemoryFit />
+
+## Why there's nothing to train
+
+The full derivation is in the [TurboQuant write-up](/articles/turboquant-kv-cache), but the short
+version is the whole reason there's no training step. TurboVec encodes each vector in six moves:
+
+1. **Normalize** to the unit sphere (the length is stored separately for scoring).
+2. **Rotate** by a random orthogonal matrix — built once from a seeded Gaussian via QR, so it's
+   deterministic and, crucially, *data-independent*.
+3. **TQ+ calibration** — a small per-coordinate shift/scale, fit once on the first batch, to snap
+   real embeddings onto the ideal post-rotation marginal.
+4. **Lloyd–Max scalar quantization** — the optimal quantization levels, precomputed against the
+   *known* Beta distribution the rotation produces. This is the data-free part: because you know
+   the distribution analytically, the optimal quantizer is a fixed table, not something learned
+   from your vectors.
+5. **Bit-pack** to 2, 3, or 4 bits per coordinate — 16× smaller than float32 at 2-bit.
+6. **Store a per-vector correction scalar** so the quantized dot product is an *unbiased* estimate
+   of the true inner product (a RaBitQ-style length renormalization).
+
+PQ learns its codebook from your data; TurboQuant reshapes your data into a distribution whose
+optimal codebook is already known. That's the trade — and it's why TurboVec can ingest online with
+no `train()`, no parameter tuning, and no rebuilds as the corpus grows.
+
+## Does it actually beat FAISS?
+
+Mostly yes, and the repo is honest about where it doesn't. Across its benchmark configs (100K
+vectors, 1K queries, k=64), here's TurboVec against FAISS `IndexPQ` on recall, latency, and
+compression — flip through the datasets and bit-widths:
+
+<ConfigExplorer />
+
+On the OpenAI embedding sets it wins recall@1 outright (up to +1.9 points at 2-bit) *and* runs
+12–19% faster on ARM, at 8–16× compression with no training pass. The exceptions are real: on x86
+it trails a few percent at 2-bit (it wins the 4-bit configs), and on low-dimensional GloVe vectors
+at 2-bit FAISS edges it by 0.06 of a point — the rotation has less room to spread energy in only
+200 dimensions. Net, it's genuinely competitive with a mature, heavily-optimized library, which is
+a high bar for a quantizer with no learned codebook.
+
+## The systems half
+
+A near-optimal quantizer only matters if the search is fast, and TurboVec is a real systems
+project, not a reference implementation:
+
+- **Hand-written SIMD kernels** — NEON on ARM, AVX-512BW on x86, with an AVX2 fallback and runtime
+  feature detection. Scoring runs on the *packed codes directly* via table lookups; there's no
+  decompression step.
+- **32-vector blocks**, FAISS FastScan-style, with the query LUT built per search. Filtering is a
+  bitmask checked at block granularity — whole blocks with no allowed vectors are skipped, and the
+  filter is applied *inside* the kernel so a restricted search returns the true top-k among allowed
+  items with **no recall penalty and no over-fetch**.
+- **`IdMapIndex`** gives stable `uint64` external IDs with **O(1) removal** (swap-remove, no
+  tombstones) — the vector you delete is replaced by the last one and both ID maps update in
+  constant time.
+- **Online ingest and plain persistence** (`.tv` / `.tvim` files), plus drop-in adapters for
+  LangChain, LlamaIndex, Haystack, and Agno.
+
+The Python API is what you'd hope for — no training call anywhere:
+
+```python
+from turbovec import TurboQuantIndex
+
+index = TurboQuantIndex(dim=1536, bit_width=4)   # 2, 3, or 4 bits
+index.add(vectors)                                # float32 (n, dim) — indexed immediately
+scores, ids = index.search(query, k=10)           # searches the packed codes
+index.write("corpus.tv")
+```
+
+## Where it fits (and where it doesn't)
+
+The honest scope: TurboVec is a **flat, exhaustive-scan** index — it scores every (packed) vector
+per query. That's exactly the regime where it competes with FAISS's flat PQ scan, and at a hundred
+thousand to a few million vectors it's excellent: no training, tiny memory, strong recall. It is
+*not* a billion-scale graph index — if you need sub-linear search over hundreds of millions of
+vectors you still want an IVF or HNSW structure (and you could quantize *those* with TurboQuant
+too). Think of it as the compression-and-scoring core done unusually well, not a replacement for
+every ANN system.
+
+## The take
+
+What I like about TurboVec is that it makes the [TurboQuant](/articles/turboquant-kv-cache) thesis
+concrete in a second domain: the same "rotate into a known distribution, then quantize with a
+data-free optimal quantizer" that shrinks KV caches also shrinks embedding indexes — and here it
+buys something PQ structurally can't, the elimination of the training phase. Pair it with a lexical
+scorer like [BM25](/articles/bm25) and you've got both halves of hybrid retrieval, each running on
+commodity hardware with no GPU and no learned index. It won't dethrone HNSW at billion scale, but
+for the very common case of a few million embeddings that need to fit in RAM and update live, "as
+good as FAISS, with nothing to train" is a genuinely nice place to land.
+
+---
+
+*Built on [`RyanCodrai/turbovec`](https://github.com/RyanCodrai/turbovec) (Rust + Python, MIT),
+which implements [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874)
+(Zandieh, Daliri, Hadian, Mirrokni; ICLR 2026). Benchmark figures are from the repo's published
+results (100K vectors, k=64; ARM = Apple M3 Max, x86 = Xeon Sapphire Rapids).*
