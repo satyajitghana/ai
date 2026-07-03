@@ -79,14 +79,27 @@ export function ModelFactory() {
           <span className="font-mono text-[11px] text-muted-foreground/60">↻ loop</span>
         </div>
 
-        <div className="mt-4 rounded-md border-l-2 border-foreground/30 bg-muted/30 px-3 py-3">
-          <div className="font-mono text-xs text-foreground">{i + 1}. {s.name}</div>
-          <p className="mt-1.5 text-sm leading-6">
-            <span className="font-medium text-foreground">What:</span> <span className="text-muted-foreground">{s.what}</span>
-          </p>
-          <p className="mt-1 text-sm leading-6">
-            <span className="font-medium text-foreground">Why:</span> <span className="text-muted-foreground">{s.why}</span>
-          </p>
+        {/* grid-stack every stage in one cell so the box is always as tall as the
+            tallest stage — the active one fades in, so the page below never shifts */}
+        <div className="mt-4 grid">
+          {STAGES.map((st, k) => (
+            <div
+              key={st.key}
+              aria-hidden={k !== i}
+              className={cn(
+                "col-start-1 row-start-1 rounded-md border-l-2 border-foreground/30 bg-muted/30 px-3 py-3 transition-opacity duration-300",
+                k === i ? "opacity-100" : "pointer-events-none opacity-0",
+              )}
+            >
+              <div className="font-mono text-xs text-foreground">{k + 1}. {st.name}</div>
+              <p className="mt-1.5 text-sm leading-6">
+                <span className="font-medium text-foreground">What:</span> <span className="text-muted-foreground">{st.what}</span>
+              </p>
+              <p className="mt-1 text-sm leading-6">
+                <span className="font-medium text-foreground">Why:</span> <span className="text-muted-foreground">{st.why}</span>
+              </p>
+            </div>
+          ))}
         </div>
       </div>
     </figure>

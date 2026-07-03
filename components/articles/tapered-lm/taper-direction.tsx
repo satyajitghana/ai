@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
+import { cn } from "@/lib/utils"
+
 // The paper's foundational experiment: split the stack into three blocks and move
 // the extra capacity around — early, middle, or late — at a fixed budget. Front-
 // loading wins; back-loading is worse than doing nothing. Real validation perplexity
@@ -93,12 +95,27 @@ export function TaperDirection() {
             <div className="h-3 w-full overflow-hidden rounded bg-muted">
               <div className="h-full rounded transition-all duration-500" style={{ width: `${barPct}%`, background: ACCENT }} />
             </div>
-            <div className="mt-2 font-mono text-[11px]" style={{ color: ACCENT }}>
-              {o.key === "uniform"
-                ? "the default baseline — 16.28"
-                : isBest
-                  ? "best: −0.32 ppl vs uniform, same params"
-                  : `${(o.ppl - 16.28 > 0 ? "+" : "")}${(o.ppl - 16.28).toFixed(2)} ppl vs uniform`}
+            <div className="mt-2 grid">
+              {OPTS.map((op, k) => {
+                const opBest = op.key === "early"
+                return (
+                  <div
+                    key={op.key}
+                    aria-hidden={k !== i}
+                    className={cn(
+                      "col-start-1 row-start-1 font-mono text-[11px] transition-opacity duration-300",
+                      k === i ? "opacity-100" : "pointer-events-none opacity-0"
+                    )}
+                    style={{ color: opBest ? "oklch(0.72 0.15 150)" : "oklch(0.7 0.13 285)" }}
+                  >
+                    {op.key === "uniform"
+                      ? "the default baseline — 16.28"
+                      : opBest
+                        ? "best: −0.32 ppl vs uniform, same params"
+                        : `${(op.ppl - 16.28 > 0 ? "+" : "")}${(op.ppl - 16.28).toFixed(2)} ppl vs uniform`}
+                  </div>
+                )
+              })}
             </div>
           </div>
         </div>

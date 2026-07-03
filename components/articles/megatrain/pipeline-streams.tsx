@@ -150,11 +150,33 @@ export function PipelineStreams() {
           <Stat label="vs naive" value={db ? `${(NAIVE_TOTAL / DB_TOTAL).toFixed(2)}×` : "1.00×"} />
         </div>
 
-        <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          {db
-            ? "Double-buffered: while the compute stream chews through layer i, the H2D stream prefetches layer i+1 into the other buffer and the D2H stream drains layer i−1's gradients. The compute lane is gap-free — the GPU never waits on PCIe, and removing this one optimization costs MegaTrain 31% of its throughput."
-            : "Naive: each layer runs strictly H2D → compute → D2H, so the GPU stalls during every transfer and sits idle roughly half the time. This is the latency double-buffering exists to hide."}
-        </p>
+        {/* both captions overlaid in one grid cell so the block sizes to the taller
+            text and toggling the mode never reflows the prose below */}
+        <div className="mt-3 grid">
+          <p
+            aria-hidden={!db}
+            className={cn(
+              "col-start-1 row-start-1 text-sm leading-6 text-muted-foreground transition-opacity duration-300",
+              db ? "opacity-100" : "pointer-events-none opacity-0"
+            )}
+          >
+            Double-buffered: while the compute stream chews through layer i, the H2D stream
+            prefetches layer i+1 into the other buffer and the D2H stream drains layer
+            i−1&rsquo;s gradients. The compute lane is gap-free — the GPU never waits on PCIe,
+            and removing this one optimization costs MegaTrain 31% of its throughput.
+          </p>
+          <p
+            aria-hidden={db}
+            className={cn(
+              "col-start-1 row-start-1 text-sm leading-6 text-muted-foreground transition-opacity duration-300",
+              !db ? "opacity-100" : "pointer-events-none opacity-0"
+            )}
+          >
+            Naive: each layer runs strictly H2D → compute → D2H, so the GPU stalls during
+            every transfer and sits idle roughly half the time. This is the latency
+            double-buffering exists to hide.
+          </p>
+        </div>
       </div>
     </figure>
   )

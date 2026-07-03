@@ -74,7 +74,7 @@ export function Zoomable({
           </button>
           <div
             onClick={(e) => e.stopPropagation()}
-            className="flex max-h-[88vh] w-auto max-w-6xl items-center justify-center overflow-auto rounded-lg border bg-background p-3 sm:p-5 [&>figure]:my-0 [&_img]:mx-auto [&_img]:max-h-[82vh] [&_img]:w-auto [&_img]:max-w-full [&_svg]:h-auto [&_svg]:w-full [&_svg]:max-w-full"
+            className="flex max-h-[88vh] max-w-full items-center justify-center overflow-auto rounded-lg border bg-background p-3 sm:p-5 [&>figure]:my-0 [&_img]:mx-auto [&_img]:h-auto [&_img]:max-h-[82vh] [&_img]:w-auto [&_img]:max-w-full [&_img]:object-contain [&_svg]:h-auto [&_svg]:w-full [&_svg]:max-w-full"
           >
             {children}
           </div>

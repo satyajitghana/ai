@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react"
 import { ArrowCounterClockwiseIcon } from "@phosphor-icons/react/dist/ssr"
 
+import { cn } from "@/lib/utils"
+
 // The iterated EKF update, as point-to-plane registration. The current pose
 // estimate is wrong, so the deskewed scan (red) floats off the map surface
 // (grey). Each iteration: find each point's nearest map plane, measure the
@@ -101,11 +103,24 @@ export function IEKFRegister() {
               <div className="h-full rounded transition-all duration-500" style={{ width: `${(res / res0) * 100}%`, background: converged ? "oklch(0.72 0.15 150)" : "oklch(0.72 0.15 25)" }} />
             </div>
           </div>
-          <p className="text-sm leading-6 text-muted-foreground">
-            {converged
-              ? "Converged: every component of the state correction dx fell below the threshold (0.001 in the code), so the scan sits on the map and the covariance is updated. This pose is the odometry output."
-              : "Each iteration re-associates points to planes at the latest estimate, builds the measurement Jacobian H, and takes one Kalman step dx = K·h + (I−KH)(x⊟x̂). Relinearizing is what makes the very nonlinear point-to-plane fit converge."}
-          </p>
+          {/* both states overlaid in one grid cell so the box always sizes to
+              the taller message and nothing below reflows on convergence */}
+          <div className="grid">
+            {[false, true].map((cv) => (
+              <p
+                key={String(cv)}
+                aria-hidden={cv !== converged}
+                className={cn(
+                  "col-start-1 row-start-1 text-sm leading-6 text-muted-foreground transition-opacity duration-300",
+                  cv === converged ? "opacity-100" : "pointer-events-none opacity-0"
+                )}
+              >
+                {cv
+                  ? "Converged: every component of the state correction dx fell below the threshold (0.001 in the code), so the scan sits on the map and the covariance is updated. This pose is the odometry output."
+                  : "Each iteration re-associates points to planes at the latest estimate, builds the measurement Jacobian H, and takes one Kalman step dx = K·h + (I−KH)(x⊟x̂). Relinearizing is what makes the very nonlinear point-to-plane fit converge."}
+              </p>
+            ))}
+          </div>
         </div>
       </div>
     </figure>

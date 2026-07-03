@@ -116,8 +116,10 @@ export function MTPTraining() {
           </svg>
         </div>
 
-        {/* loss readout */}
-        <div className="rounded-md border bg-muted/20 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
+        {/* loss readout — min-height reserves the tallest case (n=4, four loss
+            terms wrapping at mobile width) so the row count never changes as the
+            window auto-advances and reach shrinks toward the end of the sequence */}
+        <div className="min-h-[80px] rounded-md border bg-muted/20 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
           <span className="text-foreground">L(t)</span> ={" "}
           {Array.from({ length: reach }, (_, k) => (
             <span key={k}>
@@ -154,11 +156,24 @@ export function MTPTraining() {
           ))}
         </div>
 
-        <p className="text-sm leading-6 text-muted-foreground">
-          {n === 1
-            ? "At n=1 this is ordinary next-token training: one prediction, one loss term per position. The model only ever learns to look one step ahead."
-            : `At n=${n} each position supplies ${n} loss terms, forcing the trunk to encode information about tokens further ahead — a denser signal that, at scale, yields a better model even after the extra heads are thrown away.`}
-        </p>
+        {/* every n's paragraph overlaid in one grid cell so the block sizes to
+            the tallest and switching n never reflows the page */}
+        <div className="grid">
+          {[1, 2, 4].map((k) => (
+            <p
+              key={k}
+              aria-hidden={k !== n}
+              className={cn(
+                "col-start-1 row-start-1 text-sm leading-6 text-muted-foreground transition-opacity duration-300",
+                k === n ? "opacity-100" : "pointer-events-none opacity-0"
+              )}
+            >
+              {k === 1
+                ? "At n=1 this is ordinary next-token training: one prediction, one loss term per position. The model only ever learns to look one step ahead."
+                : `At n=${k} each position supplies ${k} loss terms, forcing the trunk to encode information about tokens further ahead — a denser signal that, at scale, yields a better model even after the extra heads are thrown away.`}
+            </p>
+          ))}
+        </div>
       </div>
     </figure>
   )
