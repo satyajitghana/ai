@@ -105,7 +105,20 @@ export function Decouple() {
           </div>
         </div>
 
-        <p className={cn("mt-4 text-sm leading-6 text-muted-foreground")}>{o.note}</p>
+        <div className="mt-4 grid">
+          {OPTS.map((op, k) => (
+            <p
+              key={op.key}
+              aria-hidden={k !== i}
+              className={cn(
+                "col-start-1 row-start-1 text-sm leading-6 text-muted-foreground transition-opacity duration-300",
+                k === i ? "opacity-100" : "pointer-events-none opacity-0",
+              )}
+            >
+              {op.note}
+            </p>
+          ))}
+        </div>
       </div>
     </figure>
   )

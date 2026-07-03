@@ -91,8 +91,10 @@ export function Unmasking() {
           })}
         </div>
 
-        {/* step indicator */}
-        <div className="font-mono text-[11px] text-muted-foreground">
+        {/* step indicator — min-height reserves the tallest wrapped case
+            (diffusion + "several at once…" suffix at mobile width) so the
+            suffix appearing/disappearing never reflows the page as steps advance */}
+        <div className="min-h-[3rem] font-mono text-[11px] text-muted-foreground">
           {mode === "diffusion"
             ? `denoising step ${Math.min(step, DIFF_STEPS)}/${DIFF_STEPS} · ${revealed}/${TOKENS.length} tokens unmasked${
                 step > 0 && step <= DIFF_STEPS ? " — several at once, bidirectional context" : ""
@@ -107,11 +109,24 @@ export function Unmasking() {
           <Stat label="attention" value={mode === "diffusion" ? "bidirectional" : "causal"} />
         </div>
 
-        <p className="text-sm leading-6 text-muted-foreground">
-          {mode === "diffusion"
-            ? "Diffusion decodes the whole block at once and commits its most confident predictions each step, so a 12-token answer lands in ~4 passes — and because there's no causal mask, every position conditions on the entire sequence, left and right. The cost is that quality depends on how many denoising steps you spend."
-            : "Autoregression commits exactly one token per forward pass, strictly left to right, each conditioned only on what came before. Simple and strong — but the number of sequential passes is the length of the output, and that serial dependency is the latency floor diffusion is trying to break."}
-        </p>
+        {/* both mode paragraphs overlaid in one grid cell so the block sizes to
+            the taller one and toggling mode never reflows the page */}
+        <div className="grid">
+          {(["diffusion", "autoregressive"] as Mode[]).map((m) => (
+            <p
+              key={m}
+              aria-hidden={m !== mode}
+              className={cn(
+                "col-start-1 row-start-1 text-sm leading-6 text-muted-foreground transition-opacity duration-300",
+                m === mode ? "opacity-100" : "pointer-events-none opacity-0"
+              )}
+            >
+              {m === "diffusion"
+                ? "Diffusion decodes the whole block at once and commits its most confident predictions each step, so a 12-token answer lands in ~4 passes — and because there's no causal mask, every position conditions on the entire sequence, left and right. The cost is that quality depends on how many denoising steps you spend."
+                : "Autoregression commits exactly one token per forward pass, strictly left to right, each conditioned only on what came before. Simple and strong — but the number of sequential passes is the length of the output, and that serial dependency is the latency floor diffusion is trying to break."}
+            </p>
+          ))}
+        </div>
       </div>
     </figure>
   )

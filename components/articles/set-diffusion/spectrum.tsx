@@ -106,23 +106,39 @@ export function Spectrum() {
           <span>position {N - 1}</span>
         </div>
 
-        {/* properties */}
-        <div className="mt-4 grid grid-cols-3 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">
-          <div className="bg-background px-3 py-2">
-            <div className="text-[10px] text-muted-foreground">sequential steps</div>
-            <div className="font-medium text-foreground">{maxStep + 1} for {N} tokens</div>
-          </div>
-          <div className="bg-background px-3 py-2">
-            <div className="text-[10px] text-muted-foreground">KV cache</div>
-            <div className="font-medium" style={{ color: r.kv === "no" ? "oklch(0.72 0.15 25)" : "oklch(0.72 0.15 150)" }}>{r.kv}</div>
-          </div>
-          <div className="bg-background px-3 py-2">
-            <div className="text-[10px] text-muted-foreground">order</div>
-            <div className="font-medium text-foreground">{r.order}</div>
-          </div>
-        </div>
+        {/* properties + note (grid-stacked so height is constant across regimes) */}
+        <div className="grid">
+          {REGIMES.map((rg, k) => {
+            const rgMax = Math.max(...rg.steps)
+            return (
+              <div
+                key={rg.key}
+                aria-hidden={k !== ri}
+                className={cn(
+                  "col-start-1 row-start-1 transition-opacity duration-300",
+                  k === ri ? "opacity-100" : "pointer-events-none opacity-0"
+                )}
+              >
+                <div className="mt-4 grid grid-cols-3 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">
+                  <div className="bg-background px-3 py-2">
+                    <div className="text-[10px] text-muted-foreground">sequential steps</div>
+                    <div className="font-medium text-foreground">{rgMax + 1} for {N} tokens</div>
+                  </div>
+                  <div className="bg-background px-3 py-2">
+                    <div className="text-[10px] text-muted-foreground">KV cache</div>
+                    <div className="font-medium" style={{ color: rg.kv === "no" ? "oklch(0.72 0.15 25)" : "oklch(0.72 0.15 150)" }}>{rg.kv}</div>
+                  </div>
+                  <div className="bg-background px-3 py-2">
+                    <div className="text-[10px] text-muted-foreground">order</div>
+                    <div className="font-medium text-foreground">{rg.order}</div>
+                  </div>
+                </div>
 
-        <p className="mt-3 text-sm leading-6 text-muted-foreground">{r.note}</p>
+                <p className="mt-3 text-sm leading-6 text-muted-foreground">{rg.note}</p>
+              </div>
+            )
+          })}
+        </div>
       </div>
     </figure>
   )

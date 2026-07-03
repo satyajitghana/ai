@@ -84,19 +84,24 @@ export function PrefillDecode() {
               <span
                 key={i}
                 className={cn(
-                  "rounded px-2 py-1 font-mono text-xs transition-all",
-                  s.phase === "prefill" ? "text-background" : "border text-muted-foreground"
+                  // always keep a 1px border (transparent in prefill) so token width and
+                  // the row's wrap point stay constant across the phase flip
+                  "rounded border px-2 py-1 font-mono text-xs transition-all",
+                  s.phase === "prefill" ? "border-transparent text-background" : "text-muted-foreground"
                 )}
                 style={s.phase === "prefill" ? { background: "oklch(0.72 0.15 195)" } : undefined}
               >
                 {t}
               </span>
             ))}
-            {s.phase === "prefill" ? (
-              <span className="px-1 py-1 font-mono text-[10px] text-muted-foreground">
-                ← all at once, one matmul
-              </span>
-            ) : null}
+            <span
+              className={cn(
+                "px-1 py-1 font-mono text-[10px] text-muted-foreground transition-opacity",
+                s.phase === "prefill" ? "opacity-100" : "opacity-0"
+              )}
+            >
+              ← all at once, one matmul
+            </span>
           </div>
         </div>
 
@@ -143,7 +148,7 @@ export function PrefillDecode() {
                     !shown
                       ? "border border-transparent opacity-0"
                       : i === s.step - 1
-                        ? "text-background"
+                        ? "border border-transparent text-background"
                         : "border text-foreground"
                   )}
                   style={shown && i === s.step - 1 ? { background: "oklch(0.72 0.15 150)" } : undefined}
@@ -168,11 +173,33 @@ export function PrefillDecode() {
           <Stat label="GPU util" value={s.phase === "prefill" ? "~95%" : "~30%"} />
         </div>
 
-        <p className="text-sm leading-6 text-muted-foreground">
-          {s.phase === "prefill"
-            ? "Prefill runs the whole prompt through every layer in parallel — a big matrix-matrix multiply that saturates the GPU's math units. Its latency is Time To First Token (TTFT), and it leaves behind the KV cache."
-            : "Decode emits one token per pass: compute Q for the new token, attend over the cached K/V, append. The arithmetic is tiny but the GPU still streams every weight and the whole cache from memory — so bandwidth, not compute, sets the Inter-Token Latency (ITL), and most of the math units sit idle."}
-        </p>
+        {/* both captions overlaid in one grid cell so the block sizes to the taller
+            (decode) text and never reflows the prose below when the phase flips */}
+        <div className="grid">
+          <p
+            aria-hidden={s.phase !== "prefill"}
+            className={cn(
+              "col-start-1 row-start-1 text-sm leading-6 text-muted-foreground transition-opacity duration-300",
+              s.phase === "prefill" ? "opacity-100" : "pointer-events-none opacity-0"
+            )}
+          >
+            Prefill runs the whole prompt through every layer in parallel — a big
+            matrix-matrix multiply that saturates the GPU&rsquo;s math units. Its latency is
+            Time To First Token (TTFT), and it leaves behind the KV cache.
+          </p>
+          <p
+            aria-hidden={s.phase !== "decode"}
+            className={cn(
+              "col-start-1 row-start-1 text-sm leading-6 text-muted-foreground transition-opacity duration-300",
+              s.phase === "decode" ? "opacity-100" : "pointer-events-none opacity-0"
+            )}
+          >
+            Decode emits one token per pass: compute Q for the new token, attend over the
+            cached K/V, append. The arithmetic is tiny but the GPU still streams every
+            weight and the whole cache from memory — so bandwidth, not compute, sets the
+            Inter-Token Latency (ITL), and most of the math units sit idle.
+          </p>
+        </div>
       </div>
     </figure>
   )

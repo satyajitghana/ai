@@ -117,12 +117,28 @@ export function DecodeStream() {
           </div>
         </div>
 
-        <div className="font-mono text-[11px] text-muted-foreground">
-          {s.phase === "draft"
-            ? `1 · drafter proposes ${draftLen} tokens in one pass (faint)`
-            : s.phase === "verify"
-              ? `2 · target verifies in one forward → keep ${accept}, drop ${draftLen - accept}, +1 bonus`
-              : `3 · commit ${g} tokens, advance the cursor`}
+        {/* all three phase captions overlaid in one grid cell so the line reserves
+            the tallest (2-line) case and never reflows the layout as the phase flips */}
+        <div className="grid font-mono text-[11px] text-muted-foreground">
+          {[
+            `1 · drafter proposes ${draftLen} tokens in one pass (faint)`,
+            `2 · target verifies in one forward → keep ${accept}, drop ${draftLen - accept}, +1 bonus`,
+            `3 · commit ${g} tokens, advance the cursor`,
+          ].map((msg, i) => {
+            const activeIdx = s.phase === "draft" ? 0 : s.phase === "verify" ? 1 : 2
+            return (
+              <div
+                key={i}
+                aria-hidden={i !== activeIdx}
+                className={cn(
+                  "col-start-1 row-start-1 transition-opacity duration-300",
+                  i === activeIdx ? "opacity-100" : "pointer-events-none opacity-0"
+                )}
+              >
+                {msg}
+              </div>
+            )
+          })}
         </div>
 
         <div className="grid grid-cols-4 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">

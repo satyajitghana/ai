@@ -109,11 +109,27 @@ export function HybridAttention() {
           </div>
         </div>
 
-        <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          {layer.type === "GA"
-            ? "The 6th layer is global: every token attends to the entire sequence, mixing information the local layers couldn't reach directly. One global layer per block restores full context at a fraction of the cost of making every layer global."
-            : `Sliding-window layer ${layer.i}: each token attends only to its local window (128 tokens in the real model). But stacking them compounds the reach — after ${swaCount} SWA layer${swaCount > 1 ? "s" : ""} the query effectively sees ~${swaCount} windows back, with a KV cache bounded by the window, not the context length.`}
-        </p>
+        {/* every layer's paragraph overlaid in one grid cell so the block sizes
+            to the tallest and the page never reflows as layers auto-advance */}
+        <div className="mt-3 grid">
+          {LAYERS.map((l, li) => {
+            const swaC = LAYERS.slice(0, li + 1).filter((x) => x.type === "SWA").length
+            return (
+              <p
+                key={li}
+                aria-hidden={li !== k}
+                className={cn(
+                  "col-start-1 row-start-1 text-sm leading-6 text-muted-foreground transition-opacity duration-300",
+                  li === k ? "opacity-100" : "pointer-events-none opacity-0"
+                )}
+              >
+                {l.type === "GA"
+                  ? "The 6th layer is global: every token attends to the entire sequence, mixing information the local layers couldn't reach directly. One global layer per block restores full context at a fraction of the cost of making every layer global."
+                  : `Sliding-window layer ${l.i}: each token attends only to its local window (128 tokens in the real model). But stacking them compounds the reach — after ${swaC} SWA layer${swaC > 1 ? "s" : ""} the query effectively sees ~${swaC} windows back, with a KV cache bounded by the window, not the context length.`}
+              </p>
+            )
+          })}
+        </div>
       </div>
     </figure>
   )
