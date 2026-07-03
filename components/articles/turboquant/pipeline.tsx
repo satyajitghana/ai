@@ -47,8 +47,6 @@ export function Pipeline() {
     return () => clearInterval(id)
   }, [playing])
 
-  const s = STAGES[i]
-
   return (
     <figure className="my-8 overflow-hidden rounded-md border">
       <div className="flex items-center justify-between border-b px-3 py-2 font-mono text-xs text-muted-foreground">
@@ -76,14 +74,25 @@ export function Pipeline() {
           ))}
         </div>
 
-        <div className="mt-4 rounded-md border-l-2 border-foreground/30 bg-muted/30 px-3 py-3">
-          <div className="font-mono text-xs text-foreground">{s.name}</div>
-          <p className="mt-1.5 text-sm leading-6">
-            <span className="font-medium text-foreground">What:</span> <span className="text-muted-foreground">{s.what}</span>
-          </p>
-          <p className="mt-1 text-sm leading-6">
-            <span className="font-medium text-foreground">Why:</span> <span className="text-muted-foreground">{s.why}</span>
-          </p>
+        <div className="mt-4 grid">
+          {STAGES.map((st, k) => (
+            <div
+              key={st.key}
+              aria-hidden={k !== i}
+              className={cn(
+                "col-start-1 row-start-1 rounded-md border-l-2 border-foreground/30 bg-muted/30 px-3 py-3 transition-opacity duration-300",
+                k === i ? "opacity-100" : "pointer-events-none opacity-0"
+              )}
+            >
+              <div className="font-mono text-xs text-foreground">{st.name}</div>
+              <p className="mt-1.5 text-sm leading-6">
+                <span className="font-medium text-foreground">What:</span> <span className="text-muted-foreground">{st.what}</span>
+              </p>
+              <p className="mt-1 text-sm leading-6">
+                <span className="font-medium text-foreground">Why:</span> <span className="text-muted-foreground">{st.why}</span>
+              </p>
+            </div>
+          ))}
         </div>
       </div>
     </figure>

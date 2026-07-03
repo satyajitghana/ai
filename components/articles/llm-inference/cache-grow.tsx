@@ -82,12 +82,14 @@ export function CacheGrow() {
                     <span
                       key={ci}
                       className={cn(
-                        "rounded px-1.5 py-0.5 font-mono text-[10px] transition-all",
+                        // always reserve a 1px border (transparent when borderless) so
+                        // token width — and thus flex-wrap line count — never changes
+                        "rounded border border-dashed px-1.5 py-0.5 font-mono text-[10px] transition-all",
                         !shown
-                          ? "opacity-0"
+                          ? "border-transparent opacity-0"
                           : isNew
-                            ? "text-background"
-                            : "border border-dashed border-foreground/30 text-muted-foreground"
+                            ? "border-transparent text-background"
+                            : "border-foreground/30 text-muted-foreground"
                       )}
                       style={shown && isNew ? { background: "oklch(0.72 0.15 195)" } : undefined}
                     >
@@ -95,11 +97,14 @@ export function CacheGrow() {
                     </span>
                   )
                 })}
-                {shown ? (
-                  <span className="self-center pl-1 font-mono text-[10px] text-muted-foreground">
-                    {cache.length} entries (+{newN})
-                  </span>
-                ) : null}
+                <span
+                  className={cn(
+                    "self-center pl-1 font-mono text-[10px] text-muted-foreground transition-opacity",
+                    shown ? "opacity-100" : "opacity-0"
+                  )}
+                >
+                  {cache.length} entries (+{newN})
+                </span>
               </div>
 
               {/* output */}
