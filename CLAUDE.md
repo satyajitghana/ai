@@ -19,6 +19,7 @@ Every content kind is an `.mdx` file under `content/<kind>/`. Frontmatter is Zod
 | Kind | File naming | Required frontmatter | Notes |
 |---|---|---|---|
 | **blog** | `content/blog/<slug>.mdx` | `title, description, date` (+ `tags[]`, `draft`, `updated?`, `cover?`) | `<slug>` kebab-case, no date prefix. `draft: true` hides it. |
+| **articles** | `content/articles/<slug>.mdx` | `title, description, date` (+ `tags[]`, `draft`, `updated?`, `cover?`) | Long-form flagship explainers (usually one paper). Same frontmatter as blog. **Must combine original interactive components _and_ real figures from the paper** — see "Article production standard" below. |
 | **logs** | `content/logs/YYYY-MM-DD-slug.mdx` | `date` (+ `title?`, `tags[]`) | Dated daily build log; `date` matches the filename prefix. |
 | **projects** | `content/projects/<slug>.mdx` | `title, description, date` (+ `stack[]`, `repo?`, `demo?`, `featured`, `cover?`) | `repo`/`demo` must be URLs. |
 | **papers** | `content/papers/YYYY-MM-DD.mdx` | `date` + `papers[]` (≥1) | Daily arXiv digest; **filename === date** (validator enforces `slug === date`). Each entry: `arxivId, title, authors[], categories[], abstract, take, standout`. Links are **derived** from `arxivId` (`paperLinks()`); **no PDFs stored**. |
@@ -26,6 +27,18 @@ Every content kind is an `.mdx` file under `content/<kind>/`. Frontmatter is Zod
 | **notes** | `content/notes/<slug>.mdx` | `title, date` (+ `tags[]`, `updated?`) | Digital-garden, interlinked with `[[wikilinks]]` (target = note slug). |
 
 Dates are `YYYY-MM-DD`. MDX body may use `<Callout type="tip|note|warning">`, fenced code (rehype-pretty-code), and KaTeX math.
+
+## Article production standard (`content/articles/*`)
+A flagship article is **not** interactives-only and **not** a wall of prose. Every paper-backed article ships **both**:
+1. **Original interactive components** — the house style. Custom SSR/zero-JS `"use client"` widgets (e.g. `BenchBars`, animated diagrams) in `components/articles/<slug>/`, imported per-MDX. These are our *explanation* of the mechanism.
+2. **Real figures from the source paper** — the architecture/method diagram **and** the headline benchmark/results figure(s). These are the paper's *own* evidence; readers want to see the actual figure, not only our redrawing.
+
+Rules for paper figures:
+- **Serve assets locally.** Download the figure and commit it to `public/articles/<slug>/figN.png`; reference it as `/articles/<slug>/figN.png`. **Never hotlink** arXiv/other hosts.
+- **Embed with `<Figure src alt caption />`** (globally registered — no import). Every `caption` ends with attribution: `(paper, Figure N).` Write a real `alt` for screen readers.
+- **Flatten transparent figures onto white** before committing (many arXiv figures are transparent RGBA and vanish in dark mode) and cap width ~1600px. PIL: `bg=Image.new('RGBA',im.size,(255,255,255,255)); bg.alpha_composite(im.convert('RGBA'))`.
+- **Pick the important ones** (usually 1–3): the method/architecture diagram + the key quantitative result. Skip decorative, appendix, and pure-text-table figures. Interactives and paper figures are complementary — keep both even when they overlap.
+- Fetch figures from `arxiv.org/html/<id>vN/…` (or `ar5iv.labs.arxiv.org/html/<id>` when arXiv HTML 404s). Figures are treated as academic/commentary use. (This is the one exception to papers' "no PDFs/assets stored" rule — that rule governs the daily **digest**, not flagship articles.)
 
 ## data/*.ts records (typed, hand-curated)
 `profile` (identity + `seedStats`), `resume` (feeds `/resume`, the PDF, `/resume.json`), `publications`, `patents`, `health` (Zod-validated **inline** at import — bad edit throws), `now` (bump `updated`), `uses`, `reading`, `interests` (arXiv categories + keyword weights driving the digest). Edit through the skills below; `pnpm typecheck` catches shape errors.
