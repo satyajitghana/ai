@@ -45,7 +45,20 @@ export function DistillNetwork() {
         {/* the rolled-out task */}
         <div className="rounded-md border-l-2 bg-muted/30 px-3 py-2" style={{ borderColor: `oklch(0.72 0.14 ${active.hue})` }}>
           <div className="font-mono text-[10px] text-muted-foreground">student rollout · domain router reads the task →</div>
-          <p className="mt-0.5 text-sm leading-6 text-foreground">{active.task}</p>
+          <div className="mt-0.5 grid">
+            {TEACHERS.map((t, k) => (
+              <p
+                key={t.key}
+                aria-hidden={k !== i}
+                className={cn(
+                  "col-start-1 row-start-1 text-sm leading-6 text-foreground transition-opacity duration-300",
+                  k === i ? "opacity-100" : "pointer-events-none opacity-0"
+                )}
+              >
+                {t.task}
+              </p>
+            ))}
+          </div>
         </div>
 
         {/* teachers row */}

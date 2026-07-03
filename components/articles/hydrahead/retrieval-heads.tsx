@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
+import { cn } from "@/lib/utils"
+
 // The interpretability finding that motivates head-wise hybridization: heads in the
 // SAME layer, reading the SAME input, do different jobs. Some are retrieval-critical
 // — they reach far back to a specific token (the "needle"), which only full attention
@@ -103,15 +105,31 @@ export function RetrievalHeads() {
           <span>query ↑</span>
         </div>
 
-        {/* verdict */}
-        <div className="mt-4 rounded-md border-l-2 px-3 py-2.5" style={{ borderColor: c, background: `${c.replace(")", " / 0.08)")}` }}>
-          <div className="font-mono text-xs">
-            <span className="text-foreground">{h.name}</span>
-            <span className="text-muted-foreground"> · {h.kind}</span>
-          </div>
-          <div className="mt-1 font-mono text-[11px]" style={{ color: c }}>
-            {h.fa ? "→ retrieval-critical: keep FULL attention" : "→ short-range: LINEAR attention is enough"}
-          </div>
+        {/* verdict — every head's box overlaid in one grid cell so the region
+            sizes to the tallest and the page never reflows as heads cycle */}
+        <div className="mt-4 grid">
+          {HEADS.map((hd, k) => {
+            const hc = hd.fa ? FA : LA
+            return (
+              <div
+                key={hd.name}
+                aria-hidden={k !== i}
+                className={cn(
+                  "col-start-1 row-start-1 rounded-md border-l-2 px-3 py-2.5 transition-opacity duration-300",
+                  k === i ? "opacity-100" : "pointer-events-none opacity-0"
+                )}
+                style={{ borderColor: hc, background: `${hc.replace(")", " / 0.08)")}` }}
+              >
+                <div className="font-mono text-xs">
+                  <span className="text-foreground">{hd.name}</span>
+                  <span className="text-muted-foreground"> · {hd.kind}</span>
+                </div>
+                <div className="mt-1 font-mono text-[11px]" style={{ color: hc }}>
+                  {hd.fa ? "→ retrieval-critical: keep FULL attention" : "→ short-range: LINEAR attention is enough"}
+                </div>
+              </div>
+            )
+          })}
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
