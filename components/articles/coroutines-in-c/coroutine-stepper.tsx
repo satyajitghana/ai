@@ -5,35 +5,20 @@ import { PauseIcon, PlayIcon, ArrowCounterClockwiseIcon } from "@phosphor-icons/
 
 import { cn } from "@/lib/utils"
 
-// An animated walk-through of a switch/__LINE__ coroutine. Each "frame" is one
-// observable step: which source line is executing, what the saved `state` is,
-// and what the function has emitted so far. Purpose-built for the coroutines
-// article — it makes the "jump back into the middle of the switch" visible.
-//
-// Degrades gracefully: with no JS the article's prose + code already explain
-// everything; this is progressive enhancement (the signature interactive bit).
+// The switch/__LINE__ coroutine drawn as the state machine it really is. Each call to
+// next() dispatches on the saved `state`: the first call runs the loop body and yields,
+// and every later call jumps straight back into the middle of the switch (case 6) —
+// that back-edge is the whole trick. Step the trace and watch the active node + the
+// transition light up. Degrades gracefully: prose + code already explain it; this is
+// the signature interactive.
 
 type Frame = {
-  line: number // 1-based index into CODE
-  state: string // value of `state` after this step
-  note: string // what just happened
-  emit?: string // character emitted on this step (crReturn)
-  ret?: boolean // this step returns to the caller
+  line: number
+  state: string
+  note: string
+  emit?: string
+  ret?: boolean
 }
-
-const CODE = [
-  "int next(void) {",
-  "  static int state = 0, i;",
-  "  switch (state) {",
-  "    case 0:",
-  "      for (i = 0; i < 3; i++) {",
-  "        state = __LINE__;  return i;",
-  "        case __LINE__: ;",
-  "      }",
-  "  }",
-  "  return -1;",
-  "}",
-]
 
 // A hand-authored trace of three calls to next() returning 0, 1, 2, then -1.
 const FRAMES: Frame[] = [
@@ -54,18 +39,60 @@ const FRAMES: Frame[] = [
   { line: 10, state: "6", note: "loop done; fall through to return -1", emit: "-1", ret: true },
 ]
 
+type NodeId = "A" | "B" | "C" | "D" | "E"
+
+function nodeIdOf(f: Frame): NodeId {
+  switch (f.line) {
+    case 2:
+    case 4:
+      return "A"
+    case 3:
+      return f.state === "0" ? "A" : "D"
+    case 5:
+      return "B"
+    case 6:
+      return "C"
+    case 7:
+      return "D"
+    case 10:
+      return "E"
+    default:
+      return "A"
+  }
+}
+
+const NODES: { id: NodeId; x: number; y: number; w: number; h: number; t: string; s: string }[] = [
+  { id: "A", x: 34, y: 127, w: 108, h: 46, t: "next()", s: "state = 0" },
+  { id: "B", x: 196, y: 127, w: 108, h: 46, t: "for i < 3", s: "loop body" },
+  { id: "C", x: 358, y: 127, w: 108, h: 46, t: "yield i", s: "save state=6" },
+  { id: "D", x: 281, y: 43, w: 108, h: 46, t: "resume", s: "case 6" },
+  { id: "E", x: 512, y: 127, w: 96, h: 46, t: "done", s: "return −1" },
+]
+
+const EDGES: { from: NodeId; to: NodeId; d: string; lx: number; ly: number; label: string; anchor?: "start" | "middle" | "end" }[] = [
+  { from: "A", to: "B", d: "M142 150 L196 150", lx: 169, ly: 143, label: "state 0" },
+  { from: "B", to: "C", d: "M304 150 L358 150", lx: 331, ly: 143, label: "i<3 · return i" },
+  { from: "C", to: "D", d: "M412 127 C 412 96, 389 84, 389 78", lx: 430, ly: 108, label: "next call", anchor: "start" },
+  { from: "D", to: "B", d: "M300 89 C 280 108, 255 112, 250 127", lx: 252, ly: 108, label: "case 6 · i++", anchor: "end" },
+  { from: "B", to: "E", d: "M250 173 C 250 214, 545 214, 555 173", lx: 400, ly: 210, label: "i==3 · return −1", anchor: "middle" },
+]
+
+const ACC = "oklch(0.62 0.14 255)"
+const W = 620
+const H = 230
+
 export function CoroutineStepper() {
   const [i, setI] = useState(0)
   const [playing, setPlaying] = useState(false)
 
   const frame = FRAMES[i]
   const atEnd = i >= FRAMES.length - 1
-  const emitted = FRAMES.slice(0, i + 1)
-    .filter((f) => f.emit)
-    .map((f) => f.emit)
+  const emitted = FRAMES.slice(0, i + 1).filter((f) => f.emit).map((f) => f.emit)
 
-  // Only schedules the async advance — no synchronous setState in the effect.
-  // "Stopped" is derived from `atEnd`, so playback simply stops at the last frame.
+  const active = nodeIdOf(frame)
+  const prev = i > 0 ? nodeIdOf(FRAMES[i - 1]) : null
+  const activeEdge = prev && prev !== active ? `${prev}-${active}` : null
+
   useEffect(() => {
     if (!playing || atEnd) return
     const t = setTimeout(() => setI((n) => n + 1), 1100)
@@ -78,111 +105,87 @@ export function CoroutineStepper() {
   }
 
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="flex items-center justify-between border-b px-3 py-2 font-mono text-xs text-muted-foreground">
-        <span>next() — a 0,1,2 generator</span>
-        <span>
-          step {i + 1}/{FRAMES.length}
-        </span>
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="flex items-center justify-between border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
+        <span>next() as a state machine · a 0,1,2 generator</span>
+        <span>step {i + 1}/{FRAMES.length}</span>
       </div>
 
-      {/* Code with the live line highlighted */}
-      <pre className="overflow-x-auto px-3 py-3 font-mono text-xs leading-6">
-        {CODE.map((line, n) => {
-          const active = frame.line === n + 1
-          return (
-            <div
-              key={n}
-              className={cn(
-                "-mx-3 px-3 transition-colors",
-                active && "bg-foreground/10 text-foreground"
-              )}
-            >
-              <span className="mr-3 inline-block w-4 text-right text-muted-foreground/50 select-none">
-                {n + 1}
-              </span>
-              {active ? (
-                <span className="mr-1 text-foreground">▸</span>
-              ) : (
-                <span className="mr-1 opacity-0">▸</span>
-              )}
-              {line}
-            </div>
-          )
-        })}
-      </pre>
+      <div className="p-3 sm:p-4">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`Coroutine state machine; current step: ${frame.note}`}>
+          <defs>
+            <marker id="cs-arrow" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="6.5" refY="0">
+              <path d="M0,-4L6,0L0,4" fill="none" stroke="var(--muted-foreground)" strokeWidth={1.5} />
+            </marker>
+            <marker id="cs-arrow-on" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="6.5" refY="0">
+              <path d="M0,-4L6,0L0,4" fill="none" stroke={ACC} strokeWidth={1.5} />
+            </marker>
+            <filter id="cs-soft" x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="1.5" stdDeviation="1.6" floodOpacity="0.16" />
+            </filter>
+          </defs>
 
-      {/* Live state readout */}
-      <div className="grid grid-cols-2 gap-px border-t bg-border font-mono text-xs">
-        <div className="bg-background px-3 py-2">
-          <span className="text-muted-foreground">saved state: </span>
-          <span className="font-semibold">{frame.state}</span>
+          {/* edges */}
+          {EDGES.map((e) => {
+            const on = activeEdge === `${e.from}-${e.to}`
+            return (
+              <g key={`${e.from}-${e.to}`}>
+                <path d={e.d} fill="none" stroke={on ? ACC : "var(--muted-foreground)"} strokeOpacity={on ? 0.95 : 0.4} strokeWidth={on ? 2 : 1.5} markerEnd={`url(#${on ? "cs-arrow-on" : "cs-arrow"})`} className="transition-all duration-300" />
+                <text x={e.lx} y={e.ly} textAnchor={e.anchor ?? "middle"} className="font-mono" fontSize={9.5} fill={on ? ACC : "var(--muted-foreground)"} fillOpacity={on ? 1 : 0.75}>{e.label}</text>
+              </g>
+            )
+          })}
+
+          {/* nodes */}
+          {NODES.map((nd) => {
+            const on = active === nd.id
+            return (
+              <g key={nd.id} className="transition-all duration-300">
+                <rect x={nd.x} y={nd.y} width={nd.w} height={nd.h} rx={10}
+                  fill={on ? "color-mix(in oklch, oklch(0.62 0.14 255) 14%, var(--background))" : "var(--background)"}
+                  stroke={on ? ACC : "var(--border)"} strokeWidth={on ? 1.75 : 1.25}
+                  filter={on ? "url(#cs-soft)" : undefined} className="transition-all duration-300" />
+                <text x={nd.x + nd.w / 2} y={nd.y + 20} textAnchor="middle" className="font-mono" fontSize={12} fontWeight={600} fill={on ? "var(--foreground)" : "var(--muted-foreground)"}>{nd.t}</text>
+                <text x={nd.x + nd.w / 2} y={nd.y + 35} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9.5}>{nd.s}</text>
+              </g>
+            )
+          })}
+        </svg>
+
+        {/* live readout */}
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px]">
+          <span className="text-muted-foreground">saved state <span className="font-semibold text-foreground">{frame.state}</span></span>
+          <span className="text-border">·</span>
+          <span className="text-muted-foreground">emitted <span className="font-semibold text-foreground">{emitted.length ? emitted.join(" ") : "—"}</span></span>
         </div>
-        <div className="bg-background px-3 py-2">
-          <span className="text-muted-foreground">emitted: </span>
-          <span className="font-semibold">
-            {emitted.length ? emitted.join(" ") : "—"}
+
+        <div className="mt-1.5 font-mono text-[11px]">
+          <span className={cn("text-muted-foreground", frame.ret && "text-foreground")}>
+            {frame.ret ? "↩ " : "  "}{frame.note}
           </span>
         </div>
-      </div>
 
-      <div className="border-t px-3 py-2 font-mono text-xs">
-        <span
-          className={cn(
-            "text-muted-foreground",
-            frame.ret && "text-foreground"
-          )}
-        >
-          {frame.ret ? "↩ " : "  "}
-          {frame.note}
-        </span>
-      </div>
-
-      {/* Controls */}
-      <div className="flex items-center gap-2 border-t px-3 py-2">
-        <button
-          type="button"
-          onClick={() => setPlaying((p) => !p)}
-          disabled={atEnd}
-          className="flex cursor-pointer items-center gap-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {playing && !atEnd ? (
-            <PauseIcon size={13} weight="fill" />
-          ) : (
-            <PlayIcon size={13} weight="fill" />
-          )}
-          {playing && !atEnd ? "pause" : "play"}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setPlaying(false)
-            setI((n) => Math.max(0, n - 1))
-          }}
-          disabled={i === 0}
-          className="cursor-pointer font-mono text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          ← prev
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setPlaying(false)
-            setI((n) => Math.min(FRAMES.length - 1, n + 1))
-          }}
-          disabled={i >= FRAMES.length - 1}
-          className="cursor-pointer font-mono text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          next →
-        </button>
-        <button
-          type="button"
-          onClick={reset}
-          className="ml-auto flex cursor-pointer items-center gap-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <ArrowCounterClockwiseIcon size={13} weight="bold" />
-          reset
-        </button>
+        {/* controls */}
+        <div className="mt-3 flex items-center gap-3 border-t pt-3">
+          <button type="button" onClick={() => setPlaying((p) => !p)} disabled={atEnd}
+            className="flex cursor-pointer items-center gap-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40">
+            {playing && !atEnd ? <PauseIcon size={13} weight="fill" /> : <PlayIcon size={13} weight="fill" />}
+            {playing && !atEnd ? "pause" : "play"}
+          </button>
+          <button type="button" onClick={() => { setPlaying(false); setI((n) => Math.max(0, n - 1)) }} disabled={i === 0}
+            className="cursor-pointer font-mono text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40">
+            ← prev
+          </button>
+          <button type="button" onClick={() => { setPlaying(false); setI((n) => Math.min(FRAMES.length - 1, n + 1)) }} disabled={atEnd}
+            className="cursor-pointer font-mono text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40">
+            next →
+          </button>
+          <button type="button" onClick={reset}
+            className="ml-auto flex cursor-pointer items-center gap-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground">
+            <ArrowCounterClockwiseIcon size={13} weight="bold" />
+            reset
+          </button>
+        </div>
       </div>
     </figure>
   )
