@@ -1,7 +1,6 @@
 "use client"
 
 import { useState } from "react"
-import { ArrowsClockwiseIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
 
@@ -9,8 +8,8 @@ import { cn } from "@/lib/utils"
 // model_id (which agent), subtasks (a natural-language instruction), and
 // access_list (which earlier outputs that agent may see). Those three lists ARE
 // a workflow graph. Flip between the topologies the Conductor learns to produce
-// and watch the same triple of lists redraw the DAG. Hover a node to trace what
-// it's allowed to read.
+// and watch the same triple of lists redraw the DAG. Hover a node to trace its
+// edges. The recursive topology draws its self-loop literally.
 
 const AGENTS = [
   { name: "GPT-5", hue: 150 },
@@ -37,6 +36,7 @@ type Preset = {
   h: number
   nodes: Node[]
   edges: [string, string][]
+  loop?: string // node id that draws a recursive self-loop
   lists: { model_id: string; subtasks: string; access_list: string }
   caption: string
 }
@@ -65,11 +65,11 @@ const PRESETS: Record<string, Preset> = {
     h: 300,
     nodes: [
       { id: "Q", kind: "io", x: 180, y: 22 },
-      { id: "0", kind: "agent", agent: 2, sub: "restate + translate", x: 180, y: 86 },
-      { id: "1", kind: "agent", agent: 0, sub: "solve, approach A", x: 92, y: 156 },
-      { id: "2", kind: "agent", agent: 3, sub: "solve, approach B", x: 268, y: 156 },
-      { id: "3", kind: "agent", agent: 1, sub: "verify + merge", x: 180, y: 226 },
-      { id: "A", kind: "io", x: 180, y: 280 },
+      { id: "0", kind: "agent", agent: 2, sub: "restate + translate", x: 180, y: 88 },
+      { id: "1", kind: "agent", agent: 0, sub: "solve, approach A", x: 90, y: 160 },
+      { id: "2", kind: "agent", agent: 3, sub: "solve, approach B", x: 270, y: 160 },
+      { id: "3", kind: "agent", agent: 1, sub: "verify + merge", x: 180, y: 232 },
+      { id: "A", kind: "io", x: 180, y: 282 },
     ],
     edges: [
       ["Q", "0"], ["0", "1"], ["0", "2"], ["0", "3"], ["1", "3"], ["2", "3"], ["3", "A"],
@@ -92,19 +92,20 @@ const PRESETS: Record<string, Preset> = {
       { id: "A", kind: "io", x: 180, y: 234 },
     ],
     edges: [["Q", "0"], ["0", "1"], ["1", "A"]],
+    loop: "1",
     lists: {
       model_id: "[0, C]",
       subtasks: '["draft a solution", "re-orchestrate + refine"]',
       access_list: "[[], [\"all\"]]",
     },
     caption:
-      "The Conductor can name itself (C) as a worker. That spawns a fresh sub-workflow on the draft — a recursive topology that turns inference depth into a tunable compute axis.",
+      "The Conductor can name itself (C) as a worker. That spawns a fresh sub-workflow on the draft — a recursive topology (the self-loop) that turns inference depth into a tunable compute axis.",
   },
 }
 
-const NW = 132
-const NH = 40
-const IW = 84
+const NW = 140
+const NH = 44
+const IW = 104
 const IH = 28
 
 export function ConductorWorkflow() {
@@ -114,83 +115,49 @@ export function ConductorWorkflow() {
   const node = (id: string) => preset.nodes.find((n) => n.id === id)!
 
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="flex items-center justify-between gap-2 border-b px-3 py-2 font-mono text-xs">
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="flex items-center justify-between gap-2 border-b px-4 py-2.5 font-mono text-xs">
         <span className="text-muted-foreground">three lists → one workflow</span>
         <div className="flex gap-1">
           {Object.entries(PRESETS).map(([k, p]) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setKey(k as keyof typeof PRESETS)}
-              aria-pressed={k === key}
-              className={cn(
-                "cursor-pointer rounded px-2 py-1 transition-colors",
-                k === key
-                  ? "bg-foreground text-background"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
+            <button key={k} type="button" onClick={() => setKey(k as keyof typeof PRESETS)} aria-pressed={k === key}
+              className={cn("cursor-pointer rounded-md px-2 py-1 transition-colors",
+                k === key ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground")}>
               {p.label}
             </button>
           ))}
         </div>
       </div>
 
-      <div className="grid gap-4 p-4 md:grid-cols-2">
+      <div className="grid gap-4 p-3 sm:p-4 md:grid-cols-2">
         {/* the three lists */}
         <div className="flex flex-col gap-3">
           <div className="rounded-md border bg-muted/30 p-3 font-mono text-[11px] leading-6">
-            <div>
-              <span className="text-muted-foreground">model_id&nbsp;&nbsp;&nbsp;= </span>
-              {preset.lists.model_id}
-            </div>
-            <div>
-              <span className="text-muted-foreground">subtasks&nbsp;&nbsp;&nbsp;= </span>
-              {preset.lists.subtasks}
-            </div>
-            <div>
-              <span className="text-muted-foreground">access_list = </span>
-              {preset.lists.access_list}
-            </div>
+            <div><span className="text-muted-foreground">model_id&nbsp;&nbsp;&nbsp;= </span>{preset.lists.model_id}</div>
+            <div><span className="text-muted-foreground">subtasks&nbsp;&nbsp;&nbsp;= </span>{preset.lists.subtasks}</div>
+            <div><span className="text-muted-foreground">access_list = </span>{preset.lists.access_list}</div>
           </div>
-          {/* legend */}
           <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-muted-foreground">
-            {preset.nodes
-              .filter((n) => n.kind !== "io")
-              .map((n) => (
-                <span key={n.id} className="flex items-center gap-1.5">
-                  <span
-                    className="size-2.5 rounded-full"
-                    style={{ background: agentColor(n.agent!) }}
-                  />
-                  {n.id}: {agentName(n.agent!)}
-                </span>
-              ))}
+            {preset.nodes.filter((n) => n.kind !== "io").map((n) => (
+              <span key={n.id} className="flex items-center gap-1.5">
+                <span className="size-2.5 rounded-full" style={{ background: agentColor(n.agent!) }} />
+                {n.id}: {agentName(n.agent!)}
+              </span>
+            ))}
           </div>
           <p className="text-sm leading-6 text-muted-foreground">{preset.caption}</p>
         </div>
 
         {/* the DAG */}
         <div>
-          <svg
-            viewBox={`0 0 360 ${preset.h}`}
-            className="w-full"
-            role="img"
-            aria-label={`Conductor ${preset.label} workflow graph`}
-          >
+          <svg viewBox={`0 0 360 ${preset.h}`} className="w-full" role="img" aria-label={`Conductor ${preset.label} workflow graph`}>
             <defs>
-              <marker
-                id="cw-arrow"
-                viewBox="0 0 10 10"
-                refX="8"
-                refY="5"
-                markerWidth="6"
-                markerHeight="6"
-                orient="auto-start-reverse"
-              >
-                <path d="M0,0 L10,5 L0,10 z" fill="var(--muted-foreground)" />
+              <marker id="cw-arrow" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="6" refY="0">
+                <path d="M0,-4L6,0L0,4" fill="none" stroke="var(--muted-foreground)" strokeWidth={1.5} />
               </marker>
+              <filter id="cw-soft" x="-40%" y="-40%" width="180%" height="180%">
+                <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.14" />
+              </filter>
             </defs>
 
             {/* edges */}
@@ -202,71 +169,49 @@ export function ConductorWorkflow() {
               const dy = Math.max((ty - sy) / 2, 10)
               const active = hover === null || hover === to || hover === from
               return (
-                <path
-                  key={i}
+                <path key={i}
                   d={`M ${a.x} ${sy} C ${a.x} ${sy + dy}, ${b.x} ${ty - dy}, ${b.x} ${ty}`}
-                  fill="none"
-                  stroke="var(--muted-foreground)"
-                  strokeWidth={hover === to ? 2 : 1.3}
+                  fill="none" stroke="var(--muted-foreground)" strokeWidth={hover === to ? 2 : 1.3}
                   markerEnd="url(#cw-arrow)"
-                  style={{ opacity: active ? 0.7 : 0.12, transition: "opacity 0.25s, stroke-width 0.25s" }}
-                />
+                  style={{ opacity: active ? 0.65 : 0.12, transition: "opacity 0.25s, stroke-width 0.25s" }} />
               )
             })}
+
+            {/* recursive self-loop */}
+            {preset.loop && (() => {
+              const n = node(preset.loop)
+              const rx = n.x + NW / 2
+              const ry = n.y
+              return (
+                <path key="loop"
+                  d={`M ${rx} ${ry - 8} C ${rx + 46} ${ry - 26}, ${rx + 46} ${ry + 26}, ${rx} ${ry + 8}`}
+                  fill="none" stroke={agentColor(SELF)} strokeWidth={1.5} markerEnd="url(#cw-arrow)" opacity={0.8} />
+              )
+            })()}
 
             {/* nodes */}
             {preset.nodes.map((n) =>
               n.kind === "io" ? (
                 <g key={n.id}>
-                  <rect
-                    x={n.x - IW / 2}
-                    y={n.y - IH / 2}
-                    width={IW}
-                    height={IH}
-                    rx={14}
-                    fill="var(--background)"
-                    stroke="var(--border)"
-                  />
-                  <text
-                    x={n.x}
-                    y={n.y + 4}
-                    textAnchor="middle"
-                    fontFamily="monospace"
-                    fontSize="11"
-                    fill="var(--muted-foreground)"
-                  >
+                  <rect x={n.x - IW / 2} y={n.y - IH / 2} width={IW} height={IH} rx={14}
+                    fill="var(--background)" stroke="var(--border)" strokeWidth={1.5} />
+                  <text x={n.x} y={n.y + 4} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={11}>
                     {n.id === "Q" ? "user question" : "final answer"}
                   </text>
                 </g>
               ) : (
-                <foreignObject
-                  key={n.id}
-                  x={n.x - NW / 2}
-                  y={n.y - NH / 2}
-                  width={NW}
-                  height={NH}
-                  onMouseEnter={() => setHover(n.id)}
-                  onMouseLeave={() => setHover(null)}
-                  style={{ cursor: "pointer" }}
-                >
-                  <div
-                    className="flex h-full flex-col justify-center rounded-md border-l-[3px] bg-background px-2 shadow-sm"
-                    style={{
-                      borderColor: agentColor(n.agent!),
-                      outline: hover === n.id ? `1px solid ${agentColor(n.agent!)}` : "1px solid var(--border)",
-                    }}
-                  >
-                    <div className="flex items-center gap-1 font-mono text-[10px] leading-tight font-medium">
-                      {n.kind === "self" ? (
-                        <ArrowsClockwiseIcon size={11} weight="bold" />
-                      ) : null}
-                      {agentName(n.agent!)}
-                    </div>
-                    <div className="truncate font-mono text-[9px] leading-tight text-muted-foreground">
-                      {n.sub}
-                    </div>
-                  </div>
-                </foreignObject>
+                <g key={n.id} onMouseEnter={() => setHover(n.id)} onMouseLeave={() => setHover(null)} style={{ cursor: "pointer" }}>
+                  <rect x={n.x - NW / 2} y={n.y - NH / 2} width={NW} height={NH} rx={9}
+                    fill="var(--background)" stroke={hover === n.id ? agentColor(n.agent!) : "var(--border)"}
+                    strokeWidth={1.5} filter="url(#cw-soft)" className="transition-colors" />
+                  <rect x={n.x - NW / 2} y={n.y - NH / 2 + 5} width={4} height={NH - 10} rx={2} fill={agentColor(n.agent!)} />
+                  <text x={n.x - NW / 2 + 14} y={n.y - 3} className="fill-foreground font-mono" fontSize={10} fontWeight={600}>
+                    {n.kind === "self" ? "↻ " : ""}{agentName(n.agent!)}
+                  </text>
+                  <text x={n.x - NW / 2 + 14} y={n.y + 11} className="fill-muted-foreground font-mono" fontSize={9}>
+                    {n.sub}
+                  </text>
+                </g>
               )
             )}
           </svg>

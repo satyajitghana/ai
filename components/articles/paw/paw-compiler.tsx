@@ -1,16 +1,16 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { SnowflakeIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
 
-// The Program-as-Weights loop, made playable. A "fuzzy function" (specified in plain
-// language) is compiled ONCE by a 4B compiler into a small LoRA adapter — a neural
-// program. That adapter then runs on a frozen 0.6B interpreter, locally and cheaply,
-// for every subsequent input. Pick a spec, press compile (watch the adapter fill in),
-// then click inputs to run them through the interpreter. It's an illustration of the
-// mechanism, not a live model — the outputs are the paper's example behaviors.
+// The Program-as-Weights loop, drawn as a composed pipeline. A "fuzzy function"
+// (specified in plain language) is compiled ONCE by a 4B compiler into a small LoRA
+// adapter — a neural program. That adapter loads into a frozen 0.6B interpreter that
+// then runs locally and cheaply for every subsequent input. Pick a spec, press compile
+// (watch the adapter fill in), then click inputs to run them through the interpreter.
+// It's an illustration of the mechanism, not a live model — the outputs are the paper's
+// example behaviors.
 
 const INDIGO = "oklch(0.55 0.17 275)"
 const GREEN = "oklch(0.68 0.15 150)"
@@ -58,9 +58,43 @@ const SPECS: Spec[] = [
   },
 ]
 
-// LoRA adapter grid geometry
-const ROWS = 6
-const COLS = 14
+// ── scene geometry (viewBox units) ─────────────────────────────
+const W = 740
+const H = 330
+const xA = 24, wA = 182 // col A (spec / input)
+const xB = 252, wB = 170 // col B (compiler / interpreter)
+const xC = 468, wC = 248 // col C (adapter / output)
+const yT = 52, hT = 62 // top row
+const yB = 214, hB = 76 // bottom row
+const cyT = yT + hT / 2
+const cyB = yB + hB / 2
+const cxA = xA + wA / 2
+const cxB = xB + wB / 2
+const cxC = xC + wC / 2
+
+// adapter fill grid
+const ACOLS = 24, AROWS = 3
+const gx = xC + 10, gy = yT + 22, gw = wC - 20, gh = 30
+const gap = 1.8
+const cellW = (gw - (ACOLS - 1) * gap) / ACOLS
+const cellH = (gh - (AROWS - 1) * gap) / AROWS
+
+// smooth horizontal connector
+const hcurve = (x1: number, x2: number, y: number) => {
+  const mx = (x1 + x2) / 2
+  return `M ${x1} ${y} C ${mx} ${y}, ${mx} ${y}, ${x2} ${y}`
+}
+// bridge from adapter (top) down-left into interpreter (bottom)
+const bridge = (() => {
+  const x1 = cxC, y1 = yT + hT
+  const x2 = cxB, y2 = yB
+  const my = (y1 + y2) / 2
+  return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`
+})()
+// flow the running dot follows: input → interpreter → output
+const flowPath = `M ${xA + wA} ${cyB} L ${xB} ${cyB} L ${xB + wB} ${cyB} L ${xC} ${cyB}`
+
+const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s)
 
 export function PawCompiler() {
   const [si, setSi] = useState(0)
@@ -79,9 +113,9 @@ export function PawCompiler() {
   }
   function compile() {
     clearTimers()
-    setActive(null)
+    setActive(null); setRunning(false)
     setPhase("compiling")
-    timers.current.push(setTimeout(() => setPhase("ready"), ROWS * COLS * 8 + 350))
+    timers.current.push(setTimeout(() => setPhase("ready"), ACOLS * AROWS * 6 + 320))
   }
   function run(i: number) {
     if (phase !== "ready") return
@@ -91,7 +125,7 @@ export function PawCompiler() {
   }
 
   const filled = phase === "ready" || phase === "compiling"
-  const cells = ROWS * COLS
+  const outVal = active === null ? null : spec.examples[active]
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/20 to-transparent">
@@ -100,157 +134,160 @@ export function PawCompiler() {
         <span className="text-muted-foreground/60">illustrative</span>
       </div>
 
-      <div className="p-4 sm:p-5">
-        {/* ── COMPILE ONCE (in the cloud) ───────────────────────────── */}
-        <div className="mb-1 flex items-center gap-2 font-mono text-[11px] uppercase tracking-wide text-muted-foreground/70">
-          <span>compile once · in the cloud</span>
-          <span className="h-px flex-1 bg-border" />
-        </div>
+      <div className="p-3 sm:p-4">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img"
+          aria-label="Pipeline: a natural-language spec is compiled once by a 4B compiler into a small LoRA adapter, which loads into a frozen 0.6B interpreter that runs each input locally to produce an output.">
+          <defs>
+            <marker id="paw-ar-i" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="6" refY="0">
+              <path d="M0,-4L6,0L0,4" fill="none" stroke={INDIGO} strokeWidth={1.5} />
+            </marker>
+            <marker id="paw-ar-g" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="6" refY="0">
+              <path d="M0,-4L6,0L0,4" fill="none" stroke={GREEN} strokeWidth={1.5} />
+            </marker>
+            <filter id="paw-soft" x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.14" />
+            </filter>
+          </defs>
 
-        <div className="grid items-stretch gap-3 sm:grid-cols-[1fr_auto_1fr]">
-          {/* spec card */}
-          <div className="rounded-lg border bg-background p-3">
-            <div className="mb-2 flex flex-wrap gap-1">
-              {SPECS.map((s, i) => (
-                <button
-                  key={s.key}
-                  type="button"
-                  onClick={() => pick(i)}
-                  aria-pressed={i === si}
-                  className={cn(
-                    "cursor-pointer rounded-md px-2 py-1 font-mono text-[10px] transition-colors",
-                    i === si ? "text-background" : "bg-muted text-muted-foreground hover:text-foreground",
-                  )}
-                  style={i === si ? { background: INDIGO } : undefined}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-            <div className="font-mono text-[10px] text-muted-foreground">natural-language spec</div>
-            <p className="mt-1 text-sm leading-6 text-foreground">&ldquo;{spec.spec}&rdquo;</p>
-          </div>
+          {/* band labels */}
+          <text x={xA} y={34} className="fill-muted-foreground/70 font-mono" fontSize={10} letterSpacing="0.06em">COMPILE ONCE · IN THE CLOUD</text>
+          <line x1={xA + 224} y1={30} x2={W - 24} y2={30} stroke="var(--border)" strokeWidth={1} />
+          <text x={xA} y={yB - 14} className="fill-muted-foreground/70 font-mono" fontSize={10} letterSpacing="0.06em">RUN LOCALLY · EVERY CALL AFTER</text>
+          <line x1={xA + 246} y1={yB - 18} x2={W - 24} y2={yB - 18} stroke="var(--border)" strokeWidth={1} />
 
-          {/* compiler + button */}
-          <div className="flex flex-row items-center justify-center gap-3 sm:flex-col">
-            <Arrow />
-            <button
-              type="button"
-              onClick={compile}
-              className="group flex shrink-0 cursor-pointer flex-col items-center gap-1 rounded-lg border px-3 py-2 transition-colors hover:border-foreground/40"
-              style={{ background: `${INDIGO}0f` }}
-            >
-              <span className="font-mono text-[10px] text-muted-foreground">4B compiler</span>
-              <span className="text-sm font-semibold" style={{ color: INDIGO }}>
-                {phase === "compiling" ? "compiling…" : phase === "ready" ? "recompile" : "compile ▸"}
-              </span>
-            </button>
-            <Arrow />
-          </div>
+          {/* connectors (behind nodes) */}
+          <path d={hcurve(xA + wA, xB, cyT)} fill="none" stroke={INDIGO} strokeWidth={1.5} opacity={0.75} markerEnd="url(#paw-ar-i)" />
+          <path d={hcurve(xB + wB, xC, cyT)} fill="none" stroke={INDIGO} strokeWidth={1.5} opacity={filled ? 0.85 : 0.35} markerEnd="url(#paw-ar-i)" className="transition-opacity duration-300" />
+          <path d={bridge} fill="none" stroke={GREEN} strokeWidth={1.5} strokeDasharray="4 3" opacity={filled ? 0.8 : 0.28} markerEnd="url(#paw-ar-g)" className="transition-opacity duration-300" />
+          <path d={hcurve(xA + wA, xB, cyB)} fill="none" stroke={GREEN} strokeWidth={1.5} opacity={phase === "ready" ? 0.75 : 0.28} markerEnd="url(#paw-ar-g)" className="transition-opacity duration-300" />
+          <path d={hcurve(xB + wB, xC, cyB)} fill="none" stroke={GREEN} strokeWidth={1.5} opacity={phase === "ready" ? 0.75 : 0.28} markerEnd="url(#paw-ar-g)" className="transition-opacity duration-300" />
 
-          {/* LoRA adapter grid */}
-          <div className="rounded-lg border bg-background p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="font-mono text-[10px] text-muted-foreground">neural program · LoRA adapter</span>
-              <span className="font-mono text-[10px]" style={{ color: filled ? GREEN : "var(--muted-foreground)" }}>
-                {filled ? "~1 MB" : "empty"}
-              </span>
-            </div>
-            <div
-              className="grid gap-[3px]"
-              style={{ gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))` }}
-            >
-              {Array.from({ length: cells }).map((_, k) => {
-                const on = filled
-                return (
-                  <span
-                    key={k}
-                    className="aspect-square rounded-[2px] transition-all"
-                    style={{
-                      background: on ? GREEN : "var(--muted)",
-                      opacity: on ? 0.35 + 0.65 * (((k * 37) % 100) / 100) : 0.25,
-                      transitionDelay: phase === "compiling" ? `${k * 8}ms` : "0ms",
-                      transitionDuration: "260ms",
-                    }}
-                  />
-                )
-              })}
-            </div>
-            <div className="mt-2 font-mono text-[10px] text-muted-foreground">
-              {phase === "ready" ? "compiled — a small reusable artifact" : phase === "compiling" ? "emitting weights…" : "press compile"}
-            </div>
-          </div>
-        </div>
+          {/* bridge label */}
+          <text x={(cxC + cxB) / 2 + 6} y={cyB - (cyB - (yT + hT)) / 2} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9}>loads once</text>
 
-        {/* ── RUN LOCALLY (many times) ──────────────────────────────── */}
-        <div className="mb-1 mt-5 flex items-center gap-2 font-mono text-[11px] uppercase tracking-wide text-muted-foreground/70">
-          <span>run locally · every call after</span>
-          <span className="h-px flex-1 bg-border" />
-        </div>
+          {/* running dot */}
+          {running && active !== null && (
+            <circle key={active} r={3.2} fill={GREEN}>
+              <animateMotion dur="0.5s" fill="freeze" path={flowPath} />
+            </circle>
+          )}
 
-        <div className="grid items-stretch gap-3 sm:grid-cols-[1fr_auto_1fr]">
-          {/* inputs */}
-          <div className={cn("rounded-lg border bg-background p-3 transition-opacity", phase === "ready" ? "opacity-100" : "opacity-45")}>
-            <div className="mb-2 font-mono text-[10px] text-muted-foreground">{phase === "ready" ? "click an input to run it →" : "compile first, then run inputs"}</div>
-            <div className="flex flex-col gap-1.5">
-              {spec.examples.map((ex, i) => (
-                <button
-                  key={i}
-                  type="button"
-                  disabled={phase !== "ready"}
-                  onClick={() => run(i)}
-                  aria-pressed={active === i}
-                  className={cn(
-                    "cursor-pointer truncate rounded-md border px-2 py-1.5 text-left font-mono text-[11px] transition-all disabled:cursor-not-allowed",
-                    active === i ? "border-transparent text-foreground" : "text-muted-foreground hover:text-foreground",
-                  )}
-                  style={active === i ? { background: `${INDIGO}14`, boxShadow: `inset 2px 0 0 ${INDIGO}` } : undefined}
-                >
-                  {ex.in}
-                </button>
-              ))}
-            </div>
-          </div>
+          {/* ── spec node ── */}
+          <g>
+            <rect x={xA} y={yT} width={wA} height={hT} rx={10} fill="var(--background)" stroke="var(--border)" strokeWidth={1.5} filter="url(#paw-soft)" />
+            <text x={xA + 12} y={yT + 20} className="fill-muted-foreground font-mono" fontSize={9}>natural-language spec</text>
+            <text x={xA + 12} y={yT + 42} className="fill-foreground font-mono" fontSize={13} fontWeight={600}>{spec.label}</text>
+          </g>
 
-          {/* interpreter */}
-          <div className="flex flex-row items-center justify-center gap-3 sm:flex-col">
-            <Arrow />
-            <div className="flex shrink-0 flex-col items-center gap-1 rounded-lg border px-3 py-2" style={{ background: `${GREEN}0f` }}>
-              <span className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground">
-                <SnowflakeIcon size={11} weight="fill" /> frozen
-              </span>
-              <span className="text-sm font-semibold" style={{ color: GREEN }}>0.6B</span>
-              <span className="font-mono text-[9px] text-muted-foreground">+ LoRA</span>
-            </div>
-            <Arrow pulse={running} />
-          </div>
+          {/* ── 4B compiler node ── */}
+          <g>
+            <rect x={xB} y={yT} width={wB} height={hT} rx={10} fill="var(--background)" stroke={INDIGO} strokeWidth={1.5} filter="url(#paw-soft)" />
+            <text x={cxB} y={yT + 26} textAnchor="middle" className="fill-foreground font-mono" fontSize={13} fontWeight={600}>4B compiler</text>
+            <text x={cxB} y={yT + 44} textAnchor="middle" fontSize={11} fontWeight={600} style={{ fill: INDIGO }} className="font-mono">
+              {phase === "compiling" ? "compiling…" : phase === "ready" ? "compiled ✓" : "press compile"}
+            </text>
+          </g>
 
-          {/* output */}
-          <div className="flex flex-col rounded-lg border bg-background p-3">
-            <div className="font-mono text-[10px] text-muted-foreground">{spec.outLabel}</div>
-            <div className="flex flex-1 items-center">
-              {active === null ? (
-                <span className="font-mono text-sm text-muted-foreground/50">—</span>
-              ) : running ? (
-                <span className="font-mono text-sm text-muted-foreground">running…</span>
-              ) : (
-                <span
-                  className="rounded-md px-2 py-1 font-mono text-sm font-semibold"
+          {/* ── LoRA adapter node ── */}
+          <g>
+            <rect x={xC} y={yT} width={wC} height={hT} rx={10} fill="var(--background)" stroke={filled ? GREEN : "var(--border)"} strokeWidth={1.5} filter="url(#paw-soft)" className="transition-colors duration-300" />
+            <text x={xC + 12} y={yT + 16} className="fill-muted-foreground font-mono" fontSize={9}>neural program · LoRA adapter</text>
+            <text x={xC + wC - 12} y={yT + 16} textAnchor="end" fontSize={9} className="font-mono" style={{ fill: filled ? GREEN : "var(--muted-foreground)" }}>{filled ? "~1 MB" : "empty"}</text>
+            {Array.from({ length: ACOLS * AROWS }, (_, k) => {
+              const r = Math.floor(k / ACOLS), c = k % ACOLS
+              const on = filled
+              return (
+                <rect key={k} x={gx + c * (cellW + gap)} y={gy + r * (cellH + gap)} width={cellW} height={cellH} rx={1}
+                  fill={on ? GREEN : "var(--muted)"}
                   style={{
-                    color: spec.examples[active].hot ? AMBER : "var(--muted-foreground)",
-                    background: spec.examples[active].hot ? `${AMBER}18` : "var(--muted)",
-                  }}
-                >
-                  {spec.examples[active].out}
-                </span>
-              )}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1.5 font-mono text-[9px] text-muted-foreground">
-              <span className="rounded bg-muted px-1.5 py-0.5">≈1/50 the memory</span>
-              <span className="rounded bg-muted px-1.5 py-0.5">30 tok/s on an M3</span>
-              <span className="rounded bg-muted px-1.5 py-0.5">offline</span>
-            </div>
+                    opacity: on ? 0.32 + 0.68 * (((k * 37) % 100) / 100) : 0.3,
+                    transitionProperty: "opacity, fill",
+                    transitionDuration: "240ms",
+                    transitionDelay: phase === "compiling" ? `${k * 6}ms` : "0ms",
+                  }} />
+              )
+            })}
+          </g>
+
+          {/* ── input node ── */}
+          <g>
+            <rect x={xA} y={yB} width={wA} height={hB} rx={10} fill="var(--background)" stroke="var(--border)" strokeWidth={1.5} filter="url(#paw-soft)" />
+            <text x={xA + 12} y={yB + 20} className="fill-muted-foreground font-mono" fontSize={9}>input</text>
+            {outVal ? (
+              <text x={xA + 12} y={yB + 44} className="fill-foreground font-mono" fontSize={11}>{clip(outVal.in, 26)}</text>
+            ) : (
+              <text x={xA + 12} y={yB + 44} className="fill-muted-foreground/60 font-mono" fontSize={11}>{phase === "ready" ? "click an input below" : "compile first"}</text>
+            )}
+          </g>
+
+          {/* ── frozen 0.6B interpreter node ── */}
+          <g>
+            <rect x={xB} y={yB} width={wB} height={hB} rx={10} fill="var(--background)" stroke={running ? GREEN : "var(--border)"} strokeWidth={running ? 2 : 1.5} filter="url(#paw-soft)" className="transition-all duration-200" />
+            <text x={cxB} y={yB + 20} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9}>❄ frozen interpreter</text>
+            <text x={cxB} y={yB + 46} textAnchor="middle" className="fill-foreground font-mono" fontSize={17} fontWeight={700}>0.6B</text>
+            <text x={cxB} y={yB + 64} textAnchor="middle" fontSize={10} className="font-mono" style={{ fill: filled ? GREEN : "var(--muted-foreground)" }}>+ LoRA</text>
+          </g>
+
+          {/* ── output node ── */}
+          <g>
+            <rect x={xC} y={yB} width={wC} height={hB} rx={10} fill="var(--background)" stroke="var(--border)" strokeWidth={1.5} filter="url(#paw-soft)" />
+            <text x={xC + 12} y={yB + 20} className="fill-muted-foreground font-mono" fontSize={9}>{spec.outLabel}</text>
+            {outVal === null ? (
+              <text x={cxC} y={yB + 50} textAnchor="middle" className="fill-muted-foreground/50 font-mono" fontSize={16}>—</text>
+            ) : running ? (
+              <text x={cxC} y={yB + 50} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={13}>running…</text>
+            ) : (
+              <>
+                <rect x={cxC - (outVal.out.length * 8 + 24) / 2} y={yB + 32} width={outVal.out.length * 8 + 24} height={30} rx={6}
+                  fill={outVal.hot ? `${AMBER}22` : "var(--muted)"} />
+                <text x={cxC} y={yB + 52} textAnchor="middle" className="font-mono" fontSize={15} fontWeight={700}
+                  style={{ fill: outVal.hot ? AMBER : "var(--muted-foreground)" }}>{outVal.out}</text>
+              </>
+            )}
+          </g>
+        </svg>
+
+        {/* ── controls ── */}
+        <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-mono text-[10px] text-muted-foreground">spec</span>
+            {SPECS.map((s, i) => (
+              <button key={s.key} type="button" onClick={() => pick(i)} aria-pressed={i === si}
+                className={cn("cursor-pointer rounded-md px-2 py-1 font-mono text-[10px] transition-colors", i === si ? "text-background" : "bg-muted text-muted-foreground hover:text-foreground")}
+                style={i === si ? { background: INDIGO } : undefined}>
+                {s.label}
+              </button>
+            ))}
           </div>
+          <button type="button" onClick={compile}
+            className="ml-auto cursor-pointer rounded-md border px-3 py-1 font-mono text-[11px] font-semibold transition-colors hover:border-foreground/40"
+            style={{ color: INDIGO, background: `${INDIGO}0f` }}>
+            {phase === "compiling" ? "compiling…" : phase === "ready" ? "recompile" : "compile ▸"}
+          </button>
+        </div>
+
+        <p className="mt-2.5 text-sm leading-6 text-muted-foreground">
+          <span className="font-mono text-[10px] text-muted-foreground/70">spec: </span>
+          <span className="text-foreground">&ldquo;{spec.spec}&rdquo;</span>
+        </p>
+
+        <div className={cn("mt-3 transition-opacity", phase === "ready" ? "opacity-100" : "opacity-50")}>
+          <div className="mb-1.5 font-mono text-[10px] text-muted-foreground">{phase === "ready" ? "click an input to run it through the interpreter" : "compile first, then run inputs"}</div>
+          <div className="flex flex-wrap gap-1.5">
+            {spec.examples.map((ex, i) => (
+              <button key={i} type="button" disabled={phase !== "ready"} onClick={() => run(i)} aria-pressed={active === i}
+                className={cn("cursor-pointer rounded-md border px-2 py-1.5 text-left font-mono text-[11px] transition-all disabled:cursor-not-allowed", active === i ? "border-transparent text-foreground" : "text-muted-foreground hover:text-foreground")}
+                style={active === i ? { background: `${INDIGO}14`, boxShadow: `inset 2px 0 0 ${INDIGO}` } : undefined}>
+                {ex.in}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-1.5 font-mono text-[9px] text-muted-foreground">
+          <span className="rounded bg-muted px-1.5 py-0.5">≈1/50 the memory</span>
+          <span className="rounded bg-muted px-1.5 py-0.5">30 tok/s on an M3</span>
+          <span className="rounded bg-muted px-1.5 py-0.5">offline</span>
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
@@ -260,17 +297,5 @@ export function PawCompiler() {
         </p>
       </div>
     </figure>
-  )
-}
-
-function Arrow({ pulse }: { pulse?: boolean }) {
-  return (
-    <span className="relative hidden h-px w-8 shrink-0 bg-border sm:block">
-      <span className="absolute -right-1 -top-[3px] text-[10px] text-muted-foreground/60">▸</span>
-      {pulse ? (
-        <span className="absolute top-[-1px] left-0 h-[3px] w-2 animate-[pawpulse_0.5s_ease-in-out] rounded-full" style={{ background: "oklch(0.68 0.15 150)" }} />
-      ) : null}
-      <style>{`@keyframes pawpulse{from{left:0}to{left:100%}}`}</style>
-    </span>
   )
 }
