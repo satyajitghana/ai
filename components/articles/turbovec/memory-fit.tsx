@@ -88,7 +88,7 @@ export function MemoryFit() {
             <g key={row.label}>
               <text x={BX0 - 8} y={row.y + 17} textAnchor="end" className="fill-muted-foreground font-mono" fontSize={10}>{row.label}</text>
               <rect x={BX0} y={row.y} width={sx(row.gb) - BX0} height={24} rx={5} fill={row.fit ? row.color : OVER} opacity={row.fit ? 0.92 : 0.7} filter="url(#mf-soft)" className="transition-all duration-200" />
-              <text x={Math.min(sx(row.gb) + 7, W - 46)} y={row.y + 17} className="fill-foreground font-mono tabular-nums" fontSize={11} fontWeight={600}>{fmt(row.gb)}</text>
+              <text x={Math.min(sx(row.gb) + 7, W - 58)} y={row.y + 17} className="fill-foreground font-mono tabular-nums" fontSize={11} fontWeight={600}>{fmt(row.gb)}</text>
             </g>
           ))}
           <text x={BX1} y={132} textAnchor="end" className="fill-muted-foreground/70 font-mono" fontSize={9}>RAM footprint →</text>
