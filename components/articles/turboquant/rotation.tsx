@@ -52,6 +52,16 @@ const cos = (a: number[], b: number[]) => {
   return d / (Math.sqrt(na) * Math.sqrt(nb))
 }
 
+const ACCENT = "oklch(0.72 0.15 195)"
+const BAD = "oklch(0.65 0.19 25)"
+
+// scene geometry (viewBox units)
+const SLOT = 30
+const W = D * SLOT
+const H = 148
+const CY = 70 // zero baseline
+const HALF = 56 // usable half-height for a bar
+
 export function Rotation() {
   const [rotated, setRotated] = useState(true)
   const [bits, setBits] = useState(3)
@@ -66,15 +76,12 @@ export function Rotation() {
   }, [rotated, bits, range])
 
   const maxAbs = Math.max(...vec.map((v) => Math.abs(v)), range)
-  const H = 90
-  const scaleY = (v: number) => (v / maxAbs) * (H / 2 - 4)
-
-  const ACCENT = "oklch(0.72 0.15 195)"
-  const BAD = "oklch(0.72 0.15 25)"
+  const scaleY = (v: number) => (v / maxAbs) * HALF
+  const clippedCount = vec.filter((v) => Math.abs(v) > range).length
 
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="flex items-center justify-between border-b px-3 py-2 font-mono text-xs">
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="flex items-center justify-between border-b px-4 py-2.5 font-mono text-xs">
         <span className="text-muted-foreground">rotate, then quantize · one fixed quantizer for every vector</span>
         <div className="flex gap-1">
           {[
@@ -94,25 +101,43 @@ export function Rotation() {
         </div>
       </div>
 
-      <div className="p-4">
-        {/* coordinate bars with quantization band */}
-        <svg viewBox={`0 0 ${D * 24} ${H}`} className="w-full" role="img" aria-label="Coordinate magnitudes of the vector; raw is spiky, rotated is even. The shaded band is the fixed quantizer range.">
+      <div className="p-4 sm:p-5">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`Coordinate magnitudes of the ${rotated ? "rotated" : "raw"} vector; the shaded band is the fixed quantizer range, ${clippedCount} of ${D} coordinates clip.`}>
+          <defs>
+            <filter id="tqr-soft" x="-40%" y="-60%" width="180%" height="220%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1" floodOpacity="0.16" />
+            </filter>
+          </defs>
+
           {/* quantizer range band */}
-          <rect x={0} y={H / 2 - scaleY(range)} width={D * 24} height={scaleY(range) * 2} fill={ACCENT} fillOpacity="0.08" />
-          <line x1={0} y1={H / 2} x2={D * 24} y2={H / 2} stroke="currentColor" strokeOpacity="0.15" />
+          <rect x={0} y={CY - scaleY(range)} width={W} height={scaleY(range) * 2} fill={ACCENT} opacity={0.09} />
+          <line x1={0} y1={CY - scaleY(range)} x2={W} y2={CY - scaleY(range)} stroke={ACCENT} strokeWidth={1} strokeDasharray="3 3" opacity={0.5} />
+          <line x1={0} y1={CY + scaleY(range)} x2={W} y2={CY + scaleY(range)} stroke={ACCENT} strokeWidth={1} strokeDasharray="3 3" opacity={0.5} />
+          <text x={W - 4} y={CY - scaleY(range) - 4} textAnchor="end" className="font-mono" fontSize={9} fill={ACCENT}>+3/√d</text>
+          <text x={W - 4} y={CY + scaleY(range) + 11} textAnchor="end" className="font-mono" fontSize={9} fill={ACCENT}>−3/√d</text>
+
+          {/* zero baseline */}
+          <line x1={0} y1={CY} x2={W} y2={CY} stroke="currentColor" className="text-border" strokeWidth={1} />
+
+          {/* coordinate bars */}
           {vec.map((v, i) => {
             const clipped = Math.abs(v) > range
+            const h = Math.max(1.5, Math.abs(scaleY(v)))
             return (
-              <rect
-                key={i}
-                x={i * 24 + 5}
-                y={v >= 0 ? H / 2 - scaleY(v) : H / 2}
-                width={14}
-                height={Math.max(1, Math.abs(scaleY(v)))}
-                rx={1.5}
-                fill={clipped ? BAD : ACCENT}
-                fillOpacity={clipped ? 0.95 : 0.7}
-              />
+              <g key={i}>
+                <rect
+                  x={i * SLOT + (SLOT - 15) / 2}
+                  y={v >= 0 ? CY - h : CY}
+                  width={15}
+                  height={h}
+                  rx={2.5}
+                  fill={clipped ? BAD : ACCENT}
+                  opacity={clipped ? 0.95 : 0.78}
+                  filter={clipped ? "url(#tqr-soft)" : undefined}
+                  className="transition-all duration-300"
+                />
+                <text x={i * SLOT + SLOT / 2} y={H - 4} textAnchor="middle" className="fill-muted-foreground/60 font-mono" fontSize={7.5}>{i}</text>
+              </g>
             )
           })}
         </svg>
@@ -128,8 +153,8 @@ export function Rotation() {
           </div>
           <div className="bg-background px-3 py-2">
             <div className="text-[10px] text-muted-foreground">coordinates outside the quantizer</div>
-            <div className="font-medium" style={{ color: vec.filter((v) => Math.abs(v) > range).length ? BAD : ACCENT }}>
-              {vec.filter((v) => Math.abs(v) > range).length} / {D}
+            <div className="font-medium" style={{ color: clippedCount ? BAD : ACCENT }}>
+              {clippedCount} / {D}
             </div>
           </div>
         </div>
@@ -139,7 +164,7 @@ export function Rotation() {
             <span>quantizer bit-width</span>
             <span className="tabular-nums text-foreground">{bits}-bit ({2 ** bits} levels)</span>
           </div>
-          <input type="range" min={1} max={5} step={1} value={bits} onChange={(e) => setBits(+e.target.value)} className="w-full accent-foreground" aria-label="bits" />
+          <input type="range" min={1} max={5} step={1} value={bits} onChange={(e) => setBits(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="bits" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
