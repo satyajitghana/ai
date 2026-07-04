@@ -48,6 +48,15 @@ reader scrub + group toggle + stage control. Read it before starting.
    `leanstral/test-time-scaling.tsx`) — gridlines, a drawn curve, a draggable marker, live readout.
    Keep them; just make sure they're SVG, not div-bars, and elegant.
 
+## Text must fit its box (common bug)
+SVG `<text>` does NOT clip to a `<rect>` — it overflows freely. So:
+- Size every node to fit its longest label, or shorten/abbreviate the label. Estimate width ≈
+  `chars × fontSize × 0.6` and make the node wider than that.
+- Keep labels terse; move detail into prose or the caption, not into a cramped node.
+- For HTML labels in fixed columns (e.g. BenchBars `w-28`), keep labels short enough to not
+  truncate; put baselines/context in surrounding prose.
+- **Verify at 390px width**: nothing may bleed past its node/box or the figure edge in either theme.
+
 ## Hard constraints (unchanged)
 - **No layout shift**: grid-stack variable-height regions or reserve min-height; verify page
   `scrollHeight` is stable across animation.
