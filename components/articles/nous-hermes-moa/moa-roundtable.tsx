@@ -135,7 +135,7 @@ export function MoARoundtable() {
         </div>
 
         {/* synthesis (prose) */}
-        <div className={cn("mt-3 rounded-md border-l-2 px-3 py-2.5 transition-all duration-500", showSynth ? "bg-muted/30 opacity-100" : "opacity-30")} style={{ borderColor: showSynth ? ACCENT : "var(--border)" }}>
+        <div className={cn("mt-3 rounded-md px-3 py-2.5 transition-all duration-500", showSynth ? "bg-muted/40 opacity-100" : "opacity-30")} style={{ borderColor: showSynth ? ACCENT : "var(--border)" }}>
           <div className="font-mono text-[11px] text-muted-foreground">synthesized answer</div>
           <p className={cn("mt-1 text-sm leading-6 transition-opacity duration-300", showSynth ? "opacity-100" : "opacity-0")}>{SYNTHESIS}</p>
         </div>

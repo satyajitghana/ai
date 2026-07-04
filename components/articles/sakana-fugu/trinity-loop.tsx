@@ -140,7 +140,7 @@ export function TrinityLoop() {
         </svg>
 
         {/* current turn — fixed min-height so the flip never shifts layout */}
-        <div className="mt-2 min-h-[132px] rounded-md border-l-2 bg-muted/30 px-3 py-2.5"
+        <div className="mt-2 min-h-[132px] rounded-md bg-muted/40 px-3 py-2.5"
           style={{ borderColor: color(turn.role) }}>
           <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
             <span className="rounded px-1.5 py-0.5 text-[10px] font-medium" style={{ background: color(turn.role), color: "oklch(0.18 0 0)" }}>{turn.role}</span>

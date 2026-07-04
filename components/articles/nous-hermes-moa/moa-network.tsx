@@ -169,7 +169,7 @@ export function MoANetwork() {
         <div className="mt-3 grid">
           {STAGES.map((st, k) => (
             <div key={st.label} aria-hidden={k !== stage} className={cn("col-start-1 row-start-1 transition-opacity duration-300", k === stage ? "opacity-100" : "pointer-events-none opacity-0")}>
-              <div className="rounded-md border-l-2 bg-muted/30 px-3 py-2.5" style={{ borderColor: ACCENT }}>
+              <div className="rounded-md bg-muted/40 px-3 py-2.5" style={{ borderColor: ACCENT }}>
                 <div className="font-mono text-[10px] text-muted-foreground">output · &ldquo;What is the Kuiper Belt?&rdquo;</div>
                 <p className="mt-1 text-sm leading-6">{st.answer}</p>
               </div>
