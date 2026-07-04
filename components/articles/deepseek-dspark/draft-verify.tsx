@@ -35,7 +35,7 @@ const W = 680
 const H = 226
 const MX = 30
 const COLS = 5
-const COLW = (W - 2 * MX) / COLS
+const COLW = (W - 2 * MX) / (COLS + 1) // 6 slots: 5 drafts + the bonus token column
 const colCx = (i: number) => MX + COLW * (i + 0.5)
 const PH = 30 // pill height
 const DRAFT_Y = 40 // draft row top
