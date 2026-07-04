@@ -77,7 +77,7 @@ export function IEKFRegister() {
           {/* map walls (planes) */}
           <line x1={sc(16)} y1={sc(70)} x2={sc(84)} y2={sc(70)} stroke="var(--muted-foreground)" strokeWidth="3" opacity="0.4" strokeLinecap="round" />
           <line x1={sc(80)} y1={sc(74)} x2={sc(80)} y2={sc(26)} stroke="var(--muted-foreground)" strokeWidth="3" opacity="0.4" strokeLinecap="round" />
-          <text x={sc(45)} y={sc(78)} textAnchor="middle" fontFamily="monospace" fontSize="7" fill="var(--muted-foreground)">map plane</text>
+          <text x={sc(45)} y={sc(78)} textAnchor="middle" className="font-mono" fontSize="7" fill="var(--muted-foreground)">map plane</text>
           {/* residual lines to nearest wall */}
           {pts.map(([x, y], i) => {
             const toH = Math.abs(y - 70)

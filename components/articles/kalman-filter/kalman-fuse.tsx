@@ -11,6 +11,18 @@ import { useState } from "react"
 
 const MU_PRED = 38
 const Z = 64
+const C_PRED = "var(--muted-foreground)"
+const C_MEAS = "oklch(0.72 0.15 40)"
+const C_POST = "oklch(0.62 0.15 205)"
+const C_POST_FILL = "oklch(0.62 0.15 205 / 0.14)"
+
+// ── scene geometry ──
+const W = 600
+const H = 216
+const pad = 12
+const axisY = 150 // baseline for the density curves
+const gainY = 178 // the Kalman-gain track
+const labelY = 200
 
 export function KalmanFuse() {
   const [sp, setSp] = useState(10) // prediction std
@@ -23,15 +35,11 @@ export function KalmanFuse() {
   const vPost = (1 - K) * vp
   const sPost = Math.sqrt(vPost)
 
-  const W = 600
-  const H = 180
-  const pad = 10
   const xs = (x: number) => pad + (x / 100) * (W - 2 * pad)
-  // normalized densities; scale so the tallest fits
   const dens = (x: number, mu: number, s: number) =>
     Math.exp((-(x - mu) * (x - mu)) / (2 * s * s)) / (s * Math.sqrt(2 * Math.PI))
   const peak = Math.max(dens(muPost, muPost, sPost), dens(MU_PRED, MU_PRED, sp), dens(Z, Z, sz))
-  const ys = (d: number) => H - pad - (d / peak) * (H - 2 * pad)
+  const ys = (d: number) => axisY - (d / peak) * (axisY - pad)
   const curve = (mu: number, s: number) => {
     let p = ""
     for (let x = 0; x <= 100; x += 1) p += `${x === 0 ? "M" : "L"}${xs(x).toFixed(1)},${ys(dens(x, mu, s)).toFixed(1)} `
@@ -39,25 +47,51 @@ export function KalmanFuse() {
   }
 
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
-        prediction × measurement = posterior
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/20 to-transparent">
+      <div className="flex items-center justify-between border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
+        <span>prediction × measurement = posterior</span>
+        <span className="text-muted-foreground/60">exact · Gaussian product</span>
       </div>
 
-      <div className="p-4">
-        <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Three Gaussian curves: prediction, measurement, and their sharper product the posterior." className="w-full">
-          <line x1={pad} y1={H - pad} x2={W - pad} y2={H - pad} stroke="var(--border)" strokeWidth="1" />
-          <path d={curve(MU_PRED, sp)} fill="none" stroke="var(--muted-foreground)" strokeWidth="1.5" opacity="0.7" />
-          <path d={curve(Z, sz)} fill="none" stroke="oklch(0.72 0.15 40)" strokeWidth="1.5" opacity="0.85" />
-          <path d={curve(muPost, sPost)} fill="oklch(0.72 0.15 195 / 0.14)" stroke="oklch(0.72 0.15 195)" strokeWidth="2.5" />
-          {/* mean ticks */}
-          <line x1={xs(muPost)} y1={pad} x2={xs(muPost)} y2={H - pad} stroke="oklch(0.72 0.15 195)" strokeWidth="1" strokeDasharray="2 2" opacity="0.6" />
+      <div className="p-3 sm:p-4">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img"
+          aria-label="Three Gaussian curves — prediction, measurement, and their sharper product the posterior — with a gain track showing where the posterior mean lands between the two inputs.">
+          <defs>
+            <filter id="kf-soft" x="-30%" y="-40%" width="160%" height="200%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.2" floodOpacity="0.14" />
+            </filter>
+          </defs>
+
+          {/* axis */}
+          <line x1={pad} y1={axisY} x2={W - pad} y2={axisY} stroke="var(--border)" strokeWidth={1} />
+
+          {/* mean guide ticks */}
+          {[{ x: MU_PRED, c: C_PRED }, { x: Z, c: C_MEAS }, { x: muPost, c: C_POST }].map((m, k) => (
+            <line key={k} x1={xs(m.x)} y1={pad} x2={xs(m.x)} y2={axisY} stroke={m.c} strokeWidth={1} strokeDasharray="2 3" opacity={0.4} />
+          ))}
+
+          {/* curves */}
+          <path d={curve(MU_PRED, sp)} fill="none" stroke={C_PRED} strokeWidth={1.5} opacity={0.7} />
+          <path d={curve(Z, sz)} fill="none" stroke={C_MEAS} strokeWidth={1.5} opacity={0.85} />
+          <path d={curve(muPost, sPost)} fill={C_POST_FILL} stroke={C_POST} strokeWidth={2.5} filter="url(#kf-soft)" />
+
+          {/* ── Kalman-gain track: μ_post slides between μ_pred and z ── */}
+          <line x1={xs(MU_PRED)} y1={gainY} x2={xs(Z)} y2={gainY} stroke="var(--border)" strokeWidth={3} strokeLinecap="round" />
+          <line x1={xs(MU_PRED)} y1={gainY} x2={xs(muPost)} y2={gainY} stroke={C_POST} strokeWidth={3} strokeLinecap="round" className="transition-all" />
+          <circle cx={xs(MU_PRED)} cy={gainY} r={3} fill={C_PRED} />
+          <circle cx={xs(Z)} cy={gainY} r={3} fill={C_MEAS} />
+          <circle cx={xs(muPost)} cy={gainY} r={4.5} fill={C_POST} stroke="var(--background)" strokeWidth={1.5} className="transition-all" />
+
+          {/* base labels (short — fit under their ticks) */}
+          <text x={xs(MU_PRED)} y={labelY} textAnchor="middle" className="font-mono" fontSize={10} fill={C_PRED}>μ_pred</text>
+          <text x={xs(Z)} y={labelY} textAnchor="middle" className="font-mono" fontSize={10} fill={C_MEAS}>z</text>
+          <text x={xs(muPost)} y={gainY - 10} textAnchor="middle" className="font-mono" fontSize={10} fontWeight={700} fill={C_POST}>K = {K.toFixed(2)}</text>
         </svg>
 
         <div className="mt-2 flex flex-wrap gap-4 font-mono text-[10px] text-muted-foreground">
-          <span className="flex items-center gap-1"><span className="inline-block h-0.5 w-4 bg-muted-foreground/70" />prediction</span>
-          <span className="flex items-center gap-1"><span className="inline-block h-0.5 w-4" style={{ background: "oklch(0.72 0.15 40)" }} />measurement</span>
-          <span className="flex items-center gap-1"><span className="inline-block h-0.5 w-4" style={{ background: "oklch(0.72 0.15 195)" }} />posterior</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-0.5 w-4" style={{ background: "var(--muted-foreground)" }} />prediction</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-0.5 w-4" style={{ background: C_MEAS }} />measurement</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-0.5 w-4" style={{ background: C_POST }} />posterior</span>
         </div>
 
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -66,7 +100,7 @@ export function KalmanFuse() {
         </div>
 
         <div className="mt-4 grid grid-cols-3 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">
-          <Stat label="Kalman gain K" value={K.toFixed(2)} highlight />
+          <Stat label="Kalman gain K" value={K.toFixed(2)} />
           <Stat label="posterior mean" value={muPost.toFixed(1)} />
           <Stat label="posterior σ" value={`${sPost.toFixed(1)} (< both)`} />
         </div>
@@ -97,11 +131,11 @@ function Slider({ label, value, onChange }: { label: string; value: number; onCh
   )
 }
 
-function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="bg-background px-3 py-2">
       <div className="text-[10px] text-muted-foreground">{label}</div>
-      <div className={highlight ? "font-medium text-foreground" : "font-medium text-foreground"}>{value}</div>
+      <div className="font-medium text-foreground">{value}</div>
     </div>
   )
 }

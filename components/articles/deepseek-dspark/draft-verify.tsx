@@ -1,20 +1,19 @@
 "use client"
 
 import { useState } from "react"
-import {
-  ArrowCounterClockwiseIcon,
-  CheckIcon,
-  XIcon,
-} from "@phosphor-icons/react/dist/ssr"
+import { ArrowCounterClockwiseIcon } from "@phosphor-icons/react/dist/ssr"
 
-import { cn } from "@/lib/utils"
+// One round of speculative decoding, drawn as a scene. A cheap draft proposes a
+// block of W tokens in a single pass (top row); the target verifies all W in ONE
+// forward and accepts the longest prefix that matches its own greedy choice, then
+// emits one free "bonus" token at the mismatch. Green connectors = accepted, the
+// red one = the first disagreement (tail thrown away), the accent one = the
+// target's own correction. Accepted length g is what that one expensive forward
+// bought. Hand-authored trace of a code-generation example; illustrative.
 
-// One round of speculative decoding, made steppable. A cheap draft proposes a
-// block of W tokens in a single pass; the target verifies all W in ONE forward
-// and accepts the longest prefix that matches its own greedy choice, plus one
-// free "bonus" token. Accepted length g is how many real tokens that one
-// expensive target forward bought — the whole game is making g large.
-// Hand-authored trace of a code-generation example; illustrative, not a live model.
+const GREEN = "oklch(0.72 0.15 150)"
+const RED = "oklch(0.62 0.20 25)"
+const ACCENT = "oklch(0.60 0.15 255)"
 
 type Round = {
   ctx: string
@@ -26,147 +25,161 @@ type Round = {
 
 // Generating a small Python function, block size W = 5 (DSpark's released config).
 const ROUNDS: Round[] = [
-  {
-    ctx: "def fib(n):",
-    draft: ["\\n", "    if", " n", " <", " 2"],
-    accept: 5,
-    bonus: ":",
-  },
-  {
-    ctx: "…if n < 2:",
-    draft: ["\\n", "        return", " n", "\\n", "    return"],
-    accept: 5,
-    bonus: " fib",
-  },
-  {
-    ctx: "…return fib",
-    draft: ["(n", "-1)", " +", " fib(n", "-3)"],
-    accept: 4, // target wanted "-2)" not "-3)"
-    bonus: "-2)",
-  },
+  { ctx: "def fib(n):", draft: ["\\n", "    if", " n", " <", " 2"], accept: 5, bonus: ":" },
+  { ctx: "…if n < 2:", draft: ["\\n", "        return", " n", "\\n", "    return"], accept: 5, bonus: " fib" },
+  { ctx: "…return fib", draft: ["(n", "-1)", " +", " fib(n", "-3)"], accept: 4, bonus: "-2)" },
 ]
+
+// scene geometry (viewBox units)
+const W = 680
+const H = 226
+const MX = 30
+const COLS = 5
+const COLW = (W - 2 * MX) / COLS
+const colCx = (i: number) => MX + COLW * (i + 0.5)
+const PH = 30 // pill height
+const DRAFT_Y = 40 // draft row top
+const BAND_Y = 106
+const BAND_H = 32
+const OUT_Y = 172
+const disp = (t: string) => t.trim() || "␣"
+const pillW = (t: string) => Math.min(COLW - 14, Math.max(30, disp(t).length * 7 + 16))
 
 export function DraftVerify() {
   const [r, setR] = useState(0)
   const round = ROUNDS[r]
-  const g = round.accept + 1 // accepted drafts + the bonus token
+  const accept = Math.min(round.accept, round.draft.length)
+  const allMatched = round.accept >= round.draft.length
+  const g = accept + 1 // accepted drafts + the bonus token
+
+  // short vertical S-curve between two points
+  const link = (x1: number, y1: number, x2: number, y2: number) => {
+    const my = (y1 + y2) / 2
+    return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`
+  }
 
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="flex items-center justify-between border-b px-3 py-2 font-mono text-xs text-muted-foreground">
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="flex items-center justify-between border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
         <span>speculative round · draft → verify → accept</span>
-        <span>
-          round {r + 1}/{ROUNDS.length}
-        </span>
+        <span className="text-muted-foreground/60">round {r + 1}/{ROUNDS.length}</span>
       </div>
 
-      <div className="space-y-3 p-4">
-        {/* context */}
-        <div className="font-mono text-xs text-muted-foreground">
-          context so far:{" "}
-          <span className="text-foreground">{round.ctx}</span>
+      <div className="p-3 sm:p-4">
+        <div className="mb-2 font-mono text-xs text-muted-foreground">
+          context so far: <span className="text-foreground">{round.ctx}</span>
         </div>
 
-        {/* draft block */}
-        <div>
-          <div className="mb-1 font-mono text-[11px] text-muted-foreground">
-            1 · draft network proposes {round.draft.length} tokens in one pass
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {round.draft.map((t, i) => (
-              <span
-                key={i}
-                className="rounded border bg-muted/40 px-2 py-1 font-mono text-xs"
-              >
-                {t}
-              </span>
-            ))}
-          </div>
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img"
+          aria-label={`Draft proposes 5 tokens; target accepts ${accept} then emits a bonus token, for ${g} real tokens in one forward`}>
+          <defs>
+            <marker id="dv-g" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="6" refY="0">
+              <path d="M0,-4L6,0L0,4" fill="none" stroke={GREEN} strokeWidth={1.5} />
+            </marker>
+            <marker id="dv-a" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="6" refY="0">
+              <path d="M0,-4L6,0L0,4" fill="none" stroke={ACCENT} strokeWidth={1.5} />
+            </marker>
+            <filter id="dv-soft" x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.14" />
+            </filter>
+          </defs>
+
+          <text x={MX} y={26} className="fill-muted-foreground font-mono" fontSize={11}>
+            1 · draft proposes {round.draft.length} tokens · one pass →
+          </text>
+
+          {/* draft → target connectors */}
+          {round.draft.map((_, i) => {
+            const ok = i < accept
+            const mismatch = i === accept
+            const stroke = ok ? GREEN : mismatch ? RED : "var(--border)"
+            return (
+              <path key={i} d={link(colCx(i), DRAFT_Y + PH, colCx(i), BAND_Y)} fill="none"
+                stroke={stroke} strokeWidth={1.5} strokeDasharray={i > accept ? "3 3" : undefined}
+                opacity={i > accept ? 0.4 : 0.85} />
+            )
+          })}
+
+          {/* draft pills */}
+          {round.draft.map((t, i) => {
+            const dropped = i >= accept
+            return (
+              <g key={i}>
+                <rect x={colCx(i) - pillW(t) / 2} y={DRAFT_Y} width={pillW(t)} height={PH} rx={7}
+                  fill="var(--background)" stroke={dropped ? "var(--border)" : GREEN} strokeWidth={1.5}
+                  opacity={dropped && !allMatched ? 0.5 : 1} filter="url(#dv-soft)" />
+                <text x={colCx(i)} y={DRAFT_Y + 19} textAnchor="middle"
+                  className={dropped && !allMatched ? "fill-muted-foreground font-mono" : "fill-foreground font-mono"}
+                  fontSize={11} textDecoration={i === accept ? "line-through" : undefined}>
+                  {disp(t)}
+                </text>
+              </g>
+            )
+          })}
+
+          {/* target band */}
+          <rect x={MX} y={BAND_Y} width={W - 2 * MX} height={BAND_H} rx={8}
+            fill="var(--muted)" opacity={0.5} stroke="var(--border)" strokeWidth={1.5} />
+          <rect x={MX} y={BAND_Y} width={W - 2 * MX} height={BAND_H} rx={8} fill="none"
+            stroke="var(--border)" strokeWidth={1.5} filter="url(#dv-soft)" />
+          <text x={W / 2} y={BAND_Y + 20} textAnchor="middle" className="fill-foreground font-mono" fontSize={11} fontWeight={600}>
+            2 · target · verifies all {round.draft.length} in one forward
+          </text>
+
+          {/* target → output connectors + output pills */}
+          {Array.from({ length: g }, (_, i) => {
+            const bonus = i === accept
+            const t = bonus ? round.bonus : round.draft[i]
+            const stroke = bonus ? ACCENT : GREEN
+            return (
+              <g key={i}>
+                <path d={link(colCx(i), BAND_Y + BAND_H, colCx(i), OUT_Y)} fill="none"
+                  stroke={stroke} strokeWidth={1.5} markerEnd={`url(#${bonus ? "dv-a" : "dv-g"})`} opacity={0.9} />
+                <rect x={colCx(i) - pillW(t) / 2} y={OUT_Y} width={pillW(t)} height={PH} rx={7}
+                  fill={bonus ? "var(--background)" : GREEN} stroke={stroke} strokeWidth={1.5} filter="url(#dv-soft)" />
+                <text x={colCx(i)} y={OUT_Y + 19} textAnchor="middle"
+                  className="font-mono" fontSize={11} fontWeight={600}
+                  fill={bonus ? ACCENT : "var(--background)"}>
+                  {bonus ? "+" : ""}{disp(t)}
+                </text>
+              </g>
+            )
+          })}
+          <text x={MX} y={OUT_Y + PH + 16} className="fill-muted-foreground font-mono" fontSize={11}>
+            3 · commit — accepted prefix{" "}
+            <tspan fill={ACCENT}>+ 1 free bonus token</tspan>
+          </text>
+        </svg>
+
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-[11px] text-muted-foreground">
+          <span>1 target forward → <span className="text-foreground">{g} real tokens</span></span>
+          <span style={{ color: GREEN }}>accepted {accept}</span>
+          <span style={{ color: ACCENT }}>+1 bonus</span>
+          <span className="ml-auto">{g}× vs autoregressive</span>
         </div>
 
-        {/* verify + accept */}
-        <div>
-          <div className="mb-1 font-mono text-[11px] text-muted-foreground">
-            2 · target verifies all {round.draft.length} in one forward, keeps
-            the matching prefix
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {round.draft.map((t, i) => {
-              const ok = i < round.accept
-              return (
-                <span
-                  key={i}
-                  className={cn(
-                    "flex items-center gap-1 rounded border px-2 py-1 font-mono text-xs",
-                    ok
-                      ? "border-transparent text-background"
-                      : "border-destructive/40 text-muted-foreground line-through opacity-60"
-                  )}
-                  style={ok ? { background: "oklch(0.72 0.15 150)" } : undefined}
-                >
-                  {ok ? <CheckIcon size={11} weight="bold" /> : <XIcon size={11} weight="bold" />}
-                  {t}
-                </span>
-              )
-            })}
-            {/* bonus token from the target itself — always correct */}
-            <span
-              className="flex items-center gap-1 rounded border border-foreground/30 px-2 py-1 font-mono text-xs"
-              title="the target's own next token at the mismatch — free, always correct"
-            >
-              +{round.bonus}
-            </span>
-          </div>
-        </div>
-
-        {/* readout */}
-        <div className="grid grid-cols-3 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">
-          <Stat label="accepted (g)" value={`${g} tok`} />
-          <Stat label="target forwards" value="1" />
-          <Stat label="vs autoregressive" value={`${g}× tokens`} />
-        </div>
-        <p className="text-sm leading-6 text-muted-foreground">
-          {round.accept === round.draft.length
+        <p className="mt-3 text-sm leading-6 text-muted-foreground">
+          {allMatched
             ? `All ${round.draft.length} drafts matched — one expensive target pass produced ${g} real tokens instead of 1.`
-            : `The target disagreed at token ${round.accept + 1}, so the tail is thrown away — but its own correction is emitted for free, so the round still nets ${g} tokens. Output is bit-identical to plain decoding; only the speed changes.`}
+            : `The target disagreed at token ${accept + 1}, so the tail is thrown away — but its own correction is emitted for free, so the round still nets ${g} tokens. Output is bit-identical to plain decoding; only the speed changes.`}
         </p>
       </div>
 
       <div className="flex items-center gap-3 border-t px-3 py-2 font-mono text-xs">
-        <button
-          type="button"
-          onClick={() => setR((n) => Math.max(0, n - 1))}
-          disabled={r === 0}
-          className="cursor-pointer text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-        >
+        <button type="button" onClick={() => setR((n) => Math.max(0, n - 1))} disabled={r === 0}
+          className="cursor-pointer text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40">
           ← prev
         </button>
-        <button
-          type="button"
-          onClick={() => setR((n) => Math.min(ROUNDS.length - 1, n + 1))}
-          disabled={r === ROUNDS.length - 1}
-          className="cursor-pointer text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-        >
+        <button type="button" onClick={() => setR((n) => Math.min(ROUNDS.length - 1, n + 1))} disabled={r === ROUNDS.length - 1}
+          className="cursor-pointer text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40">
           next round →
         </button>
-        <button
-          type="button"
-          onClick={() => setR(0)}
-          className="ml-auto flex cursor-pointer items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
-        >
+        <button type="button" onClick={() => setR(0)}
+          className="ml-auto flex cursor-pointer items-center gap-1 text-muted-foreground transition-colors hover:text-foreground">
           <ArrowCounterClockwiseIcon size={13} weight="bold" />
           reset
         </button>
       </div>
     </figure>
-  )
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="bg-background px-3 py-2">
-      <div className="text-[10px] text-muted-foreground">{label}</div>
-      <div className="font-medium text-foreground">{value}</div>
-    </div>
   )
 }

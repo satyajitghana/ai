@@ -12,6 +12,8 @@ import { cn } from "@/lib/utils"
 // so the marginal gain of the i-th draft decays like α^i. Drag α and n and watch
 // the curve flatten. Illustrative model of the real accept dynamics.
 
+const ACCENT = "oklch(0.68 0.14 205)"
+
 function expectedG(alpha: number, n: number) {
   let g = 1
   let term = 1
@@ -22,53 +24,101 @@ function expectedG(alpha: number, n: number) {
   return g
 }
 
+// chart geometry (viewBox units)
+const W = 520
+const H = 200
+const padL = 44
+const padR = 20
+const padT = 18
+const padB = 34
+const NS = Array.from({ length: 8 }, (_, i) => i + 1)
+
 export function MTPSpeedup() {
   const [alpha, setAlpha] = useState(0.7)
   const [n, setN] = useState(4)
 
   const g = expectedG(alpha, n)
-  // curve of g vs block size 1..8 at the current alpha
-  const NS = Array.from({ length: 8 }, (_, i) => i + 1)
   const curve = NS.map((k) => expectedG(alpha, k))
   const gmax = expectedG(alpha, 64) // asymptote = 1 + α/(1-α)
-  const W = 360
-  const H = 120
-  const pad = 24
-  const sx = (k: number) => pad + ((k - 1) / 7) * (W - 2 * pad)
-  const sy = (v: number) => H - pad - ((v - 1) / (gmax - 1 || 1)) * (H - 2 * pad)
-  const path = curve
-    .map((v, i) => `${i === 0 ? "M" : "L"}${sx(NS[i]).toFixed(1)},${sy(v).toFixed(1)}`)
-    .join(" ")
+  const top = Math.max(gmax, curve[curve.length - 1] * 1.05)
+
+  const sx = (k: number) => padL + ((k - 1) / 7) * (W - padL - padR)
+  const sy = (v: number) => H - padB - ((v - 1) / (top - 1 || 1)) * (H - padT - padB)
+
+  const line = curve.map((v, i) => `${i === 0 ? "M" : "L"}${sx(NS[i]).toFixed(1)},${sy(v).toFixed(1)}`).join(" ")
+  const area = `${line} L${sx(8).toFixed(1)},${(H - padB).toFixed(1)} L${sx(1).toFixed(1)},${(H - padB).toFixed(1)} Z`
+
+  // a few horizontal gridlines across the value domain
+  const gridVals = [1, 1 + (top - 1) * 0.33, 1 + (top - 1) * 0.66, top]
 
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
         self-speculative decoding · expected tokens per target forward
       </div>
 
-      <div className="space-y-4 p-4">
-        {/* curve */}
-        <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Expected accepted tokens per forward as a function of block size, flattening toward an asymptote." className="w-full">
-          <line x1={pad} y1={H - pad} x2={W - pad} y2={H - pad} stroke="var(--border)" strokeWidth="1" />
-          <line x1={pad} y1={pad} x2={pad} y2={H - pad} stroke="var(--border)" strokeWidth="1" />
+      <div className="space-y-4 p-3 sm:p-4">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`Expected accepted tokens per forward versus draft block size, at acceptance ${alpha.toFixed(2)}, flattening toward a ceiling of ${gmax.toFixed(1)}.`}>
+          <defs>
+            <linearGradient id="ms-fill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={ACCENT} stopOpacity={0.22} />
+              <stop offset="100%" stopColor={ACCENT} stopOpacity={0.02} />
+            </linearGradient>
+            <filter id="ms-soft" x="-60%" y="-60%" width="220%" height="220%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.2" />
+            </filter>
+          </defs>
+
+          {/* gridlines + y labels */}
+          {gridVals.map((v, i) => (
+            <g key={i}>
+              <line x1={padL} y1={sy(v)} x2={W - padR} y2={sy(v)} stroke="var(--border)" strokeWidth={1} opacity={0.5} />
+              <text x={padL - 6} y={sy(v) + 3} textAnchor="end" fill="var(--muted-foreground)" className="font-mono" fontSize={9}>
+                {v.toFixed(1)}
+              </text>
+            </g>
+          ))}
+
           {/* asymptote */}
-          <line x1={pad} y1={sy(gmax)} x2={W - pad} y2={sy(gmax)} stroke="var(--muted-foreground)" strokeWidth="1" strokeDasharray="3 3" opacity="0.5" />
-          <text x={W - pad} y={sy(gmax) - 4} textAnchor="end" fontFamily="monospace" fontSize="9" fill="var(--muted-foreground)">
-            ceiling {gmax.toFixed(1)}
+          {gmax <= top + 0.01 && (
+            <>
+              <line x1={padL} y1={sy(gmax)} x2={W - padR} y2={sy(gmax)} stroke={ACCENT} strokeWidth={1} strokeDasharray="4 3" opacity={0.7} />
+              <text x={W - padR} y={sy(gmax) - 5} textAnchor="end" fill={ACCENT} className="font-mono" fontSize={9}>
+                ceiling {gmax.toFixed(1)}×
+              </text>
+            </>
+          )}
+
+          {/* area + curve */}
+          <path d={area} fill="url(#ms-fill)" />
+          <path d={line} fill="none" stroke={ACCENT} strokeWidth={2} />
+
+          {/* points at each n */}
+          {NS.map((k, i) => (
+            <circle key={k} cx={sx(k)} cy={sy(curve[i])} r={k === n ? 5 : 2.6} fill={k === n ? ACCENT : "var(--background)"} stroke={ACCENT} strokeWidth={1.5} filter={k === n ? "url(#ms-soft)" : undefined} />
+          ))}
+          {/* current-n readout label */}
+          <text x={sx(n)} y={sy(g) - 10} textAnchor="middle" fill="var(--foreground)" className="font-mono" fontSize={10} fontWeight={600}>
+            {g.toFixed(2)}×
           </text>
-          <path d={path} fill="none" stroke="var(--foreground)" strokeWidth="1.5" />
-          {/* current-n marker */}
-          <circle cx={sx(n)} cy={sy(g)} r="4" fill="oklch(0.72 0.15 195)" />
-          <text x={pad - 6} y={H - pad + 3} textAnchor="end" fontFamily="monospace" fontSize="9" fill="var(--muted-foreground)">1</text>
-          <text x={sx(1)} y={H - pad + 12} textAnchor="middle" fontFamily="monospace" fontSize="9" fill="var(--muted-foreground)">n=1</text>
-          <text x={sx(8)} y={H - pad + 12} textAnchor="middle" fontFamily="monospace" fontSize="9" fill="var(--muted-foreground)">n=8</text>
+
+          {/* x axis */}
+          <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="var(--border)" strokeWidth={1} />
+          {NS.map((k) => (
+            <text key={k} x={sx(k)} y={H - padB + 13} textAnchor="middle" fill={k === n ? ACCENT : "var(--muted-foreground)"} className="font-mono" fontSize={9} fontWeight={k === n ? 600 : 400}>
+              {k}
+            </text>
+          ))}
+          <text x={(padL + W - padR) / 2} y={H - 3} textAnchor="middle" fill="var(--muted-foreground)" className="font-mono" fontSize={9}>
+            draft block size n →
+          </text>
         </svg>
 
         {/* alpha slider */}
         <div>
           <div className="mb-1 flex items-center justify-between font-mono text-xs text-muted-foreground">
             <span>per-position acceptance α</span>
-            <span className="text-foreground tabular-nums">{alpha.toFixed(2)}</span>
+            <span className="tabular-nums text-foreground">{alpha.toFixed(2)}</span>
           </div>
           <input
             type="range"
@@ -77,7 +127,7 @@ export function MTPSpeedup() {
             step={0.01}
             value={alpha}
             onChange={(e) => setAlpha(parseFloat(e.target.value))}
-            className="w-full cursor-pointer accent-foreground"
+            className="w-full cursor-pointer accent-[oklch(0.68_0.14_205)]"
             aria-label="per-position acceptance probability"
           />
         </div>
@@ -93,9 +143,7 @@ export function MTPSpeedup() {
               aria-pressed={n === k}
               className={cn(
                 "cursor-pointer rounded border px-2 py-1 transition-colors",
-                n === k
-                  ? "border-transparent bg-foreground text-background"
-                  : "text-muted-foreground hover:border-foreground/40"
+                n === k ? "border-transparent bg-foreground text-background" : "text-muted-foreground hover:border-foreground/40"
               )}
             >
               {k}
@@ -103,10 +151,10 @@ export function MTPSpeedup() {
           ))}
         </div>
 
-        <div className="grid grid-cols-3 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">
-          <Stat label="tokens / forward" value={`${g.toFixed(2)}×`} />
-          <Stat label="marginal (n→n+1)" value={`+${(expectedG(alpha, n + 1) - g).toFixed(2)}`} />
-          <Stat label="ceiling (n→∞)" value={`${gmax.toFixed(1)}×`} />
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-1 font-mono text-[11px] text-muted-foreground">
+          <span>tokens / forward <span style={{ color: ACCENT }}>{g.toFixed(2)}×</span></span>
+          <span>marginal (n→n+1) <span className="text-foreground">+{(expectedG(alpha, n + 1) - g).toFixed(2)}</span></span>
+          <span>ceiling (n→∞) <span className="text-foreground">{gmax.toFixed(1)}×</span></span>
         </div>
 
         <p className="text-sm leading-6 text-muted-foreground">
@@ -118,14 +166,5 @@ export function MTPSpeedup() {
         </p>
       </div>
     </figure>
-  )
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="bg-background px-3 py-2">
-      <div className="text-[10px] text-muted-foreground">{label}</div>
-      <div className="font-medium text-foreground">{value}</div>
-    </div>
   )
 }
