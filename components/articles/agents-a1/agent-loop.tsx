@@ -173,7 +173,7 @@ export function AgentLoop() {
               key={i}
               aria-hidden={i !== k}
               className={cn(
-                "col-start-1 row-start-1 rounded-md border-l-2 bg-muted/30 px-3 py-2.5 transition-opacity duration-300",
+                "col-start-1 row-start-1 rounded-md bg-muted/40 px-3 py-2.5 transition-opacity duration-300",
                 i === k ? "opacity-100" : "pointer-events-none opacity-0",
               )}
               style={{ borderLeftColor: s.ok ? OK : BAD }}

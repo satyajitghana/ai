@@ -163,7 +163,7 @@ export function DistillNetwork() {
         </svg>
 
         {/* the routed task — grid-stacked for stable height */}
-        <div className="mt-2 rounded-md border-l-2 bg-muted/30 px-3 py-2" style={{ borderColor: accent }}>
+        <div className="mt-2 rounded-md bg-muted/40 px-3 py-2" style={{ borderColor: accent }}>
           <div className="font-mono text-[10px] text-muted-foreground">this rollout&apos;s task · router matches it to the <span style={{ color: accent }}>{active.name}</span></div>
           <div className="mt-0.5 grid">
             {TEACHERS.map((t, k) => (
