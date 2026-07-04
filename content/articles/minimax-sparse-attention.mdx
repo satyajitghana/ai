@@ -1,0 +1,132 @@
+---
+title: "MiniMax Sparse Attention: let each query pick its own blocks"
+description: "Full attention makes every query read the whole context — the cost that caps long-context serving. MiniMax's MSA keeps it exact but sparse: a lightweight index branch scores past KV in blocks, keeps the top-16 (2,048 tokens) per query, and attends only those — per GQA group, so different heads see different blocks. At 1M context that's a 28.4× FLOP cut and a measured 14.2× prefill / 7.6× decode speedup, at on-par quality. A walk through the mechanism, the fixed-budget economics, and the honest caveats."
+date: 2026-07-04
+tags:
+  - llm
+  - attention
+  - inference-optimization
+  - mixture-of-experts
+  - explainer
+draft: false
+---
+
+import { BlockSelect } from "@/components/articles/minimax-sparse-attention/block-select"
+import { SparsityAtScale } from "@/components/articles/minimax-sparse-attention/sparsity-scale"
+
+The thing that makes long context expensive is that, under full attention, **every query token reads
+every past token**. The [KV cache](/articles/how-llm-inference-works) that stores those keys and values
+grows linearly with sequence length, and the attention itself scales with it — so a 1M-token context is
+brutal to serve. The field's answer has been to make attention *cheaper*: linear-attention hybrids
+[like HydraHead](/articles/hydrahead), sliding windows [like MiMo-V2-Flash](/articles/mimo-v2-flash), or
+KV compression [like TurboQuant](/articles/turboquant-kv-cache). **MiniMax Sparse Attention (MSA)** takes
+a different route: keep attention **exact**, but let each query attend to only a **small, learned subset**
+of the context.
+
+The trick is to think in **blocks**. Partition the past KV into fixed blocks of 128 tokens; for each
+query, a cheap *index branch* scores every block, keeps only the highest-scoring few, and the main
+attention runs — exactly — over just those. Scrub the query and watch which blocks it actually reads:
+
+<BlockSelect />
+
+Two design choices make this work. First, the selection happens **per GQA group**: MiniMax uses grouped-
+query attention with 64 query heads tied to 4 KV heads, so there are 4 groups, and *each group picks its
+own blocks* off the same keys and values — flip the group above and the arrows swing. Second, the index
+is **trained, not heuristic**: an auxiliary KL loss aligns the index branch's block scores with the main
+attention's true distribution over blocks, with a stop-gradient so it only trains the tiny index
+projections and never disturbs the backbone.
+
+## The mechanism, precisely
+
+Each attention layer splits into two branches:
+
+- **Index branch (selection).** It adds one lightweight index-query head per group and a single shared
+  index-key head. For query `i` it computes `Q_idx · K_idxᵀ`, pools those token scores to the **block**
+  level by max-pooling, and takes the **top-k blocks** — deployed as **block size 128, k = 16**, so a
+  fixed budget of **2,048 tokens** per query. The block the query sits in (the *local* block) is always
+  kept.
+- **Main branch (compute).** Given the selected block indices, it runs **exact** attention over only
+  those blocks. Because every head in a group reuses the same block set, KV reads stay block-contiguous —
+  which is what lets a custom kernel turn the FLOP savings into real wall-clock speedup.
+
+<Figure
+  src="/articles/minimax-sparse-attention/fig1.png"
+  alt="MSA architecture diagram. Left, an Index Branch takes hidden states through linear projection, norm and RoPE to index query and key heads, computes a score matrix, applies block max pooling, and emits a Top-K block index. Right, a Main Branch selects those Top-K KV blocks and runs exact sparse attention over Q, K, V. Far right, two attention-mask grids for Query Group 1 and Query Group 2 show different selected key blocks per group."
+  caption="A lightweight Index Branch scores KV blocks (Q·Kᵀ → block max pool → top-k); the Main Branch runs exact attention over only the selected blocks. Each GQA group selects its own blocks, so Group 1 and Group 2 attend to different long-range keys (paper, Figure 1)."
+/>
+
+## Why the fixed budget is the whole point
+
+Because every query attends to the same **2,048 tokens** no matter how long the context is, the *fraction*
+of the context each query reads collapses as context grows — but, honestly, the measured speedup is much
+smaller than that fraction would suggest, because the index branch still scans every block. Slide the
+context length and watch both numbers:
+
+<SparsityAtScale />
+
+<Figure
+  src="/articles/minimax-sparse-attention/fig2.png"
+  alt="Three line charts comparing GQA (blue) and MSA (green) as sequence length grows from 32k to 1M. Left: per-token attention FLOPs — GQA rises steeply while MSA stays nearly flat, annotated 28.4x reduction at 1M. Middle: prefilling latency, annotated 14.2x speedup. Right: decoding latency per token, annotated 7.6x speedup."
+  caption="Efficiency vs GQA at matched head config (64 query / 4 KV heads; MSA block 128, k=16, 2,048-token budget). At 1M tokens on H800: 28.4× per-token attention-FLOP reduction, 14.2× prefill and 7.6× decode wall-clock speedup (paper, Figure 4)."
+/>
+
+## The numbers
+
+MSA is trained two ways — from scratch (**MSA-PT**) and by converting a full-attention checkpoint
+(**MSA-CPT**) — and compared against MiniMax's *own* GQA full-attention model at a matched 3T-token
+budget. The headline is parity, not a free lunch: MSA holds or slightly beats full attention on most of a
+28-benchmark suite, with real regressions on a few. The efficiency, meanwhile, is decisive at long
+context:
+
+<BenchBars
+  title="MSA vs full attention — representative benchmarks (MSA-PT, %)"
+  unit="%"
+  bars={[
+    { label: "RULER-8K (long-ctx)", value: 84.2, highlight: true },
+    { label: "GSM8K (full: 76.2)", value: 77.7, highlight: true },
+    { label: "MMLU (full: 67.0)", value: 67.2, highlight: true },
+    { label: "HumanEval (full: 61.0)", value: 64.0, highlight: true },
+    { label: "VisualWebBench (full: 55.6)", value: 68.4, highlight: true },
+  ]}
+/>
+
+The efficiency wins that motivate all of this, at 1M context on H800:
+
+<BenchBars
+  title="Speedup vs GQA full attention at 1M context (×)"
+  unit="×"
+  bars={[
+    { label: "Attention FLOPs (theoretical)", value: 28.4, highlight: true },
+    { label: "Prefill (wall-clock)", value: 14.2, highlight: true },
+    { label: "Decode (wall-clock)", value: 7.6, highlight: true },
+  ]}
+/>
+
+A few honesty notes. The baseline is **provider-selected and internal** — MSA vs MiniMax's own GQA model,
+not against other sparse-attention methods (NSA, MoBA) or external frontier models. Quality is "on par,"
+and the converted **MSA-CPT** variant does trail full attention on some tasks (GSM8K 73.7 vs 76.2,
+HumanEval 57.9 vs 61.0, HELMET-128K −0.60) — the fixed budget shows up as small losses on
+retrieval-heavy long-context tasks. And the striking efficiency figures are the **1M** extreme with a
+fixed 2,048-token budget on a specific head config; at 32k the advantage is barely 1.6×. The **28.4×** is
+a theoretical FLOP count read off a chart, not measured throughput — the honest wall-clock numbers are
+14.2× and 7.6×.
+
+## The take
+
+MSA's contribution is that it makes *selection* a first-class, trainable part of attention rather than a
+bolt-on. The block granularity is the quiet key: picking whole 128-token blocks (not individual tokens)
+keeps memory access regular enough that a kernel can actually realize the savings, and sharing the
+selection across a GQA group keeps it cheap. Set against the other long-context playbooks — linear
+attention trades exactness for O(1) state; sliding windows drop the far past; KV quantization shrinks
+each entry — MSA keeps attention **exact and full-range** and simply reads *less of it*, chosen per query
+and per group. Whether a fixed 2,048-token budget holds up as tasks demand genuinely global reasoning is
+the open question the retrieval regressions hint at; but as a way to serve a 1M context at a fraction of
+the cost while staying on the full-attention quality curve, it's a clean, well-engineered bet. The
+production model, MiniMax-M3, ships with it (open weights, minimax-community license).
+
+---
+
+*Built on [MiniMax Sparse Attention](https://arxiv.org/abs/2606.13392) (Lai, Xu, Yang et al.; MiniMax,
+2026) and the [MiniMax-M3 release](https://huggingface.co/MiniMaxAI/MiniMax-M3). Benchmark and efficiency
+figures are quoted from the paper (the 109B-total / 6B-active experimental model; block size 128, top-16);
+the interactive diagrams are illustrations of the mechanism. Speedups are measured on H800 at 1M context.*
