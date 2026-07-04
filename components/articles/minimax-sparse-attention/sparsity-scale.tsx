@@ -110,13 +110,6 @@ export function SparsityAtScale() {
                 fill={k === i ? "var(--foreground)" : "var(--muted-foreground)"} opacity={k === i ? 1 : 0.6}>{l.label}</text>
             </g>
           ))}
-
-          {/* current readout */}
-          <text x={cx(i)} y={cy(cur.prefill) - 10} textAnchor={i > 3 ? "end" : "start"} className="font-mono" fontSize={11} fontWeight={700} style={{ fill: SEL }}>{cur.prefill}× prefill</text>
-          <text x={cx(i)} y={cy(cur.decode) + 18} textAnchor={i > 3 ? "end" : "start"} className="font-mono" fontSize={11} fontWeight={700} style={{ fill: AMBER }}>{cur.decode}× decode</text>
-
-          {/* honest ceiling annotation */}
-          <text x={CR} y={CT - 2} textAnchor="end" className="fill-muted-foreground/70 font-mono" fontSize={9}>1/fraction = {Math.round(naive).toLocaleString()}× (theoretical ceiling, never reached)</text>
         </svg>
 
         <div className="mt-2">
