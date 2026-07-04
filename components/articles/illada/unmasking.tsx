@@ -129,7 +129,7 @@ export function Unmasking() {
         </svg>
 
         <div className="flex items-center justify-between">
-          <div className="min-h-[2.5rem] font-mono text-[11px] text-muted-foreground">
+          <div className="min-h-[3.5rem] font-mono text-[11px] text-muted-foreground sm:min-h-[2.5rem]">
             {mode === "diffusion"
               ? `denoising step ${Math.min(step, DIFF_STEPS)}/${DIFF_STEPS} · ${revealed}/${TOKENS.length} tokens unmasked${
                   step > 0 && step <= DIFF_STEPS ? " — several at once, bidirectional context" : ""

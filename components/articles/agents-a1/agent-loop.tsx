@@ -165,8 +165,9 @@ export function AgentLoop() {
           />
         </div>
 
-        {/* active-step detail — grid-stacked so height never shifts */}
-        <div className="mt-3 grid">
+        {/* active-step detail — grid-stacked so height never shifts; minmax(0,1fr)
+            column so the long code line truncates instead of stretching the figure */}
+        <div className="mt-3 grid grid-cols-[minmax(0,1fr)]">
           {STEPS.map((s, i) => (
             <div
               key={i}
