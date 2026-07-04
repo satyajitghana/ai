@@ -283,7 +283,7 @@ export function MoeArchitecture() {
         </svg>
 
         {/* code panel */}
-        <div className="flex min-h-[300px] flex-col rounded-lg border bg-muted/30">
+        <div className="flex min-h-[300px] min-w-0 flex-col rounded-lg border bg-muted/30">
           <div className="flex items-center justify-between border-b px-3 py-2 font-mono text-xs">
             <span className="font-medium">{stage.label}</span>
             <span className="text-muted-foreground">{stage.shape}</span>

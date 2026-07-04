@@ -89,17 +89,26 @@ export function BenchBars({
                       : "oklch(0.62 0.02 260)",
                   }}
                 />
-                {/* value label, riding just past the bar end */}
-                <span
-                  className={cn(
-                    "absolute top-1/2 -translate-y-1/2 pl-1.5 font-mono text-[11px] tabular-nums",
-                    b.highlight ? "text-foreground" : "text-muted-foreground"
-                  )}
-                  style={{ left: `${Math.min((b.value / top) * 100, 100)}%` }}
-                >
-                  {fmt(b.value)}
-                  {unit}
-                </span>
+                {/* value label — sits just past the bar end, but rides INSIDE the bar
+                    (right-aligned, dark on the coloured fill) once the bar is near full
+                    width, so it never spills past the figure edge */}
+                {(() => {
+                  const pct = Math.min((b.value / top) * 100, 100)
+                  const inside = pct >= 80
+                  return (
+                    <span
+                      className={cn(
+                        "absolute top-1/2 -translate-y-1/2 font-mono text-[11px] tabular-nums",
+                        inside ? "pr-1.5" : "pl-1.5",
+                        !inside && (b.highlight ? "text-foreground" : "text-muted-foreground")
+                      )}
+                      style={inside ? { right: `${100 - pct}%`, color: "oklch(0.22 0 0)" } : { left: `${pct}%` }}
+                    >
+                      {fmt(b.value)}
+                      {unit}
+                    </span>
+                  )
+                })()}
               </div>
             </div>
           ))}

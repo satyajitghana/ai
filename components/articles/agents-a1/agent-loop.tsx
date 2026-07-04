@@ -178,7 +178,7 @@ export function AgentLoop() {
               style={{ borderLeftColor: s.ok ? OK : BAD }}
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="truncate font-mono text-[11px] text-foreground">{s.act}</span>
+                <span className="min-w-0 truncate font-mono text-[11px] text-foreground">{s.act}</span>
                 <span
                   className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px]"
                   style={{ background: `${s.ok ? OK : BAD}22`, color: s.ok ? OK : BAD }}
