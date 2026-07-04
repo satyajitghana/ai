@@ -1,0 +1,160 @@
+---
+title: "Nemotron in NVFP4: training a frontier model natively in 4-bit"
+description: "Quantization usually happens after training — you train in BF16, then squeeze the weights for serving. NVIDIA's Nemotron flips that: the forward and backward GEMMs run natively in NVFP4, a 4-bit format, during the training run itself. This is a walk through what NVFP4 actually is (a 4-bit element plus a two-level shared scale), the three tricks that keep 4-bit gradients from diverging, and the honest caveats — it's mixed-precision not end-to-end FP4, the quality claim is a training-loss gap, and the run diverged twice."
+date: 2026-07-04
+tags:
+  - llm
+  - quantization
+  - training
+  - mixture-of-experts
+  - explainer
+draft: false
+---
+
+import { BitLayout } from "@/components/articles/nemotron-nvfp4/bit-layout"
+import { PrecisionMap } from "@/components/articles/nemotron-nvfp4/precision-map"
+import { MemoryCalc } from "@/components/articles/nemotron-nvfp4/memory-calc"
+
+Almost every "4-bit model" you have heard of is 4-bit *after the fact*: the network is trained in BF16,
+and then a [post-training quantizer](/articles/turboquant-kv-cache) compresses the finished weights so
+they are cheaper to serve. Training itself stays in 16-bit, because the gradients are delicate and 4 bits
+is a very small number. NVIDIA's Nemotron does something more aggressive: it runs the actual training
+GEMMs — the big matrix multiplies in the forward *and* backward pass — natively in **NVFP4**, a 4-bit
+floating-point format, while the model is still learning. The headline is a training-loss gap under
+**0.4%** against a BF16 reference. The interesting part is everything that had to be true to get there.
+
+## What NVFP4 actually is
+
+Four bits cannot, on their own, represent the range of values a weight tensor spans. NVFP4's answer is to
+split the job: store each value in a tiny 4-bit **element**, and recover dynamic range from a **shared
+scale** that a whole block of elements multiplies through. The element is **E2M1** — 1 sign bit, 2
+exponent bits, 1 mantissa bit. The scale is where NVFP4 differs from the MXFP4 format you may have seen:
+it shares one **FP8 (E4M3)** scale across every **16** elements, plus a single FP32 scale for the whole
+tensor. Flip between the formats:
+
+<BitLayout />
+
+That two-level scaling is the whole trick. A 4-bit element with an 8-bit block scale over 16 values
+behaves, in effective dynamic range, more like a ~10-bit ("E6M4"-ish) number than a raw 4-bit one — while
+costing **4.5 bits per element** to store (4 for the element, 8/16 = 0.5 for the scale). MXFP4 uses a
+coarser power-of-2 (E8M0) scale over a wider 32-element block: cheaper at 4.25 bits, but blunter, because
+one outlier drags a bigger block and a power-of-2 scale can only snap to coarse steps. NVFP4's finer block
+and FP8 scale are what make it stable enough to *train* in, not just serve in.
+
+<Figure
+  src="/articles/nemotron-nvfp4/fig1.png"
+  alt="Line charts of the relative training-loss difference (percent) between NVFP4 and BF16 segments across the 5T, 10T and 16T-token checkpoints. The gap hovers around 0.3 percent with occasional spikes, and a lower panel shows the gap converging toward zero under longer BF16 training."
+  caption="The NVFP4-vs-BF16 relative training-loss gap stays around 0.3% — under 0.4% — across checkpoints; longer BF16 continuation closes it toward zero. A loss gap, not a downstream benchmark A/B (paper, Figure 3)."
+/>
+
+## Why 4-bit training normally falls apart — and the three fixes
+
+Post-training quantization only has to preserve the *forward* pass of a frozen network. Training in 4-bit
+is harder on two counts: the **gradients** flow through the same low-precision GEMMs, and any systematic
+error compounds over trillions of tokens. Nemotron leans on three stabilizers, each aimed at a specific
+failure:
+
+1. **2D block quantization on weights.** Instead of quantizing weights in 1D strips, quantize them in 2D
+   blocks, so a block's shared scale better fits the local structure of the weight matrix and fewer values
+   get clipped.
+2. **Random Hadamard transform on the wgrad inputs.** The weight-gradient (wgrad) matmul is the one most
+   poisoned by outliers. Multiplying its inputs by a random Hadamard matrix *spreads* those outliers
+   across the block before quantization (and is undone analytically), so no single large value blows out
+   the block scale.
+3. **Stochastic rounding on gradients.** Deterministic rounding biases small gradients toward zero — over
+   trillions of steps that lost signal is fatal. Rounding gradients *stochastically* is unbiased in
+   expectation, so the gradient direction survives quantization even when individual values don't.
+
+Where each of these lives is easier to see than to say. Here is one path through the stack, colored by
+precision, with the stabilizers attached to the FP4 GEMMs — flip to the backward pass:
+
+<PrecisionMap />
+
+## The honest part: this is not end-to-end FP4
+
+The precision map makes the biggest caveat visual: **most of the network is not FP4.** Native FP4 training
+means the heavy expert/MLP weight-GEMMs run in NVFP4 — that is the bulk of the FLOPs — but a meaningful
+fraction of the model is deliberately kept at higher precision, because FP4 is most fragile exactly there:
+
+<Callout type="warn">
+  **Kept at higher precision:** the **final ~16 layers**, the **Mamba-2 projection layers**, the **QKV
+  projections**, the **MTP (multi-token-prediction) module**, and the **embeddings**. So "native FP4
+  training" is really *mixed-precision* training with FP4 doing the heavy lifting on the compute-bound
+  GEMMs — not a network where every tensor is 4-bit. Read the quality claim the same way: it's a
+  **training-loss gap under 0.4%**, not a downstream task-benchmark parity result. A small loss gap is
+  necessary for parity but does not prove it.
+</Callout>
+
+And it was not a smooth ride. The run **diverged twice** — around ~8T and ~16T tokens — and each time the
+team had to roll back to an earlier checkpoint and restart the segment (with an FP32-rounding fix and a
+re-annealed learning rate) to recover. Four-bit training is not a free lunch you turn on and forget:
+
+<Figure
+  src="/articles/nemotron-nvfp4/fig2.png"
+  alt="Training and validation loss versus training tokens in trillions. The original phase-1 run diverges twice — insets labeled Divergence 1 near 8T tokens and Divergence 2 near 15–16T tokens — where the loss curls upward. A rollback run with FP32 rounding and an annealed-learning-rate phase-2 run continue smoothly downward past the divergence points."
+  caption="Two real loss divergences during the run (near ~8T and ~16T tokens) each required a rollback and restart; the recovered runs (FP32-rounding rollback, then annealed-LR phase 2) continue down cleanly (paper, Figure 5)."
+/>
+
+## The model underneath
+
+The precision story rides on a specific architecture: a **550B-total / 55B-active** hybrid that interleaves
+**Mamba-2** state-space blocks, periodic **attention**, and **[LatentMoE](/articles/mixture-of-experts-from-scratch)**
+expert layers, with a **[multi-token-prediction](/articles/multi-token-prediction)** head on top. The
+Mamba-2 blocks carry most of the sequence mixing cheaply; attention appears sparingly for exact long-range
+recall; the MoE layers are where the parameters (and the FP4 GEMMs) live. The repeating layer pattern:
+
+<Figure
+  src="/articles/nemotron-nvfp4/fig3.png"
+  alt="The Nemotron layer pattern: repeating groups of Mamba-2 blocks, occasional Attention blocks, and Latent MoE blocks, with group multipliers x2, x3 and x4 across the stack, bracketed as a repeating hybrid unit."
+  caption="The hybrid layer pattern — Mamba-2 and attention for sequence mixing, LatentMoE for sparse capacity — repeated across the stack (paper, Figure 2)."
+/>
+
+Storing that many parameters in 4.5-bit elements is a real memory win, but — honestly — not the clean 4×
+the "4-bit" label implies, once you count the scale overhead. Slide the parameter count:
+
+<MemoryCalc />
+
+For the effective storage cost per element, the formats line up cleanly — and NVFP4's 4.5 bits sits
+between MXFP4's leaner-but-blunter 4.25 and BF16's 16:
+
+<BenchBars
+  title="Effective storage cost (bits per element · lower = smaller)"
+  unit="b"
+  bars={[
+    { label: "BF16", value: 16 },
+    { label: "MXFP4", value: 4.25 },
+    { label: "NVFP4", value: 4.5, highlight: true },
+  ]}
+/>
+
+## One more thing not to conflate
+
+There is a *second* quantization result in this work that is easy to mix up with the training story:
+**inference PTQ** — post-training-quantizing the finished model down for cheaper serving. Those serving
+numbers are a separate experiment about deployment, measured on the trained checkpoint; they are not
+evidence about training precision. The claim on the table here is narrower and more interesting: that you
+can run the *training* GEMMs in 4-bit and land within a fraction of a percent of a BF16 loss curve. Keep
+the two apart.
+
+## The take
+
+The quiet lesson is that "native 4-bit training" is an engineering result about *where* you dare to put
+4 bits, not a claim that the whole network is 4-bit. NVFP4's two-level scale (4-bit element + FP8 block
+scale + FP32 tensor scale) buys back enough dynamic range to make the compute-heavy expert GEMMs
+trainable in 4 bits; the three stabilizers — 2D block quantization, Hadamard-smeared wgrad inputs, and
+stochastic gradient rounding — keep the gradients honest; and mixed precision quietly protects the fragile
+edges (embeddings, final layers, projections, MTP). The payoff is a real reduction in training compute and
+memory bandwidth on hardware built for FP4, at a training-loss gap under 0.4%. The caveats are equally
+real: it is not end-to-end FP4, a loss gap is not benchmark parity, the run diverged twice, and the
+inference-PTQ numbers are a different story. As a demonstration that frontier-scale training can leave the
+16-bit comfort zone, though, it is a genuinely aggressive, well-instrumented bet — and it stuck.
+
+---
+
+*Built on NVIDIA's Nemotron NVFP4 training report. NVFP4 is a 4-bit E2M1 element with a per-16-element
+FP8 (E4M3) block scale and an FP32 per-tensor scale; figures are reproduced from the paper for commentary,
+and the interactive diagrams are illustrations of the mechanism. Related: [why quantization is
+hard](/articles/turboquant-kv-cache), [mixture-of-experts from
+scratch](/articles/mixture-of-experts-from-scratch), [multi-token
+prediction](/articles/multi-token-prediction), and [large-scale
+training](/articles/megatrain-single-gpu-training).*
