@@ -42,7 +42,10 @@ const REGIMES: Regime[] = [
   { key: "diff", name: "order-agnostic diffusion", pos: 1, steps: diff, kv: "no", order: "any / uniform", note: "One set of the whole sequence, denoised in a random order. Maximally parallel and any-order — but it needs full bidirectional context every step, so there is no KV cache and it recomputes everything." },
 ]
 
-const HUES = [195, 150, 265, 30, 320]
+// decode step is encoded as a single-accent lightness ramp (sequential), not a
+// categorical rainbow — earlier steps darker, later steps lighter.
+const stepFill = (s: number, total: number) =>
+  `oklch(${(0.5 + 0.34 * (s / Math.max(1, total))).toFixed(3)} 0.13 265)`
 
 // scene geometry (viewBox units)
 const W = 760
@@ -133,7 +136,7 @@ export function Spectrum() {
                 width={RW}
                 height={STRIPH}
                 rx={3}
-                fill={shown ? `oklch(0.72 0.14 ${HUES[s % HUES.length]})` : "var(--muted)"}
+                fill={shown ? stepFill(s, maxStep) : "var(--muted)"}
                 opacity={shown ? (justNow ? 1 : 0.72) : 0.3}
                 className="transition-all duration-300"
               >

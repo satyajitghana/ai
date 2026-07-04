@@ -12,7 +12,10 @@ import { useState } from "react"
 
 const N = 16
 const ACCENT = "oklch(0.62 0.15 265)"
-const HUES = [195, 150, 265, 30, 320, 90, 230]
+// decode step is encoded as a single-accent lightness ramp (sequential), not a
+// categorical rainbow — earlier steps darker, later steps lighter.
+const stepFill = (s: number, total: number) =>
+  `oklch(${(0.5 + 0.34 * (s / Math.max(1, total - 1))).toFixed(3)} 0.13 265)`
 
 // scene geometry (viewBox units)
 const W = 760
@@ -77,7 +80,7 @@ export function WindowKnob() {
           {Array.from({ length: N }).map((_, i) => {
             const s = stepOf(i)
             return (
-              <rect key={i} x={tokX(i)} y={STRIPY} width={RW} height={STRIPH} rx={3} fill={`oklch(0.72 0.14 ${HUES[s % HUES.length]})`} opacity={0.82} className="transition-all duration-300" />
+              <rect key={i} x={tokX(i)} y={STRIPY} width={RW} height={STRIPH} rx={3} fill={stepFill(s, spread)} opacity={0.9} className="transition-all duration-300" />
             )
           })}
           <text x={AX0} y={STRIPY + STRIPH + 15} className="fill-muted-foreground font-mono" fontSize={9}>position 0</text>
