@@ -125,9 +125,9 @@ export function BlockSelect() {
 
           {/* query node */}
           <g>
-            <rect x={qx - 66} y={QY} width={132} height={QH} rx={8} fill="var(--background)" stroke={SEL} strokeWidth={1.5} filter="url(#msa-soft)" />
+            <rect x={qx - 82} y={QY} width={164} height={QH} rx={8} fill="var(--background)" stroke={SEL} strokeWidth={1.5} filter="url(#msa-soft)" />
             <text x={qx} y={QY + 17} textAnchor="middle" className="fill-foreground font-mono" fontSize={11} fontWeight={600}>query · block {qb}</text>
-            <text x={qx} y={QY + 31} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9}>index-branch → top-{K} + local</text>
+            <text x={qx} y={QY + 31} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9}>index scores → top-{K} + local</text>
           </g>
         </svg>
 
