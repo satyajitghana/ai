@@ -79,6 +79,12 @@ export function SparsityAtScale() {
 
           {/* ── bottom: measured speedup chart ── */}
           <text x={SX} y={CT - 18} className="fill-muted-foreground font-mono" fontSize={11}>measured speedup vs context length (H800)</text>
+          <text x={CR} y={CT - 18} textAnchor="end" className="font-mono" fontSize={11}>
+            <tspan style={{ fill: SEL }} fontWeight={700}>{cur.prefill}× prefill</tspan>
+            <tspan className="fill-muted-foreground"> · </tspan>
+            <tspan style={{ fill: AMBER }} fontWeight={700}>{cur.decode}× decode</tspan>
+          </text>
+          <text x={SX} y={CT - 4} className="fill-muted-foreground/70 font-mono" fontSize={9}>1/fraction = {Math.round(naive).toLocaleString()}× would be the ceiling — never reached</text>
 
           {/* y gridlines */}
           {[0, 5, 10, 15].map((v) => (

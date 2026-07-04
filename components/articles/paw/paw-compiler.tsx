@@ -214,9 +214,9 @@ export function PawCompiler() {
             <rect x={xA} y={yB} width={wA} height={hB} rx={10} fill="var(--background)" stroke="var(--border)" strokeWidth={1.5} filter="url(#paw-soft)" />
             <text x={xA + 12} y={yB + 20} className="fill-muted-foreground font-mono" fontSize={9}>input</text>
             {outVal ? (
-              <text x={xA + 12} y={yB + 44} className="fill-foreground font-mono" fontSize={11}>{clip(outVal.in, 26)}</text>
+              <text x={xA + 12} y={yB + 44} className="fill-foreground font-mono" fontSize={10}>{clip(outVal.in, 25)}</text>
             ) : (
-              <text x={xA + 12} y={yB + 44} className="fill-muted-foreground/60 font-mono" fontSize={11}>{phase === "ready" ? "click an input below" : "compile first"}</text>
+              <text x={xA + 12} y={yB + 44} className="fill-muted-foreground/60 font-mono" fontSize={10}>{phase === "ready" ? "click an input below" : "compile first"}</text>
             )}
           </g>
 
