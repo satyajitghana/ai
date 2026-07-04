@@ -70,8 +70,8 @@ const NODES: { id: NodeId; x: number; y: number; w: number; h: number; t: string
 ]
 
 const EDGES: { from: NodeId; to: NodeId; d: string; lx: number; ly: number; label: string; anchor?: "start" | "middle" | "end" }[] = [
-  { from: "A", to: "B", d: "M142 150 L196 150", lx: 169, ly: 143, label: "state 0" },
-  { from: "B", to: "C", d: "M304 150 L358 150", lx: 331, ly: 143, label: "i<3 · return i" },
+  { from: "A", to: "B", d: "M142 150 C 160 158, 178 158, 196 150", lx: 169, ly: 143, label: "state 0" },
+  { from: "B", to: "C", d: "M304 150 C 322 158, 340 158, 358 150", lx: 331, ly: 143, label: "i<3 · return i" },
   { from: "C", to: "D", d: "M412 127 C 412 96, 389 84, 389 78", lx: 430, ly: 108, label: "next call", anchor: "start" },
   { from: "D", to: "B", d: "M300 89 C 280 108, 255 112, 250 127", lx: 252, ly: 108, label: "case 6 · i++", anchor: "end" },
   { from: "B", to: "E", d: "M250 173 C 250 214, 545 214, 555 173", lx: 400, ly: 210, label: "i==3 · return −1", anchor: "middle" },
