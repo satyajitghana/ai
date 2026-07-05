@@ -1,0 +1,162 @@
+---
+title: "MrFlow: climb the resolution in pixel space, not diffusion steps"
+description: "Flow and diffusion image models spend most of their compute running every denoising step at full resolution. MrFlow is a training-free reshuffle of that budget: run most steps at low resolution, do the resolution climb with a cheap pixel-space super-resolution network, re-inject a small closed-form amount of noise, and finish with a single high-resolution refine step. It buys real speedups (roughly 4–9× training-free on the good configs) at near-native quality — but the headline numbers are best-case, and how much quality you keep depends heavily on the config and the base model."
+date: 2026-07-04
+tags:
+  - diffusion
+  - image-generation
+  - inference-optimization
+  - flow-matching
+  - explainer
+draft: false
+---
+
+import { StageStepper } from "@/components/articles/mrflow-diffusion-acceleration/stage-stepper"
+import { SpeedQuality } from "@/components/articles/mrflow-diffusion-acceleration/speed-quality"
+import { ConfigSplit } from "@/components/articles/mrflow-diffusion-acceleration/config-split"
+
+A modern text-to-image model — a flow-matching or [diffusion](/articles/set-diffusion) network like
+FLUX or Qwen-Image — makes a picture by running a stack of denoising steps. The expensive fact about
+that stack is where the compute lands: **every step runs at the output resolution**. A 20-step sample
+at 1024² pays the full-resolution price twenty times over, and most of those steps are spent on detail
+the early ones can't even see yet. That's the cost MrFlow goes after — and it does so **without any
+fine-tuning**, purely by rearranging *when* the model works at full size.
+
+The idea is a budget reshuffle. Structure is decided early and is cheap to compute at small sizes;
+sharp high-frequency detail is what full resolution actually buys you. So MrFlow spends the pricey
+diffusion steps at **low resolution**, does the climb to full resolution in **pixel space** with an
+off-the-shelf super-resolution network, and then spends just **one** diffusion step at high resolution
+to clean up. Walk the four stages:
+
+<StageStepper />
+
+## The pipeline, precisely
+
+MrFlow is four stages, and only the outer two touch the full-resolution latent:
+
+1. **Low-resolution generate.** Run the flow/diffusion model for ~12 of its 20 steps at a low
+   resolution (e.g. 512²). Steps are cheap at this size, and this is where composition and layout are
+   fixed. Decode to a low-resolution image.
+2. **Pixel-space super-resolution.** Upsample that image to full resolution with a **pixel-space SR
+   network** — Real-ESRGAN — in a single forward pass. This is the resolution jump, and crucially it is
+   *not* more latent diffusion steps.
+3. **Low-strength noise re-injection.** Encode the upscaled image back to latent and add a small amount
+   of noise, `σ_t ∈ [0.1, 0.15]`, computed **closed-form** from the flow schedule. No extra network,
+   no training — just enough noise to give the model something to denoise.
+4. **One HR refine step.** A single high-resolution diffusion step blends the upscaled detail back into
+   the model's own distribution and cleans up the SR network's artifacts.
+
+<Figure
+  src="/articles/mrflow-diffusion-acceleration/fig1.png"
+  alt="Pipeline comparison. Top left, 'Native' runs 50 diffusion steps at high resolution then a VAE decoder to the final image. Top right, 'Latent Upsampling' runs 20 steps, upsamples the latent, adds noise, runs 10 more steps, then decodes. Bottom, 'MrFlow' runs 12 low-resolution steps and decodes to a low-resolution image, applies an SR GAN to reach high resolution, VAE-encodes, adds a small closed-form noise σ_t·ε, runs a single refine step, and decodes to the final high-resolution image. A legend marks latent space in green and pixel space in orange."
+  caption="Native runs every step at full resolution; latent-upsampling schemes climb by adding more latent diffusion steps. MrFlow instead climbs in pixel space with an SR network, then spends a single high-resolution refine step — the resolution jump costs one forward pass, not a second block of diffusion (paper, Figure 2)."
+/>
+
+The contrast with the usual "latent upsampling" trick (middle row of the figure) is the whole point.
+Those schemes also start small, but they climb by running **more latent diffusion steps** at the higher
+resolution — you pay full-resolution diffusion twice. MrFlow does the climb with a cheap pixel-space
+network and buys back fidelity with a *single* diffusion step.
+
+## Where the budget actually goes
+
+The reason this is faster isn't subtle: high-resolution diffusion steps are the expensive line item,
+and MrFlow runs almost none of them. If you count an HR step as roughly 4× an LR step (2× the linear
+resolution is 4× the pixels), a native 20-step HR sample and a MrFlow `(12, 1)` config are worlds apart
+in compute. Drag the config and watch the budget — and the honest quality tradeoff — move:
+
+<ConfigSplit />
+
+That schematic is where the **config dependence** lives, and it's the first honest caveat. The speedup
+is the reliable part — fewer, cheaper steps is unambiguously less compute. Quality is the part that
+swings: strip the refine steps and Real-ESRGAN's artifacts survive to the final image; starve the
+low-resolution stage and the composition never locks in.
+
+<Callout type="warn">
+The advertised **"within 1% of native quality" is a best-case figure**, and it lives at the conservative
+end of that slider. Push the config harder and the gap widens fast — FLUX at the aggressive `(12, 1)`
+setting drops roughly **18% on OneIG**. Degradation is real, and it is both **config- and
+model-dependent**.
+</Callout>
+
+## Why pixel-space SR instead of more diffusion
+
+The subtle design question is: once you have a low-resolution image, how do you get to full resolution?
+The latent-upsampling answer is "more diffusion." MrFlow's answer is "a super-resolution network, then
+one diffusion step to fix it." The paper compares SR backbones — bilinear interpolation, SwinIR,
+OSEDiff, Real-ESRGAN — with and without the final HR refine step:
+
+<Figure
+  src="/articles/mrflow-diffusion-acceleration/fig3.png"
+  alt="Staged super-resolution comparison. Far left, a low-resolution input crop of a shop scene with a chalkboard reading '9am'. To the right, a grid: columns are Interpolate, SwinIR, OSEDiff, and Real-ESRGAN; the top row is labelled 'SR' (super-resolution only) and the bottom row 'High Resolution Refine' (SR followed by one diffusion refine step). Zoomed insets of the '9am' text show interpolation stays blurry, and the Real-ESRGAN column with the refine step recovers the sharpest, cleanest lettering."
+  caption="The SR stage on its own (top row) can leave text and edges blurry or artifact-ridden; a single high-resolution refine step (bottom row) cleans them up. Real-ESRGAN plus the refine step recovers the crispest detail — the refine step exists precisely to fix the SR network's mistakes (paper, Figure 3)."
+/>
+
+Two things read off that grid. First, the SR network alone is **not enough** — plain interpolation
+stays soft, and even a strong SR net can hallucinate wrong detail (look at the "9am" text). Second, the
+single refine step is doing real work: the bottom row is visibly cleaner than the top. Real-ESRGAN can
+introduce its own artifacts, and the HR refine step is there **precisely to fix them** — the two stages
+are a pair, not alternatives.
+
+## The speed–quality frontier
+
+The payoff is best seen as a Pareto plot: quality against speedup, versus the obvious baseline of just
+running the model with fewer native steps. Toggle the model and walk the refine-step configs:
+
+<SpeedQuality />
+
+<Figure
+  src="/articles/mrflow-diffusion-acceleration/fig2.png"
+  alt="Two scatter plots of GenEval score (y-axis) versus speedup ratio (x-axis), for FLUX.1-dev on the left and Qwen-Image on the right. A star marks native quality at speedup 1. A dark 'Native Steps' curve falls steeply as speedup increases. Several acceleration baselines — ToMA, TeaCache, DB-Taylor, RALU, SPEED — sit below and to the left. MrFlow's three configs (+1, +2, +3 refine steps) form a red frontier, highlighted with an ellipse, that stays high in quality much further to the right than any baseline."
+  caption="Quality (GenEval) versus speedup for FLUX.1-dev and Qwen-Image. Just cutting native steps (dark curve) sheds quality fast; other accelerators sit below the frontier. MrFlow's +1/+2/+3 configs (red) hold near-native quality much further to the right — but note the frontier still bends down as speed climbs (paper, Figure 5)."
+/>
+
+The shape is the honest summary. On the good configs, MrFlow's frontier dominates both "fewer native
+steps" and prior accelerators like TeaCache and RALU — you get several× speedup while staying close to
+the native star. But the frontier still slopes downward: more speed costs some quality, and the `+1`
+config (fastest) sits measurably below `+3`. Qwen-Image holds its quality far better than FLUX across
+the same speedups, which is exactly the point about **model dependence** — some base models tolerate the
+reshuffle much better than others.
+
+## The honest headline
+
+The clean numbers to keep are the training-free ones: roughly **4–9× faster** on the frontier configs at
+**near-native** quality, no fine-tuning required. The bigger figures you may see quoted come with strings:
+
+<Callout type="warn">
+The **10×/25× speedups are config-dependent**, and the top end is not training-free. The **25× figure is
+reached only with distillation stacked on top** of MrFlow's staged sampling — not by the training-free
+pipeline alone. Quote the ~4–9× training-free range if you want the number MrFlow earns on its own.
+</Callout>
+
+A few smaller honesty notes. "Within 1%" is a best case measured on forgiving configs and models; the
+same pipeline pushed to `(12, 1)` on FLUX loses ~18% on OneIG. The compute-unit accounting in the
+diagrams above is a schematic (an HR step is *roughly* 4× an LR step) — the paper's speedups are
+measured wall-clock, and they depend on the SR network's own cost, which the unit count glosses over.
+And Real-ESRGAN, being a GAN, can invent detail that isn't in the low-resolution image; the refine step
+mitigates but doesn't fully erase this.
+
+## The take
+
+MrFlow's contribution is a reframing more than a new network: the resolution climb doesn't have to be
+paid for in diffusion steps. Set against the usual acceleration playbooks — caching redundant
+computation ([TeaCache-style](/articles/how-llm-inference-works)), or simply taking fewer steps — it
+makes a sharper bet: **structure is cheap and settles early; resolution is expensive and can be borrowed
+from a pixel-space SR net; artifacts are cleanable in one diffusion step**. Because every piece is
+training-free and closed-form, it drops onto an existing checkpoint with no retraining, which is the
+practical reason to care. The catch is the one every honest acceleration paper carries — the best-case
+headline is best-case. On a forgiving model at a conservative config it really is near-free; push the
+config or pick a brittle model and you pay for the speed in quality. As a way to make an existing
+image model several times cheaper to sample without touching its weights, though, it's a clean idea,
+cleanly executed.
+
+For the diffusion background this builds on, see [Set Diffusion](/articles/set-diffusion) and, for how
+denoising models differ from autoregressive ones, [the diffusion *language* model
+walkthrough](/articles/illada-diffusion-language-model).
+
+---
+
+*Built on MrFlow (arXiv 2607.01642), a training-free staged-sampling accelerator for flow and diffusion
+image models. Benchmark and speedup figures (GenEval, OneIG; FLUX.1-dev and Qwen-Image) are quoted from
+the paper; the interactive diagrams are illustrations of the mechanism, and the per-stage compute units
+are a schematic, not measured FLOPs. Speedups are config- and model-dependent; the top-end figures
+require distillation on top of the training-free pipeline.*

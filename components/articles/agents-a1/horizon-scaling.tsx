@@ -59,23 +59,23 @@ export function HorizonScaling() {
           {yticks.map((v) => (
             <g key={v}>
               <line x1={padL} y1={sy(v)} x2={W - padR} y2={sy(v)} stroke="currentColor" strokeOpacity="0.08" />
-              <text x={padL - 8} y={sy(v) + 3} textAnchor="end" fontFamily="monospace" fontSize="9" fill="currentColor" fillOpacity="0.5">{v}</text>
+              <text x={padL - 8} y={sy(v) + 3} textAnchor="end" className="font-mono" fontSize="9" fill="currentColor" fillOpacity="0.5">{v}</text>
             </g>
           ))}
           {ticks.map((t) => (
-            <text key={t.p} x={sx(t.p)} y={H - padB + 16} textAnchor="middle" fontFamily="monospace" fontSize="9" fill="currentColor" fillOpacity="0.5">{t.label}</text>
+            <text key={t.p} x={sx(t.p)} y={H - padB + 16} textAnchor="middle" className="font-mono" fontSize="9" fill="currentColor" fillOpacity="0.5">{t.label}</text>
           ))}
-          <text x={(W) / 2} y={H - 6} textAnchor="middle" fontFamily="monospace" fontSize="9" fill="currentColor" fillOpacity="0.45">total parameters (log)</text>
-          <text x={14} y={H / 2} textAnchor="middle" fontFamily="monospace" fontSize="9" fill="currentColor" fillOpacity="0.45" transform={`rotate(-90 14 ${H / 2})`}>agentic score (5-bench avg)</text>
+          <text x={(W) / 2} y={H - 6} textAnchor="middle" className="font-mono" fontSize="9" fill="currentColor" fillOpacity="0.45">total parameters (log)</text>
+          <text x={14} y={H / 2} textAnchor="middle" className="font-mono" fontSize="9" fill="currentColor" fillOpacity="0.45" transform={`rotate(-90 14 ${H / 2})`}>agentic score (5-bench avg)</text>
 
           {/* the lift arrow: base -> A1 at the same x */}
           <line x1={sx(base.params)} y1={sy(base.score) - 6} x2={sx(a1.params)} y2={sy(a1.score) + 10} stroke={A1} strokeWidth="1.5" strokeDasharray="3 3" markerEnd="url(#arrow)" />
           <defs>
-            <marker id="arrow" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto">
-              <path d="M0,0 L7,3.5 L0,7 Z" fill={A1} />
+            <marker id="arrow" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" refX="7" refY="0" orient="auto">
+              <path d="M0,-4L6,0L0,4" fill="none" stroke={A1} strokeWidth={1.5} />
             </marker>
           </defs>
-          <text x={sx(base.params) + 8} y={(sy(base.score) + sy(a1.score)) / 2} fontFamily="monospace" fontSize="9" fill={A1}>+18 from training</text>
+          <text x={sx(base.params) + 8} y={(sy(base.score) + sy(a1.score)) / 2} className="font-mono" fontSize="9" fill={A1}>+18 from training</text>
 
           {/* frontier band */}
           <line x1={padL} y1={sy(77.5)} x2={W - padR} y2={sy(77.5)} stroke={FRONTIER} strokeOpacity="0.25" strokeDasharray="2 4" />
@@ -92,7 +92,7 @@ export function HorizonScaling() {
                   x={labelLeft ? sx(m.params) - 11 : sx(m.params) + 11}
                   y={sy(m.score) + 3}
                   textAnchor={labelLeft ? "end" : "start"}
-                  fontFamily="monospace"
+                  className="font-mono"
                   fontSize={m.kind === "a1" ? "10.5" : "9.5"}
                   fontWeight={m.kind === "a1" ? 700 : 400}
                   fill="currentColor"

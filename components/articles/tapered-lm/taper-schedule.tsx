@@ -17,6 +17,20 @@ function widths(s: number) {
   return Array.from({ length: L }, (_, l) => 1 + s * (2 * f(l) - 1))
 }
 
+const hue = (l: number) => 250 - (l / (L - 1)) * 60 // early = violet, late = teal
+
+// scene geometry (viewBox units)
+const W = 600
+const H = 236
+const padL = 30
+const padR = 16
+const padT = 22
+const padB = 34
+const VMAX = 1.9
+const slot = (W - padL - padR) / L
+const baseY = H - padB
+const sy = (v: number) => padT + (1 - v / VMAX) * (H - padT - padB)
+
 export function TaperSchedule() {
   const [s, setS] = useState(0.5) // 3:1 early:late — the paper's optimal 1.5×/0.5× config
   const w = widths(s)
@@ -24,29 +38,49 @@ export function TaperSchedule() {
   const relTotal = (total / L).toFixed(2) // 1.00 at any taper — budget is conserved
   const ratio = (w[0] / w[L - 1]).toFixed(1)
 
-  const hue = (l: number) => 250 - (l / (L - 1)) * 60 // early = violet, late = teal
-
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
         MLP width across depth · same total budget, redistributed
       </div>
-      <div className="p-4">
-        <div className="space-y-1">
-          {w.map((width, l) => (
-            <div key={l} className="flex items-center gap-2">
-              <span className="w-14 shrink-0 text-right font-mono text-[10px] text-muted-foreground">layer {l}</span>
-              <div className="flex-1">
-                <div
-                  className="h-4 rounded-[3px] transition-all duration-300"
-                  style={{ width: `${(width / 1.7) * 100}%`, background: `oklch(0.7 0.13 ${hue(l)})`, opacity: 0.9 }}
-                />
-              </div>
-            </div>
-          ))}
-        </div>
+      <div className="p-3 sm:p-4">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`MLP hidden width by layer depth. Taper strength ${s.toFixed(2)} gives an early-to-late width ratio of ${ratio} to 1, with the total budget conserved at ${relTotal} times uniform.`}>
+          <defs>
+            <filter id="ts-soft" x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.2" floodOpacity="0.14" />
+            </filter>
+          </defs>
 
-        <div className="mt-4">
+          {/* gridlines */}
+          {[0.5, 1, 1.5].map((v) => (
+            <line key={v} x1={padL} y1={sy(v)} x2={W - padR} y2={sy(v)} stroke="currentColor" strokeOpacity="0.08" />
+          ))}
+          {/* uniform reference */}
+          <line x1={padL} y1={sy(1)} x2={W - padR} y2={sy(1)} stroke="currentColor" strokeOpacity="0.3" strokeDasharray="3 4" />
+          <text x={W - padR} y={sy(1) - 5} textAnchor="end" className="fill-muted-foreground/70 font-mono" fontSize="9">uniform width</text>
+
+          {/* baseline */}
+          <line x1={padL} y1={baseY} x2={W - padR} y2={baseY} stroke="currentColor" strokeOpacity="0.25" />
+
+          {/* bars */}
+          {w.map((width, l) => {
+            const bw = slot * 0.6
+            const x = padL + l * slot + (slot - bw) / 2
+            const y = sy(width)
+            return (
+              <rect key={l} x={x} y={y} width={bw} height={baseY - y} rx={3} fill={`oklch(0.7 0.13 ${hue(l)})`} opacity={0.92} filter="url(#ts-soft)" className="transition-all duration-300" />
+            )
+          })}
+
+          {/* x labels */}
+          {[0, 3, 6, 9, 11].map((l) => (
+            <text key={l} x={padL + l * slot + slot / 2} y={baseY + 14} textAnchor="middle" className="fill-muted-foreground/60 font-mono" fontSize="9">L{l}</text>
+          ))}
+          <text x={W / 2} y={H - 3} textAnchor="middle" className="fill-muted-foreground/50 font-mono" fontSize="9">layer depth →</text>
+        </svg>
+
+        {/* control */}
+        <div className="mt-2">
           <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-muted-foreground">
             <span>taper strength</span>
             <span className="tabular-nums text-foreground">{s === 0 ? "uniform" : `${ratio}:1 early:late`}</span>
@@ -58,20 +92,15 @@ export function TaperSchedule() {
             step={0.02}
             value={s}
             onChange={(e) => setS(Number(e.target.value))}
-            className="w-full accent-foreground"
+            className="w-full cursor-pointer accent-[oklch(0.7_0.13_250)]"
             aria-label="taper strength"
           />
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">
-          <div className="bg-background px-3 py-2">
-            <div className="text-[10px] text-muted-foreground">total MLP params (relative)</div>
-            <div className="font-medium text-foreground">{relTotal}× — held fixed</div>
-          </div>
-          <div className="bg-background px-3 py-2">
-            <div className="text-[10px] text-muted-foreground">early : late width</div>
-            <div className="font-medium text-foreground">{s === 0 ? "1.0 : 1.0" : `${ratio} : 1`}</div>
-          </div>
+        {/* readout */}
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-[11px] text-muted-foreground">
+          <span>total MLP params <span className="text-foreground">{relTotal}×</span> — held fixed</span>
+          <span>early : late width <span className="text-foreground">{s === 0 ? "1.0 : 1.0" : `${ratio} : 1`}</span></span>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

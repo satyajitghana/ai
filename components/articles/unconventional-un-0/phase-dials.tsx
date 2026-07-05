@@ -13,7 +13,11 @@ const frac = (x: number) => x - Math.floor(x)
 // deterministic spreads (no Math.random) → SSR and first client render match
 const OMEGA = Array.from({ length: N }, (_, i) => 1.1 + 1.7 * (frac((i + 1) * 0.61803398875) - 0.5))
 const INIT = Array.from({ length: N }, (_, i) => 2 * Math.PI * frac((i + 1) * 0.41421356))
-const HUE = Array.from({ length: N }, (_, i) => 120 + ((i * 53) % 260))
+// Hue encodes each oscillator's *phase* (a circular quantity → circular hue), so
+// the dials share one colormap: as coupling locks the phases together the colors
+// converge too — a meaningful encoding, not an arbitrary per-dial rainbow.
+const TAU = 2 * Math.PI
+const phaseHue = (p: number) => ((((p % TAU) + TAU) % TAU) / TAU) * 360
 
 // round derived coords so the server/client SVG strings are identical
 const rnd = (v: number) => Math.round(v * 100) / 100
@@ -102,7 +106,7 @@ export function PhaseDials() {
               const a = p - (s / 5) * 1.1
               return `${rnd(cx + Math.cos(a) * RD)},${rnd(cy + Math.sin(a) * RD)}`
             }).join(" ")
-            const col2 = `oklch(0.7 0.14 ${HUE[i]})`
+            const col2 = `oklch(0.7 0.14 ${phaseHue(p).toFixed(0)})`
             return (
               <g key={i}>
                 <circle cx={cx} cy={cy} r={RD} fill="none" stroke="var(--border)" strokeWidth="1" />

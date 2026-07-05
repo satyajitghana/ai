@@ -73,9 +73,9 @@ export function IkdMap() {
           })}
           {/* sensor */}
           <circle cx={X(sxPos)} cy={Y(50)} r="4" fill="var(--foreground)" />
-          <text x={X(sxPos)} y={Y(50) - 7} textAnchor="middle" fontFamily="monospace" fontSize="8" fill="var(--foreground)">sensor</text>
-          <text x={X(sxPos + L) - 2} y={Y(10)} textAnchor="end" fontFamily="monospace" fontSize="7" fill="oklch(0.72 0.15 150)">insert →</text>
-          <text x={X(sxPos - L) + 2} y={Y(10)} fontFamily="monospace" fontSize="7" fill="oklch(0.72 0.15 25)">← box-delete</text>
+          <text x={X(sxPos)} y={Y(50) - 7} textAnchor="middle" className="font-mono"fontSize="8" fill="var(--foreground)">sensor</text>
+          <text x={X(sxPos + L) - 2} y={Y(10)} textAnchor="end" className="font-mono"fontSize="7" fill="oklch(0.72 0.15 150)">insert →</text>
+          <text x={X(sxPos - L) + 2} y={Y(10)} className="font-mono"fontSize="7" fill="oklch(0.72 0.15 25)">← box-delete</text>
         </svg>
 
         <div className="mt-3 grid grid-cols-3 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">
@@ -101,7 +101,7 @@ function Stat({ label, value, highlight }: { label: string; value: string; highl
   return (
     <div className="bg-background px-3 py-2">
       <div className="text-[10px] text-muted-foreground">{label}</div>
-      <div className={highlight ? "font-medium text-foreground" : "font-medium text-foreground"}>{value}</div>
+      <div className={highlight ? "font-semibold text-foreground" : "font-medium text-foreground"}>{value}</div>
     </div>
   )
 }

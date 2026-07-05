@@ -8,8 +8,8 @@ import { cn } from "@/lib/utils"
 // every document is re-scored live with the exact Lucene BM25 formula:
 //   score(D,Q) = Σ_q IDF(q) · tf(q,D)·(k1+1) / ( tf(q,D) + k1·(1 − b + b·|D|/avgdl) )
 //   IDF(q)     = ln( 1 + (N − df(q) + 0.5)/(df(q) + 0.5) )
-// The bars show the ranking; expand the top document to see each query term's
-// contribution — IDF (rarity) × a saturating, length-normalized term-frequency factor.
+// The ranked bars are the live scores; pick a bar to open its per-term breakdown —
+// IDF (rarity) × a saturating, length-normalized term-frequency factor.
 // Fully server-rendered at the default query, so it degrades to a static ranking.
 
 const CORPUS = [
@@ -32,11 +32,20 @@ const idf = (t: string) => Math.log(1 + (N - (DF[t] ?? 0) + 0.5) / ((DF[t] ?? 0)
 
 const ACCENT = "oklch(0.72 0.15 195)"
 
+// scene geometry (viewBox units)
+const W = 600
+const TOP = 16
+const ROW = 32
+const BX = 60 // bar left edge
+const BMAX = 470 // max bar width  (BX + BMAX = 530)
+const BH = 15
+const SCOREX = 592 // right-anchored score column
+
 export function Bm25Scorer() {
   const [query, setQuery] = useState("quick lazy fox")
   const [k1, setK1] = useState(1.2)
   const [b, setB] = useState(0.75)
-  const [openIdx, setOpenIdx] = useState<number | null>(0)
+  const [sel, setSel] = useState<number | null>(0)
 
   const qTerms = useMemo(() => Array.from(new Set(tokenize(query))), [query])
 
@@ -51,16 +60,20 @@ export function Bm25Scorer() {
       })
       const score = parts.reduce((a, p) => a + p.contrib, 0)
       return { i, len, parts, score }
-    }).sort((a, b) => b.score - a.score)
+    }).sort((x, y) => y.score - x.score)
   }, [qTerms, k1, b])
 
   const maxScore = Math.max(...scored.map((s) => s.score), 1e-9)
+  const H = TOP * 2 + scored.length * ROW
+  const selRow = sel === null ? null : scored.find((s) => s.i === sel) ?? null
 
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">live BM25 · scores the 6-document corpus against your query</div>
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
+        live BM25 · scores the 6-document corpus against your query
+      </div>
 
-      <div className="p-4">
+      <div className="p-3 sm:p-4">
         {/* query + params */}
         <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
           <label className="block">
@@ -75,72 +88,84 @@ export function Bm25Scorer() {
           <div className="flex gap-4">
             <label className="block">
               <span className="mb-1 flex justify-between gap-3 font-mono text-[10px] text-muted-foreground">k1<span className="text-foreground">{k1.toFixed(1)}</span></span>
-              <input type="range" min={0} max={3} step={0.1} value={k1} onChange={(e) => setK1(+e.target.value)} className="w-24 accent-foreground" aria-label="k1" />
+              <input type="range" min={0} max={3} step={0.1} value={k1} onChange={(e) => setK1(+e.target.value)} className="w-24 cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="k1" />
             </label>
             <label className="block">
               <span className="mb-1 flex justify-between gap-3 font-mono text-[10px] text-muted-foreground">b<span className="text-foreground">{b.toFixed(2)}</span></span>
-              <input type="range" min={0} max={1} step={0.05} value={b} onChange={(e) => setB(+e.target.value)} className="w-24 accent-foreground" aria-label="b" />
+              <input type="range" min={0} max={1} step={0.05} value={b} onChange={(e) => setB(+e.target.value)} className="w-24 cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="b" />
             </label>
           </div>
         </div>
 
-        {/* ranked docs */}
-        <div className="mt-4 space-y-1.5">
-          {scored.map((s, rank) => {
-            const open = openIdx === s.i
-            return (
-              <div key={s.i} className="rounded-md border">
-                <button
-                  type="button"
-                  onClick={() => setOpenIdx(open ? null : s.i)}
-                  className="flex w-full items-center gap-3 px-2.5 py-2 text-left"
-                >
-                  <span className="w-4 shrink-0 font-mono text-[10px] text-muted-foreground">{rank + 1}</span>
-                  <span className="w-14 shrink-0 text-right font-mono text-xs tabular-nums" style={{ color: s.score > 0 ? ACCENT : "var(--muted-foreground)" }}>
-                    {s.score.toFixed(2)}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {CORPUS[s.i].split(" ").map((w, wi) => {
-                        const hit = qTerms.includes(w.toLowerCase())
-                        return (
-                          <span key={wi} className={cn(hit && "rounded px-0.5 font-medium text-foreground")} style={hit ? { background: "oklch(0.72 0.15 195 / 0.18)" } : undefined}>
-                            {w}{" "}
-                          </span>
-                        )
-                      })}
-                    </span>
-                  </span>
-                  <span className="hidden h-1.5 w-24 shrink-0 overflow-hidden rounded bg-muted sm:block">
-                    <span className="block h-full rounded" style={{ width: `${(s.score / maxScore) * 100}%`, background: ACCENT }} />
-                  </span>
-                </button>
+        {/* ranked docs — SVG bar chart */}
+        <svg viewBox={`0 0 ${W} ${H}`} className="mt-3 w-full" role="img" aria-label={`Documents ranked by BM25 score against the query "${query}". Top document scores ${scored[0]?.score.toFixed(2)}.`}>
+          <defs>
+            <filter id="bm25-soft" x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.16" />
+            </filter>
+          </defs>
 
-                {open ? (
-                  <div className="border-t bg-muted/20 px-3 py-2.5">
-                    <div className="mb-1.5 font-mono text-[10px] text-muted-foreground">
-                      per-term contribution · |D| = {s.len} tokens, avgdl = {AVGDL.toFixed(1)}
-                    </div>
-                    <div className="space-y-1">
-                      {s.parts.map((p) => (
-                        <div key={p.term} className="grid grid-cols-[70px_1fr_44px] items-center gap-2 font-mono text-[11px]">
-                          <span className="text-foreground">{p.term}</span>
-                          <span className="text-muted-foreground">
-                            idf {p.idf.toFixed(2)} · tf {p.tf}
-                            {p.tf === 0 ? " · absent" : ""}
-                          </span>
-                          <span className="text-right tabular-nums" style={{ color: p.contrib > 0 ? ACCENT : "var(--muted-foreground)" }}>
-                            {p.contrib.toFixed(2)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+          {scored.map((s, rank) => {
+            const cy = TOP + rank * ROW + ROW / 2
+            const bw = Math.max((s.score / maxScore) * BMAX, s.score > 0 ? 3 : 0)
+            const isSel = s.i === sel
+            const hasScore = s.score > 0
+            return (
+              <g key={s.i} onClick={() => setSel(s.i)} className="cursor-pointer">
+                {/* hit target */}
+                <rect x={0} y={cy - ROW / 2} width={W} height={ROW} fill="transparent" />
+                {/* rank + doc label */}
+                <text x={10} y={cy + 3.5} className="fill-muted-foreground/70 font-mono" fontSize={10}>{rank + 1}</text>
+                <text x={22} y={cy + 3.5} className={cn("font-mono", isSel ? "fill-foreground" : "fill-muted-foreground")} fontSize={10} fontWeight={isSel ? 600 : 400}>doc {s.i + 1}</text>
+                {/* track */}
+                <rect x={BX} y={cy - BH / 2} width={BMAX} height={BH} rx={4} fill="var(--muted)" opacity={0.35} />
+                {/* value bar */}
+                {hasScore ? (
+                  <rect x={BX} y={cy - BH / 2} width={bw} height={BH} rx={4} fill={ACCENT} opacity={isSel ? 1 : 0.5} filter={isSel ? "url(#bm25-soft)" : undefined} className="transition-all duration-300" />
                 ) : null}
-              </div>
+                {/* score */}
+                <text x={SCOREX} y={cy + 3.5} textAnchor="end" className={cn("font-mono tabular-nums", hasScore ? (isSel ? "fill-foreground" : "fill-muted-foreground") : "fill-muted-foreground/40")} fontSize={11} fontWeight={isSel ? 600 : 400}>{s.score.toFixed(2)}</text>
+              </g>
             )
           })}
-        </div>
+        </svg>
+
+        {/* detail panel for the selected doc */}
+        {selRow ? (
+          <div className="mt-3 rounded-lg border bg-muted/20 p-3">
+            <div className="text-sm leading-6">
+              <span className="mr-1.5 font-mono text-[10px] text-muted-foreground">doc {selRow.i + 1}</span>
+              {CORPUS[selRow.i].split(" ").map((word, wi) => {
+                const hit = qTerms.includes(word.toLowerCase())
+                return (
+                  <span key={wi} className={cn(hit ? "rounded px-0.5 font-medium text-foreground" : "text-muted-foreground")} style={hit ? { background: "oklch(0.72 0.15 195 / 0.18)" } : undefined}>
+                    {word}{" "}
+                  </span>
+                )
+              })}
+            </div>
+            <div className="mb-1.5 mt-3 font-mono text-[10px] text-muted-foreground">
+              per-term contribution · |D| = {selRow.len} tokens, avgdl = {AVGDL.toFixed(1)}
+            </div>
+            <div className="space-y-1">
+              {selRow.parts.map((p) => {
+                const w = maxScore > 0 ? (p.contrib / maxScore) * 100 : 0
+                return (
+                  <div key={p.term} className="grid grid-cols-[64px_1fr_44px] items-center gap-2 font-mono text-[11px]">
+                    <span className="truncate text-foreground">{p.term}</span>
+                    <span className="flex items-center gap-2 text-muted-foreground">
+                      <span className="h-1.5 flex-1 overflow-hidden rounded bg-muted">
+                        <span className="block h-full rounded" style={{ width: `${w}%`, background: ACCENT, opacity: p.contrib > 0 ? 1 : 0 }} />
+                      </span>
+                      <span className="shrink-0 whitespace-nowrap text-muted-foreground/80">idf {p.idf.toFixed(2)} · tf {p.tf}{p.tf === 0 ? " · absent" : ""}</span>
+                    </span>
+                    <span className="text-right tabular-nums" style={{ color: p.contrib > 0 ? ACCENT : "var(--muted-foreground)" }}>{p.contrib.toFixed(2)}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ) : null}
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Each score is a sum over query terms of <span className="text-foreground">rarity</span> (IDF) times a
