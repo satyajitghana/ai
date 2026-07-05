@@ -8,15 +8,18 @@ import { cn } from "@/lib/utils"
 // The training objective, animated. A window slides along the sequence; from each
 // position t the model predicts the next n tokens at once, so n loss terms fire per
 // position instead of one. Flip n between 1 (ordinary next-token) and 4 to see the
-// signal get denser — the reason MTP trains a better model. Loops.
+// signal get denser — the reason MTP trains a better model. Scrub t or let it loop.
 
+const ACCENT = "oklch(0.66 0.15 150)"
 const TOKENS = ["the", "cat", "sat", "on", "a", "warm", "mat", "by", "the", "fire", "."]
 
-const CELL = 58
-const TOP = 70 // vertical space for the prediction arcs
-const BOXY = TOP + 6
-const BOXH = 30
-
+const CELL = 54
+const TOP = 78 // vertical space for the prediction arcs
+const BOXY = TOP + 4
+const BOXH = 32
+const W = TOKENS.length * CELL
+const H = BOXY + BOXH + 20
+const cx = (i: number) => i * CELL + CELL / 2
 const rnd = (v: number) => Math.round(v * 100) / 100
 
 export function MTPTraining() {
@@ -31,14 +34,11 @@ export function MTPTraining() {
     return () => clearInterval(id)
   }, [playing, lastT])
 
-  const W = TOKENS.length * CELL
-  const H = BOXY + BOXH + 16
-  const cx = (i: number) => i * CELL + CELL / 2
   const reach = Math.min(n, TOKENS.length - 1 - t)
 
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="flex items-center justify-between border-b px-3 py-2 font-mono text-xs text-muted-foreground">
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="flex items-center justify-between border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
         <span>multi-token training objective · live</span>
         <button
           type="button"
@@ -50,81 +50,107 @@ export function MTPTraining() {
         </button>
       </div>
 
-      <div className="space-y-4 p-4">
-        <div className="overflow-x-auto">
-          <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="A window slides along a sentence; from the current position, arcs predict the next n tokens." style={{ width: "100%", minWidth: 520 }}>
-            {/* prediction arcs from t to t+1..t+reach */}
-            {Array.from({ length: reach }, (_, k) => {
-              const from = cx(t)
-              const to = cx(t + k + 1)
-              const midY = TOP - 10 - k * 12
-              const hue = 150 + k * 14
-              return (
-                <g key={k}>
-                  <path
-                    d={`M ${rnd(from)} ${BOXY} Q ${rnd((from + to) / 2)} ${rnd(midY)} ${rnd(to)} ${BOXY}`}
-                    fill="none"
-                    stroke={`oklch(0.72 0.14 ${hue})`}
-                    strokeWidth="1.8"
-                    markerEnd="url(#mtpArrow)"
-                    opacity="0.9"
-                  />
-                  <text x={rnd((from + to) / 2)} y={rnd(midY + 2)} textAnchor="middle" fontFamily="monospace" fontSize="9" fill={`oklch(0.72 0.14 ${hue})`}>
-                    +{k + 1}
-                  </text>
-                </g>
-              )
-            })}
-            <defs>
-              <marker id="mtpArrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-                <path d="M0,0 L6,3 L0,6 Z" fill="var(--muted-foreground)" />
-              </marker>
-            </defs>
+      <div className="space-y-4 p-3 sm:p-4">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`A window at position ${t} predicts the next ${reach} token${reach > 1 ? "s" : ""}, one arc per prediction.`}>
+          <defs>
+            <marker id="mt-arrow" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="6" refY="0">
+              <path d="M0,-4L6,0L0,4" fill="none" stroke={ACCENT} strokeWidth={1.5} />
+            </marker>
+            <filter id="mt-soft" x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.14" />
+            </filter>
+          </defs>
 
-            {/* token boxes */}
-            {TOKENS.map((tok, i) => {
-              const isPos = i === t
-              const isTarget = i > t && i <= t + reach
-              return (
-                <g key={i}>
-                  <rect
-                    x={i * CELL + 4}
-                    y={BOXY}
-                    width={CELL - 8}
-                    height={BOXH}
-                    rx="6"
-                    fill={isPos ? "oklch(0.72 0.15 195)" : isTarget ? "oklch(0.72 0.13 150)" : "var(--background)"}
-                    fillOpacity={isPos ? 0.9 : isTarget ? 0.18 : 1}
-                    stroke="var(--border)"
-                  />
-                  <text
-                    x={cx(i)}
-                    y={BOXY + 20}
-                    textAnchor="middle"
-                    fontFamily="monospace"
-                    fontSize="11"
-                    fill={isPos ? "oklch(0.2 0 0)" : "var(--foreground)"}
-                  >
-                    {tok}
-                  </text>
-                </g>
-              )
-            })}
-            <text x={cx(t)} y={BOXY + BOXH + 13} textAnchor="middle" fontFamily="monospace" fontSize="9" fill="var(--muted-foreground)">
-              position t
-            </text>
-          </svg>
+          {/* prediction arcs from t to t+1..t+reach */}
+          {Array.from({ length: reach }, (_, k) => {
+            const from = cx(t)
+            const to = cx(t + k + 1)
+            const peak = TOP - 8 - k * 13
+            return (
+              <g key={k}>
+                <path
+                  d={`M ${rnd(from)} ${BOXY} C ${rnd(from)} ${rnd(peak)}, ${rnd(to)} ${rnd(peak)}, ${rnd(to)} ${BOXY}`}
+                  fill="none"
+                  stroke={ACCENT}
+                  strokeWidth={1.5}
+                  markerEnd="url(#mt-arrow)"
+                  opacity={0.85 - k * 0.14}
+                />
+                <text x={rnd((from + to) / 2)} y={rnd(peak - 3)} textAnchor="middle" fill={ACCENT} className="font-mono" fontSize={9} fontWeight={600} opacity={0.9 - k * 0.12}>
+                  +{k + 1}
+                </text>
+              </g>
+            )
+          })}
+
+          {/* token boxes */}
+          {TOKENS.map((tok, i) => {
+            const isPos = i === t
+            const isTarget = i > t && i <= t + reach
+            return (
+              <g key={i}>
+                <rect
+                  x={i * CELL + 4}
+                  y={BOXY}
+                  width={CELL - 8}
+                  height={BOXH}
+                  rx={7}
+                  fill={isPos ? ACCENT : isTarget ? ACCENT : "var(--background)"}
+                  fillOpacity={isPos ? 0.95 : isTarget ? 0.16 : 1}
+                  stroke={isPos || isTarget ? ACCENT : "var(--border)"}
+                  strokeWidth={1.5}
+                  filter={isPos ? "url(#mt-soft)" : undefined}
+                  className="transition-all duration-300"
+                />
+                <text
+                  x={cx(i)}
+                  y={BOXY + BOXH / 2 + 4}
+                  textAnchor="middle"
+                  fill={isPos ? "var(--background)" : "var(--foreground)"}
+                  className="font-mono"
+                  fontSize={11}
+                  fontWeight={isPos ? 600 : 400}
+                >
+                  {tok}
+                </text>
+              </g>
+            )
+          })}
+          <text x={cx(t)} y={BOXY + BOXH + 14} textAnchor="middle" fill="var(--muted-foreground)" className="font-mono" fontSize={9}>
+            position t
+          </text>
+        </svg>
+
+        {/* position scrubber */}
+        <div>
+          <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-muted-foreground">
+            <span>position t (drag)</span>
+            <span className="tabular-nums text-foreground">{t}</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={lastT}
+            step={1}
+            value={t}
+            onChange={(e) => {
+              setPlaying(false)
+              setT(Number(e.target.value))
+            }}
+            className="w-full cursor-pointer accent-[oklch(0.66_0.15_150)]"
+            aria-label="window position t"
+          />
         </div>
 
         {/* loss readout — min-height reserves the tallest case (n=4, four loss
             terms wrapping at mobile width) so the row count never changes as the
-            window auto-advances and reach shrinks toward the end of the sequence */}
+            window advances and reach shrinks toward the end of the sequence */}
         <div className="min-h-[80px] rounded-md border bg-muted/20 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
           <span className="text-foreground">L(t)</span> ={" "}
           {Array.from({ length: reach }, (_, k) => (
             <span key={k}>
               {k > 0 ? " − " : "− "}log P(
-              <span style={{ color: `oklch(0.72 0.14 ${150 + k * 14})` }}>{TOKENS[t + k + 1]}</span>
+              <span style={{ color: ACCENT, opacity: 1 - k * 0.14 }}>{TOKENS[t + k + 1]}</span>
               {" | z"}
               <sub>t</sub>)
             </span>
@@ -145,9 +171,7 @@ export function MTPTraining() {
               aria-pressed={n === k}
               className={cn(
                 "cursor-pointer rounded border px-2 py-1 transition-colors",
-                n === k
-                  ? "border-transparent bg-foreground text-background"
-                  : "text-muted-foreground hover:border-foreground/40"
+                n === k ? "border-transparent bg-foreground text-background" : "text-muted-foreground hover:border-foreground/40"
               )}
             >
               {k}

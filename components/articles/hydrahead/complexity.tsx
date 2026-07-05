@@ -11,71 +11,87 @@ import { useState } from "react"
 // length and read the relative cost. Illustrative n² vs n scaling.
 
 const MAXK = 512 // K tokens
+const FA = "oklch(0.7 0.15 25)"
+const LA = "oklch(0.62 0.13 195)"
+const HY = "oklch(0.68 0.15 150)"
+
+const W = 620
+const H = 300
+const padL = 48
+const padR = 92
+const padT = 20
+const padB = 40
+
+const sx = (k: number) => padL + (k / MAXK) * (W - padL - padR)
+const faCost = (k: number) => (k / MAXK) ** 2
+const laCost = (k: number) => (k / MAXK) * 0.14 // linear, cheap slope
+const hydraCost = (k: number) => (k / MAXK) * 0.24 // linear, a bit above LA (the FA heads)
+const sy = (c: number) => padT + (1 - c) * (H - padT - padB)
+
+const path = (f: (k: number) => number) =>
+  Array.from({ length: 65 }, (_, i) => {
+    const k = (i / 64) * MAXK
+    return `${i === 0 ? "M" : "L"} ${sx(k).toFixed(2)} ${sy(f(k)).toFixed(2)}`
+  }).join(" ")
+
+const area = (f: (k: number) => number) =>
+  `${path(f)} L ${sx(MAXK).toFixed(2)} ${sy(0).toFixed(2)} L ${sx(0).toFixed(2)} ${sy(0).toFixed(2)} Z`
 
 export function Complexity() {
   const [ctxK, setCtxK] = useState(128)
 
-  const W = 620
-  const H = 300
-  const padL = 46
-  const padR = 16
-  const padT = 16
-  const padB = 40
-  const sx = (k: number) => padL + (k / MAXK) * (W - padL - padR)
-  // normalize cost so FA at max = 1
-  const faCost = (k: number) => (k / MAXK) ** 2
-  const laCost = (k: number) => (k / MAXK) * 0.14 // linear, cheap slope
-  const hydraCost = (k: number) => (k / MAXK) * 0.24 // linear, a bit above LA (the FA heads)
-  const sy = (c: number) => padT + (1 - c) * (H - padT - padB)
-
-  const line = (f: (k: number) => number) =>
-    Array.from({ length: 65 }, (_, i) => {
-      const k = (i / 64) * MAXK
-      return `${sx(k)},${sy(f(k))}`
-    }).join(" ")
-
   const fa = faCost(ctxK)
   const la = laCost(ctxK)
   const hy = hydraCost(ctxK)
-  // cost relative to LA
   const faX = (fa / la).toFixed(fa / la >= 10 ? 0 : 1)
   const hyX = (hy / la).toFixed(1)
 
-  const FA = "oklch(0.72 0.15 25)"
-  const LA = "oklch(0.62 0.13 195)"
-  const HY = "oklch(0.72 0.15 150)"
-
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
         attention cost vs context length · full (n²) vs linear (n) vs HydraHead
       </div>
-      <div className="p-4">
+      <div className="p-3 sm:p-4">
         <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Attention compute cost versus context length: full attention grows quadratically and blows up, linear attention and HydraHead grow linearly and stay flat.">
-          {/* axes */}
-          <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="currentColor" strokeOpacity="0.2" />
-          <line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="currentColor" strokeOpacity="0.2" />
-          {[0, 128, 256, 384, 512].map((k) => (
-            <text key={k} x={sx(k)} y={H - padB + 15} textAnchor="middle" fontFamily="monospace" fontSize="9" fill="currentColor" fillOpacity="0.5">{k}K</text>
+          <defs>
+            <filter id="hh-soft" x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.16" />
+            </filter>
+            <linearGradient id="hh-fa" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={FA} stopOpacity={0.16} />
+              <stop offset="100%" stopColor={FA} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+
+          {/* horizontal gridlines */}
+          {[0, 0.25, 0.5, 0.75, 1].map((c) => (
+            <line key={c} x1={padL} y1={sy(c)} x2={W - padR} y2={sy(c)} stroke="var(--border)" strokeWidth={1} strokeOpacity={c === 0 ? 0.9 : 0.45} strokeDasharray={c === 0 ? undefined : "3 4"} />
           ))}
-          <text x={(W) / 2} y={H - 4} textAnchor="middle" fontFamily="monospace" fontSize="9" fill="currentColor" fillOpacity="0.45">context length</text>
-          <text x={12} y={H / 2} textAnchor="middle" fontFamily="monospace" fontSize="9" fill="currentColor" fillOpacity="0.45" transform={`rotate(-90 12 ${H / 2})`}>relative cost</text>
+          {/* x ticks */}
+          {[0, 128, 256, 384, 512].map((k) => (
+            <text key={k} x={sx(k)} y={H - padB + 15} textAnchor="middle" className="fill-muted-foreground/70 font-mono" fontSize={9}>{k}K</text>
+          ))}
+          <text x={padL + (W - padL - padR) / 2} y={H - 6} textAnchor="middle" className="fill-muted-foreground/60 font-mono" fontSize={9}>context length</text>
+          <text x={13} y={padT + (H - padT - padB) / 2} textAnchor="middle" className="fill-muted-foreground/60 font-mono" fontSize={9} transform={`rotate(-90 13 ${padT + (H - padT - padB) / 2})`}>relative cost</text>
+
+          {/* area under FA */}
+          <path d={area(faCost)} fill="url(#hh-fa)" />
 
           {/* curves */}
-          <polyline points={line(laCost)} fill="none" stroke={LA} strokeWidth="2" />
-          <polyline points={line(hydraCost)} fill="none" stroke={HY} strokeWidth="2" />
-          <polyline points={line(faCost)} fill="none" stroke={FA} strokeWidth="2" />
+          <path d={path(laCost)} fill="none" stroke={LA} strokeWidth={2} />
+          <path d={path(hydraCost)} fill="none" stroke={HY} strokeWidth={2} />
+          <path d={path(faCost)} fill="none" stroke={FA} strokeWidth={2} />
 
           {/* cursor */}
-          <line x1={sx(ctxK)} y1={padT} x2={sx(ctxK)} y2={H - padB} stroke="currentColor" strokeOpacity="0.25" strokeDasharray="3 3" />
-          <circle cx={sx(ctxK)} cy={sy(fa)} r="4" fill={FA} />
-          <circle cx={sx(ctxK)} cy={sy(hy)} r="4" fill={HY} />
-          <circle cx={sx(ctxK)} cy={sy(la)} r="4" fill={LA} />
+          <line x1={sx(ctxK)} y1={padT} x2={sx(ctxK)} y2={H - padB} stroke="var(--muted-foreground)" strokeOpacity={0.3} strokeDasharray="3 3" />
+          {[{ v: fa, c: FA }, { v: hy, c: HY }, { v: la, c: LA }].map((m, i) => (
+            <circle key={i} cx={sx(ctxK)} cy={sy(m.v)} r={4} fill={m.c} stroke="var(--background)" strokeWidth={1.5} filter="url(#hh-soft)" />
+          ))}
 
-          {/* labels */}
-          <text x={W - padR} y={sy(faCost(MAXK)) + 4} textAnchor="end" fontFamily="monospace" fontSize="10" fill={FA}>full attention · n²</text>
-          <text x={W - padR} y={sy(hydraCost(MAXK)) - 6} textAnchor="end" fontFamily="monospace" fontSize="10" fill={HY}>HydraHead · ~n</text>
-          <text x={W - padR} y={sy(laCost(MAXK)) + 14} textAnchor="end" fontFamily="monospace" fontSize="10" fill={LA}>linear · n</text>
+          {/* end labels (in right gutter) */}
+          <text x={W - padR + 8} y={sy(faCost(MAXK)) + 4} className="font-mono" fontSize={10} fill={FA}>full · n²</text>
+          <text x={W - padR + 8} y={sy(hydraCost(MAXK)) - 5} className="font-mono" fontSize={10} fill={HY}>HydraHead</text>
+          <text x={W - padR + 8} y={sy(laCost(MAXK)) + 12} className="font-mono" fontSize={10} fill={LA}>linear · n</text>
         </svg>
 
         {/* slider */}
@@ -91,20 +107,16 @@ export function Complexity() {
             step={8}
             value={ctxK}
             onChange={(e) => setCtxK(Number(e.target.value))}
-            className="w-full accent-foreground"
+            className="w-full cursor-pointer accent-foreground"
             aria-label="context length in thousands of tokens"
           />
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs sm:grid-cols-2">
-          <div className="bg-background px-3 py-2">
-            <div className="text-[10px] text-muted-foreground">full attention cost</div>
-            <div className="font-medium" style={{ color: FA }}>{faX}× linear</div>
-          </div>
-          <div className="bg-background px-3 py-2">
-            <div className="text-[10px] text-muted-foreground">HydraHead cost</div>
-            <div className="font-medium" style={{ color: HY }}>{hyX}× linear</div>
-          </div>
+        {/* readout */}
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px]">
+          <span className="text-muted-foreground">full attention <span style={{ color: FA }}>{faX}× linear</span></span>
+          <span className="text-border">·</span>
+          <span className="text-muted-foreground">HydraHead <span style={{ color: HY }}>{hyX}× linear</span></span>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

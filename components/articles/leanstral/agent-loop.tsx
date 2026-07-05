@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils"
 // model thinks, calls a tool (edit a file, `lake build`, query the Lean language
 // server), reads the compiler/LSP feedback, and revises. It just keeps going —
 // across millions of tokens and repeated context compaction — until the proof
-// compiles and SafeVerify accepts it. This steps through one turn of that loop.
+// compiles and SafeVerify accepts it. Drawn as the loop it is; step through one turn.
 
 const ACCENT = "oklch(0.70 0.19 42)" // Mistral orange
 
@@ -59,6 +59,17 @@ const STEPS = [
   },
 ] as const
 
+// scene geometry (viewBox units)
+const W = 760
+const H = 176
+const NW = 104
+const NH = 46
+const ML = 22
+const GAP = (W - 2 * ML - STEPS.length * NW) / (STEPS.length - 1)
+const ROWY = 40 // node top
+const nx = (i: number) => ML + i * (NW + GAP)
+const ncx = (i: number) => nx(i) + NW / 2
+
 export function AgentLoop() {
   const [i, setI] = useState(0)
   const [playing, setPlaying] = useState(true)
@@ -69,9 +80,22 @@ export function AgentLoop() {
     return () => clearInterval(id)
   }, [playing])
 
+  const rowBottom = ROWY + NH
+
+  // forward connector between adjacent nodes
+  const fwd = (a: number, b: number) => {
+    const x1 = nx(a) + NW, x2 = nx(b)
+    const y = ROWY + NH / 2
+    const mx = (x1 + x2) / 2
+    return `M ${x1} ${y} C ${mx} ${y}, ${mx} ${y}, ${x2} ${y}`
+  }
+  // the loop-back arc: revise (4) → think (1), dipping below the row
+  const dip = 132
+  const loop = `M ${ncx(4)} ${rowBottom} C ${ncx(4)} ${dip}, ${ncx(1)} ${dip}, ${ncx(1)} ${rowBottom}`
+
   return (
-    <figure className="my-8 overflow-hidden rounded-md border">
-      <div className="flex items-center justify-between border-b px-3 py-2 font-mono text-xs text-muted-foreground">
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+      <div className="flex items-center justify-between border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
         <span>the code-agent loop · think → act → read feedback → revise</span>
         <button type="button" onClick={() => setPlaying((p) => !p)} className="flex cursor-pointer items-center gap-1 transition-colors hover:text-foreground">
           {playing ? <PauseIcon size={12} weight="fill" /> : <PlayIcon size={12} weight="fill" />}
@@ -79,33 +103,62 @@ export function AgentLoop() {
         </button>
       </div>
 
-      <div className="p-4">
-        {/* cyclic step chips */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          {STEPS.map((st, k) => (
-            <span key={st.key} className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setI(k)}
-                className={cn("cursor-pointer rounded-md border px-2 py-1 font-mono text-[11px] transition-all", k === i ? "border-transparent text-background" : "text-muted-foreground hover:border-foreground/40")}
-                style={k === i ? { background: ACCENT } : undefined}
-              >
-                {st.tag}
-              </button>
-              <span className="text-muted-foreground/40">{k === STEPS.length - 1 ? "↻" : "→"}</span>
-            </span>
-          ))}
-        </div>
+      <div className="p-3 sm:p-4">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`Code-agent loop, step ${i + 1} of ${STEPS.length}: ${STEPS[i].tag}`}>
+          <defs>
+            <marker id="lsal-arrow" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="7" refY="0">
+              <path d="M0,-4L6,0L0,4" fill="none" stroke={ACCENT} strokeWidth={1.5} />
+            </marker>
+            <filter id="lsal-soft" x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.18" />
+            </filter>
+          </defs>
 
-        {/* grid-stack all steps in one cell so the box is always as tall as the
-            tallest step — the active one fades in, nothing below ever shifts */}
-        <div className="mt-4 grid">
+          {/* forward connectors */}
+          {STEPS.slice(1).map((_, idx) => (
+            <path key={idx} d={fwd(idx, idx + 1)} fill="none" stroke={ACCENT} strokeWidth={1.5} markerEnd="url(#lsal-arrow)" opacity={idx + 1 <= i ? 0.9 : 0.45} className="transition-opacity duration-300" />
+          ))}
+
+          {/* loop-back arc (revise → think) */}
+          <path d={loop} fill="none" stroke={ACCENT} strokeWidth={1.5} strokeDasharray="4 4" markerEnd="url(#lsal-arrow)" opacity={0.6} />
+          <text x={(ncx(1) + ncx(4)) / 2} y={dip - 4} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9}>doesn&apos;t compile yet → revise &amp; keep going</text>
+
+          {/* nodes */}
+          {STEPS.map((s, k) => {
+            const active = k === i
+            const done = k <= i
+            return (
+              <g key={s.key} onClick={() => { setPlaying(false); setI(k) }} className="cursor-pointer" role="button" aria-pressed={active}>
+                <rect
+                  x={nx(k)}
+                  y={ROWY}
+                  width={NW}
+                  height={NH}
+                  rx={9}
+                  fill="var(--background)"
+                  stroke={done ? ACCENT : "var(--border)"}
+                  strokeWidth={active ? 2 : 1.5}
+                  opacity={done ? 1 : 0.55}
+                  filter={active ? "url(#lsal-soft)" : undefined}
+                  className="transition-all duration-300"
+                />
+                <text x={ncx(k)} y={ROWY + 20} textAnchor="middle" className="font-mono" fontSize={11} fontWeight={600} fill={done ? "var(--foreground)" : "var(--muted-foreground)"}>{s.key}</text>
+                <text x={ncx(k)} y={ROWY + 33} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={8}>{k + 1}/{STEPS.length}</text>
+              </g>
+            )
+          })}
+
+          <text x={ML} y={22} className="fill-muted-foreground font-mono" fontSize={9}>one turn of Mistral Vibe →</text>
+        </svg>
+
+        {/* active-step detail — grid-stacked so nothing below ever shifts */}
+        <div className="mt-3 grid">
           {STEPS.map((st, k) => (
             <div
               key={st.key}
               aria-hidden={k !== i}
               className={cn(
-                "col-start-1 row-start-1 rounded-md border-l-2 bg-muted/30 px-3 py-3 transition-opacity duration-300",
+                "col-start-1 row-start-1 rounded-md bg-muted/40 px-3 py-3 transition-opacity duration-300",
                 k === i ? "opacity-100" : "pointer-events-none opacity-0",
               )}
               style={{ borderLeftColor: ACCENT }}

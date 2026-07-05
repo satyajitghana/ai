@@ -61,12 +61,12 @@ export function Deskew() {
         <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="LiDAR points from a moving sensor: raw stacking shears a straight wall; deskewing recovers it." className="mx-auto w-full max-w-[320px] rounded-md border bg-muted/20">
           {/* true wall */}
           <line x1={sx(WALL)} y1={sy(8)} x2={sx(WALL)} y2={sy(92)} stroke="var(--muted-foreground)" strokeWidth="1" strokeDasharray="3 3" opacity="0.5" />
-          <text x={sx(WALL)} y={sy(4)} textAnchor="middle" fontFamily="monospace" fontSize="8" fill="var(--muted-foreground)">true wall</text>
+          <text x={sx(WALL)} y={sy(4)} textAnchor="middle" className="font-mono" fontSize="8" fill="var(--muted-foreground)">true wall</text>
           {/* sensor trajectory */}
           {Array.from({ length: 5 }, (_, k) => (
             <circle key={k} cx={sx(2 + k * 3)} cy={sy(50)} r="2" fill="oklch(0.72 0.14 40)" opacity={0.3 + k * 0.15} />
           ))}
-          <text x={sx(8)} y={sy(62)} textAnchor="middle" fontFamily="monospace" fontSize="8" fill="var(--muted-foreground)">sensor →</text>
+          <text x={sx(8)} y={sy(62)} textAnchor="middle" className="font-mono" fontSize="8" fill="var(--muted-foreground)">sensor →</text>
           {/* points */}
           {pts.map((p, i) => (
             <circle key={i} cx={sx(p.x)} cy={sy(p.y)} r="2.6" fill={deskew ? "oklch(0.72 0.15 150)" : "oklch(0.72 0.15 25)"} />
