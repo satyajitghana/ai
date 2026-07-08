@@ -1,0 +1,182 @@
+---
+title: "Gemma 4: an open multimodal family, tuned to the KV-cache budget"
+description: "Google DeepMind's Gemma 4 is a family of open-weight, natively multimodal models from 2.3B to 31B — dense plus a 26B-A4B MoE — released under Apache 2.0 with a thinking mode. The engineering worth reading is the memory work: a 5:1 local-to-global attention ratio, pp-RoPE, and reusing keys as values on global layers cut the global KV cache ~37.5%; the 12B drops its vision and audio encoders for raw-patch projection; and an MTP drafter head does speculative decoding without prefill. This is a first-principles walk through those choices with the paper's own numbers."
+date: 2026-07-08
+tags:
+  - explainer
+  - llm
+  - architecture
+  - kv-cache
+  - long-context
+draft: false
+cover: /articles/gemma-4/fig1.png
+---
+
+import { AttnStrip } from "@/components/articles/gemma-4/attn-strip"
+import { KvBudget } from "@/components/articles/gemma-4/kv-budget"
+
+**Gemma 4** is Google DeepMind's next open-weight family: natively multimodal (text, image, audio), released under **Apache 2.0**, with sizes from **2.3B to 31B**. Four dense models — effective **2.3B (E2B)**, **4.5B (E4B)**, **12B**, **31B** — plus a Mixture-of-Experts variant, **26B-A4B**, with **~3.8B activated** of 26B total. The headline features read like a checklist: a **thinking mode**, an **encoder-free 12B**, and a raft of efficiency work aimed at long context. I care about the last part most, because it's the part that decides whether you can actually serve these on the hardware you have.
+
+<Callout type="note">
+Every benchmark here is **first-party** — Google's own report, thinking mode on unless noted, and the Gemma 3 27B column it compares against is **non-thinking**, so some of the generational jump is thinking-mode-vs-not rather than raw capability. The Arena ranking is real human eval but self-cited. Read it as a strong *open* family for its size, not an all-around SOTA claim: on the open leaderboard, several larger MoE models still sit above it.
+</Callout>
+
+## Where the sizes land
+
+The family splits by how much of the model runs per token, and by how "effective" and "total" parameters differ:
+
+| Model | Type | Total | Runs / token | Note |
+|---|---|---|---|---|
+| E2B | dense | 5B | 2.3B effective | per-layer embeddings (Gemma 3n trick) |
+| E4B | dense | 8B | 4.5B effective | per-layer embeddings |
+| 12B | dense | 12B | 12B | the encoder-free unified model |
+| 31B | dense | 31B | 31B | leading dense open model on Arena |
+| 26B-A4B | MoE | 26B | ~3.8B activated | sparse routing |
+
+"Effective" is the Gemma 3n move: **E2B** and **E4B** keep 5B and 8B parameters on disk but stream **per-layer embeddings** so only 2.3B / 4.5B are resident in the compute path. It's a memory-placement trick for on-device, not a routing one — orthogonal to the MoE sparsity in 26B-A4B, where a router activates ~3.8B of 26B per token.
+
+## Long context is a memory problem
+
+The expensive part of a long prompt isn't the matmul — it's the **KV cache**. Every past token leaves a key and a value in every attention layer, and under full attention that cache grows linearly with context on every layer:
+
+$$
+\text{KV}_{\text{full}} \;\propto\; 2 \cdot n_{\text{layers}} \cdot L \cdot d_{\text{kv}}
+$$
+
+The factor of 2 is K *and* V; $L$ is the context length. At 128k tokens this is what fills your accelerator's memory. Gemma 4 attacks it structurally. Most layers are **local** — sliding-window attention that only looks back a fixed window $W$ — and only **1 in 6** is **global**, attending over the whole context. The ratio is **5:1** for most models, **4:1** for E2B:
+
+<AttnStrip />
+
+That interleave changes the scaling. Local layers stop growing once the context passes $W$; only the global layers keep paying for length. Then two more moves shrink the global term itself. On global layers Gemma 4 **reuses keys as values** ($V = K$), storing one tensor where full attention stores two — except on E2B/E4B. Position uses **pp-RoPE** ($p = 0.25$) on global layers and ordinary RoPE (frequency 10k) on local ones, with global frequency 1M. Combined with KV-cache sharing, the report puts the **global KV-cache cut at 37.5%**. So the split KV cost looks like:
+
+$$
+\text{KV}_{\text{g4}} \;\propto\; \underbrace{2\,n_{\text{loc}}\,\min(L,W)\,d_{\text{kv}}}_{\text{local: bounded by }W} \;+\; \underbrace{n_{\text{glb}}\,L\,d_{\text{kv}}}_{\text{global: }V{=}K\text{, no factor of 2}}
+$$
+
+Slide the context up and watch which term dominates — the sliding window is the structural win, `values=keys` shaves what's left:
+
+<KvBudget />
+
+The payoff shows up in the real memory table. At 32k context the int8 KV cache adds only **+0.05 GB** (E2B), **+0.28 GB** (12B / 26B-A4B), **+1.10 GB** (31B) on top of the quantized weights — small enough that the weights, not the cache, stay the budget:
+
+| Model | Weights (bf16) | Quantized | + int8 KV @ 32k |
+|---|---|---|---|
+| E2B | 4.6 GB | 0.8 GB | +0.05 GB |
+| E4B | 9.0 GB | 2.3 GB | +0.14 GB |
+| 12B | 24.0 GB | 7.65 GB | +0.28 GB |
+| 26B-A4B | 52.0 / 7.6 GB | 16.2 / 2.8 GB | +0.28 GB |
+| 31B | 64.0 GB | 19.2 GB | +1.10 GB |
+
+The quantized column is **quantization-aware training** (QAT), not a post-hoc round: the model trains with fake-quant in the loop so int4/int8 weights land with minimal quality loss. That's how 31B fits in ~19 GB.
+
+## The encoder-free 12B
+
+The most unusual model is the **12B**, trained from scratch with **no vision or audio encoder at all**. Normally a multimodal LLM bolts a frozen ViT and a speech encoder onto the token stream. Gemma 4 12B replaces them with projections:
+
+- **Vision:** it takes raw **48×48×3 RGB patches** and projects them with a **single 35M-parameter matmul** — standing in for the **550M** ViT the larger models use. 2D coordinate embeddings and a LayerNorm carry spatial position.
+- **Audio:** the **305M USM conformer encoder is discarded entirely**. Raw audio is cut into **40ms chunks at 16kHz** (640-dim vectors) and projected straight into the embedding space. Audio is already temporal, so no extra positional encoding.
+
+The bet: give a large enough LLM the raw patches and it learns the encoder's job internally, for less memory and no separate frozen tower to serve. The report's Table 8 argues the 12B stays competitive on audio-text tasks without the dedicated encoder — a genuinely different design point from the encoder-plus-LLM norm, and the honest caveat is that it only did this for one size.
+
+For the models that *keep* a vision encoder, the input pipeline is worth a look too. Gemma 4 supports **variable aspect ratios** rather than square-cropping, resizing an image to fit a token budget $N_{\max} \in \{70, 140, 280, 560, 1120\}$ while mostly preserving shape:
+
+<Figure
+  src="/articles/gemma-4/fig2.png"
+  alt="A 572x1024 portrait image of an astronaut otter is resized by a mostly aspect-ratio-preserving algorithm (parameters k=3, sl=10, ps=16) into a 96x192 grid, which becomes 8 tokens of 72 patches each."
+  caption="Aspect-ratio-preserving resize: a 1:1.79 image maps to a token grid instead of a square crop, so tall or wide inputs keep their proportions (paper, Figure 2)."
+/>
+
+## Thinking mode
+
+Gemma 4 adds a **thinking mode**: before answering, the model can emit a reasoning trace, which lifts math and coding. It's a post-training addition on top of a Gemma 3-style recipe, toggled by a control token in a leading system turn:
+
+```text
+<|think|>              # activates the reasoning trace for this turn
+...user turn...
+# IT models close a turn with <turn|>; base (PT) models emit <eos>
+```
+
+Because the trace is optional, you pay for it only on the prompts that need it. The flip side, for anyone reading the tables: the Gemma 3 27B baseline is non-thinking, so a row like AIME (89.2 vs 20.8) is partly measuring the mode, not only the model.
+
+## MTP drafter: speculative decoding without prefill
+
+Decoding is memory-bandwidth-bound — one token per forward pass, weights re-read each step. The usual fix is **speculative decoding**: a small draft model proposes several tokens, the big model verifies them in one pass, and accepted tokens are free. Gemma 4 ships a **multi-token-prediction (MTP) drafter head** for exactly this.
+
+<Figure
+  src="/articles/gemma-4/fig1.png"
+  alt="Diagram of the autoregressive MTP drafter. The main model (gray blocks) processes token t1 and produces last-layer activations and a KV cache. The drafter (blue blocks) — an input embedding, a concat plus down-projection, four stacked MTP layers, and an up-projection into unembed plus softmax — consumes those activations and cross-attends to the main model's KV to autoregressively emit t3, t4."
+  caption="The autoregressive MTP drafter (blue) reads the main model's (gray) last-layer activations and KV cache, then emits future tokens by cross-attending to the main KV — no separate prefill (paper, Figure 1)."
+/>
+
+The drafter is a **4-layer Transformer block** (model dim 256 for E2B/E4B, 1024 for 26B-A4B/31B; three local and one global attention layers). It reuses the main model's last-layer activations and **cross-attends to the main model's KV cache**, so it needs **no prefill of its own** and supports any draft length. On E2B/E4B there's a further trick: instead of projecting the draft over the full **262k** vocabulary, it does a top-k over token clusters, cutting the final matmul from $d \times 262\text{,}000$ to $d \times 4096$ at a similar acceptance rate. The report doesn't publish an end-to-end speedup, so I won't invent one — but the design (no prefill, cross-attention to the live cache) is the part worth copying.
+
+If speculative decoding and MTP are new, I built the idea up from scratch in [Multi-Token Prediction](/articles/multi-token-prediction).
+
+## The numbers
+
+Start with human eval, since it's the least gameable. On **Arena Text** (blind side-by-side, Elo, as of June 2026), Gemma 4 31B is the **top dense open model** — but the leaderboard around it is mostly much larger MoE systems, and a closed model tops it:
+
+| Rank | Model | Elo | Open | Params / active |
+|---|---|---|---|---|
+| 1 | Claude Fable 5 | 1508 | no | – |
+| 15 | GLM 5.1 | 1475 | yes | 744B / 40B |
+| 38 | DeepSeek V4 Pro | 1456 | yes | 1.6T / 49B |
+| **43** | **Gemma 4 31B** | **1451** | **yes** | **31B dense** |
+| 61 | Gemma 4 26B-A4B | 1438 | yes | 26B / 4B |
+| 157 | Gemma 3 27B | 1366 | yes | 27B dense |
+
+An Elo of 1451 at **31B dense** against 744B–1.6T MoE models a dozen ranks up is the real story: it's punching well above its parameter count, not topping the board. On static reasoning benchmarks the family scales cleanly, and the jump over Gemma 3 27B is large (thinking-mode caveat noted):
+
+<BenchBars
+  title="AIME 2026, no tools (%) — first-party, thinking mode"
+  unit=""
+  bars={[
+    { label: "Gemma 4 31B", value: 89.2, highlight: true },
+    { label: "Gemma 4 26B-A4B", value: 88.3 },
+    { label: "Gemma 4 12B", value: 77.5 },
+    { label: "Gemma 4 E4B", value: 42.5 },
+    { label: "Gemma 4 E2B", value: 37.5 },
+    { label: "Gemma 3 27B", value: 20.8 },
+  ]}
+/>
+
+<BenchBars
+  title="GPQA Diamond (%) — first-party, thinking mode"
+  unit=""
+  bars={[
+    { label: "Gemma 4 31B", value: 84.3, highlight: true },
+    { label: "Gemma 4 26B-A4B", value: 82.3 },
+    { label: "Gemma 4 12B", value: 78.8 },
+    { label: "Gemma 4 E4B", value: 58.6 },
+    { label: "Gemma 4 E2B", value: 43.4 },
+    { label: "Gemma 3 27B", value: 42.4 },
+  ]}
+/>
+
+The rest of the text suite tells the same story — the 31B leads its own family, the 26B-A4B tracks close behind at a seventh of the active params, and both clear Gemma 3 27B by a wide margin:
+
+| Benchmark | 31B | 26B-A4B | 12B | E4B | E2B | Gemma 3 27B |
+|---|---|---|---|---|---|---|
+| MMLU Pro | 85.2 | 82.6 | 77.2 | 69.4 | 60.0 | 67.6 |
+| LiveCodeBench v6 | 80.0 | 77.1 | 72.0 | 52.0 | 44.0 | 29.1 |
+| Codeforces Elo | 2150 | 1718 | 1659 | 940 | 633 | 110 |
+| SciCode | 43.0 | 40.0 | 38.0 | 24.0 | 21.0 | 21.0 |
+| IFEval | 98.9 | 98.5 | 97.2 | 96.7 | 94.6 | 90.4 |
+| MMMLU | 88.4 | 86.3 | 83.4 | 76.6 | 67.4 | 70.7 |
+
+Vision holds up (MMMU Pro 76.9 / MATH-Vision 85.6 / InfographicVQA 92.0 for 31B at full resolution), and long context does what the KV work promises — **RULER at 128k** stays high where Gemma 3 27B falls off:
+
+| Long-context @ 128k | 31B | 26B-A4B | 12B | E4B | Gemma 3 27B |
+|---|---|---|---|---|---|
+| RULER (accuracy) | 96.4 | 89.8 | 91.2 | 86.6 | 66.0 |
+| LOFT (recall@k) | 79.5 | 66.3 | 66.4 | 58.5 | 8.6 |
+
+## The take
+
+Gemma 4's contribution isn't a benchmark crown — it's **efficiency engineering shipped in the open**. The pieces compose: a 5:1 local:global ratio and `values=keys` on global layers keep the KV cache flat enough that a 128k prompt costs single-digit gigabytes of cache; QAT puts 31B in ~19 GB; the encoder-free 12B deletes two frozen towers; the MTP drafter does speculative decoding without a second prefill. None of these is individually novel, but the combination is a serious on-device and single-accelerator story, released under **Apache 2.0** with a **31B dense model that is the top open dense entry on Arena**.
+
+The honest caveats are the first-party ones. The benchmarks are Google's own, thinking mode is on for Gemma 4 and off for the Gemma 3 baseline it's measured against, and "leading open model" is true only in the **dense** category — larger open MoE models (GLM 5.1, DeepSeek V4) rank above it on the same board. The encoder-free design is proven at exactly one size (12B), and there's no published MTP speedup to hold them to. For a team that wants an open, multimodal, long-context model that fits the hardware it already owns, the 12B and 31B are the ones I'd reach for — and the KV-cache design is the part I'd study regardless of which model I ended up serving.
+
+---
+
+*Built on the [Gemma 4 Technical Report](https://arxiv.org/abs/2607.02770) (Gemma Team, Google DeepMind, 2026), Apache 2.0 model license. All benchmark numbers are first-party from the report (thinking mode unless noted; the Gemma 3 27B baseline is non-thinking). The interactive diagrams are schematic illustrations of the mechanism, not measured traces; the two paper figures are reproduced for commentary.*

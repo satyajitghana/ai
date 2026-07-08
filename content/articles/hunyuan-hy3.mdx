@@ -1,0 +1,238 @@
+---
+title: "Hunyuan Hy3: Tencent's 295B-A21B MoE, and the community 1M GGUF"
+description: "Tencent's Hy3 (preview) is a 295-billion-parameter Mixture-of-Experts model that activates only 21B per token, ships open weights with a 256K native context, and pairs grouped-query attention with a multi-token-prediction draft head for speculative decode. This is a first-principles walk through the architecture, the hybrid fast/slow-thinking training, the honest gap between the trained 256K window and the community YaRN 1M GGUF, the GGUF quant ladder for local inference, and the full provider-reported benchmark suite."
+date: 2026-07-08
+tags:
+  - explainer
+  - llm
+  - mixture-of-experts
+  - long-context
+  - quantization
+  - inference-optimization
+draft: false
+cover: /articles/hunyuan-hy3/fig1.png
+---
+
+import { Hy3Arch } from "@/components/articles/hunyuan-hy3/hy3-arch"
+import { Hy3Quant } from "@/components/articles/hunyuan-hy3/hy3-quant"
+import { Hy3Context } from "@/components/articles/hunyuan-hy3/hy3-context"
+
+**Hy3** is Tencent Hunyuan's newest open model — released as a *preview* checkpoint, `Hy3 preview (295B A21B)`. It is a Mixture-of-Experts language model with **295 billion total parameters** that activates **21 billion per token**, ships **open weights** on Hugging Face and ModelScope, and serves a **256K native context**. Tencent frames it as a *hybrid fast-and-slow-thinking* model: one set of weights, a `reasoning_effort` knob that goes from `no_think` to `high`. The pitch is efficiency — "intelligence comparable to flagship models with two to five times its parameter scale."
+
+I read all three primary sources for this: the [research page](https://hy.tencent.com/research/hy3), the [`Tencent-Hunyuan/Hy3-preview` repo](https://github.com/Tencent-Hunyuan/Hy3-preview), and a community [`Hy3-1M-GGUF`](https://huggingface.co/satgeze/Hy3-1M-GGUF) build that YaRN-extends the context to 1,048,576 tokens for local inference. Two things are worth pinning down before any of the benchmark charts: the "1M" context is a **community artifact**, not a Tencent release, and the whole benchmark suite is **provider-reported**. Both matter, and I keep them separate below.
+
+<Callout type="warn">
+Everything numeric here is **provider-reported** — Tencent's own harness for the model charts, the community author's own samples for the GGUF. Hy3 tops **no** frontier benchmark: on the hardest STEM and agentic tasks **GPT-5.4**, **Gemini-3.1-Pro**, and **Claude Opus 4.6** all lead. Read it as a strong model *for its 21B active size*, competitive with **GLM-5** and **Kimi-K2.5**. The "comparable to 2–5× larger models" line and the "270-expert blind eval (2.67/4 vs GLM-5.1's 2.51/4)" are provider claims I cannot independently verify. And the **1M context is a community YaRN extension** of a model trained to **256K** — explicitly experimental and not needle-certified.
+</Callout>
+
+## Where the 295B lives
+
+The parameter accounting is the whole economic argument, so start there. Hy3 is **80 decoder layers** of MoE, plus **1 extra multi-token-prediction (MTP) layer** (3.8B params). Each MoE layer holds **192 experts**; the router keeps the **top-8** per token. So of 295B total, only ~**21B is active** on any given token — roughly a **7% activation rate**. That sparsity is what lets a 295B model serve at the cost of a ~21B dense one.
+
+Attention is **grouped-query attention (GQA)**: **64 query heads** but only **8 KV heads**, `head_dim` 128, hidden size 4096. The 8-way sharing is not a detail — it is an 8× cut in KV-cache memory versus full multi-head attention, and it is the reason a 256K window is affordable at all (more on that below). The MTP layer drafts the next token so the main model can **verify several tokens per step** — speculative decoding, built into the weights rather than bolted on.
+
+Walk one token through a block. Flip stages to see the KV grouping, the top-8 route, and the draft head:
+
+<Hy3Arch />
+
+<Diagram
+  ascii={`
+Hy3 preview — 295B total / 21B active (top-8 of 192 experts)
+
+  token id ─▶ embed 4096 (vocab 120,832, RMSNorm)
+                │
+                ▼
+  ┌────────────────────────────────────────────┐
+  │  × 80 decoder layers                        │
+  │                                             │
+  │   GQA:  64 query heads ── share ──▶ 8 KV    │   head_dim 128
+  │         (KV cache is 8× smaller than MHA)   │
+  │                                             │
+  │   MoE:  router → top-8 of 192 experts       │   ~21B active
+  │         intermediate 13312                  │
+  └────────────────────────────────────────────┘
+                │
+                ▼
+  MTP layer (3.8B) ─▶ draft next token ─▶ main model verifies
+`}
+  caption="Hy3 preview block: GQA attention + top-8/192 MoE, ×80, then a shared MTP draft head for speculative decode."
+/>
+
+If the MoE routing here is new, I built it from nothing in [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch) — the router, the top-k gate, and why activating a sparse subset is the entire reason a model this large is cheap to run. The MTP head is the same idea I unpacked in [Multi-Token Prediction](/articles/multi-token-prediction): predict more than one token so a cheap draft can be verified in a single forward pass.
+
+One honest architecture note Tencent does not hide but does not emphasize: this is the **preview** release. The card labels it `295B A21B`, and the community GGUF card rounds the same weights to `~299B / ~17B active`. I use Tencent's official figures (295B / 21B) throughout; the ~2% discrepancy is a community rounding, not a second model.
+
+## Training: one model, two speeds
+
+Tencent is thin on the training story, and I will not pad it. What the sources actually say: Hy3 was built with "strengthened reinforcement learning and enhanced data quality and diversity," and refined "through use by global developers and across Tencent's large-scale real-world business scenarios." No token count, no data-mix percentages, no stage breakdown. Treat the training narrative as a claim.
+
+The concrete, testable part is the **hybrid thinking** interface. A single `reasoning_effort` parameter switches inference mode:
+
+- `no_think` — direct answer, no chain-of-thought (the default, and the cheapest).
+- `low` — moderate CoT.
+- `high` — deep CoT for hard reasoning.
+
+That is exposed at serve time, so you pay for reasoning only when the task needs it. On an OpenAI-compatible endpoint you set it per request:
+
+```python
+# after deploying Hy3 behind vLLM / SGLang (OpenAI-compatible)
+resp = client.chat.completions.create(
+    model="hy3-preview",
+    messages=[{"role": "user", "content": "prove there are infinitely many primes"}],
+    temperature=0.9,      # Tencent's recommended default
+    top_p=1.0,
+    extra_body={"chat_template_kwargs": {"reasoning_effort": "high"}},
+)
+```
+
+The pretrained base model is where the numbers are cleanest, because base-model evals are the least harness-sensitive. On general knowledge Hy3-Base sits a hair under the larger open models — **MMLU 87.42** (Kimi-K2 88.24, GLM-4.5 87.73, DeepSeek-V3 87.68) — but it *leads* its comparison set on several reasoning and math rows:
+
+| Benchmark | Hy3-Base | Kimi-K2 | DeepSeek-V3 |
+|---|---|---|---|
+| MMLU | 87.42 | **88.24** | 87.68 |
+| MMLU-Pro | 65.76 | **65.98** | 63.98 |
+| MATH | **76.28** | 71.20 | 59.37 |
+| GSM8K | **95.37** | — | — |
+| LiveCodeBench-v6 | **34.86** | — | — |
+| CRUXEval-I | **71.19** | — | — |
+| SuperGPQA | **51.60** | — | — |
+| MMMLU (multilingual) | **80.15** | 77.63 | 79.54 |
+
+The pattern holds across the suite: Hy3-Base trails the biggest models slightly on broad knowledge, then pulls ahead on math (MATH 76.28 vs DeepSeek-V3's 59.37 is not close) and code reasoning. For a model activating 21B, that is the interesting shape.
+
+## Long context: 256K trained, 1M borrowed
+
+Here is where the honesty matters most. Hy3's **trained** context is **256K**. The headline "1M" in this article's third source is a **community** build (`satgeze/Hy3-1M-GGUF`) that applies **YaRN** to stretch positional encoding out to **1,048,576 tokens**. YaRN rescales RoPE frequencies so the model can *index* positions it never saw in training — it extends reach, it does not re-train competence. The GGUF card says so plainly: the 1M window is "unverified at full length," experimental, and **not yet needle-certified**.
+
+So the useful mental model is two numbers: 256K you can lean on, and a 1M ceiling you should measure before trusting. Drag the window below and watch the KV-cache cost — and the point where you cross from *trained* into *extrapolated*:
+
+<Hy3Context />
+
+The KV-cache arithmetic is worth doing by hand, because it explains both the GQA choice and why 1M is expensive regardless of quality. Per token, the cache stores K and V for every layer:
+
+$$
+\text{bytes/token} = 2 \times n_{kv} \times d_{head} \times L \times b
+= 2 \times 8 \times 128 \times 80 \times b
+$$
+
+With $b = 2$ bytes (fp16) that is **320 KiB/token**. Multiply by context:
+
+- **256K** tokens → ~**80 GiB** of KV cache (fp16), ~40 GiB at fp8.
+- **1M** tokens → ~**320 GiB** (fp16), ~160 GiB at fp8 — *on top of* the weights.
+
+Now the GQA payoff is obvious. Full MHA would use **64 KV heads**, not 8, so every one of those numbers would be **8× larger** — 640 GiB of cache at 256K. GQA is not a quality trick here; it is what makes the window fit in memory at all. If you want to push the cache down further, that is exactly the territory of [TurboQuant KV-cache quantization](/articles/turboquant-kv-cache) and why [how LLM inference works](/articles/how-llm-inference-works) spends so long on the cache.
+
+Tencent's own long-context numbers land where you'd expect for a 256K-trained model: on **LongBench v2** Hy3 scores **65.4** (up from Hy2's 56.4), matching Kimi-K2.5 (65.6) and edging GLM-5 (62.5), while GPT-5.4 (67.4) and Gemini-3.1-Pro (67.1) lead. On **AA-LCR** it's **66.3**. Competitive at its size, not a long-context leader.
+
+<Figure
+  src="/articles/hunyuan-hy3/fig3.png"
+  alt="Five grouped bar panels — AdvancedIF, AA-LCR, LongBench v2, CL-bench, CL-bench Life — comparing Hy3 preview and Hy2 (blue) against Gemini-3.1-Pro, GLM-5, Kimi-K2.5, and GPT-5.4. Hy3 improves clearly over Hy2 in every panel and matches GLM-5 and Kimi-K2.5, but GPT-5.4 and Gemini-3.1-Pro top most panels."
+  caption="Context-learning and long-context suite. Hy3 (dark blue) over Hy2 (light blue); frontier models still lead the hardest panels (Tencent Hunyuan, Fig 3)."
+/>
+
+## Quantization and running it locally
+
+The base weights are ~**590 GB** in BF16 — multi-GPU territory. Three paths bring that down.
+
+**FP8, at serve time.** vLLM quantizes the loaded BF16 weights online with `--quantization fp8`, roughly **halving the footprint to ~295 GB** (sources conflict on whether a standalone `Hy3-FP8` checkpoint also ships — the runtime path is the one I'd rely on). Tencent's `AngelSlim` toolkit adds low-bit quantization and speculative-sampling support on top.
+
+**GGUF, for CPU/Mac.** This is what the community `Hy3-1M-GGUF` build is for: `llama.cpp`-style quantization that runs on a single machine with lots of RAM instead of a rack of GPUs. The quant ladder trades size for quality. Pick a RAM budget and see what fits:
+
+<Hy3Quant />
+
+The sizes on that chart are the exact ones the card reports; the quality pip is an *illustrative* ordering from bits-per-weight, not a measured score — the card is explicit that even the good quants prove "coherence and basic instruction-following, not reasoning, long-context retrieval, or factual accuracy." The practical reads:
+
+- **IQ1_M (62 GB)** fits a 128 GB Mac but is visibly weaker (it dropped list formatting in the author's samples).
+- **IQ2_M (~92 GB)** is the recommended baseline; **MTP-IQ2_M (~100 GB)** bakes in a `q8_0` draft head for speculative decode.
+- **Q4_K_M (183 GB)** is the highest-quality GGUF and needs a **192 GB+** box.
+
+Running it is a `llama.cpp` server with the model's chat template and the extended context:
+
+```bash
+# 256K context; needs a hy_v3-capable llama.cpp build
+llama-server -m hy3-1M-IQ2_M.gguf -c 262144 -np 1 --jinja \
+  --chat-template-file chat_template_llamacpp.jinja
+
+# MTP speculative decode (draft head)
+llama-server -m hy3-1M-MTP-IQ2_M.gguf -c 262144 --jinja \
+  --spec-type draft-mtp --spec-draft-n-max 3 --spec-draft-p-min 0.75
+```
+
+Reported throughput: **24–25 tok/s** generation on a **MacBook Pro M3 Max (128 GB)**, dropping to 17–19 tok/s in long conversations. The MTP draft head gives **+26–37%** on CUDA (an RTX 5090) but is roughly **neutral on Apple Silicon** — speculative decode helps when verification is compute-bound, which it is on the GPU and mostly isn't on the Mac. That is an honest, useful asymmetry: don't expect the draft head to speed up your laptop.
+
+For the datacenter path, the official serving stacks are vLLM and SGLang, both with the MTP/EAGLE draft and Hunyuan's tool + reasoning parsers:
+
+```bash
+vllm serve tencent/Hy3-preview \
+  --tensor-parallel-size 8 \
+  --speculative-config.method mtp --speculative-config.num_speculative_tokens 1 \
+  --tool-call-parser hy_v3 --reasoning-parser hy_v3 \
+  --enable-auto-tool-choice --served-model-name hy3-preview
+```
+
+## The benchmarks, in full
+
+The clearest way to read Hy3 is as a **trajectory**: what changed from Hy2 (the previous generation, Nov 2025) to Hy3 preview (Apr 2026). On the agentic suite the jump is large, and it lands Hy3 in the pack with GLM-5 and Kimi-K2.5 — below Claude Opus 4.6.
+
+<Figure
+  src="/articles/hunyuan-hy3/fig1.png"
+  alt="Four line panels — SWE-bench Verified, Terminal-Bench 2.0, BrowseComp, WideSearch — plotting each model from 2025-11 to 2026-04. Hy3 preview (blue) rises steeply from Hy2 to land near GLM-5 and Kimi-K2.5, below Claude Opus 4.6, on every panel."
+  caption="Agent-benchmark trajectory from Hy2 to Hy3 preview against Kimi-K2/K2.5, GLM-4.7/GLM-5, and Claude Opus 4.5/4.6 (Tencent Hunyuan, Fig 1)."
+/>
+
+The four agent numbers, provider-reported:
+
+- **SWE-bench Verified**: Hy2 53.0 → **Hy3 74.4**. Field: GLM-4.7 73.8, Kimi-K2.5 76.8, GLM-5 77.8, Claude Opus 4.6 80.8.
+- **Terminal-Bench 2.0**: Hy2 23.2 → **Hy3 54.4**. Kimi-K2.5 50.8, GLM-5 56.2, Claude Opus 4.6 65.4.
+- **BrowseComp**: Hy2 28.7 → **Hy3 67.1**. GLM-4.7 67.5, Kimi-K2.5 74.9, GLM-5 75.9, Claude Opus 4.6 84.0.
+- **WideSearch**: Hy2 53.9 → **Hy3 70.2**. GLM-5 69.8, Kimi-K2.5 72.7, Claude Opus 4.6 77.2.
+
+The two coding-agent panels tell the "competitive, not leading" story cleanly. Hy3 tracks GLM-5 and Kimi-K2.5, and trails the Claude Opus 4.6 line:
+
+<BenchBars
+  title="SWE-bench Verified (%) — provider-reported"
+  unit=""
+  bars={[
+    { label: "Hy3 preview", value: 74.4, highlight: true },
+    { label: "Kimi-K2.5", value: 76.8 },
+    { label: "GLM-5", value: 77.8 },
+    { label: "Claude Opus 4.6", value: 80.8 },
+  ]}
+/>
+
+<BenchBars
+  title="Terminal-Bench 2.0 (%) — provider-reported"
+  unit=""
+  bars={[
+    { label: "Hy3 preview", value: 54.4, highlight: true },
+    { label: "Kimi-K2.5", value: 50.8 },
+    { label: "GLM-5", value: 56.2 },
+    { label: "Claude Opus 4.6", value: 65.4 },
+  ]}
+/>
+
+On raw reasoning and STEM the shape splits. Hy3 **matches or leads** its size class on GPQA-Diamond (87.2, vs GLM-5 86.0, Kimi-K2.5 87.6) and the Chinese-curriculum exams (China High School Biology Olympiad 87.8 — the top bar), but the frontier models pull away on the very hardest sets: on **HLE** (Humanity's Last Exam) Hy3 is **30.0** against GPT-5.4's 39.8 and Gemini-3.1-Pro's 44.4, and on the IMO Answer Bench it's 84.3 vs 89–92 for the closed pair. Note the asterisks in the figure: domestic models are scored on a text-only subset, so cross-vendor HLE/CHSBO numbers are not strictly like-for-like.
+
+<Figure
+  src="/articles/hunyuan-hy3/fig2.png"
+  alt="Six STEM bar panels — FrontierScience Olympiad, IMO Answer Bench, HLE, GPQA-Diamond, Tsinghua Qiuzhen math PhD qualifier, CHSBO 2025 — with Hy3 preview and Hy2 in blue against Gemini-3.1-Pro, GLM-5, Kimi-K2.5, and GPT-5.4. Hy3 tops GPQA and CHSBO in its class; GPT-5.4 and Gemini-3.1-Pro lead HLE and IMO."
+  caption="STEM and reasoning suite. Hy3 leads its size class on GPQA and the Chinese-curriculum exams; the frontier pair leads the hardest sets. Note: domestic models on a text-only subset (Tencent Hunyuan, Fig 2)."
+/>
+
+The agentic **Claw** benchmarks (tool-use) are the honest ceiling: Hy3 improves hugely over Hy2 (ClawEval 32.4 → **55.0**, WildClawBench 33.7 → **45.3**) and edges Kimi-K2.5, but Claude Opus 4.6 is clearly ahead (ClawEval 66.3, WildClawBench 60.4).
+
+<Figure
+  src="/articles/hunyuan-hy3/fig4.png"
+  alt="Two bar panels — WildClawBench and ClawEval — with Hy3 preview and Hy2 in blue against GLM-5, Kimi-K2.5, and Claude Opus 4.6. Hy3 roughly doubles Hy2 and edges Kimi-K2.5, but Claude Opus 4.6 is the tallest bar in both."
+  caption="Claw agentic tool-use benchmarks. Hy3 roughly doubles Hy2 and matches GLM-5 / Kimi-K2.5; Claude Opus 4.6 leads both (Tencent Hunyuan, Fig 4)."
+/>
+
+## The take
+
+Hy3's real claim isn't a leaderboard crown — it's **efficiency at 21B active**. It roughly matches GLM-5 and Kimi-K2.5 across coding, search, and STEM while activating a fraction of their parameters, and it packages the pieces that make a MoE cheap to serve: **GQA** (8 KV heads → 8× smaller cache), an **MTP** draft head for speculative decode, a **256K** trained window, open weights, and a `reasoning_effort` knob so you pay for chain-of-thought only when you need it. That is a coherent systems story, and the base-model math scores (MATH 76.28) back the reasoning pitch.
+
+The caveats are the usual open-weights ones, stated plainly. Every number is Tencent's own harness; independent reproduction reports treat them as upper bounds. This is a **preview** checkpoint. Hy3 trails **Claude Opus 4.6**, **GPT-5.4**, and **Gemini-3.1-Pro** on the hardest agentic and STEM tasks — sometimes by a wide margin (HLE 30.0 vs 44.4). And the eye-catching **1M context is a community YaRN extension**, not a trained window: 256K is what I'd trust, 1M is what I'd measure. The community GGUF is a genuinely useful gift for anyone with a 128 GB Mac and patience — but the card is right to call it experimental. For a team that wants an open, agent-capable model at a real inference discount, and can either run 8×GPU tensor-parallel or a fat single box, Hy3 preview earns a look. As "flagship intelligence at 2–5× smaller" — that part is Tencent's claim, and worth checking yourself.
+
+---
+
+*Built from the [Hy3 research page](https://hy.tencent.com/research/hy3), the [`Tencent-Hunyuan/Hy3-preview` repo](https://github.com/Tencent-Hunyuan/Hy3-preview) (295B-A21B, 256K context), and the community [`satgeze/Hy3-1M-GGUF`](https://huggingface.co/satgeze/Hy3-1M-GGUF) build (YaRN 1M, experimental). All benchmark numbers are provider-reported; the four figures are reproduced from Tencent's model card for commentary. The interactive diagrams are illustrations of the mechanism, not measured traces — the architecture walk-through, the GGUF size ladder, and the KV-cache calculator all use the published configs and reported sizes, but the quality ordering in the quant explorer is illustrative, not benchmarked. The community 1M window is a third-party artifact, not a Tencent release.*

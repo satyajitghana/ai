@@ -1,0 +1,152 @@
+---
+title: "Antidoom: breaking doom loops with Final Token Preference Optimization"
+description: "Liquid AI's Antidoom explains why small reasoning models get stuck repeating a span until the context runs out, and fixes it with Final Token Preference Optimization — a DPO-like method that retrains only the trailing token, spreads probability across several chosen alternatives, and regularizes the rest of the vocabulary in logit space. It cuts the doom-loop rate from 10.2% to 1.4% (LFM2.5-2.6B) and 22.9% to 1% (Qwen3.5-4B), with eval scores rising because the model can finally reach answers it already knew."
+date: 2026-07-08
+tags:
+  - explainer
+  - llm
+  - reinforcement-learning
+  - training
+  - inference-optimization
+draft: false
+cover: /articles/antidoom/fig1.png
+---
+
+import { DoomLoop } from "@/components/articles/antidoom/doom-loop"
+import { FinalToken } from "@/components/articles/antidoom/final-token"
+
+A **doom loop** is when a model emits a span — usually something like `Wait, let me reconsider…` — and then repeats that same span again, and again, until the context window is exhausted. Liquid AI's **Antidoom** post is about why this happens and how to train it away. Their fix is **Final Token Preference Optimization (FTPO)**: a DPO-like method that retrains a single position, the one where the loop would restart, so the model has somewhere else to go. On an early **LFM2.5-2.6B** checkpoint it takes the doom-loop rate from **10.2% to 1.4%**; on **Qwen3.5-4B** from **22.9% to 1%**. The interesting part is *why* eval scores go up when they do it: the training teaches the model nothing new about math or code, it just removes the failure mode that was keeping it from finishing.
+
+<Callout type="note">
+Every number here is **provider-reported** by Liquid AI (blog + the `LiquidAI/antidoom-mix-v1.0` dataset). The two interactive widgets are my illustrations of the mechanism — schematic distributions and logits, not measured traces. The four embedded charts are the post's own figures, reproduced for commentary.
+</Callout>
+
+## What a loop looks like
+
+The detector is blunt and effective: a completion is flagged as looping if a section **repeats at least four times, over at least 60 characters**. Small reasoning models hit this most on long thinking traces for hard math and coding — exactly the prompts where the model is uncertain for a long stretch.
+
+The tokens that *start* a loop are not random. On the early LFM2.5-2.6B checkpoint, Liquid counted which token opens the repeating span:
+
+```text
+count    share  token
+ 2277  11.39%  ' the'
+  902   4.51%  ' So'
+  644   3.22%  'Alternatively'
+  511   2.56%  'Wait'
+  493   2.46%  ' But'
+```
+
+These are discourse markers and self-reflection tokens. They are not bad tokens — `Wait` or `Alternatively` can mark a genuine change of strategy. The problem is what happens when the model reaches for one *under uncertainty* and then can't get back out.
+
+## Why the loop tightens
+
+Three things stack up, and it's worth keeping them separate because FTPO only attacks the third.
+
+**High priors.** Some tokens carry artificially high prior probability. Liquid points at synthetic training data inflating certain words above their natural human-text frequency — the same effect that made `delve` and `testament` model tells. In reasoning traces, the inflated tokens are the discourse markers above. When the model is unsure of the next real step, these dominate the next-token distribution, and it restarts the same local reasoning pattern instead of making progress.
+
+**Self-reinforcing context.** This is the one that turns a stumble into a loop. Once a span is in the context, that span becomes *more* likely to appear again — and with each repetition the probability of every token inside the looping span climbs toward 1. The distribution collapses:
+
+<Figure
+  src="/articles/antidoom/fig1.png"
+  alt="Four rows of tokenized text — Pre-loop, Loop 1, Loop 2, Loop 3 — each token shaded by its probability. Pre-loop and later loops are near-uniformly dark (probability ~1); Loop 1 has several lighter, lower-probability tokens. Annotations show the span probability rising 0.815, 0.961, 0.995 and the first-token probability rising 0.412, 0.920, 0.962 across repeats."
+  caption="The same repeated span, shaded by per-token probability across repeats. The span probability climbs 0.815 → 0.961 → 0.995 and the first token of the repeat climbs 0.412 → 0.920 → 0.962 — by the third pass the whole span is locked in near 1 (Liquid AI, Antidoom blog)."
+/>
+
+**Greedy decoding has no exit.** At low temperature — and especially at temp 0 — the model takes the argmax. Once self-reinforcement has pushed the loop token's probability close to 1, there is almost no mass left on anything else, so there is nothing to sample instead. Turning up temperature only helps a little: Liquid reports significant looping even at **temp=0.67**, because there just isn't enough probability left on the alternatives to escape.
+
+The widget below is the whole story in one place. In **base model** mode, step the repeat count and watch the loop token `Wait` climb from ~41% to ~98% while the distribution collapses onto it — greedy decoding restarts the span every time. Flip to **after FTPO** once you've read the next section to see the fix.
+
+<DoomLoop />
+
+## Why the easy fixes don't hold
+
+The usual inference-time patch is `repetition_penalty`, which reweights the output distribution to discourage repeats. It's a band-aid: it fights the symptom at decode time and can degrade quality, and it doesn't touch the priors that caused the collapse. Reinforcement learning *can* target looping, but it needs carefully calibrated rewards and costly online rollouts. FTPO's pitch is to fix the distribution once, offline, at the exact position where the loop begins.
+
+## Final Token Preference Optimization
+
+FTPO is preference optimization in the DPO family. The reference form of DPO trains a policy $\pi_\theta$ against a frozen reference $\pi_{\text{ref}}$ to prefer a chosen response $y_w$ over a rejected one $y_l$:
+
+$$
+\mathcal{L}_{\text{DPO}} = -\,\mathbb{E}_{(x,\,y_w,\,y_l)}\!\left[\log \sigma\!\left(\beta \log \frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta \log \frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\right)\right]
+$$
+
+FTPO keeps that skeleton and changes four things, each aimed at *not* over-correcting:
+
+1. **Final token only.** It trains the *trailing* token of a sequence that is midway through generation — the single position where the loop would restart — not a whole response. $y_w$ and $y_l$ are one token each, at one place.
+2. **Multiple chosen tokens per sample.** Instead of one $y_w$, it uses a *set* of plausible chosen tokens. This spreads the freed-up probability across several alternatives, so you aren't just replacing one overtrained token with a new overtrained token.
+3. **A KL-like term in logit space.** The reference-anchoring divergence is computed on **logits**, omitting the softmax. That avoids gradient pressure leaking onto unrelated tokens through the normalization.
+4. **Two-part regularization.** The tokens it means to move — chosen and rejected — are allowed to travel freely relative to the reference, while the rest of the vocabulary is held tightly near it. Loosen the ones you're fixing, pin everything else.
+
+### Building the training row
+
+A training row is a `[prompt prefix, one rejected token, one or more chosen tokens]` tuple, and Liquid mines it straight from the model's own failures. They generate completions on a loop-eliciting prompt mix (`LiquidAI/antidoom-mix-v1.0`) at low temperature, detect a loop with the ≥4-repeats / ≥60-chars rule, and target the **first token of the first repeat** as the rejected token. At that position they take the base model's top-k log-prob alternatives, filter out short and non-alphanumeric noise, and keep up to **20** plausible substitutes as the chosen set. Before training they regularize the two distributions, because a small set of culprits (`Wait`, `So`, `the`) would otherwise dominate — and over-suppressing them degrades reasoning.
+
+<Figure
+  src="/articles/antidoom/fig2.png"
+  alt="A training example. A boxed prompt prefix shows a chat template: user asks who voiced Davy Jones; the assistant thinking trace reads 'Bill Nighy is the voice for Davy Jones. Wait, let me check if there's any other actor. No, Bill Nighy is the one.' Below, the token 'Wait' is labelled Rejected (down arrow), and three tokens 'Let's', 'Yes', 'Ok' are each labelled Chosen (up arrow)."
+  caption="One FTPO training row: the prompt prefix ends where the loop restarts, 'Wait' is the single rejected token, and several plausible continuations ('Let's', 'Yes', 'Ok') are the chosen set (Liquid AI, Antidoom blog)."
+/>
+
+The next widget is the same idea in logit space — the mechanism the figure above doesn't draw. Toggle **reference → after FTPO** to watch the one trained position: the rejected `Wait` logit driven down, several chosen logits lifted up, and the entire rest of the vocabulary pinned near where it started.
+
+<FinalToken />
+
+That last property is the reason this works without collateral damage. FTPO isn't teaching the model anything about Davy Jones or about calculus; it's redistributing probability at the exact positions where the model was getting stuck, and leaving the rest of the distribution alone.
+
+## Results
+
+The headline is the doom-loop rate under greedy decoding. On the early LFM2.5-2.6B checkpoint it drops from 10.2% to 1.4%; on Qwen3.5-4B, from 22.9% to 1%.
+
+<Figure
+  src="/articles/antidoom/fig3.png"
+  alt="Bar chart titled 'Doom-loop Rate', benchmark all temp=0, lower is better. LFM2.5-2.6B: base 10.20, anti doom-loop 1.40. Qwen3.5-4B: base 22.90, anti doom-loop 1.00."
+  caption="Doom-loop rate at temp=0 (lower is better), base vs Antidoom, for both models (Liquid AI, Antidoom blog)."
+/>
+
+<BenchBars
+  title="Doom-loop rate (%, temp=0) — lower is better · provider-reported"
+  unit="%"
+  bars={[
+    { label: "LFM2.5-2.6B base", value: 10.2 },
+    { label: "LFM2.5-2.6B + FTPO", value: 1.4, highlight: true },
+    { label: "Qwen3.5-4B base", value: 22.9 },
+    { label: "Qwen3.5-4B + FTPO", value: 1.0, highlight: true },
+  ]}
+/>
+
+Eval scores go up across the board — but Liquid is careful about the causal story, and so am I. The training set teaches the model nothing new about math or code; it removes the failure mode that was preventing the model from reaching answers it could already produce. A completion that used to spiral into `Wait, let me reconsider…` until it ran out of tokens now finishes and gets scored. The gain is recovered credit, not new capability.
+
+### The temperature tradeoff
+
+This is the honest catch, and it's a genuinely interesting one. Break the LFM2.5-2.6B evals out by decoding temperature:
+
+<Figure
+  src="/articles/antidoom/fig4.png"
+  alt="Eight small line charts of score vs temperature (0 to 1) for LFM2.5-2.6B early checkpoint, base (grey) vs antidoom (purple): Average, Doom-loop rate, AIME25, GPQA, GSMPlus, IFEval, LiveCodeBench v6, RULER. The antidoom curves start far higher than base at temp 0 on most panels; the base curves rise with temperature and largely catch up by temp 1.0. On the Average panel antidoom peaks around temp 0.33 (~48.7) and falls to ~44.8 at temp 1.0, meeting the base curve."
+  caption="LFM2.5-2.6B early checkpoint, score vs temperature: base (grey) vs Antidoom (purple) across eight evals. Antidoom leads by a wide margin at low temperature and the two converge near temp=1.0 (Liquid AI, Antidoom blog)."
+/>
+
+The average score panel tells it: Antidoom leads by roughly 8 points at temp 0 (≈47 vs ≈38), peaks around temp 0.33, and then falls back to meet the base curve near temp 1.0 (≈45). The base model, meanwhile, climbs steadily with temperature — because sampling was its only escape from the loops. So FTPO effectively **shifts the model's best operating temperature downward**: it makes low-temperature decoding safe, which is where you'd want to run a small reasoning model anyway, but it gives up the high-temperature regime, where the extra randomness now mostly adds noise instead of buying an exit. That cuts against the usual intuition that reasoning models like a bit of temperature.
+
+### Cost and recipe
+
+The whole thing is cheap, which is the other reason to care. For the early LFM2.5-2.6B checkpoint, generating the training set took about **1 hour on 8× MI325** GPUs (bounded by the model's own loop rate, since generation stops when it catches loops), and training took about **1–2 hours on a single MI325**. The recipe:
+
+```yaml
+method: FTPO (DPO-family, final-token)
+epochs: 1
+adapter: LoRA            # rank 128–256 — higher learnability, less degradation
+train_modules: [attention_proj, mlp_proj, lm_head]
+learning_rate: 4e-6 – 2e-5
+early_stop: chosen_win = 0.35   # fraction of samples where chosen beat rejected
+```
+
+Two guardrails matter. **Over-training happens easily** — training past the `chosen_win=0.35` stopping point tended to degrade the model and, ironically, spawn *new* doom loops. Stopping at that threshold typically pulled loop rates from 20–30% down to 1–2% with minimal degradation. And FTPO is **iterative by design**: after one round the loop-causing tokens are rejected and probability is reweighted toward the chosen alternatives, but that can expose new failure points where *other* tokens start looping, so a second round targets the newly surfaced loops.
+
+## The take
+
+Doom loops are a small-model, low-temperature, hard-problem failure, and the diagnosis here is clean: overtrained discourse-marker priors plus self-reinforcing context plus greedy decoding equals a distribution that collapses onto one token with no exit. FTPO is a tidy fix because it matches the shape of the problem — retrain the one position that restarts the loop, spread the escape probability across several tokens instead of minting a new favourite, and pin the rest of the vocabulary in logit space so you don't disturb what the model already does well. The results are strong (10.2% → 1.4%, 22.9% → 1%) and, importantly, honestly framed: the eval gains are recovered credit for answers the model could already reach, the win is concentrated at low temperature and fades by temp 1.0, over-training is a real risk with a specific stopping rule, and it can take more than one round. For anyone shipping a small reasoning model that greedy-decodes in production, a 1–2 hour LoRA pass that removes a 10–20% failure mode is an easy trade.
+
+---
+
+*Built on Liquid AI's [Antidoom: Reducing Doom Loops with Final Token Preference Optimization](https://www.liquid.ai/blog/antidoom) (2026) and the [`LiquidAI/antidoom-mix-v1.0`](https://huggingface.co/datasets/LiquidAI/antidoom-mix-v1.0) dataset. All benchmark numbers are provider-reported; the four charts are reproduced from the blog for commentary, and the two interactive widgets are illustrations of the mechanism, not measured traces.*
