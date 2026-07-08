@@ -45,7 +45,8 @@ function ngramHit(token: number): Set<number> {
   const set = new Set<number>()
   let x = (token + 7) * 40503
   while (set.size < 2) {
-    x = (x ^ (x << 11)) >>> 0
+    x = (x ^ (x << 13)) >>> 0
+    x = (x ^ (x >> 7)) >>> 0
     set.add(x % COLS)
   }
   return set
