@@ -1,0 +1,192 @@
+---
+title: "A field guide to attention mechanisms"
+description: "One operation, two bills — O(N²) compute and the O(N·layers) KV cache — and a map of how every variant pays them down: MHA, MQA, GQA and MLA on the memory axis; sliding-window, sinks, dilated, block-sparse and content-based NSA on the mask axis; linear/kernelized attention that drops the matrix; and the exact-but-IO-aware systems layer of FlashAttention and PagedAttention."
+date: 2026-07-08
+tags:
+  - explainer
+  - attention
+  - transformers
+  - long-context
+  - kv-cache
+draft: false
+---
+
+import { FamilyMap } from "@/components/articles/attention-mechanisms/family-map"
+import { ScaledDotProduct } from "@/components/articles/attention-mechanisms/scaled-dot-product"
+import { MaskExplorer } from "@/components/articles/attention-mechanisms/mask-explorer"
+import { CrossAttention } from "@/components/articles/attention-mechanisms/cross-attention"
+import { KvSharing } from "@/components/articles/attention-mechanisms/kv-sharing"
+import { NsaBranches } from "@/components/articles/attention-mechanisms/nsa-branches"
+import { LinearAttention } from "@/components/articles/attention-mechanisms/linear-attention"
+import { FlashTiling } from "@/components/articles/attention-mechanisms/flash-tiling"
+import { PagedKv } from "@/components/articles/attention-mechanisms/paged-kv"
+import { DifferentialAttention } from "@/components/articles/attention-mechanisms/differential-attention"
+
+Attention is a single operation, and almost everything else in a transformer is plumbing around it. The zoo of named variants — MQA, GQA, MLA, sliding-window, BigBird, NSA, FlashAttention — can read like a pile of unrelated tricks. It isn't. Nearly every one is a targeted answer to a **specific bill** that plain attention runs up, and once you know which bill a mechanism is paying down, the whole field organizes itself.
+
+This is a map, not an encyclopedia. For the fundamentals — what Q, K and V are and why the dot product means "relevance" — start with [how transformers attention works](/articles/how-transformers-attention-works). Here I assume that and go wide: the families, the mechanics, the exact costs, and the honest thing each one gives up.
+
+<FamilyMap />
+
+## The one operation, and its two bills
+
+For one query vector, attention scores every key by dot product, turns the scores into weights with softmax, and returns the weight-blended values:
+
+$$
+\mathrm{Attention}(Q,K,V) = \mathrm{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right)V
+$$
+
+$Q \in \mathbb{R}^{N\times d_k}$ are the queries, $K \in \mathbb{R}^{N\times d_k}$ the keys, $V \in \mathbb{R}^{N\times d_v}$ the values, $N$ the sequence length, and $d_k$ the per-head key dimension. The $1/\sqrt{d_k}$ is not cosmetic: if $q$ and $k$ have unit-variance entries, $q\cdot k$ has variance $\approx d_k$, so without the scale the logits grow with head width and push softmax into a near–one-hot corner where its gradient vanishes. Multi-head attention runs $h$ of these in parallel on different learned projections and concatenates — different heads settle on different relationships over the same tokens.
+
+<ScaledDotProduct />
+
+Now the bills. That one line hides two very different costs, and they are the two axes this whole guide is organized around.
+
+**Bill one — the O(N²) score matrix (the compute / *mask* axis).** The product $QK^{\top}$ is an $N\times N$ matrix: every query dotted with every key. Time and memory are $O(N^2 d)$. Double the context and the work quadruples. Every *sparse* method is an answer to this bill — a rule for **which (query, key) pairs to actually compute**.
+
+**Bill two — the KV cache (the memory axis).** At inference a decoder generates one token at a time and re-reads the whole past, so it caches the keys and values it already computed. That cache is $2 \cdot n_h \cdot d_h$ elements **per token, per layer** (one key and one value per head) — it grows linearly with context *and* with depth, and at long context it, not the FLOPs, is what pins you to the hardware. Every *KV-sharing* and *compression* method is an answer to this bill.
+
+A third, quieter cost sits underneath both: attention is **memory-bandwidth bound** on real GPUs — moving the $N\times N$ scores in and out of HBM dominates. That is not a math problem, and it gets its own family (FlashAttention) that changes *how* the exact same numbers are computed.
+
+Keep the two bills in mind and the families below stop looking like a zoo.
+
+## Bill one: which pairs do we compute? (the mask axis)
+
+The cleanest way to cut the $O(N^2)$ matrix is to not compute most of it. A **mask** says, for each query, which keys it may read; the rest are dropped. The single diagram below is the shared language for this entire axis — a query cursor lighting exactly the keys it is allowed to see, under seven different patterns. Every later sparse diagram reuses these colors.
+
+<MaskExplorer />
+
+**Bidirectional (encoder) attention** is the no-mask case: every query reads the whole sequence, both directions. It is what BERT-style encoders use, and it is the full $O(N^2)$ bill — appropriate when the input is short and you want maximum mixing.
+
+**Causal (decoder) attention** masks the strict upper triangle: a query at position $q$ may read positions $0\ldots q$ only, never the future. This is what every autoregressive LLM uses. It halves the constant but the asymptotics are still $O(N^2)$ — the triangle is half of a square.
+
+**Cross-attention** is a different picture entirely, because the queries and the keys come from *different sequences*. The decoder's query reads the encoder's keys and values, with no causal mask, because the whole source is already known. It is the join between two sequences — French to English in translation, image patches to caption in a vision-language model.
+
+<CrossAttention />
+
+### Structured sparsity: a fixed, position-based pattern
+
+The first real savings come from a *fixed* rule that depends only on position.
+
+**Sliding-window attention** (Mistral 7B) lets each query read only the previous $w$ keys, dropping cost to $O(N\cdot w)$ and — crucially — capping the KV cache at $w$ per layer instead of $N$. Mistral uses $w=4096$ over 32 layers. The catch is obvious: one window layer cannot see past $w$. The rescue is depth. Stacked window layers **compound** their reach — after $k$ layers information can travel $k\cdot w$ tokens, so Mistral's last layer has a theoretical span of $4096\times 32 \approx 131{,}000$ tokens. That "theoretical" matters: a window model needs either stacking, or global/sink tokens, or interleaved global layers, or it genuinely loses long-range information.
+
+**Attention sinks** (StreamingLLM) explain *why* a naive sliding window degrades, and fix it cheaply. Softmax weights must sum to 1, so a query with nothing important to attend to still has to put its mass *somewhere* — and models learn to dump that excess onto the first few tokens. Evict those tokens (as a rolling window does) and the whole distribution destabilizes; perplexity explodes. Keeping just **four initial tokens** as always-visible "sinks" plus a recent window restores stable streaming to millions of tokens, with a reported up-to-22× speedup over recomputation. The sinks carry almost no information — they are a pressure-release valve for softmax.
+
+**Block-sparse attention** (BigBird) combines three fixed pieces at block granularity — a local **window**, a few **global** tokens every query sees, and a few **random** blocks for mixing — for $O(N)$ cost. The theory is the reassuring part: with the global and random pieces, BigBird is still a universal approximator of sequence functions and Turing complete, so the sparsity does not cost you expressive power in principle. Longformer is the same local-plus-global idea for long documents.
+
+**Dilated / strided attention** attacks distance instead of density. The Sparse Transformer factorizes attention into **strided** and **fixed** patterns for $O(N\sqrt{N})$; LongNet's **dilated attention** grows the stride exponentially with distance so any two tokens connect in a logarithmic number of hops, reaching $O(N)$. A single dilated head skips across the sequence; combine a few at different strides and every position stays reachable.
+
+These structured patterns are cheap and predictable, and they are the workhorses of production long-context models — usually **interleaved** with occasional full-attention layers so long-range information still has a path. Gemma 2 alternates local:global 1:1 (window 4096); Gemma 3 shifts to 5:1 with a 1024 window, so only about one layer in six caches the full 128K context and KV-cache overhead drops from roughly 60% to under 15% with little quality loss. MiMo-V2-Flash uses one global layer in six; Character.AI reports a similar 5:1, 1024-window design with over 20× KV-cache reduction. Two of these get full treatments here: [Gemma 4's interleaving and KV budget](/articles/gemma-4) and [MiMo-V2-Flash's 5:1 hybrid](/articles/mimo-v2-flash).
+
+### Content-based sparsity: let the query choose
+
+Fixed patterns are blind to content — they read the same positions whether or not those positions matter. The 2025–26 frontier is **learned, content-based selection**: score the past cheaply, then read only the blocks that actually matter *for this query*.
+
+**Native Sparse Attention** (DeepSeek, 2025) is the cleanest example. For each query it runs three branches in parallel over the same KV — a **compression** branch that squashes the past into coarse block summaries (global gist), a **selection** branch that scores blocks and keeps the top-$n$ at full resolution (the important detail), and a **sliding-window** branch (local coherence) — then a learned gate blends them:
+
+$$
+o_t = \sum_{c\,\in\,\{\text{cmp},\,\text{slc},\,\text{win}\}} g_t^{\,c}\;\mathrm{Attn}\!\left(q_t,\,\tilde K_t^{\,c},\,\tilde V_t^{\,c}\right),
+\qquad g_t^{\,c}\in[0,1]
+$$
+
+The gate scores $g_t^{\,c}$ come from a small MLP-plus-sigmoid on the query. The reason this matters is in the name: NSA is **natively trainable** — all three read paths are differentiable, so the sparsity is learned end-to-end rather than bolted onto a dense checkpoint at inference time, and it is designed to be hardware-aligned (Tensor-Core-friendly block sizes).
+
+<NsaBranches />
+
+Two siblings ship the same idea in production models, and I have covered both in depth: [MiniMax Sparse Attention](/articles/minimax-sparse-attention) scores the past in 128-token blocks and keeps the top-$k$ whole blocks; [LongCat Sparse Attention](/articles/longcat-2) goes finer with a hierarchical coarse-recall-then-token-select index, shares the index across layers, and reshapes the reads for coalesced memory access. This is the least-settled family in the guide — the shape of "trained-in sparsity" is still moving — but it is where the interesting long-context work is happening.
+
+## Bill two: how do we share or shrink K/V? (the memory axis)
+
+The mask axis leaves attention *exact within what it reads*. The memory axis is orthogonal: keep full attention, but pay less to cache K and V. This is the difference between sharing heads and compressing them, and the two are genuinely different axes — you can combine them.
+
+<KvSharing />
+
+**Multi-Query Attention** (MQA) is the blunt version: keep all $h$ query heads but share a **single** key head and value head across them. The cache drops from $2 \cdot n_h \cdot d_h$ to $2 \cdot d_h$ per token — a factor of $n_h$. It targets exactly the decode-time memory-bandwidth bottleneck, and it costs some quality and can destabilize training.
+
+**Grouped-Query Attention** (GQA) is the middle ground almost everyone now uses. Split the query heads into $G$ **groups**; each group shares one key head and one value head, so the cache is $2 \cdot G \cdot d_h$. The important thing to get right: GQA interpolates by **KV-head groups**, not by reducing query heads — you keep all $h$ query heads, they just fan into $G$ shared KV heads. $G=1$ is exactly MQA; $G=h$ is exactly MHA. Llama 2 70B adopted it, and the quality is essentially MHA's at a fraction of the cache.
+
+**Multi-head Latent Attention** (MLA, DeepSeek-V2) sits on a *different axis*: it does not share heads, it **compresses** them. K and V are jointly projected down to a shared low-rank **latent** vector $c_t^{KV}$, cached in place of the per-head keys and values, then up-projected back to all heads at compute time. Because RoPE is incompatible with folding the up-projection into the query, MLA carries positional information on a small **decoupled** key dimension. DeepSeek-V2 caches $\tfrac{9}{2}\,d_h$ per token — about what GQA with 2.25 groups would cost — while reporting quality at or above full MHA. (Its headline "93.3% smaller KV cache" is measured against DeepSeek 67B, itself a GQA model, not against full MHA; the clean comparison is the $\tfrac{9}{2}\,d_h$ figure.) Sharing versus compressing is the real distinction between GQA and MLA.
+
+## Drop the matrix entirely: linear and kernelized attention
+
+Both axes above still compute a softmax. **Linear attention** asks whether we need it at all. Softmax puts a non-linearity between $Q$ and $K$, which is exactly what forces the $N\times N$ matrix to exist. Replace it with a kernel feature map $\phi$ and the product reassociates:
+
+$$
+\mathrm{softmax}(QK^{\top})V \;\longrightarrow\; \phi(Q)\big(\phi(K)^{\top}V\big)
+$$
+
+Computing $\phi(K)^{\top}V$ first gives a $d\times d$ matrix, never an $N\times N$ one. For autoregressive decoding this becomes a running state updated once per token, exactly like an RNN:
+
+$$
+S_t = S_{t-1} + \phi(k_t)\,v_t^{\top},
+\qquad \mathrm{out}_t = \frac{\phi(q_t)^{\top} S_t}{\phi(q_t)^{\top} z_t},
+\qquad z_t = z_{t-1} + \phi(k_t)
+$$
+
+$S_t \in \mathbb{R}^{d\times d}$ is the fixed-size state, $z_t$ the normalizer. Time is $O(N d^2)$, memory is **constant** in $N$, and context is unbounded. The diagram below is the whole pitch: the softmax triangle grows quadratically as tokens stream in, while the linear state just updates in place.
+
+<LinearAttention />
+
+The honest cost is real, and I want to state it plainly: linear attention is an **approximation** of softmax, and pure linear models are usually **weaker on recall** — pulling one exact fact out of a long context is precisely where a compressed fixed-size state struggles. Performer's FAVOR+ makes the approximation principled (random features that provably, unbiasedly approximate the softmax kernel); "lightning" and gated-linear variants add a decay so old state fades. In practice the winning form today is **hybrid** — MiniMax-01 interleaves seven lightning (linear) blocks per one softmax block, buying linear-time bulk with periodic exact attention to restore recall.
+
+## Exact, but IO-aware: the systems layer
+
+This family is different in kind, and it is worth being explicit: **FlashAttention and PagedAttention are not new attention functions.** They compute the exact same softmax attention, bit for bit. They change *where the bytes move*. I include them because "attention is slow" is usually a memory-traffic statement, not a FLOP statement, and these are the fix.
+
+**FlashAttention** attacks the fact that materializing the $N\times N$ scores in slow HBM is the real bottleneck. It **tiles** the computation: a block of queries stays in fast on-chip SRAM while blocks of K and V stream past it, and it maintains an **online softmax** — a running max $m$ and running sum $\ell$ — so it can produce the exact softmax result without ever writing the full matrix to HBM.
+
+<FlashTiling />
+
+The payoff is an IO complexity of $\Theta(N^2 d^2 / M)$ HBM accesses, where $M$ is the SRAM size, versus $\Theta(Nd + N^2)$ for the standard implementation — many-fold fewer round-trips for typical $d$ and $M$, and the reason a long-context forward pass stopped being memory-bound. FlashAttention-2 and -3 push the same idea with better GPU work-partitioning and FP8 on Hopper. It is exact; the only thing it "gives up" is the naive implementation's simplicity.
+
+**PagedAttention** (vLLM) does for the KV cache what FlashAttention does for the scores — a systems fix, not a math one. Before it, a serving engine reserved one *contiguous* buffer per request sized to the maximum output length, so a short generation left most of its reservation wasted (internal fragmentation), and two requests could share nothing. PagedAttention stores the cache in fixed-size **blocks** with a per-sequence **block table**, exactly like OS virtual memory: blocks are handed out on demand (near-zero fragmentation), and a shared prompt prefix maps to the **same physical blocks** via copy-on-write.
+
+<PagedKv />
+
+The result is many more concurrent sequences per GPU with identical model outputs — which is why paged KV is now table stakes for serving.
+
+## A quality move, not an efficiency one: differential attention
+
+Not every variant is about cost. **Differential attention** (Microsoft, 2024) targets a *quality* failure: softmax spends attention mass on irrelevant tokens because the weights are forced to sum to 1 — the same pressure that creates attention sinks also creates broadband "attention noise." The fix borrows from differential amplifiers: compute two softmax maps and return their difference.
+
+$$
+\mathrm{DiffAttn}(X) = \Big(\mathrm{softmax}\!\big(\tfrac{Q_1 K_1^{\top}}{\sqrt{d}}\big) - \lambda\,\mathrm{softmax}\!\big(\tfrac{Q_2 K_2^{\top}}{\sqrt{d}}\big)\Big)V
+$$
+
+The irrelevant mass is roughly common to both maps, so it subtracts away; the genuine peaks, which differ between the maps, survive. $\lambda$ is learned per head (reparameterized, initialized around 0.8), and the reported effect is sparser attention and better long-context retrieval and in-context recall.
+
+<DifferentialAttention />
+
+It costs roughly double the attention compute and cache (two maps), and it is still $O(N^2)$ — this buys accuracy, not efficiency. Worth it when the failure mode is a model that gets "distracted" in long context.
+
+## The whole map, in one table
+
+Complexities are per attention layer; $N$ is sequence length, $d$ the model width, $n_h$ heads, $d_h$ head dim, $w$ window, $k$ selected blocks, $M$ SRAM size. "KV cache" is per token per layer.
+
+| Mechanism | Bill it pays | Time | KV cache | Exact? | Quality / recall | Reach for it when |
+|---|---|---|---|---|---|---|
+| MHA (full) | baseline | $O(N^2 d)$ | $2\,n_h d_h$ | exact | reference | short context; training |
+| MQA | memory | $O(N^2 d)$ | $2\,d_h$ | exact | small drop | decode memory-bound |
+| GQA | memory | $O(N^2 d)$ | $2\,G\,d_h$ | exact | ≈ MHA | default for large models |
+| MLA | memory | $O(N^2 d)$ | $\tfrac{9}{2}\,d_h$ | exact | ≥ MHA (reported) | long context + quality |
+| Sliding-window | compute | $O(N w d)$ | capped at $w$ | exact in window | loses distance unless stacked/interleaved | cheap long context |
+| Sink / StreamingLLM | compute + memory | $O(N w)$ | sinks + window | exact in kept set | stable, not true long-range recall | unbounded streaming |
+| Dilated (LongNet) | compute | $O(N)$ | bounded | exact in pattern | pattern-limited | extreme length |
+| Block-sparse (BigBird) | compute | $O(N)$ | bounded | exact in pattern | near-full w/ global+random | long documents |
+| Content-based (NSA / MSA / LSA) | compute | $O(N k)$ | blockwise | exact in selection | near-full if selection is good | trained-in long context |
+| Linear / Performer | compute + memory | $O(N d^2)$ | $d\times d$ state | approximate | weaker recall | very long, recall-tolerant |
+| FlashAttention | systems (IO) | $O(N^2 d)$, $\Theta(N^2 d^2/M)$ HBM | same as base | exact | none (identical) | always — default kernel |
+| PagedAttention | systems (memory) | same as base | block-paged | exact | none (identical) | serving many sequences |
+| Differential | quality | $O(N^2 d)$ (≈2×) | ≈2× | exact | better retrieval | reduce attention noise |
+
+## What's settled, what's still moving
+
+Some of this is infrastructure now. **GQA** is the default attention for large models; **FlashAttention** is the default kernel; **PagedAttention** is the default cache manager; **sliding-window interleaved with periodic global (or sink) layers** is the standard recipe for cheap long context. If you are building a model today, those four are choices you make without much agonizing.
+
+The frontier is the content-based sparse family — **NSA**, **MiniMax Sparse Attention**, **LongCat Sparse Attention** — where the model *learns what to read*. The promise is compelling (near-full quality at a fraction of the reads, trained end-to-end) but the designs are still diverging on granularity, how the index is shared across layers, and how to make the reads hardware-friendly; there is no settled winner yet. **Linear and kernelized attention** remains the most tantalizing and the most caveated: constant-memory unbounded context is exactly what you want, and the recall gap is exactly why pure-linear models have not displaced softmax — hybrids are the pragmatic answer for now. And attention lives inside a larger design space: whether to specialize behavior at the **head** level rather than the layer level is its own question, which I dig into in [HydraHead](/articles/hydrahead).
+
+The map is stable even as the territory shifts. Every new mechanism you meet is answering one of the same two questions: *which (query, key) pairs do we compute*, and *how do we pay for the K/V we keep*. Place it on those axes and you already understand most of what it does — and what it gives up.
+
+---
+
+*The interactive diagrams are illustrations of each mechanism, not measured traces; real windows, blocks, and head counts are far larger than what fits on screen. Primary sources: Attention Is All You Need (Vaswani et al., 2017, arXiv 1706.03762); Fast Transformer Decoding / MQA (Shazeer, 2019, arXiv 1911.02150); GQA (Ainslie et al., 2023, arXiv 2305.13245); DeepSeek-V2 / MLA (DeepSeek-AI, 2024, arXiv 2405.04434); Mistral 7B (Jiang et al., 2023, arXiv 2310.06825); StreamingLLM (Xiao et al., 2023, arXiv 2309.17453); Longformer (Beltagy et al., 2020, arXiv 2004.05150); BigBird (Zaheer et al., 2020, arXiv 2007.14062); Sparse Transformer (Child et al., 2019, arXiv 1904.10509); LongNet (Ding et al., 2023, arXiv 2307.02486); Native Sparse Attention (Yuan et al., 2025, arXiv 2502.11089); Differential Transformer (Ye et al., 2024, arXiv 2410.05258); Transformers are RNNs / linear attention (Katharopoulos et al., 2020, arXiv 2006.16236); Performer / FAVOR+ (Choromanski et al., 2020, arXiv 2009.14794); FlashAttention (Dao et al., 2022, arXiv 2205.14135) and FlashAttention-2/-3 (arXiv 2307.08691, 2407.08608); PagedAttention / vLLM (Kwon et al., 2023, arXiv 2309.06180); Gemma 2 and 3 (Gemma Team, 2024/2025, arXiv 2408.00118, 2503.19786); MiniMax-01 (2025, arXiv 2501.08313).*

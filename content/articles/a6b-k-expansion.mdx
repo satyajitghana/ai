@@ -1,0 +1,130 @@
+---
+title: "A6B: k-expansion, or what breaks when you force a top-8 MoE router to fire 32 experts"
+description: "A single-author research log takes Qwen3.6-35B-A3B, overrides its Mixture-of-Experts router from top-8 to top-32 at inference (≈3B → ≈6.6B active params, zero new weights), measures the monotonic damage, and heals it with a router-frozen selective expert fine-tune. The core finding: renormalization hands 54% of the gate mass to 24 experts the model never learned to co-activate, accuracy falls at every step, and ESFT-style residual deltas recover the loss into a statistical tie — not a win. Honest, paired-McNemar measurement, negative results included."
+date: 2026-07-08
+tags:
+  - explainer
+  - llm
+  - architecture
+  - inference-optimization
+draft: false
+cover: /articles/a6b-k-expansion/fig1.png
+---
+
+import { GateMass } from "@/components/articles/a6b-k-expansion/gate-mass"
+import { EsftSelect } from "@/components/articles/a6b-k-expansion/esft-select"
+
+**a6b-k-expansion** is a single-author research log with a sharp, testable question: a Mixture-of-Experts model already stores far more experts than it fires per token — so what happens if you just *fire more of them* at inference? The author takes **Qwen3.6-35B-A3B** (their stated base: 35B total, ~3B active, 256 routed experts per layer, native top-8 routing) and overrides the router to keep **top-32** instead of top-8. Active compute goes from ~3B to **~6.6B** parameters per token — the regime they call **"A6B"** — at **zero new weights**. Then they measure what it costs, and try to heal it.
+
+The interesting part is that it does not work for free, and the repo says so in the title of its own findings: *the damage from naive k-expansion is smooth and monotonic — there is no free sweet spot.* This is a measurement-first log with paired A/B tests, exact McNemar significance, and the negative results kept in. That honesty is the reason it's worth reading.
+
+<Callout type="warn">
+Scope, up front. This is one person's **ongoing research log**, not a model release or a peer-reviewed paper. The base is **Qwen3.6-35B-A3B** as named in the repo — I take that at face value and report the author's own numbers, all of which are self-measured. "Healing" is explicitly **demonstrated, not complete**: the point estimates stay negative. Rejection fine-tuning, GRPO, and the Terminal-Bench evaluation are still in progress. Read this as a well-instrumented experiment, not a benchmark trophy.
+</Callout>
+
+## The one-line edit
+
+Every MoE layer scores all 256 experts with a softmax router (in fp32), keeps the **top-k**, and — this is the load-bearing detail — **renormalizes the selected gate weights so they sum to 1**. Renormalization is baked into the architecture. So raising k is not a matter of appending a few experts on the side; it *redistributes the entire gate mass* across four times as many slots.
+
+<Figure
+  src="/articles/a6b-k-expansion/fig1.png"
+  alt="Two side-by-side MoE blocks. Left: stock A3B, router keeps top-8 of 256 experts (blue cells), ≈3B active per token, top-8 carry 46% of gate mass. Right: A6B, same weights but router keeps top-32; the 8 blue experts stay and 24 orange experts (ranks 9-32) are added, ≈6.6B active per token, the orange ranks carrying 54% of the renormalized gate mass. Both feed a renormalized combine plus an always-on shared expert."
+  caption="Identical weights; one routing constant changed. The added experts (orange) are load-bearing — 54% of the renormalized gate mass — but were never trained to collaborate (a6b-k-expansion, Fig 1)."
+/>
+
+The experts are stored as packed 3D tensors — `gate_up_proj [256, 1024, 2048]` and `down_proj [256, 2048, 512]` per layer — so widening k adds **compute but no parameters**. If the routing here is unfamiliar, I built the top-k gate up from nothing in [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch); this article assumes that machinery and pokes at one constant inside it.
+
+Formally, for the selected set the renormalized gate weight of expert $i$ is
+
+$$
+\tilde{g}_i = \frac{g_i}{\sum_{j \in \text{top-}k} g_j}, \qquad i \in \text{top-}k .
+$$
+
+The denominator grows with k. So every already-selected expert's $\tilde{g}_i$ *shrinks* as k rises, and the freed mass flows to the newcomers. The author profiled the router at k=32 and found the newcomers are not a rounding error: **ranks 9-32 carry 54.0% of the renormalized gate mass.** More than half the block's output now comes from experts the model never trained to fire together.
+
+Slide k below and watch the mass move off the trained top-8 and onto the untrained tail — with the measured accuracy for each k next to it:
+
+<GateMass />
+
+## No sweet spot
+
+You might hope for a lucky k — 2-3× the native width, where the extra experts add capacity before they add noise. There isn't one. Changing **only** the inference-time top-k on the frozen base model, both a knowledge benchmark and a math benchmark decline at every single step:
+
+| Benchmark | k = 8 | k = 16 | k = 24 | k = 32 |
+| --- | --- | --- | --- | --- |
+| MMLU  | 0.8433 | 0.8283 | 0.8150 | 0.8067 |
+| GSM8K | 0.8933 | 0.8883 | 0.8783 | 0.8650 |
+
+The shape is the whole point: monotonic, sweet-spot-free. Every step down is paid the moment more untrained expert combinations switch on, and the noise grows with the mass those combinations carry — a mass that is real (54.0% on ranks 9-32). This is what motivates *healing* the model rather than *searching* for a lucky k. There is nothing to search for.
+
+## Healing without touching the router
+
+The fix is deliberately surgical, in the spirit of [ESFT — Expert-Specialized Fine-Tuning (Wang et al., 2024)](https://arxiv.org/abs/2407.01906). The recipe:
+
+1. **Profile.** Run the target corpus through the model at k=32, count token-level routing frequency for every expert across all 40 layers.
+2. **Select.** Keep experts by cumulative routing frequency up to **top-p 0.2** — the ones actually carrying the work. That is **833 of the 10,240 layer-experts** (40 × 256).
+3. **Train residual deltas.** Add trainable delta tensors to the selected experts' FFN slices and train **only those deltas** — **2.62B of 35B params (7.5%)**. The router and everything else stay frozen.
+4. **Toggle.** Because nothing but the deltas moved, turning them off returns the **exact stock model**. The deltas ship as one **5.2 GB** artifact, patched on or off at load time.
+
+Toggle the deltas below to see the surgical footprint and the gap-to-baseline flip from "significant loss" to "statistical tie":
+
+<EsftSelect />
+
+Freezing the router is not just a cost decision. The deltas are learned *relative to a specific routing distribution* — freeze it and every delta keeps meaning the same thing at inference; let it move and the coordinate system shifts underneath the deltas. Second, a router that drifts under SFT is the classic path to **routing collapse**, where a handful of experts capture all the traffic. A frozen router removes that failure mode entirely.
+
+Each healing generation is a broader training corpus, measured as the **gap to base@k8** on its own machine (negative = still below native top-8), with the verdict from exact McNemar at p = 0.05:
+
+| Generation | Corpus | MMLU Δ | MMLU p | GSM8K Δ | GSM8K p |
+| --- | --- | --- | --- | --- | --- |
+| Gen 0 | naive k32 (no training) | −3.7 pt | 0.002 · loss | −2.8 pt | 0.016 · loss |
+| Gen 1 | agentic-only ESFT | −3.0 pt | 0.010 · loss | −0.8 pt | 0.487 · tie |
+| Gen 2 | mixed + replay ESFT | −2.0 pt | 0.141 · **tie** | −2.2 pt | 0.263 · **tie** |
+
+Each broader corpus removes more of the misalignment: the agentic-only patch already heals math to a tie, and adding coding, tool-calling, math and a small general/knowledge replay is what finally pulls MMLU into a tie too. But read the header honestly — a *tie* is a repair, not a gain. The MMLU point estimate is still −2.0 pt; it is no longer statistically distinguishable from base, but it is not zero.
+
+And it does not get better with more steps. A checkpoint trajectory reads **MMLU 0.825 / 0.823 / 0.820** at steps 1200 / 2100 / 3150 — healing **saturates by ~38% of training**. The author reads this as a **capacity ceiling of the selective deltas**, not a data-volume problem: more steps on this delta set will not close the gap; a larger trainable surface or a different objective would be needed.
+
+Where training *does* buy something beyond healing is code. On HumanEval (n = 164), the agentic patch reaches **0.902** — above both base@k8 and naive k32 — while compressing median generation to about a third of the tokens:
+
+<BenchBars
+  title="HumanEval (%) — paired, same-machine (Workstation A)"
+  unit=""
+  bars={[
+    { label: "agentic patch", value: 90.2, highlight: true },
+    { label: "base@k8", value: 86.6 },
+    { label: "naive k32", value: 84.1 },
+    { label: "coding-only patch", value: 76.2 },
+  ]}
+/>
+
+## The hazard: style transfers before knowledge
+
+That fourth bar is the most useful result in the whole repo. A **coding-only** patch — same recipe, single-domain corpus — taught the model a *style* (terse code) faster than it taught it to stay correct. Median generation crashed to **186 tokens**, and accuracy collapsed with it: **HumanEval 0.762** (the worst of every arm) and **GSM8K 0.820**, which is *below even naive k32*, at p = 0.002. You can train a confident, compact, and wrong model this way.
+
+<Callout type="warn">
+**SFT transfers answer style before it transfers knowledge.** Corpus diversity is a safety rail, not a luxury — it is the specific guard against this failure mode, which is why the Gen-2 mix spans five domains (agentic 62%, coding 12%, tool-calling 11%, math 10%, knowledge replay 3%) plus a small replay slice.
+</Callout>
+
+The mixed patch is not immune to the same pressure, only more resistant. It still compressed MBPP generations (median **531** vs base's **2852** tokens) and lost MBPP by **−10.2 pt** (p < .0001) — even while HumanEval stayed at parity. Two benchmarks that both "test coding" diverged sharply, and the difference is how much each rewards long, explicit generation, which the patch has learned to suppress. Because this compression grows with training length, an *earlier* checkpoint may beat the final one on generation-heavy tasks; that evaluation is still running.
+
+## Why I trust the numbers
+
+The measurement discipline is where this log earns its credibility, and it's the part most self-reported results skip:
+
+- **Paired, same-condition A/B.** Every comparison runs an arm against its own baseline on the **same machine**, same prompts, same decoding. Significance is **exact McNemar** on the paired per-item correctness vectors — not an unpaired accuracy-difference test.
+- **n = 600 per benchmark** (164 for HumanEval), fixed shuffle seed so every arm sees the same items in the same order.
+- **Choice-logprob MMLU** — scored by summed log-prob of each answer choice, not by parsing free-form text, so truncation and format quirks can't masquerade as a knowledge gap.
+- **No-think GSM8K** — the measured quantity is the arithmetic answer, not the length or style of the scratch reasoning.
+- **Re-measure on every machine.** The author observed **−0.3 to −0.6 pt cross-machine drift** on identical weights and config, so a base arm and a patched arm are always re-run together on the same box before their delta is trusted. Gen 0-1 ran on a 2× RTX PRO 6000 workstation, Gen 2 on an 8× RTX PRO 6000 Blackwell server, each with its own re-measured base@k8.
+
+Training data also passed a hard decontamination gate against every benchmark used — exact-match, word-13-gram, short-question containment, HumanEval signature purge, Terminal-Bench instruction match — with the knowledge-replay slice further screened by embedding similarity against the full MMLU test set. Reported result: **0 residual hits**. You can disagree with the conclusions, but the instrument is honest about what it measured.
+
+## The take
+
+k-expansion is a clean idea with a clean negative result. Firing 4× the experts at inference is free in weights but not in accuracy, because renormalization is not a bystander — it hands 54% of every MoE block's output to 24 experts per layer that never learned to work together, and the model degrades monotonically for it. There is no lucky k. Router-frozen selective deltas — 2.62B trainable params, toggleable, 833 of 10,240 experts — heal the knowledge loss back to a **statistical tie**, which is a genuine result and an honest one: a tie, saturating at ~38% of training, with the point estimate still negative. The coding axis actually improves (HumanEval 0.902), but generation-length compression is a live hazard, and a single-domain corpus is a fast way to train a compact, confident, wrong model.
+
+What I'd take from it, beyond A6B: the failure modes generalize. **Renormalized top-k is not free to widen.** **SFT teaches style before substance.** **Freeze the router or watch the deltas lose their coordinate system.** And measure in pairs on one machine, because a −0.5 pt result that is really cross-machine drift will fool you. Whether A6B ever nets out positive after rejection-FT and GRPO is unsettled — the repo says so plainly — but the instrumentation is the part I'd copy tomorrow.
+
+---
+
+*Built on the [a6b-k-expansion](https://github.com/hikarioyama/a6b-k-expansion) research log (hikarioyama, 2026) — README, `METHOD.md`, and the two HTML reports under `docs/`, MIT-licensed. All numbers are the author's own paired, McNemar-tested measurements on Qwen3.6-35B-A3B; I report them as stated and have not independently reproduced them. The interactive diagrams are my illustration of the mechanism, not measured traces; the architecture figure is reproduced from the repo for commentary.*

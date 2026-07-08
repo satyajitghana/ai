@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
 import { AgentChip } from "@/components/site/agent-chip"
+import { Citation } from "@/components/site/citation"
 import { PageShell } from "@/components/site/page-shell"
 import { ShareButtons } from "@/components/site/share-buttons"
 import { getArticle, getArticles } from "@/lib/content"
@@ -68,6 +69,7 @@ export default async function Page({
         </header>
         <Article />
       </article>
+      <Citation title={article.title} slug={slug} date={article.date} />
       <ShareButtons
         path={`/articles/${slug}`}
         title={article.title}
