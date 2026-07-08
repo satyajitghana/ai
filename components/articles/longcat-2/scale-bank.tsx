@@ -29,11 +29,16 @@ const CELL = 15
 const CGAP = 5
 const GRID_W = COLS * CELL + (COLS - 1) * CGAP
 
+// Guard: these sampling loops run during SSR/prerender, so a degenerate PRNG
+// must never spin forever (see the ngramHit bug that hung the build). Cap the
+// iterations — the RNG converges in a few steps, so this only trips on a bug.
+const MAX_SPIN = 1000
+
 // deterministic "routing" — which expert cells a given token lights
 function routed(token: number): Set<number> {
   const set = new Set<number>()
   let x = (token + 1) * 2654435761
-  while (set.size < ACTIVE) {
+  for (let i = 0; set.size < ACTIVE && i < MAX_SPIN; i++) {
     x = (x ^ (x << 13)) >>> 0
     x = (x ^ (x >> 7)) >>> 0
     set.add(x % N)
@@ -44,7 +49,7 @@ function routed(token: number): Set<number> {
 function ngramHit(token: number): Set<number> {
   const set = new Set<number>()
   let x = (token + 7) * 40503
-  while (set.size < 2) {
+  for (let i = 0; set.size < 2 && i < MAX_SPIN; i++) {
     x = (x ^ (x << 13)) >>> 0
     x = (x ^ (x >> 7)) >>> 0
     set.add(x % COLS)
