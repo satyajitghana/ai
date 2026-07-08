@@ -1,0 +1,153 @@
+---
+title: "SWE-1.7: near-frontier code RL, and the async training loop behind it"
+description: "Cognition's SWE-1.7 is an RL-trained software-engineering model built on a Kimi K2.7 base, tuned for long-horizon work inside the Devin harness and served through Cerebras at 1000 tokens/sec. It doesn't top the benchmark table — Claude Opus 4.8 leads every row and it roughly matches GPT-5.5 — but the training write-up is the real payload: asynchronous multi-cluster RL, a top-p 'sampling distribution replay' trick that stops entropy collapse, compressed cross-continental weight sync, and self-compaction for six-hour rollouts. A first-principles walk through all four, with the provider-reported numbers in full."
+date: 2026-07-09
+tags:
+  - explainer
+  - agents
+  - reinforcement-learning
+  - systems
+  - inference-optimization
+draft: false
+cover: /articles/swe-1-7/fig1.png
+---
+
+import { SyncVsAsync } from "@/components/articles/swe-1-7/sync-vs-async"
+import { EntropyCollapse } from "@/components/articles/swe-1-7/entropy-collapse"
+import { WeightDeltaSync } from "@/components/articles/swe-1-7/weight-delta-sync"
+
+**SWE-1.7** is Cognition's newest in-house software-engineering model — the SWE-1 family is the set of models behind Devin and the Windsurf editor. It's trained with reinforcement learning on real SE tasks, starting from a **Kimi K2.7** base that had *already* been through heavy RL post-training. That starting point is the headline claim: Cognition still pulled large gains on top of an RL-saturated base, which they read as evidence against a "post-training ceiling." The model is tuned for long-horizon, asynchronous engineering — the multi-hour tasks Devin runs — and it's served through **Cerebras at 1000 tokens/sec**. That speed is the other half of the pitch: near-frontier quality, cheap and fast, moving the cost-performance Pareto curve rather than the top of the leaderboard.
+
+<Callout type="warning">
+Every number here is **provider-reported**, run under Cognition's own harness (Claude Code for Anthropic models, Codex for OpenAI, Devin CLI otherwise; `timeout=4h`, max reasoning effort). On the published suite SWE-1.7 tops **nothing**: **Claude Opus 4.8** leads all three benchmarks and SWE-1.7 lands roughly at **GPT-5.5**. It is also **not open-weights** — there's no model card or download, only the served model in Devin. Read it as a strong, fast, cheap near-frontier model and a genuinely interesting training write-up — not a new SOTA.
+</Callout>
+
+## The numbers, in full
+
+Three agentic coding benchmarks, pass rate (%). `FrontierCode` is Cognition's own eval; `SWE-Bench Multilingual` is the multi-language slice of the SWE-bench family; `Terminal-Bench 2.1` is agent-in-a-terminal.
+
+| Benchmark | SWE-1.7 | Kimi K2.7 Code (base) | GPT-5.5 | Opus 4.7 | Opus 4.8 | GLM-5.2 | Composer 2.5 | SWE-1.6 |
+|---|---|---|---|---|---|---|---|---|
+| FrontierCode 1.1 Main | **42.3** | 30.1 | 43.0 | 38.5 | 46.5 | 24.5 | 25.6 | 9.4 |
+| Terminal-Bench 2.1 | **81.5** | 72.7 | 84.2 | 83.0 | 86.9 | 81.0 | 76.0 | 39.7 |
+| SWE-Bench Multilingual | **77.8** | 73.5 | 76.8 | 80.5 | 84.4 | 74.5 | 71.6 | 58.3 |
+
+The load-bearing comparison is the base column. SWE-1.7 vs its own `Kimi K2.7 Code` base is **+12.2** on FrontierCode Main, **+8.8** on Terminal-Bench, **+4.3** on SWE-Bench Multilingual — the largest lift on the hardest eval. That gap is the whole "no post-training ceiling" argument: it's pure RL on top of a base that was already RL-post-trained.
+
+<BenchBars
+  title="FrontierCode 1.1 Main (%) — provider-reported"
+  unit=""
+  bars={[
+    { label: "SWE-1.7", value: 42.3, highlight: true },
+    { label: "Kimi K2.7 (base)", value: 30.1 },
+    { label: "GPT-5.5", value: 43.0 },
+    { label: "Opus 4.7", value: 38.5 },
+    { label: "Opus 4.8", value: 46.5 },
+  ]}
+/>
+
+<BenchBars
+  title="SWE-Bench Multilingual (%) — provider-reported"
+  unit=""
+  bars={[
+    { label: "SWE-1.7", value: 77.8, highlight: true },
+    { label: "Kimi K2.7 (base)", value: 73.5 },
+    { label: "GPT-5.5", value: 76.8 },
+    { label: "Opus 4.7", value: 80.5 },
+    { label: "Opus 4.8", value: 84.4 },
+  ]}
+/>
+
+So: SWE-1.7 edges GPT-5.5 on SWE-Bench Multilingual (77.8 vs 76.8), trails it a hair on FrontierCode Main (42.3 vs 43.0) and Terminal-Bench (81.5 vs 84.2), and sits behind both Opus checkpoints everywhere. The jump from the previous **SWE-1.6** (9.4 / 39.7 / 58.3) is huge, but read it honestly: most of that comes from the far stronger Kimi K2.7 base, not only the new RL recipe. The rest of this piece is the recipe, which is where the interesting engineering lives. Four ideas stand out.
+
+## 1. Asynchronous RL: don't let the trainer starve
+
+Start with why this is hard. An agentic SE rollout is a long, **variable-length** trajectory: read files, edit, run tests, read the failure, edit again — dozens of tool-calling turns, and with self-compaction (below) some run for **six hours**. Now do RL on batches of these.
+
+In **synchronous** RL the loop ping-pongs: the actors generate a batch of rollouts, then the learner does one optimizer step, then the next batch starts. The problem is variance. Within a batch, one trajectory finishes in minutes and another runs for hours, and the learner can only step once the **slowest** one lands. So the trainer sits idle across most of the wall-clock, and the fast actors idle too, waiting for their batch-mates. Expensive accelerators, starved.
+
+**Asynchronous** RL breaks the ping-pong. Decouple the two fleets: actors continuously generate trajectories against the current-ish policy and push them into a buffer; the learner trains on whatever is ready. Both fleets stay busy. Flip the toggle below between the two modes and watch the learner's GPU-utilization gauge and the weight-update counter over the same wall-clock window:
+
+<SyncVsAsync />
+
+The catch is honest and specific. Once the learner trains on trajectories the actors generated a few weight-versions ago, those trajectories are **off-policy** — sampled by a stale policy, not the one being updated. Cognition names the failure mode directly: a **KL-divergence mismatch between inference and training**, "since the trainer policy is usually different from the sampling policy." The fix is the standard off-policy toolkit — importance sampling, plus a bounded staleness — and a **buffer policy** after any interruption that "prevents bias from any imbalance in training-inference throughput." It's the same bias/variance trade you always pay for throughput: async keeps the GPUs full, and you spend correction terms to keep the stale gradients honest. Cognition cites [PipelineRL](https://arxiv.org/abs/2509.19128) as the async-RL lineage here. The [Agents-A1 write-up](/articles/agents-a1) is a good companion on where verified agentic trajectories come from in the first place, and the Devin side of "the environment the model is trained in" is the [agent harness](/articles/agent-harness).
+
+## 2. Preserving entropy with top-p "sampling distribution replay"
+
+This is the most elegant idea in the post, and it's small. Long RL runs die of **entropy collapse**: a strong policy stops exploring, the distribution sharpens to a spike, and reward plateaus within a few hundred steps. Cognition's diagnosis of *why* is worth the walk.
+
+Take three tokens with logits $x_1 > x_2 \gg x_3$ and softmax probabilities $p_i$. Token 3 is a junk token — sampling it usually means the rollout went off the rails, so the trajectory earns low reward and its advantage is negative, $\hat{A} < 0$. The policy gradient of its log-prob on the logits is:
+
+$$
+\nabla \log p_3 = \begin{bmatrix} -p_1 \\ -p_2 \\ p_1 + p_2 \end{bmatrix}, \qquad \Delta x_i \propto \hat{A}\,\nabla \log p_3 .
+$$
+
+With $\hat{A} < 0$ this becomes
+
+$$
+\Delta x_1 \propto |\hat{A}|\,p_1, \qquad \Delta x_2 \propto |\hat{A}|\,p_2, \qquad \Delta x_3 \propto -|\hat{A}|\,(p_1+p_2).
+$$
+
+Look at what that does. Because $p_1 > p_2$, the already-dominant token's logit rises **more** than the runner-up's, and the junk token is pushed down. So *punishing* a junk sample **sharpens** the distribution — every off-track sample bleeds a little entropy. Step the widget below with replay off to watch the bars spike and the entropy gauge fall; then flip **top-p replay** on:
+
+<EntropyCollapse />
+
+The fix is two moves. First, **top-p sampling**: never sample from the low-probability tail, so junk tokens never become optimization targets in the first place. But top-p naively breaks something else — the trainer computes probabilities over the *full* vocabulary while the rollout sampled from the *top-p subset*, so the two distributions diverge and you're back to a large train/inference mismatch. Second, then, **sampling distribution replay**: record the kept-set mask at rollout time and renormalize the trainer's probabilities over that **same mask**. Sampler and trainer now agree on the support, the mismatch stays bounded, and entropy holds roughly constant.
+
+<Figure
+  src="/articles/swe-1-7/fig2.png"
+  alt="Line chart of policy entropy across training. The SWE-1.7 recipe (blue) holds entropy roughly constant across the run, while the baseline (orange) rises early then decays steadily toward collapse."
+  caption="With top-p sampling plus sampling distribution replay, policy entropy stays roughly flat where the baseline collapses (Cognition, policy-entropy figure)."
+/>
+
+<Figure
+  src="/articles/swe-1-7/fig3.png"
+  alt="Line chart of training-inference mismatch across training steps for the SWE-1.7 run; the divergence rises early then stays bounded and flat for the rest of training rather than diverging."
+  caption="Training-inference divergence stays bounded across the run once the trainer renormalizes over the recorded top-p mask (Cognition, train-inference-mismatch figure)."
+/>
+
+There's a free lunch hiding in the mask. A token whose probability already exceeds the top-p threshold has a **keep-set of size one** — itself — so its renormalized probability is a constant 1 and its gradient is **zeroed out**. Cognition finds a large fraction of sampled tokens sit above the threshold, so they drop out of the update entirely. The optimizer stops spending gradient on tokens the model is already sure about and focuses on the genuinely uncertain, high-learning-signal positions. Less gradient noise, for free.
+
+<Callout type="note">
+This is the same idea as **Rollout Routing Replay (R3)** — [/articles/rollout-routing-replay](/articles/rollout-routing-replay) — one axis over. R3 records the MoE router's rollout-time expert choices and replays them in the trainer to align sampler and trainer on the *routing* axis; sampling distribution replay does it on the *token-sampling* axis. Both are "replay the decision the sampler actually made, so the trainer optimizes the same distribution." Cognition stacks these with importance sampling and NVFP4 low-precision rollouts, and reports gains from the [Muon optimizer](/articles/muon-optimizer) and from stripping non-deterministic trainer ops that were quietly widening the mismatch.
+</Callout>
+
+## 3. Multi-cluster training: ship weight deltas, not weights
+
+Here's a structural observation that falls out of async RL: it **decomposes across clusters**. Only the trainer needs to live on a single high-bandwidth fabric — that's the one tightly-coupled, all-reduce-heavy component. The rollout inference engines are self-contained; each one needs nothing but the current weights, so it can run on whatever compute is available, anywhere.
+
+Cognition leans all the way into that. SWE-1.7's RL spans **four datacenters across three continents**, mixing their own GPUs with third-party inference compute from **Fireworks**. The hard part is keeping every far-flung inference engine current after each optimizer step, because stale weights mean stale trajectories mean weaker gradients. Broadcasting a full ~1T-parameter model across oceans every few steps is a non-starter, so instead the trainer computes a **compressed weight delta** (XOR diff against the previous weights, then zstd) and streams it through **cloud object storage** as the single source of truth. Each engine prefetches the delta while still serving, then pauses briefly to apply it in-place with the KV cache intact.
+
+<WeightDeltaSync />
+
+The numbers Cognition reports for this: a delta is **>99% smaller** than the full broadcast, a cross-continental update for a 1T model lands in **1-2 minutes** end-to-end, and inference pauses only **3-4 seconds** to apply it. A **Dynamo** router fronts the inference fleet and reroutes trajectories off dead replicas; the trainer checkpoints asynchronously to local disk every step and rebuilds a dead node from peer replicas in seconds, so a hardware failure never stalls the run. The payoff loops back to idea #1: faster weight sync means less trajectory staleness, which buys room for more aggressive learning rates. This is the cost angle a sibling write-up, [why frontier RL is cheaper than you think](/articles/frontier-rl-cheaper), covers head-on — and it's [Fireworks' own post](https://fireworks.ai/blog/frontier-rl-is-cheaper-than-you-think) that Cognition cites, since they literally run on that compute.
+
+## 4. Self-compaction for six-hour rollouts
+
+The last idea handles the horizon. Two problems come with training on multi-hour tasks. First, a rollout can run far past the raw context window. Second, as DeepSeek-R1 showed, RL on reasoning tasks tends to make responses grow without bound, but I want a model that's terse on easy tasks and only elaborates on hard ones.
+
+**Self-compaction** solves the first: when the agent approaches the context limit, it's asked to **summarize its working state**, and it resumes from its own summary. During training the model learns both halves at once — to write more informative, compact summaries, and to work well *from* them. That's what lets a single rollout stretch to **six hours** without blowing the window. An **alternating length penalty** solves the second: training alternates between *unconstrained* phases (optimize only for task success) and *budget* phases (penalize solutions that exceed a weighted cost over tokens, turns, and tool-call time). Length compresses on tasks the model can already solve, while long-horizon behavior on genuinely hard tasks is preserved.
+
+<Figure
+  src="/articles/swe-1-7/fig4.png"
+  alt="Line chart of mean response length across training under the alternating length penalty. Response length climbs during unconstrained phases and compresses during the shaded budget phases, with the overall trend rising as the model tackles harder tasks."
+  caption="Mean response length climbs in unconstrained phases and compresses in budget phases, keeping the model terse on solved tasks without capping hard ones (Cognition, response-length figure)."
+/>
+
+## What the training left behind
+
+RL this heavy leaves fingerprints on behavior, and they line up with the recipe. SWE-1.7's chain-of-thought is measurably **more condensed** than the Kimi K2.7 base — a much lower function-word ratio and nearly half the words per sentence — which Cognition attributes directly to the budget phases of the length penalty. It also **explores the codebase far more** before acting: more tool calls, file reads, and greps per run than K2.7, Opus 4.8, or GPT-5.5, and more probing of edge cases, adversarial inputs, and unstated requirements. On a bug report it chases the root cause rather than patching the one symptom, and it settles ambiguous semantics by writing a small script to test them instead of guessing. Cognition credits the data pipeline — hard verifiers that reject false positives force end-to-end solutions.
+
+The honest cost of that thoroughness: **scope creep**. More reasoning means more doing — extra test cases, more files touched than the task strictly needs. It's an industry-wide pattern (more reasoning, wider blast radius) and Cognition flags it as an open axis, not a solved one. That's the right way to report it.
+
+## The take
+
+SWE-1.7 doesn't win the benchmark table, and Cognition doesn't claim it does — Opus 4.8 leads every row and SWE-1.7 sits at roughly the GPT-5.5 line. The pitch is the Pareto curve: near-frontier SE quality, served at 1000 tokens/sec through Cerebras, cheap. If that holds up in a real Devin loop rather than a `timeout=4h` harness, it's a strong practical option.
+
+But the model is the smaller story. The training write-up is the payload, and it's unusually concrete for a launch post: async RL to stop the trainer starving, a top-p **sampling distribution replay** that kills entropy collapse *and* falls out into free gradient denoising, weight-delta streaming that makes cross-continental RL practical, and self-compaction that pushes rollouts to six hours. Each is a clean, separable idea with a plausible mechanism, and together they're a real argument that "post-training ceiling" was never a ceiling — just a recipe that hadn't been tuned yet.
+
+The caveats are the usual ones, stated plainly. Every number is self-run and self-selected; `FrontierCode` is Cognition's own benchmark; there are no open weights to verify anything against; and the sharpest systems claims — >99% delta compression, 1-2 minute cross-continental sync, six-hour rollouts — are provider-reported, not independently measured. Take the leaderboard framing with the usual salt. Take the training ideas seriously.
+
+---
+
+*Built on Cognition's [SWE-1.7 launch post](https://cognition.com/blog/swe-1-7) (July 8, 2026) and its cited [FrontierCode 1.1](https://cognition.com/blog/frontier-code-1.1) eval. SWE-1.7 is served in [Devin](https://devin.ai); benchmark numbers are provider-reported. The interactive diagrams are illustrations of the mechanism, not measured traces; the entropy, mismatch, and response-length charts are reproduced from the launch post for commentary.*

@@ -1,0 +1,170 @@
+---
+title: "Rollout Routing Replay: stabilizing MoE reinforcement learning"
+description: "RL post-training on Mixture-of-Experts models collapses because the router picks different experts at rollout time than at update time, so the importance-sampling ratio explodes. Rollout Routing Replay (R3) records the inference engine's routing masks and replays them during training — aligning expert selection while keeping the router's gradient. It cuts the train-inference KL from 1.54 to 0.75 ×10⁻³, near the dense baseline, prevents the collapses that GRPO/GSPO/TIS hit, and adds under 3% rollout overhead."
+date: 2026-07-08
+tags:
+  - explainer
+  - mixture-of-experts
+  - reinforcement-learning
+  - llm
+  - training
+draft: false
+cover: /articles/rollout-routing-replay/fig1.png
+---
+
+import { RouterReplay } from "@/components/articles/rollout-routing-replay/router-replay"
+import { DiscrepancyScatter } from "@/components/articles/rollout-routing-replay/discrepancy-scatter"
+
+Reinforcement learning is now the standard last stage of training a reasoning model: sample answers, score them, push up the probability of the good ones. It works well on dense models. On **Mixture-of-Experts** models it has a habit of blowing up — the validation curve climbs for 100 steps, then falls off a cliff. **Rollout Routing Replay (R3)**, from a Peking University and Xiaomi team, names the cause and fixes it with one idea: the router chooses different experts when you *generate* a rollout than when you *score* it for the update, so make training reuse the routing decisions the rollout already made.
+
+<Callout type="note">
+All numbers here are the paper's own experiments, on one model family: **Qwen3-30B-A3B** (30B total, ~3B active) for MoE and **Qwen3-8B** for the dense baseline, trained with `VeRL` — **SGLang** for rollout, **Megatron** for the update. The tasks are math RLVR (AIME/AMC/MATH) and one multi-turn SWE-agent task. The interactive diagrams below are illustrations of the mechanism with deterministic toy numbers; the benchmark and KL values are measured and cited to the figure/table they come from.
+</Callout>
+
+## Why RL training runs two different models of the same policy
+
+Modern RL frameworks split the work across two engines. An **inference engine** (SGLang, vLLM) generates rollouts fast, with its own fused kernels and quantization. A **training engine** (Megatron, FSDP) recomputes probabilities and applies gradients. They implement the same math but not the same arithmetic, so the probability a rollout token gets from each engine is slightly different.
+
+That difference matters because PPO-style objectives are off-policy. You sample from the inference policy $\pi_\text{infer}$ but compute the loss with the training policy $\pi_\text{train}$:
+
+$$
+J(\theta) = \mathbb{E}_{x,\,y\sim\pi_\text{infer}(\theta_\text{old})}\left[\frac{1}{|y|}\sum_{t=1}^{|y|}\min\!\big(w_t(\theta)\,\hat{A}_t,\ \text{clip}(w_t(\theta),\,1-\varepsilon,\,1+\varepsilon)\,\hat{A}_t\big)\right]
+$$
+
+The whole update is scaled by the **importance-sampling ratio**
+
+$$
+w_t(\theta) = \frac{\pi_\text{train}(\theta)(y_t\mid x,y_{<t})}{\pi_\text{train}(\theta_\text{old})(y_t\mid x,y_{<t})}.
+$$
+
+When the engines agree, $w_t \approx 1$ and the clip does its job. When a token's training probability diverges from its inference probability, $w_t$ drifts away from 1, the clip either saturates or lets a huge ratio through, and gradient variance spikes. Enough such tokens and the run collapses. TIS (truncated importance sampling) and GSPO (sequence-level ratios) are two existing attempts to bound this; R3 attacks the source instead.
+
+## MoE makes the gap an order of magnitude worse
+
+A dense model is a continuous function of its inputs — nudge the activations, the output moves a little. A MoE layer is not. The router computes logits $s = x\,W_r$, keeps the top-$K$ experts, and routes through only those. A perturbation smaller than the top-$K$ margin flips which expert is selected, and the layer output jumps discretely. The two engines' small numeric differences are exactly such perturbations.
+
+The paper quantifies it on 2,048 math problems (~20M tokens), scored once by SGLang and once by Megatron:
+
+- **~10% of routers** pick a different expert between the two engines (per token, per layer).
+- **94% of tokens** get a different expert in at least one layer somewhere in the stack.
+- Train–inference **KL is 1.54×10⁻³** for the MoE model versus **0.64×10⁻³** for the dense one — more than double.
+- Even running Megatron **twice on the same sequence** gives KL 0.84×10⁻³: the MoE forward pass is not deterministic, so the "old policy" itself is noisy.
+
+Scatter each token's inference probability against its training probability and the shape of the problem is visible directly. The dense model hugs the diagonal; the MoE model fans out into a wide band with extreme off-diagonal tokens; R3 pulls it back. Switch models below:
+
+<DiscrepancyScatter />
+
+The extreme tail is what actually breaks training. The paper measures it with $F(\tau)$, the fraction of tokens whose train/infer probability ratio exceeds $\tau$. For $\tau>2$ the MoE model has an order of magnitude more such tokens than the dense model — and R3 removes that excess:
+
+<Figure
+  src="/articles/rollout-routing-replay/fig2.png"
+  alt="A log-log plot of F(tau), the fraction of tokens whose training/inference probability ratio exceeds tau, against tau from 1 to 100. Three curves: Qwen3-8B (dense) lowest, Qwen3-30B-A3B (MoE) about an order of magnitude higher across the range, and Qwen3-30B-A3B + R3 dropping back down to sit almost on top of the dense curve."
+  caption="The extreme-token distribution F(τ): the MoE model (orange) has ~10× more tokens with a large train-inference probability ratio than the dense model (blue); adding R3 (green) collapses it back to the dense baseline (paper, Figure 2)."
+/>
+
+## R3: replay the rollout routing mask
+
+The fix is almost anticlimactic once the diagnosis is clear. During rollout, record the router's top-$K$ selection mask $I_\text{infer}$ for every token and every layer. During the training forward pass, **use that mask instead of recomputing one** — but still run the softmax over the *training* logits, so the router's weights keep receiving gradient.
+
+Start from a normal MoE layer on the training side. The router scores experts and keeps the top $K$ as a binary mask:
+
+$$
+s_\text{train} = x_\text{train} W_r, \qquad I_\text{train} = \text{TopKMask}(s_\text{train}, K), \quad I_\text{train}\in\{0,1\}^M
+$$
+
+Gating weights are a softmax over the *selected* experts' logits, and the output is their weighted sum:
+
+$$
+g_{\text{train},i} = \frac{I_{\text{train},i}\,\exp(s_{\text{train},i})}{\sum_j I_{\text{train},j}\,\exp(s_{\text{train},j})}, \qquad y_\text{train} = \sum_{i=1}^{M} g_{\text{train},i}\,E_i(x_\text{train})
+$$
+
+R3 changes exactly one term: replace the training mask with the **inference** mask captured during rollout, $I_\text{infer} = \text{TopKMask}(s_\text{infer}, K)$, while keeping the softmax on the training logits:
+
+$$
+g_{\text{replay},i} = \frac{I_{\text{infer},i}\,\exp(s_{\text{train},i})}{\sum_j I_{\text{infer},j}\,\exp(s_{\text{train},j})}, \qquad y_\text{replay} = \sum_{i=1}^{M} g_{\text{replay},i}\,E_i(x_\text{train})
+$$
+
+Two properties fall out of that single substitution. **Alignment:** the training pass now activates exactly the experts the rollout used, so the layer output matches and $w_t$ returns to ~1. **Gradient survives:** only the discrete mask $I_\text{infer}$ is borrowed; the softmax still runs over $s_\text{train}$, so $\partial/\partial W_r$ keeps flowing and the router keeps training. You borrow the *decision*, not the *weights*.
+
+Below is the same mechanism at one layer. The rollout router picks its top-2; the training router, on a different engine, recomputes logits and can land on a different top-2 — and when it does, the importance ratio blows up. Toggle **R3 on** to replay the rollout mask and watch every token snap back to $w \approx 1$:
+
+<RouterReplay />
+
+The paper's own schematic makes the data flow explicit: the rollout selection `select (1, 4)` is captured once and fed into both later forward passes (the recompute of the old policy and the update of the new one), overriding whatever the training routers would have chosen on their own:
+
+<Figure
+  src="/articles/rollout-routing-replay/fig1.png"
+  alt="A three-panel diagram. Left panel: an Inference Engine forward pass through a router that selects experts 1 and 4 from four experts, producing an output. Middle and right panels: Training Engine passes for the old policy and the updated policy, each with its own router whose selection is crossed out with a trash-can icon; green arrows labelled Rollout Routing Replay carry the inference engine's select (1, 4) into both training passes."
+  caption="R3 captures the routing mask from the rollout (inference) engine and replays it in both the recompute and update passes of the training engine, discarding the training routers' own selections (paper, Figure 1, left)."
+/>
+
+If the router and top-$K$ gate are unfamiliar, I built them up from one MLP in [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch) — R3 is a small surgery on exactly that dispatch step.
+
+### What it costs, and the caching trick that makes it free at rollout
+
+Storing a mask per token per layer sounds expensive. It is not: a top-$K$ mask is a handful of small integers, and the paper reports **under 3% latency overhead** during rollout. The neat part is multi-turn. Inference engines already cache the KV of a prefix so repeated turns don't re-prefill; R3 caches the **routing masks alongside that KV**. Same prefix, same masks, no recomputation. That is what keeps R3 cheap on agent tasks — [software-engineering and browsing agents](/articles/agents-a1) that interleave many generation and tool-call turns — where re-prefilling to regenerate masks would otherwise dominate.
+
+## Does it work
+
+Three things to check: does it kill the extreme tokens, does it stop the collapse, does it score better.
+
+**Alignment.** Replaying the masks drops the train–inference KL from **1.54×10⁻³ to 0.75×10⁻³**, essentially the dense model's 0.64×10⁻³, and cuts the large-ratio tail by an order of magnitude — the green curve in Figure 2 above.
+
+**Stability.** In the single-mini-step setting, all three runs *without* R3 collapsed. The tell was mechanical: KL and $F(\tau{=}2)$ climbed together, and once $F(\tau{=}2)$ passed 0.1 — 10% of tokens differing by more than 2× between engines — the run fell over (SFT + GRPO collapsed at step 60). With R3, $F(\tau{=}2)$ stayed below 10⁻⁴ for most of training and nothing collapsed. The clearest picture is the validation curve: without R3 it climbs to ~0.62 and then craters; with R3 it climbs smoothly past 0.70.
+
+<Figure
+  src="/articles/rollout-routing-replay/fig3.png"
+  alt="A line plot of average validation score against global training step. The red w/o R3 curve rises to about 0.62 by step 100, then collapses sharply to 0.40 around step 110. The green w/ R3 curve rises smoothly and monotonically to about 0.70 by step 170 without any collapse."
+  caption="Average validation score over training. Without R3 (red) the run collapses near step 100; with R3 (green) it climbs smoothly to ~0.70 (paper, Figure 1, bottom right)."
+/>
+
+**Performance.** On the single-mini-step SFT model, R3 beats TIS by **5.58 points** of average math score — and unlike GRPO and GRPO+TIS, it never crashes:
+
+<BenchBars
+  title="Qwen3-30B-A3B-SFT · avg math score, single mini-step (Table 1)"
+  unit=""
+  bars={[
+    { label: "GRPO (crashed @60)", value: 62.23 },
+    { label: "GRPO+TIS (crashed @105)", value: 66.24 },
+    { label: "GRPO+R3", value: 71.83, highlight: true },
+  ]}
+/>
+
+In the multi-mini-step setting the story repeats against GSPO: GRPO+R3 edges GSPO by 1.29, and stacking R3 on GSPO adds another 0.95 — while plain GRPO collapsed at step 120:
+
+<BenchBars
+  title="Qwen3-30B-A3B-SFT · avg math score, multi mini-step (Table 1)"
+  unit=""
+  bars={[
+    { label: "GSPO", value: 66.76 },
+    { label: "GRPO+R3", value: 68.05 },
+    { label: "GSPO+R3", value: 69.00, highlight: true },
+  ]}
+/>
+
+And it generalizes past math. On a multi-turn SWE-agent task (R2E-Gym train, SWE-bench Verified eval), GRPO collapses at step 90; GRPO+R3 stays stable and finishes **6.8 points higher** on Pass@1:
+
+<BenchBars
+  title="SWE-bench Verified · Pass@1, multi-turn RL (Table 2)"
+  unit=""
+  bars={[
+    { label: "GRPO (crashed @90)", value: 31.80 },
+    { label: "GRPO+R3", value: 38.60, highlight: true },
+  ]}
+/>
+
+## How it differs from GSPO's routing replay
+
+GSPO already proposed a "routing replay," so it is worth being precise about what R3 changes. An RL step has three forward passes: **rollout** (generate), **recompute** (score the old policy), **update** (score the new policy). GSPO's *Recompute* Routing Replay caches the mask from the recompute pass and replays it in the update pass — it fixes routing drift *caused by the weight update*, but does nothing about the rollout-vs-training **framework gap**. R3 caches from the **rollout** pass and replays it in both recompute and update, so it fixes the framework gap *and*, because both training passes now share one mask, the update drift too.
+
+The distinction bites at `mini_step=1`, where the old and new policies are identical and GSPO's recompute-based replay has nothing to correct — yet the framework gap is still there, and only R3 closes it. One honest caveat from the same experiments: R3 already removes most of the discrepancy, so **stacking TIS on top does not help and can hurt** — TIS+R3 scored 1.69 below R3 alone on the single-mini-step SFT model. If you run R3, drop the importance-sampling patch.
+
+## The take
+
+R3 is the kind of fix that reads as obvious only after someone isolates the cause. The instability everyone attributed vaguely to "MoE being finicky" turns out to be a specific, measurable thing — the router selecting different experts in the two engines — and the remedy is to stop letting the training pass re-decide something the rollout already decided. It aligns the two policies at the source rather than clipping the symptom downstream, it costs under 3% at rollout, it caches cleanly for multi-turn agents, and it is orthogonal to GRPO/GSPO/DAPO so you can bolt it on.
+
+The caveats are the usual single-paper ones: everything is one model family (Qwen3-30B-A3B / Qwen3-8B) on math plus one SWE task, and it needs you to reach into the inference engine to capture and store routing masks — free in principle, real integration work in practice. But the mechanism is clean, the diagnosis is well-measured, and the result — MoE RL that trains as stably as a dense model — is worth the plumbing.
+
+---
+
+*Built on [Rollout Routing Replay](https://arxiv.org/abs/2510.11370) (Ma et al., 2025; arXiv:2510.11370). Figures are reproduced from the paper for commentary. The interactive diagrams use deterministic toy numbers to illustrate the mechanism; all KL, $F(\tau)$, and benchmark figures are the paper's measured values, cited to their source figure or table.*

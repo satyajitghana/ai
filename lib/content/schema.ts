@@ -22,8 +22,11 @@ export const blogFrontmatter = z.object({
 export type BlogFrontmatter = z.infer<typeof blogFrontmatter>
 
 // Curated long-form articles on AI — essays/explainers, distinct from the
-// personal build-log blog. Same shape as blog; rendered with the MDX kit.
-export const articleFrontmatter = blogFrontmatter
+// personal build-log blog. Same shape as blog, plus `featured` to star the
+// standout pieces (a ★ in the index, and they float to the top of the list).
+export const articleFrontmatter = blogFrontmatter.extend({
+  featured: z.boolean().default(false),
+})
 export type ArticleFrontmatter = z.infer<typeof articleFrontmatter>
 
 export const logFrontmatter = z.object({

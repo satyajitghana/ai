@@ -1,0 +1,197 @@
+---
+title: "Muon: orthogonalizing the update for hidden layers"
+description: "Muon takes the momentum update for a 2D weight matrix and orthogonalizes it with a few Newton-Schulz iterations before applying it, so no singular direction dominates the step. This is a first-principles walk through the update rule and the quintic iteration (with the real coefficients), why it runs only on hidden 2D layers, the NanoGPT speedrun wins Keller Jordan reports, and Moonshot's 'Muon is Scalable' result — the ~2x compute-efficiency claim, the weight-decay and update-RMS fixes needed at scale, and the Moonlight model."
+date: 2026-07-08
+tags:
+  - explainer
+  - training
+  - deep-learning
+  - llm
+draft: false
+cover: /articles/muon-optimizer/fig1.png
+---
+
+import { SpectrumCollapse } from "@/components/articles/muon-optimizer/spectrum-collapse"
+import { MuonStep } from "@/components/articles/muon-optimizer/muon-step"
+
+**Muon** is an optimizer for the **hidden layers** of a neural network. The idea is small and specific: take the momentum update you would feed to SGD, and — before applying it to a 2D weight matrix — **orthogonalize** it. Replace the raw update direction with its nearest orthogonal matrix, so every singular direction of the step carries the same weight and no single direction dominates. The name spells out the recipe: **M**oment**U**m **O**rthogonalized by **N**ewton-schulz. Everything else — the embeddings, the final head, the norms and biases — stays on AdamW.
+
+That one change buys two things that are worth taking seriously. Keller Jordan, who introduced Muon, used it to set a string of NanoGPT training-speed records at essentially the same wall-clock cost per step as Adam. And Moonshot AI's *Muon is Scalable for LLM Training* reports **~2× the compute efficiency of AdamW** at LLM scale — once you add two fixes that only matter once the matrices get big. This is a walk through the mechanism from first principles, then the numbers, honestly labelled.
+
+<Callout type="note">
+Muon only touches **2D hidden weight matrices** — attention and MLP projections. Scalars, vectors, embeddings and the output head are optimized by AdamW, and empirically that split matters (more on why below). Every speed number here is **author- or provider-reported**: Keller's on NanoGPT/CIFAR speedruns, Moonshot's on their own scaling-law sweep and the Moonlight model. I have not re-run them.
+</Callout>
+
+## The idea: orthogonalize the update
+
+Start with the problem. A momentum buffer for a weight matrix $M \in \mathbb{R}^{A \times B}$ has a spectrum — a set of singular values. Write its SVD:
+
+$$
+M = U \Sigma V^{\top}, \qquad \Sigma = \mathrm{diag}(\sigma_1, \sigma_2, \dots, \sigma_r), \quad r = \min(A, B).
+$$
+
+Here $U$ and $V$ hold the left/right **singular directions** and $\sigma_i$ are the **singular values** — how far the update reaches along each direction. Gradient updates on real transformers are badly conditioned: a few singular values are huge and the rest are tiny. So a plain momentum step lurches the weights along the top singular direction and barely moves the others. The step is *anisotropic*.
+
+Muon's fix is to keep the directions and flatten the spectrum. Set every singular value to 1:
+
+$$
+O = U V^{\top} \quad\text{(the } \Sigma \text{ in the middle is replaced by the identity).}
+$$
+
+$O$ is the closest **semi-orthogonal** matrix to $M$. It points the same way as $M$ in every singular direction, but now each direction gets the same magnitude. This is the "spectrally normalized" step — no direction dominates. Toggle between the raw momentum step and its orthogonalized version:
+
+<MuonStep />
+
+That is the whole conceptual move. The rest of Muon is about doing $M \mapsto U V^{\top}$ **cheaply** — an SVD every step, on every weight matrix, would be far too slow.
+
+## The update rule
+
+Per step, for each 2D hidden weight $W$:
+
+```python
+# Muon, one step, per 2D hidden weight matrix W
+M = mu * M + G                      # momentum buffer; G = this step's gradient, mu ~ 0.95
+U = G + mu * M                      # Nesterov variant (works a bit better in practice)
+O = newton_schulz5(U, steps=5)      # orthogonalize: O ~ U V^T of the update
+W = W - lr * O                      # apply the spectrally-normalized step
+```
+
+$G$ is the gradient, $M$ the momentum buffer, $\mu$ the momentum coefficient (~0.95), $\text{lr}$ the learning rate. Muon puts the momentum **before** the orthogonalization — you orthogonalize the accumulated direction, not the raw gradient — and Keller reports Nesterov-style momentum beats plain SGD-momentum in every case he tested. The only unusual line is `newton_schulz5`.
+
+## Newton-Schulz: orthogonalize without an SVD
+
+The trick is that $U V^{\top}$ is what you get if you take the SVD and set every singular value to 1. So you never need $U$, $V$, or $\Sigma$ explicitly — you just need a function that drives every singular value to 1 while leaving the singular *directions* alone. A matrix polynomial in $M$ does exactly that: applying $p(M) = M \, q(M^{\top}M)$ acts on the SVD as $U \, p(\Sigma) \, V^{\top}$, so it touches only the singular values. Pick the polynomial so that iterating it sends every $\sigma \in [0, 1]$ toward 1.
+
+Muon uses a fixed **quintic**, applied $T = 5$ times. Here is the exact function, coefficients and all:
+
+```python
+def newtonschulz5(G, steps=5, eps=1e-7):
+    assert G.ndim == 2
+    a, b, c = (3.4445, -4.7750, 2.0315)     # the tuned quintic coefficients
+    X = G.bfloat16()
+    X /= (X.norm() + eps)                    # normalize so every singular value is in [0, 1]
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):                   # FIXED count -- no "until converged"
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X                    # X <- a*X + b (XX^T)X + c (XX^T)^2 X
+    if G.size(0) > G.size(1):
+        X = X.T
+    return X
+```
+
+On the singular values this is the scalar map $\varphi(\sigma) = a\sigma + b\sigma^3 + c\sigma^5$ applied five times. Two things make it work. First, dividing by the Frobenius norm up front guarantees $\sigma_{\max} \le 1$, so every value lands in $[0, 1]$ where the iteration is designed to converge. Second, the coefficients are tuned so the slope at zero is steep — $\varphi'(0) = a = 3.4445 > 1$ — which yanks the *smallest* singular values up fast. Watch the spectrum flatten:
+
+<SpectrumCollapse />
+
+The honest nuance: those coefficients do **not** drive each singular value to exactly 1. $\varphi(1) = 3.4445 - 4.7750 + 2.0315 = 0.70$, and the iteration settles values into a band roughly $[0.7, 1.2]$ rather than a point. That is deliberate — Keller trades exact convergence for the steep slope at 0, which makes five steps enough. It does not matter: the goal is to *equalize* the singular values so no direction dominates, and the condition number $\kappa = \sigma_{\max}/\sigma_{\min}$ collapsing from ~33 to ~1.5 does that. Approximate orthogonalization is all Muon needs. (Moonshot report $T = 10$ gives a cleaner orthogonalization but no downstream gain, so $T = 5$ it is.)
+
+The reason this is cheap: the iteration is just matrix multiplies in `bfloat16`, no inverses or eigendecompositions. Keller bounds the overhead at $T m / B$ FLOPs relative to the forward/backward pass, where $m$ is the model dimension and $B$ the batch size in tokens. Concretely: NanoGPT ($m=768$, $B{=}524{,}288$) pays $5 \times 768 / 524288 = 0.7\%$; a Llama-405B-shaped run ($m{=}16384$, $B{=}16\text{M}$) pays $5 \times 16384 / 16\text{M} = 0.5\%$. Orthogonalization is almost free, and it gets *cheaper* as models grow.
+
+<Callout type="tip">
+Muon is close kin to Shampoo/SOAP. Strip the preconditioner accumulation out of Shampoo and its update collapses to the same orthogonalized gradient $U V^{\top}$ — but Shampoo computes it with inverse-fourth-roots (an eigendecomposition), where Muon uses the Newton-Schulz iteration. Same target, far lower wall-clock and FLOP overhead.
+</Callout>
+
+## Why only 2D hidden layers
+
+Newton-Schulz needs a matrix — orthogonalization is defined for 2D. So scalars and vectors (LayerNorm gains, biases) have no spectrum to flatten and go to AdamW by construction. Convolutional filters get flattened to 2D and can be included.
+
+The less obvious rule is that the **embedding** and the **final classifier head** are 2D but should *still* use AdamW — empirically that split improves results. The intuition: those two layers are indexed per-token. Each row is one token's vector, updated only when that token appears, so the gradient is sparse and row-wise, and there is no shared "direction" across the vocabulary worth equalizing. Orthogonalizing across the vocab dimension mixes unrelated tokens. The hidden layers are the opposite — dense, shared, badly conditioned — which is exactly where flattening the spectrum pays off. So the working split is: **hidden 2D weights on Muon, everything else on AdamW.**
+
+## The speedruns
+
+Keller's headline result is the NanoGPT speedrun. Swapping AdamW for Muon set a new training-speed record on 2024-10-15, improving speed by **35%**, and Muon has held as the optimizer of choice through the twelve NanoGPT records set since, by seven different researchers. On the training-to-target curve it dominates: at roughly Adam's cost per step it reaches a lower validation loss than Adam, DistributedShampoo, and SOAP — in less wall-clock time.
+
+<Figure
+  src="/articles/muon-optimizer/fig1.png"
+  alt="Validation loss versus wall-clock time on 8xH100 for the NanoGPT speedrun, comparing Adam, DistributedShampoo at two update frequencies, SOAP, and Muon. Muon (purple) reaches the lowest validation loss in the least wall-clock time; SOAP is far slower per step."
+  caption="NanoGPT speedrun: validation loss vs wall-clock on 8xH100. Muon reaches the lowest loss fastest, at 142 ms/step vs Adam's 139 ms/step (Keller Jordan, Muon post)."
+/>
+
+The per-step overhead is the point. From the legend: Adam runs at **139 ms/step**, Muon at **142 ms/step** — a ~2% tax — while matching-or-beating DistributedShampoo (154–179 ms/step) and SOAP (301 ms/step) on loss. Orthogonalization is nearly free per step and the sample efficiency is better, so wall-clock wins:
+
+<BenchBars
+  title="NanoGPT speedrun — ms/step (lower is better)"
+  unit=" ms"
+  bars={[
+    { label: "Adam", value: 139 },
+    { label: "Muon", value: 142, highlight: true },
+    { label: "Shampoo (uf=32)", value: 154 },
+    { label: "Shampoo (uf=10)", value: 179 },
+    { label: "SOAP", value: 301 },
+  ]}
+/>
+
+The wins hold beyond NanoGPT, in Keller's own runs: a **1.5B-parameter** transformer to GPT-2-XL-level HellaSwag in **10 × 8×H100-hours** where AdamW needs **13.3** (a 1.33× wall-clock speedup); the FineWeb validation-loss record improved by **1.35×**; and the CIFAR-10-to-94% speed record cut from **3.3 to 2.6 A100-seconds**. Small models, but a consistent shape.
+
+## Muon is Scalable — the two fixes
+
+Muon out of the box works at NanoGPT scale. Moonshot AI's *Muon is Scalable for LLM Training* (Liu et al., 2025) is about what breaks when you push it to real LLM training, and the two fixes that close the gap. Both are one-liners once you see them.
+
+**Fix 1 — weight decay.** Base Muon has no weight decay, and over a long run the weights (and with them the logits and activation RMS) drift upward until quality suffers. The fix is decoupled weight decay, exactly as in AdamW:
+
+$$
+W_t = W_{t-1} - \eta_t\,\big(O_t + \lambda\, W_{t-1}\big), \qquad \lambda = 0.1.
+$$
+
+$O_t$ is the orthogonalized update, $\eta_t$ the learning rate, $\lambda$ the weight-decay coefficient. Without it Muon eventually crosses *above* AdamW late in training; with it Muon stays ahead throughout.
+
+**Fix 2 — match the update RMS.** This one is about magnitude. AdamW's per-element update has a roughly constant RMS (~0.2–0.4) regardless of a matrix's shape, so a single learning rate works everywhere. Muon's orthogonalized update does not. Moonshot's Lemma 1: for a full-rank $[A, B]$ matrix, the RMS of $O = U V^{\top}$ is
+
+$$
+\mathrm{RMS}(O) = \frac{1}{\sqrt{\max(A, B)}}.
+$$
+
+That **shrinks as matrices get wider** — a $4096 \times 11008$ MLP weight has RMS ≈ 0.01, so its effective step is ~20× smaller than a square layer's under the same learning rate. At scale the wide matrices barely move. The fix scales each Muon update to a fixed target RMS of ~0.2:
+
+$$
+W_t = W_{t-1} - \eta_t\,\Big(0.2 \cdot O_t \cdot \sqrt{\max(A, B)} + \lambda\, W_{t-1}\Big).
+$$
+
+The $\sqrt{\max(A,B)}$ cancels the shape dependence and the constant 0.2 pins the RMS to AdamW's range, so an AdamW-tuned learning rate transfers to Muon directly — no per-layer retuning.
+
+With both fixes in, Moonshot's scaling-law sweep (dense models, 0.4B–1.5B, compute-optimal token counts) puts Muon's loss curve cleanly below AdamW's:
+
+<Figure
+  src="/articles/muon-optimizer/fig2.png"
+  alt="Scaling-law plot of language-model loss versus compute in PFLOP/s-days, log-x axis, comparing Muon (blue dashed) and AdamW (red dashed) fitted lines with star markers. Muon's line sits below AdamW's throughout; an annotation marks that Muon reaches AdamW's loss at 0.519x the FLOPs."
+  caption="Fitted scaling laws: Muon reaches AdamW's loss at 0.519x the compute — the ~2x efficiency claim (Liu et al., Figure 1a)."
+/>
+
+The fitted curves are $L_{\text{Muon}} = 2.506\,C^{-0.052}$ and $L_{\text{AdamW}} = 2.608\,C^{-0.054}$, with $C$ the compute budget. Read horizontally, matching AdamW's loss takes Muon about **52% of the training FLOPs** — the "~2× more compute-efficient" headline. Worth stating plainly: this is a fit over their own sub-2B sweep, extrapolated; it is a provider result, not an independent one.
+
+## Moonlight
+
+To show it holds past the toy scale, Moonshot trained **Moonlight** with Muon: a **15.3B-parameter** Mixture-of-Experts model (a DeepSeek-V3-Small-style architecture) that activates **2.24B** parameters per token, on **5.7T** tokens. The training was smooth — no loss or gradient-norm spikes. Placed on a compute-vs-MMLU frontier against open models, Moonlight sits *on* the Pareto front, matching models trained with far more compute:
+
+<Figure
+  src="/articles/muon-optimizer/fig3.png"
+  alt="Scatter plot of MMLU score versus training FLOPs (log-x) for many open models, with a dashed Pareto frontier. Moonlight-2.4B checkpoints at 1.2T and 5.7T tokens (red stars) sit on the frontier; Moonlight-5.7T reaches ~70 MMLU near Gemma-2-9B, above Qwen-2.5-3B, Llama-3.1-8B, DeepSeek-V2-Lite and others at similar or higher compute."
+  caption="MMLU vs training compute. Moonlight (red stars) lands on the efficiency frontier, reaching ~70 MMLU near Gemma-2-9B (Liu et al., Figure 1b)."
+/>
+
+Against comparable open models, Moonlight leads most of the standard suite — with one honest exception:
+
+<BenchBars
+  title="MMLU (%) — provider-reported"
+  unit=""
+  bars={[
+    { label: "Moonlight (Muon)", value: 70.0, highlight: true },
+    { label: "Qwen2.5-3B", value: 65.6 },
+    { label: "DeepSeek-V2-Lite", value: 58.3 },
+    { label: "Llama3.2-3B", value: 54.7 },
+  ]}
+/>
+
+On **MATH** Moonlight reaches **45.3** vs Qwen2.5-3B's 42.6, Llama3.2-3B's 8.5 and DeepSeek-V2-Lite's 17.1; on **GSM8K** it is **77.4**, ahead of Llama and DeepSeek-V2-Lite but a hair *behind* Qwen2.5-3B's 79.1. And in Moonshot's own head-to-head — Moonlight (Muon) vs an identical model trained with AdamW at 1.2T tokens — Muon wins across the board, most visibly on code: HumanEval 37.2 vs 29.3, MBPP 52.9 vs 49.2. These are all provider numbers on their own harness, and Moonlight is an MoE while the scaling-law fits were on dense models — so the ~2× claim and the model result are related but not the same experiment.
+
+## The take
+
+Muon is a genuinely small idea with a clean mechanism: orthogonalize the momentum update for 2D hidden weights so the step is spectrally flat, and do it with a five-step Newton-Schulz iteration that costs well under 1% overhead. The Newton-Schulz coefficients are tuned for speed, not exactness — they collapse the update's condition number toward 1 rather than nailing every singular value to it, and that is enough. The scope is deliberately narrow: hidden 2D matrices only, everything else on AdamW.
+
+The wins are real but each carries a caveat. Keller's NanoGPT/CIFAR speedruns are small-scale and self-reported, but they are reproducible and the per-step overhead (142 vs 139 ms) is visible and tiny. Moonshot's ~2× compute-efficiency is a fit over their own sub-2B dense sweep, extrapolated, and it *only* holds with the two fixes — weight decay and update-RMS matching — that Muon out of the box lacks. Moonlight is an MoE and a provider-reported result. Read together, the honest summary is: orthogonalizing the update is a cheap, well-motivated change that clearly helps hidden layers, is nearly free per step, and — with the scale fixes — looks like a real efficiency gain that others can now check for themselves.
+
+---
+
+*Built on Keller Jordan's [Muon: An optimizer for hidden layers in neural networks](https://kellerjordan.github.io/posts/muon) (2024) and J. Liu et al., [Muon is Scalable for LLM Training](https://arxiv.org/abs/2502.16982) (arXiv 2502.16982, 2025). Newton-Schulz code and coefficients are quoted from Keller's post; the update-RMS and weight-decay formulas from Liu et al. The interactive widgets are illustrations of the mechanism, not measured traces. Figures are reproduced from the sources for commentary; all speed and benchmark numbers are author- or provider-reported.*
