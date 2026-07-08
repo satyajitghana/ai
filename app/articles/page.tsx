@@ -12,7 +12,11 @@ export const metadata: Metadata = {
 }
 
 export default function Page() {
-  const articles = getArticles()
+  // Newest-first from the loader; a stable sort floats starred articles to the
+  // top while preserving date order within each group.
+  const articles = [...getArticles()].sort(
+    (a, b) => Number(b.featured) - Number(a.featured)
+  )
 
   return (
     <PageShell
@@ -27,6 +31,14 @@ export default function Page() {
               <div className="flex items-baseline justify-between gap-4">
                 <h2 className="font-heading text-lg font-semibold underline-offset-4 group-hover:underline">
                   {a.title}
+                  {a.featured ? (
+                    <span
+                      className="ml-2 font-mono text-xs text-muted-foreground"
+                      title="Featured"
+                    >
+                      ★
+                    </span>
+                  ) : null}
                 </h2>
                 <span className="shrink-0 font-mono text-xs text-muted-foreground">
                   {a.date}
