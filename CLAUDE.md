@@ -60,7 +60,8 @@ Rules for paper figures:
 - `pnpm dev` — dev server · `pnpm build` — production build · `pnpm start` — serve build
 - `pnpm typecheck` — `tsc --noEmit`
 - `pnpm validate:content` — load every MDX through the Zod content layer (loud failure)
-- `pnpm validate` — `typecheck` + `validate:content`. **Run this after any content/data edit, before committing.**
+- `pnpm validate:mdx` — **compile** every MDX body the way the build does (same remark plugins), so JSX/MDX syntax errors fail here instead of at the Vercel build
+- `pnpm validate` — `typecheck` + `validate:content` + `validate:mdx`. **Run this after any content/data edit, before committing.**
 
 ## Guardrails (LOCKED)
 - **Never edit `data/.generated/*`** — machine-generated, off-limits.
@@ -68,6 +69,7 @@ Rules for paper figures:
 - **Everything ships via PR** with a Vercel preview — nothing auto-deploys to the site.
 - **Never post to social without explicit approval.** `/amplify` only drafts into `drafts/<date>/`; Satyajit reviews and approves before anything is posted.
 - **No PDFs stored for papers** — paper links are derived from `arxivId`.
+- **MDX prose: escape a bare `<`.** In MDX a `<` starts a JSX tag, so `<2%`, `x < 3`, `<0.5` etc. in prose break the build (`validate:content` only checks frontmatter — `validate:mdx` catches these). Write `&lt;`, or wrap the expression in `` `code` `` or `$math$`.
 - Quality gate: if there's nothing meaningful to publish, no-op — never post filler.
 
 ## The crew
