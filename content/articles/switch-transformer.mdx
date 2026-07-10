@@ -1,0 +1,170 @@
+---
+title: "Switch Transformers: route every token to exactly one expert"
+description: "The 2021 paper that simplified Mixture-of-Experts by routing each token to a single expert instead of the usual two — cutting router math and cross-device communication, and scaling to a 1.6-trillion-parameter sparse model. This is a walk through the Switch layer, the capacity buffer that drops overflow tokens, the load-balancing loss and fp32 router that make top-1 routing stable, and the honest costs: sparse-not-dense compute, sample-efficiency-not-wall-clock speedups, and dropped tokens. The foundational simplification the modern MoE zoo descends from."
+date: 2026-07-06
+tags:
+  - mixture-of-experts
+  - llm
+  - architecture
+  - deep-learning
+  - explainer
+draft: false
+cover: /articles/switch-transformer/fig1.png
+---
+
+import { SwitchRouting } from "@/components/articles/switch-transformer/switch-routing"
+import { CapacityDrop } from "@/components/articles/switch-transformer/capacity-drop"
+
+Every modern giant open-weights model — [LongCat 2.0](/articles/longcat-2) at 1.6T
+parameters, and the rest of the sparse-MoE zoo — runs on one idea: don't run all the
+parameters on every token. Keep a big pile of experts, and for each token light up
+only a few. The mechanism, built from a router and a sparse forward pass, is walked
+through in [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch).
+**Switch Transformers** (Fedus, Zoph & Shazeer, 2021) is the paper that made that idea
+*simple* enough to scale — and it did so with one deliberately blunt move: route each
+token to **exactly one** expert.
+
+That sounds like a footnote. It was the whole contribution. The prior MoE recipe
+(Shazeer et al., 2017) argued you needed to route each token to at least the **top-2**
+experts — the reasoning being that comparing two experts gives the router a gradient
+signal to learn *which* is better. Switch throws that out and keeps only the **top-1**,
+the single argmax expert. Flip the toggle below and watch the routing collapse from two
+connectors per token to one:
+
+<SwitchRouting />
+
+<Figure
+  src="/articles/switch-transformer/fig1.png"
+  alt="Switch Transformer encoder block. Left, a standard transformer block with a Switching FFN Layer replacing the dense feed-forward network. Right, the layer expanded: two tokens x1 and x2 each pass through self-attention, then a Router that selects a single FFN — token x1 goes to FFN 2 with probability 0.65, token x2 goes to FFN 1 with probability 0.8 — and the chosen expert's output is scaled by that gate probability before the add-and-normalize."
+  caption="The Switch layer swaps the dense FFN for a set of expert FFNs; the router sends each token to just one expert (x1→FFN 2 at p=0.65, x2→FFN 1 at p=0.8) and scales that expert's output by the gate probability (Switch Transformers, Fedus et al. 2021, Figure 2)."
+/>
+
+Why is top-1 worth a paper? Because the top-2 you save is not free compute you were
+wasting — it is a second copy of every token that has to be **dispatched to another
+device**. Experts are sharded across accelerators; routing a token to an expert means
+sending its activation over the network. Halving the experts-per-token roughly halves
+both the router's arithmetic and the all-to-all communication volume — the actual
+bottleneck at scale. Switch's claim is that with the right guardrails, one expert per
+token loses little quality while making the whole thing dramatically cheaper to run.
+
+## The capacity buffer, and the tokens it drops
+
+The catch with routing is that it is dynamic — you don't know until runtime how many
+tokens will pick each expert, but hardware needs **fixed** tensor shapes. Switch solves
+this by giving every expert a fixed buffer:
+
+$$
+\text{expert capacity} = \frac{\text{tokens per batch}}{\text{number of experts}} \times \text{capacity factor}
+$$
+
+If routing were perfectly uniform, a capacity factor of `1.0` would give each expert
+exactly its fair share of slots. It never is uniform. When more tokens route to an
+expert than it has slots, the overflow tokens are **dropped** — they skip the layer
+entirely and pass through the residual connection unchanged. Drag the load imbalance and
+the capacity factor and watch tokens overflow into red:
+
+<CapacityDrop />
+
+This is the core tradeoff, made concrete. A higher capacity factor (the paper tests
+`1.0`, `1.25`, and `2.0`) means fewer dropped tokens — but every empty slot is compute
+and memory spent on nothing. A lower factor is cheaper but throws away more tokens. The
+whole point of good load balancing is to flatten the routing so a *small* buffer
+suffices.
+
+## The two tricks that make top-1 stable
+
+Blunt top-1 routing would collapse — the router would learn to send everything to a
+handful of experts, starving the rest. Two mechanisms hold it together:
+
+- **Differentiable load-balancing loss.** An auxiliary loss added at every Switch layer,
+  scaled by $\alpha = 10^{-2}$, is minimized when tokens are spread **uniformly** across
+  experts. It's the product of the fraction of tokens dispatched to each expert and the
+  router's average probability mass on that expert, summed over experts — a smooth
+  penalty that pushes the router toward balanced assignment without hard constraints.
+- **Selective precision.** Large sparse models train in `bfloat16` for speed, but the
+  router's `exp`/softmax over expert logits is numerically fragile — small perturbations
+  flip the argmax and destabilize training. Switch casts **only the router's internal
+  computation to `float32`**, keeping everything else in `bfloat16`. The fp32 stays local
+  to the router (it isn't communicated across devices), so it buys stability at no
+  bandwidth cost.
+
+Add **expert dropout** at fine-tuning time — a higher dropout rate of `0.4` inside the
+expert layers versus `0.1` elsewhere — to keep the huge sparse model from overfitting
+small downstream datasets, and top-1 routing trains cleanly.
+
+## What it bought: 7× at matched FLOPs
+
+Held to the **same FLOPs per token** as a dense T5, Switch reaches the same pretraining
+quality far sooner. The 64-expert Switch-Base hits T5-Base's quality in about
+**one-seventh** the training steps; scaled up, Switch-XXL reaches T5-XXL's quality about
+**4×** faster.
+
+<Figure
+  src="/articles/switch-transformer/fig2.png"
+  alt="A learning-curve chart with negative log perplexity on the y-axis and training time on the x-axis. Four curves: Switch-Base with 128, 64, and 32 experts all rise well above the T5-Base curve, reaching a given quality much earlier. A horizontal arrow labeled 7x Speedup marks the training-time gap between Switch-Base and T5-Base at equal quality."
+  caption="At equal FLOPs per token, Switch-Base reaches a target quality about 7× sooner than the dense T5-Base — the sample-efficiency win that motivates the whole design (Switch Transformers, Fedus et al. 2021, Figure 5)."
+/>
+
+<BenchBars
+  title="Pretraining speedup to match the dense baseline (matched FLOPs, ×)"
+  unit="×"
+  bars={[
+    { label: "Switch-Base vs T5-Base", value: 7.0, highlight: true },
+    { label: "Switch-XXL vs T5-XXL", value: 4.0, highlight: true },
+  ]}
+/>
+
+The other headline is raw scale. By stacking experts, the paper builds **Switch-C** with
+**2,048 experts** and roughly **1.6 trillion** total parameters — while **Switch-XXL**
+takes a different bet, only 64 experts but a much larger per-expert FFN, at ~395B
+parameters. Both were among the largest models trained at the time.
+
+## Distilling back to dense
+
+A 1.6T-parameter sparse model is impractical to *serve* for many use cases — the
+parameters have to live in memory across many devices even if each token only touches a
+few. So the paper distills the sparse teacher back into a small **dense** student, and
+finds you can compress the model by up to **99%** while still keeping about **30%** of the
+quality improvement the sparse model earned over its dense baseline. Not all of it — but
+a meaningful slice of the gains survives into a model you can run on modest hardware.
+
+<Callout type="warn">
+Read the wins precisely — none of them is a free lunch.
+
+- **1.6T is sparse, not dense.** Switch-C activates a *single* expert's FFN per token, so
+  the FLOPs and activated parameters per token stay close to the dense T5 backbone —
+  nowhere near 1.6T of compute. The trillion parameters are capacity you *store and
+  communicate*, not compute you *spend* per token. Never read "1.6T" as dense-1.6T cost.
+- **7× is sample-efficiency at matched FLOPs, not wall-clock magic.** It means reaching a
+  quality target in fewer steps at equal FLOPs-per-token — bought by spending far more
+  **memory and cross-device communication** on many more parameters. On different
+  hardware or with communication-bound serving, the real-world speedup shrinks.
+- **Top-1 is not strictly better than top-2.** Routing to one expert can be lower-quality
+  per FLOP in some settings; Switch's contribution is *showing it works well* once you add
+  the capacity buffer, the load-balancing loss, and the fp32 router — not that fewer
+  experts is always better.
+- **Dropped tokens are lost information.** At a low capacity factor, overflow tokens skip
+  the layer entirely. That's a genuine cost you trade against buffer waste — there's no
+  setting that removes it, only balances it.
+</Callout>
+
+## Why it still matters
+
+Almost every technique in a modern MoE — [LongCat 2.0](/articles/longcat-2)'s 1.6T /
+~48B-active split, the routing and load-balancing machinery in newer systems — is a
+descendant of the choices made here. Switch didn't invent Mixture-of-Experts; it made it
+**simple and stable enough to scale**, by proving that the aggressive top-1 route works
+if you surround it with a fixed capacity buffer, a balancing loss, and a precision-safe
+router. The interesting later work mostly *pushes back* on the simplifications — smarter
+routing than pure argmax, softer handling than hard token drops — but they all start from
+the Switch layer. It's the foundation the zoo is built on.
+
+---
+
+*Built on [Switch Transformers: Scaling to Trillion Parameter Models with Simple and
+Efficient Sparsity](https://arxiv.org/abs/2101.03961) (Fedus, Zoph & Shazeer, 2021).
+Figures are the paper's own (Figures 2 and 5), used for academic commentary; the
+interactive diagrams are our illustrations of the mechanism. Numbers — the α=0.01 loss
+coefficient, capacity factors, the 7× and 4× speedups, 2,048 experts / 1.6T parameters,
+99% compression retaining ~30% of gains, and 0.4 expert dropout — are quoted from the
+paper.*
