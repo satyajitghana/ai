@@ -12,11 +12,9 @@ export const metadata: Metadata = {
 }
 
 export default function Page() {
-  // Newest-first from the loader; a stable sort floats starred articles to the
-  // top while preserving date order within each group.
-  const articles = [...getArticles()].sort(
-    (a, b) => Number(b.featured) - Number(a.featured)
-  )
+  // Strictly newest-first by date (from the loader). `featured` is shown as a ★
+  // badge but does NOT change ordering — the list stays chronological.
+  const articles = getArticles()
 
   return (
     <PageShell
