@@ -1,0 +1,156 @@
+---
+title: "One small box, 64 users at once: continuous batching on a DGX Spark"
+description: "A single DGX Spark — a GB10 Grace-Blackwell edge box with 128 GB of unified memory — serves dozens of concurrent chat users on a 35B model. The trick isn't a faster chip; it's vLLM's continuous batching: every decode step gathers all live streams into one fused forward pass, so aggregate throughput scales far above single-stream while each user's own speed stays modest. A precise, honest walk through the mechanism, the numbers I could verify against the spark-bench results, and the ones I couldn't."
+date: 2026-07-06
+tags:
+  - inference-optimization
+  - llm
+  - systems
+  - explainer
+  - moe
+  - quantization
+draft: false
+---
+
+import { ContinuousBatch } from "@/components/articles/dgx-spark-batching/continuous-batch"
+import { ThroughputScaling } from "@/components/articles/dgx-spark-batching/throughput-scaling"
+
+A [DGX Spark](/articles/deepseek-dspark) is not a datacenter. It's a small GB10 Grace-Blackwell
+box with **128 GB of unified memory** — the kind of thing that sits on a desk. And yet one of them,
+running [vLLM](https://github.com/vllm-project/vllm), will hold a conversation with **dozens of people
+at the same time** on a 35B-class model. The surprising part isn't the model or the silicon. It's a
+scheduling trick called **continuous batching**, and it's the single most important reason a small box
+can feel like a shared server.
+
+The instinct is to picture the users taking turns — one prompt finishes, the next begins. That's not
+what happens. At every decode step the server bundles **all** the currently-active conversations into
+**one** forward pass through the GPU, and appends exactly one new token to each. Sixty-four people, one
+pass. Drag the concurrency and step the clock to see it move:
+
+<ContinuousBatch />
+
+## Why decoding one token is a waste of a GPU
+
+To see why batching helps so much, you have to look at what generating a single token actually costs.
+LLM inference splits into two phases — the [prefill and decode](/articles/how-llm-inference-works) —
+and it's the **decode** phase, one token at a time, that dominates a chat session.
+
+Decoding one token for one user means: load the model's weights out of memory, multiply the single
+current token's vector through them, read that user's entire [KV cache](/articles/turboquant-kv-cache)
+to do attention, and emit one token. The arithmetic is tiny — one token — but you had to stream **all
+the weights** through the chip to do it. That makes single-stream decode **memory-bandwidth-bound**:
+the GPU's compute units sit almost idle, waiting on memory. You paid to load the weights and barely
+used them.
+
+Continuous batching is the fix that falls out of that observation. If you're loading the weights
+anyway, run *more* tokens through them on the same load. Gather N users' current tokens, stack them,
+and do one fused matmul against the weights you already fetched. The weight-load cost — the expensive
+part — is now **amortized over N streams instead of one**. Aggregate throughput climbs steeply, and
+keeps climbing until you run out of either compute or KV-cache memory.
+
+<ThroughputScaling />
+
+That's the trade in two curves. **Aggregate** tokens/second rises and saturates; **per-user**
+tokens/second falls the whole way. Both are true at once, and conflating them is the most common way
+these numbers get oversold.
+
+## "Continuous," not just "batched"
+
+Plain static batching — wait for N requests, run them together, wait for all N to finish — would be
+useless for chat, because requests arrive at random times and finish at wildly different lengths. One
+long generation would stall everyone.
+
+vLLM's batching is **iteration-level** (also called *in-flight* batching): the batch is re-formed
+**every single decode step**. A request whose prompt just arrived joins the batch on the next step; a
+request that just emitted its stop token leaves it and frees its memory immediately. The GPU never
+blocks waiting for the slowest member — that's the "continuous" part, and it's what the join/leave
+churn in the first diagram is showing. Streams flow through a batch that is constantly being rebuilt.
+
+The enabling piece underneath is **PagedAttention**. Each user's KV cache is stored not as one
+contiguous slab but as a list of fixed-size **blocks** (the paged rows in the diagram), allocated on
+demand from a shared pool — exactly like virtual memory pages. Without it, fitting 64 independent,
+different-length caches into one memory space would fragment badly and you'd waste most of it. With it,
+64 caches pack tightly, and a finished request's blocks return to the pool for whoever's next. KV-cache
+memory — not FLOPs — is what ultimately caps how many users fit.
+
+## The numbers, and which ones I trust
+
+Here's where honesty matters. The story above is mechanism, and it's solid. The specific figures need
+sorting into what the public [spark-bench](https://github.com/Weschera/spark-bench) results actually
+contain versus what's a reported run.
+
+The model is **Qwen3.6-35B** — specifically an **A3B mixture-of-experts**: ~35B total parameters but
+only **~3B active per token**. That's half of why it's fast (you only compute a fraction of the network
+each step) and why it fits comfortably (the weights are also **quantized** — the committed throughput
+runs use vLLM with **NVFP4**, a [4-bit format](/articles/nemotron-nvfp4), and an FP8 variant). A 35B
+model serving this briskly on a 128 GB box is a *quantized MoE*, not a dense fp16 35B — and that
+distinction is load-bearing, not a footnote.
+
+The committed `spark_bench.csv` sweeps concurrency **1 → 16** and shows the batching curve directly. On
+the NVFP4 build, aggregate decode throughput roughly triples from a single user to sixteen:
+
+<BenchBars
+  title="Aggregate decode throughput climbs with concurrency — Qwen3.6-35B, NVFP4 (committed)"
+  unit=" tok/s"
+  bars={[
+    { label: "1 user", value: 72 },
+    { label: "8 users", value: 161 },
+    { label: "16 users", value: 217, highlight: true },
+  ]}
+/>
+
+…while each individual user's stream slows by roughly the same factor — you're trading personal latency
+for collective capacity:
+
+<BenchBars
+  title="Per-user throughput falls as the batch grows — same runs (committed)"
+  unit=" tok/s"
+  bars={[
+    { label: "1 user", value: 85 },
+    { label: "8 users", value: 33 },
+    { label: "16 users", value: 22, highlight: true },
+  ]}
+/>
+
+<Callout type="warn">
+**Read the caveats before quoting a headline number.**
+
+- **700+ tok/s is _aggregate_, across all streams — not per user.** At 64 users that's ≈ **11 tok/s each**,
+  a modest personal reading speed. Continuous batching raises *throughput*, not single-stream latency;
+  it does not make any one user's tokens arrive faster (time-to-first-token actually rises with batch
+  size, from ~0.3 s single-stream to ~2.5 s at concurrency 16 in the committed runs).
+- **The 64-user / ~700 tok/s / 32,768-tokens-in-54-seconds figures are a _reported_ run, not one I could
+  confirm in the repo.** The committed sweep for Qwen3.6-35B tops out at concurrency **16** (~217 tok/s
+  median, ~450 in the best single run). A ~723 tok/s aggregate *does* appear in the committed data — but
+  at concurrency **32**, and for a *different* model ([laguna](/articles/laguna-model-factory)), not this
+  one. So the 64-user number is consistent in magnitude with where the curve is heading, but treat it as
+  reported, not verified.
+- **The ~38 W figure I could not verify at all** — there is no power column anywhere in the committed
+  results. The DGX Spark's whole-box envelope is well above 38 W under load, so whatever that number
+  measures (a sub-component? an idle draw?), take it as reported until someone publishes the methodology.
+- **Quantization is doing real work.** These rates are for a **4-bit (NVFP4) / 3B-active MoE**, not a
+  dense fp16 35B. Different precision, different story.
+</Callout>
+
+## The take
+
+Continuous batching is the quiet reason "local inference" and "serving other people" stopped being
+mutually exclusive. The mechanism is honest and general: decode is memory-bound, a lone stream wastes
+the GPU, so amortize the weight-load across as many live streams as KV-cache memory will hold, rebuilding
+the batch every step so nobody waits on anybody. On a DGX Spark that turns a desk-sized box into a
+small shared server — genuinely dozens of concurrent users on a quantized 35B MoE.
+
+What it is *not* is a speedup for the person on the other end. Each user's tokens come at a human
+reading pace, and that pace gets slightly worse as the room fills up. The DGX Spark headline — one small
+box, many users — is real and impressive; it's just a statement about **aggregate** capacity and clever
+scheduling, not about raw single-stream speed. Hold both halves of that at once and the number stops
+being a magic trick and becomes what it actually is: good systems engineering.
+
+---
+
+*Mechanism (continuous / in-flight batching, PagedAttention) is standard
+[vLLM](https://github.com/vllm-project/vllm). Throughput and latency figures are read from the committed
+[spark-bench](https://github.com/Weschera/spark-bench) `results/spark_bench.csv` (Qwen3.6-35B-A3B, vLLM
+NVFP4/FP8, concurrency 1–16); the 64-user / ~700 tok/s / ~38 W figures are a reported run and are labelled
+as such above. The interactive diagrams illustrate the mechanism; their tok/s curve is a saturating fit
+pinned to the committed points and the reported endpoint.*

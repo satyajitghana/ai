@@ -1,0 +1,177 @@
+---
+title: "Colibri: running a 744B model on a 25 GB machine by streaming experts from disk"
+description: "Colibri is a pure-C, zero-dependency engine that runs GLM-5.2 — a 744B-parameter MoE — on a consumer box with ~25 GB of RAM, by keeping only the int4 dense core resident and streaming the routed experts from disk on demand. It works because the model is extremely sparse and heavily quantized. But be honest about what 'runs' means: this is a feasibility feat, not a usable-speed setup — cold decode is 10–20 seconds per token, and even the best community result is ~3 seconds per token. And '25 GB of RAM' only holds if you also have ~370 GB of fast NVMe."
+date: 2026-07-06
+tags:
+  - inference-optimization
+  - mixture-of-experts
+  - systems
+  - explainer
+  - llm
+draft: false
+---
+
+import { ExpertStreaming } from "@/components/articles/colibri/expert-streaming"
+import { ThroughputLadder } from "@/components/articles/colibri/throughput-ladder"
+import { MemoryBudget } from "@/components/articles/colibri/memory-budget"
+
+[GLM-5.2](/articles/glm-5-2) is a 744-billion-parameter model. Loaded the normal way, its
+weights want hundreds of gigabytes of fast memory — data-center territory. [Colibri](https://github.com/JustVugg/colibri)
+is a single-file, pure-C engine, zero external dependencies, that runs that same model on a
+consumer machine with about **25 GB of RAM**. Not a distillation, not a smaller sibling — the
+full 744B checkpoint, answering correctly, on a box that costs less than one H100's cooling fan.
+
+Before the "how," the honest headline: **this is a feasibility feat, not a usable-speed setup.**
+Cold, Colibri decodes at roughly **0.05–0.1 tokens per second** — that is *10 to 20 seconds per
+token*. Warm, with every trick engaged, the best real community result is about **0.37 tok/s**,
+still ~3 seconds per token. And "25 GB of RAM" is only true if you *also* have ~**370 GB of fast
+NVMe** for the experts. Keep both numbers in the same sentence or the claim is misleading.
+
+<Callout type="warn">
+**Read the fine print before you get excited.** (1) It is *slow* — 0.05–0.1 tok/s cold is 10–20
+seconds **per token**; the best community case, ~0.37 tok/s, is still ~3 s/token. (2) "Runs on 25 GB
+RAM" **requires ~370 GB of fast disk** for the experts — the RAM number alone is misleading. (3) The
+numbers here are **community-reported / single real test cases**, not official benchmarks — treat them
+as existence proofs, not spec sheets. (4) It works only because GLM-5.2 is an **extremely sparse MoE**
+*and* because of **int4/int8 quantization** — remove either and the trick collapses.
+</Callout>
+
+## Why this is even possible: extreme sparsity
+
+Colibri does not compress 744B parameters into 25 GB. It exploits the fact that, at any moment,
+almost none of those parameters are doing work. GLM-5.2 is a
+[Mixture of Experts](/articles/mixture-of-experts-from-scratch): each MoE layer holds **256 experts**,
+but a router picks only a small **top-k** of them per token. Across the model, only about **40B of the
+744B parameters activate for a given token**, and of those, only ~**11 GB of weights** actually *change*
+from one token to the next — the routed experts. Everything else (attention, shared experts, embeddings —
+the "dense" ~17B) is used on *every* token.
+
+That split is the whole design. Split the model by how often each piece is touched:
+
+- **The dense core (~17B params)** is touched every token → keep it **resident in RAM**, int4-quantized
+  to **~9.9 GB**.
+- **The routed experts (21,504 of them: 75 MoE layers × 256, plus the MTP head, ~19 MB each at int4)**
+  are touched rarely and unpredictably → leave them **on disk (~370 GB)** and fetch only the handful a
+  token actually routes to.
+
+The second enabler is quantization. The original FP8 checkpoint is ~**756 GB**; Colibri's offline
+converter requantizes it to int4 (the experts) so the dense core fits in ~9.9 GB of RAM and the expert
+store shrinks to ~370 GB on disk. Sparsity says *you rarely need most experts*; quantization says *the
+ones you do need are small enough to stream*. You need **both**.
+
+## The three-tier memory, made visible
+
+So the memory hierarchy has three tiers: the **int4 dense core resident in RAM**, an **LRU cache of hot
+experts in RAM**, and the **full expert store on disk**. When the router picks an expert, one of two
+things happens. If that expert is already in the RAM cache (or pinned), it is a **hit** — served at
+memory speed. If not, it is a **miss**: a disk read of ~19 MB that sits **on the critical path** of that
+token. The token cannot finish until the bytes arrive.
+
+Route a token through one MoE layer and watch it resolve. Scrub the token, resize the cache, toggle
+hot-expert pinning, and watch the LRU fill and evict:
+
+<ExpertStreaming />
+
+This is the entire performance story in one picture. The router picks its experts; the cache absorbs the
+ones you keep re-using; everything else is a disk fetch. A cold token — nothing cached — reads about
+**11 GB from disk** (75 layers × ~8 experts × ~19 MB). At a typical NVMe rate of ~1 GB/s, that read alone
+is ~10 seconds, which is exactly why cold decode lands at 0.05–0.1 tok/s. **Decode is disk-bound**, not
+compute-bound: the CPU sits waiting on I/O. This is the same memory-wall intuition as ordinary
+[LLM inference](/articles/how-llm-inference-works), pushed to its limit — except the "memory" the decode
+waits on is a spinning queue of NVMe reads instead of GPU HBM.
+
+Colibri softens the disk with the usual systems tricks: an **LRU cache** so repeat experts stay hot, an
+**async readahead** that reads the *next* block of experts while the current one is still multiplying (so
+compute and I/O overlap), the **OS page cache** acting as a free second-level cache, and a **RAM safety
+budget** — the cache is auto-sized from `MemAvailable` at startup so it fills spare memory without ever
+triggering an OOM kill. None of these change the physics of a cold miss; they just make misses rarer.
+
+## Budget the RAM and the disk together
+
+Because the "25 GB" number is the seductive, misleading one, it is worth drawing to scale. On a 25 GB
+machine the resident footprint is the 9.9 GB int4 core plus an auto-sized LRU expert cache plus a safety
+headroom — and the 370 GB of experts sit on disk, roughly **15× larger than the entire RAM**. Slide the
+cache size and see how little of the model is ever in memory at once:
+
+<MemoryBudget />
+
+That 15× gap is the point. Colibri did not shrink GLM-5.2 to fit in RAM; it arranged for only the
+in-use ~4% to be in RAM at any instant, and made disk the backing store for the rest. Take away the fast
+NVMe and there is no engine — which is why quoting the RAM figure without the disk figure sells a fiction.
+
+## Buying speed back: warm cache, MTP, and pinning
+
+Cold decode is the floor, not the experience. Three things stack on top of it, and it is worth being
+precise about what each one is.
+
+**A warm cache** is just locality: real prompts re-route to the same experts, so after a few tokens the
+hottest experts live in RAM and the miss rate drops. **Pinned hot experts** make that permanent — Colibri
+records which experts your usage actually routes to (a `.coli_usage` file) and pins the hottest ones in
+spare RAM, so the engine *literally gets faster the more you use it*.
+
+**MTP** is the subtle one. GLM-5.2 ships a native [multi-token-prediction](/articles/multi-token-prediction)
+head — a lightweight draft model that proposes several future tokens, which the main model then *verifies*
+in one batched forward. Colibri runs it natively at **int8** (this matters: at int4 the draft head's
+predictions are so degraded that acceptance collapses to 0–4% and speculation never engages; at int8 it
+reaches ~39–59% acceptance, community-measured). The payoff is **2.2–2.8 tokens per forward** — but note
+that is a *speculation/acceptance rate*, the number of tokens you get out of one main-model pass, **not**
+tokens per second. It amortizes the fixed per-forward cost; it does not make the disk faster. On a *cold*
+cache MTP can even be a net loss, because verifying extra draft tokens routes to *more* experts
+(~660 → ~1100 expert-loads/token) — so speculation only pays once the cache and pins are warm.
+
+Stack them, and honestly label which rungs are measured versus an illustrative split:
+
+<ThroughputLadder />
+
+The endpoints are real community numbers; the per-factor decomposition in the middle is illustrative
+(Colibri's README reports the endpoints, not the split). The takeaway is the seconds-per-token column: the
+best real result, **0.37 tok/s on a Ryzen AI 9 Framework 13** with a warm cache, MTP and pinning, is still
+about **one token every three seconds**. A different community machine — an M5 Max with **128 GB of RAM** —
+reaches **1.06 tok/s**, but only because far more RAM lets far more experts stay resident, which just
+confirms the thesis: *the disk is the bottleneck, and RAM buys you out of it.*
+
+<BenchBars
+  title="Community-reported decode throughput (tok/s) — single test cases, not benchmarks"
+  unit=""
+  bars={[
+    { label: "Cold (no cache)", value: 0.08 },
+    { label: "Core Ultra 7 · 24 GB", value: 0.11 },
+    { label: "Ryzen AI 9 · 128 GB · warm+MTP+pin", value: 0.37, highlight: true },
+    { label: "M5 Max · 128 GB", value: 1.06 },
+  ]}
+/>
+
+## Colibri is the engine, not the model
+
+Keep the two things distinct. [GLM-5.2](/articles/glm-5-2) is the *model* — the 744B MoE, its routing, its
+MTP head, its training. **Colibri is an *engine*** that runs that model's forward pass in pure C on tiny
+hardware. The cleverness is entirely in the *systems* layer: how to lay out weights on disk, when to read
+them, what to cache, how to overlap I/O with compute, how to quantize the head so speculation survives.
+It reimplements GLM-5.2's forward pass faithfully — MLA attention with a compressed KV cache (~57× smaller
+than dense), DeepSeek-V3-style routing, native MTP — but adds nothing to the model's *capability*. Same
+weights, same answers; the contribution is fitting them onto a laptop.
+
+## The take
+
+Colibri is a lovely demonstration of a real principle: **a sparse MoE's active footprint, not its parameter
+count, is what a runtime has to hold in fast memory.** Because GLM-5.2 fires only a few of its 256 experts
+per layer per token, and because int4/int8 quantization shrinks both the resident core and each streamed
+expert, the working set collapses from hundreds of gigabytes to ~10 GB of RAM plus on-demand disk reads.
+That is genuinely clever, and it is pure C with zero dependencies, which makes it a beautiful object to read.
+
+But be clear-eyed about what it buys. It buys *access*, not *speed*: you can hold a conversation with a
+744B frontier model on a 25 GB machine, at the pace of a few seconds per token, provided you also own a
+370 GB fast disk. The bottleneck is not going away — it is the physics of pulling ~11 GB across NVMe for
+every cold token — and the caching, pinning and speculation only push against it. As an existence proof
+that extreme sparsity plus aggressive quantization can put a frontier model on consumer hardware, Colibri
+is compelling. As a way to actually *use* one at interactive speed, it is not there, and it is refreshingly
+honest about that.
+
+---
+
+*Built from the [Colibri repository](https://github.com/JustVugg/colibri) (JustVugg; Apache-2.0) and its
+README. All throughput and hardware figures are **community-reported single test cases**, not official
+benchmarks: cold ~0.05–0.1 tok/s and MTP 2.2–2.8 tok/forward on the dev machine; 0.37 tok/s (Ryzen AI 9,
+Framework 13), 1.06 tok/s (M5 Max, 128 GB), 0.11 tok/s (Core Ultra 7, 24 GB) from community runs.
+Architecture figures — 744B total, ~17B dense, 9.9 GB int4 core, 21,504 experts, ~370 GB on disk — are from
+the repository README. The interactive diagrams are illustrations of the mechanism, not measurements.*
