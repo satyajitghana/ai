@@ -1,4 +1,5 @@
 import Link from "next/link"
+import { StarIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { ChatConsole } from "@/components/chat/chat-console"
 import { PageShell } from "@/components/site/page-shell"
@@ -10,6 +11,8 @@ import {
   getLogs,
   getProjects,
 } from "@/lib/content"
+
+const STAR = "oklch(0.79 0.15 82)" // warm gold, matches the articles page
 
 function SectionHeader({ path, href }: { path: string; href: string }) {
   return (
@@ -32,7 +35,7 @@ function SectionHeader({ path, href }: { path: string; href: string }) {
 
 export default function Page() {
   const projects = getProjects().filter((p) => p.featured)
-  const articles = getArticles().slice(0, 3)
+  const articles = getArticles().slice(0, 5)
   const posts = getBlogPosts().slice(0, 3)
   const logs = getLogs().slice(0, 3)
   const digest = getArxivDigests()[0]
@@ -112,6 +115,39 @@ export default function Page() {
         </p>
       </section>
 
+      {/* Curated articles — the site's flagship writing, led first */}
+      {articles.length ? (
+        <>
+          <SectionHeader path="articles" href="/articles" />
+          <ul className="space-y-3">
+            {articles.map((a) => (
+              <li key={a.slug}>
+                <Link
+                  href={`/articles/${a.slug}`}
+                  className="group flex items-baseline justify-between gap-4"
+                >
+                  <span className="underline-offset-4 group-hover:underline">
+                    {a.title}
+                    {a.featured ? (
+                      <StarIcon
+                        size={13}
+                        weight="fill"
+                        aria-label="Featured"
+                        className="ml-1.5 inline-block align-[-0.1em]"
+                        style={{ color: STAR }}
+                      />
+                    ) : null}
+                  </span>
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                    {a.date}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+
       {/* Featured projects */}
       <SectionHeader path="projects" href="/projects" />
       <ul className="space-y-4">
@@ -153,30 +189,6 @@ export default function Page() {
           </li>
         ))}
       </ul>
-
-      {/* Curated articles */}
-      {articles.length ? (
-        <>
-          <SectionHeader path="articles" href="/articles" />
-          <ul className="space-y-3">
-            {articles.map((a) => (
-              <li key={a.slug}>
-                <Link
-                  href={`/articles/${a.slug}`}
-                  className="group flex items-baseline justify-between gap-4"
-                >
-                  <span className="underline-offset-4 group-hover:underline">
-                    {a.title}
-                  </span>
-                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                    {a.date}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </>
-      ) : null}
 
       {/* Latest logs */}
       <SectionHeader path="logs" href="/logs" />
