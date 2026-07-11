@@ -12,6 +12,10 @@
 // stored PDF), writes a "take" for the chosen ~5–10, and saves the digest to
 // content/papers/<date>.mdx. This script only proposes candidates; the human + agent curate.
 
+import { readdirSync, readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+
 import { interests } from "../data/interests"
 
 const ARXIV_API = "https://export.arxiv.org/api/query"
@@ -116,13 +120,35 @@ function score(c: Candidate): number {
   return s
 }
 
-// --- date window: yesterday + today (UTC) ------------------------------------
-function dateWindow(): { from: string; to: string } {
-  const now = new Date()
-  const today = now.toISOString().slice(0, 10)
-  const y = new Date(now.getTime() - 24 * 60 * 60 * 1000)
-  const yesterday = y.toISOString().slice(0, 10)
-  return { from: yesterday, to: today }
+// --- dedup + date window ------------------------------------------------------
+// arXiv ids carry a version suffix (…v1, …v2); dedup on the base id so a revised
+// resubmission of a paper we already covered still counts as a duplicate.
+const baseId = (id: string) => id.replace(/v\d+$/, "")
+
+// Every arxivId already published in a digest under content/arxiv/, so we never
+// propose a paper twice. Resolved relative to this script, not the cwd.
+function existingArxivIds(): Set<string> {
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "content", "arxiv")
+  const ids = new Set<string>()
+  let files: string[] = []
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".mdx"))
+  } catch {
+    return ids // no digests yet
+  }
+  for (const f of files) {
+    const text = readFileSync(join(dir, f), "utf8")
+    for (const m of text.matchAll(/arxivId:\s*"?([^"\s]+)"?/g)) {
+      ids.add(baseId(m[1]))
+    }
+  }
+  return ids
+}
+
+// The day before a YYYY-MM-DD date (UTC).
+function dayBefore(d: string): string {
+  const t = Date.parse(`${d}T00:00:00Z`) - 24 * 60 * 60 * 1000
+  return new Date(t).toISOString().slice(0, 10)
 }
 
 async function main() {
@@ -150,11 +176,19 @@ async function main() {
   }
   const xml = await res.text()
 
-  const { from } = dateWindow()
-  const candidates = parseEntries(xml)
+  // Drop anything we've already covered in a previous digest (by base id).
+  const seen = existingArxivIds()
+  const fresh = parseEntries(xml)
     .map((c) => ({ ...c, score: score(c) }))
-    // Keep recent submissions (yesterday+today); arXiv returns newest first.
-    .filter((c) => c.published >= from)
+    .filter((c) => !seen.has(baseId(c.arxivId)))
+
+  // Anchor the window to the newest submission arXiv actually returned rather than
+  // the local clock — the machine clock can run ahead of arXiv's latest and drop
+  // everything. Keep the newest submission day plus the day before it.
+  const newest = fresh.reduce((m, c) => (c.published > m ? c.published : m), "")
+  const from = newest ? dayBefore(newest) : ""
+  const candidates = fresh
+    .filter((c) => !from || c.published >= from)
     .sort((a, b) => b.score - a.score || b.published.localeCompare(a.published))
     .slice(0, TOP_N)
 
