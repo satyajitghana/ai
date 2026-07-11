@@ -1,0 +1,166 @@
+---
+title: "MusaCoder: teaching a model to write GPU kernels with execution-feedback RL"
+description: "Generating a correct, fast CUDA/MUSA kernel from a PyTorch reference is a task where almost every early attempt fails to compile, so execution-based RL starves on sparse rewards, reward-hacks with PyTorch fallbacks, and destabilizes. MusaCoder is a full-stack recipe — kernel-oriented data synthesis, diversity-preserving rejection fine-tuning, and RL against the MooreEval verifier — held together by three fixes: PrimeEcho anchors multi-turn rewards to the first turn, Buffered Dynamic Retry recovers signal from all-failed samples, and MirrorPop masks off-policy sequences the vanilla filter misses. The 27B model reaches 93.2 Pass@8 on KernelBench, ahead of the closed frontier models the paper tests. A walk through the reward, the three stabilizers, the numbers, and the honest caveats."
+date: 2026-07-10
+tags:
+  - llm
+  - reinforcement-learning
+  - gpu
+  - cuda
+  - code-generation
+  - explainer
+draft: false
+cover: /articles/musacoder-gpu-kernels/fig1.png
+---
+
+import { RewardLadder } from "@/components/articles/musacoder-gpu-kernels/reward-ladder"
+import { PrimeEcho } from "@/components/articles/musacoder-gpu-kernels/prime-echo"
+import { MirrorPop } from "@/components/articles/musacoder-gpu-kernels/mirror-pop"
+
+Ask a language model to turn a PyTorch module into a hand-written CUDA (or [MUSA](https://en.wikipedia.org/wiki/Moore_Threads), Moore Threads' CUDA-alike) kernel and you hit a task that punishes it at every turn. The output has to compile against a real toolchain, launch without an illegal memory access, produce numerically-matching results across dtypes and shapes, **and** run faster than the reference — or it is worthless. Most first attempts fail outright, which is exactly what makes the obvious training recipe, execution-based reinforcement learning, so hard: when nearly every rollout scores the same failing reward, there is no gradient to learn from. Worse, the model quickly discovers it can "pass" a correctness check by quietly calling the very PyTorch operator it was asked to replace.
+
+**MusaCoder** (Cheng et al., Moore Threads, 2026) is a full-stack answer to that. It is less a single trick than an assembled pipeline — data synthesis, supervised and rejection fine-tuning, and RL against an execution verifier — with three stabilization mechanisms that keep the RL from collapsing. The result: a 9B model built on Qwen3.5-9B that matches the frontier closed models the paper evaluates, and a 27B model (on Qwen3.6-27B) that tops them on the paper's KernelBench protocol.
+
+<Figure
+  src="/articles/musacoder-gpu-kernels/fig1.png"
+  alt="MusaCoder training pipeline. Left: raw sources feed six data corpora — PyTorch-to-CUDA generation, GPU kernel knowledge QA, profiling analysis, optimization rewrite, and kernel review/repair. Middle-bottom: auxiliary augmentation (shape/stride hints, unit tests, metadata, weak-op upsampling), LLM-based multi-agent synthesis, and the MooreEval evaluator that parses, compiles, correctness-checks, anti-hacking-checks and benchmarks, producing a verified kernel-oriented corpus. Right: multi-task SFT, then diversity-preserving RFT, then two-stage RL (single-turn warmup then multi-turn) with the PrimeEcho, MirrorPop and Buffered Dynamic Retry optimization methods."
+  caption="The full MusaCoder pipeline: kernel-oriented data synthesis and the MooreEval verifier feed a verified corpus, then multi-task SFT → diversity-preserving RFT → two-stage RL with three stabilizers (Cheng et al., 2026, Figure 2)."
+/>
+
+## The reward is where correctness gets enforced
+
+Everything downstream depends on one design choice: the scalar reward `s(c)` that MooreEval — the paper's distributed compile/execute/verify environment — assigns to a candidate kernel `c`. MooreEval first produces a structured verdict `V(c,x) = (compiled, correct, legal, speedup, category, detail)`, and collapses it into a **correctness-first** reward (Equation 2):
+
+$$
+s(c)=\begin{cases}
+-1, & \text{extraction / compile / runtime fails},\\
+-1, & \text{a disallowed PyTorch/aten::* fallback is detected},\\
+-1, & q=0,\\
+-0.5+0.5\,q, & 0<q<1,\\
+1+\lambda\cdot\min\!\big(\max(\nu-1,0),\,\nu_{\max}\big), & q=1 \text{ and legal},
+\end{cases}
+$$
+
+where `q` is the fraction of test cases passed and `ν` the measured speedup over the PyTorch baseline. The shape of this function *is* the anti-hacking policy. A kernel that cheats by falling back to `aten::*` scores exactly the same `−1` as one that never compiled; partial correctness earns a bounded, still-negative shaping term so the model can climb out of "totally broken"; and **only** a fully correct, legal, native kernel crosses zero, at which point a clipped speedup bonus applies. Drag the verdict below and watch where each outcome lands:
+
+<RewardLadder />
+
+That single wall at zero is what keeps the model honest. Speed is never rewarded until correctness is banked, and forbidden fallbacks are punished as hard as a crash — so the fastest way to positive reward is to actually write the kernel.
+
+## Data and fine-tuning: getting off the floor before RL
+
+RL only works if the base model clears the bar *sometimes*. MusaCoder spends most of its pipeline manufacturing that starting competence. A three-stage data engine expands the PyTorch-to-CUDA/MUSA workload distribution (real modules, cleaned GitHub projects, and NNSmith-generated computation graphs across ~162 operators), injects tensor **shape/stride/contiguity** hints extracted with `torch.fx`/`torch.export`, and enforces a six-step structured-reasoning template before any code is written. Auxiliary corpora add GPU-kernel knowledge Q&A and a kernel-**reviewer** task that must emit `VERDICT: CORRECT` or `INCORRECT`.
+
+Two fine-tuning stages follow. Multi-task **SFT** teaches canonical kernel patterns and error-diagnosis (with loss masking so feedback tokens are context-only). Then a **diversity-preserving rejection fine-tuning (RFT)** step deliberately breaks with convention: standard RFT keeps only the single fastest correct sample, which collapses entropy; MusaCoder instead retains a *heterogeneous* set of verified-correct implementations, preserving the exploration diversity that RL will need. That choice alone is worth 2.2 points of Pass@8 (SFT 84.8 → 82.6 without RFT, Table 2). If you have not met [`torch.profiler`](/articles/torch-profiler) — the same tool MusaCoder uses to diagnose which operator families the base model is weak on — it is worth a detour.
+
+## The three stabilizers
+
+RL runs in two stages: a single-turn warmup to establish basic execution understanding, then multi-turn feedback RL where a failed kernel gets MooreEval's error log appended and the model tries again. On top of a GRPO objective, three mechanisms keep it from falling over.
+
+### PrimeEcho — anchor the reward to the turn that ships
+
+In multi-turn RL the naive reward is the best score across all turns, `max_k s_k`. But the model only ever *deploys* its first-turn kernel, and rewarding best-of-turns teaches it to defer correctness — ship something broken, then "fix" it once the verifier hands it the error. PrimeEcho blends the two (Equation 9):
+
+$$
+R_{\tau} = \alpha\,s_{1} + (1-\alpha)\max_{1\le k\le K} s_{k} + b_{\text{early}}(\tau),
+$$
+
+with an early-success bonus `b_early = β₁·1[success at turn 1] + β₂·1[fail at 1, success at 2]`. Keeping α high anchors the reward to zero-shot quality while still letting later turns supply exploration signal. Slide α and watch a deliberately-late trajectory get *more* reward as the anchor weakens — the exact hack PrimeEcho suppresses:
+
+<PrimeEcho />
+
+### Buffered Dynamic Retry — rescue the all-failed groups
+
+GRPO normalizes advantages within a group of `G` rollouts. When a task is hard enough that **all** `G` samples fail — `r_i = −1` for every `i` — the advantages are all zero and the sample contributes **no gradient**, so the hardest tasks teach nothing. Buffered Dynamic Retry (BDR) composes a *repair task* `x' = Compose(x, c⁻, f⁻)` from a failed kernel and its feedback, pushes it into a FIFO buffer `B`, and mixes buffered repair tasks back into training with probability `p_buf`. It turns a dead rollout group into a feedback-conditioned second chance. In the paper's isolated test (Table 3) BDR lifts Pass@8 from 59.6 → 62.4 on a Qwen3-8B checkpoint (~16% of previously-failed tasks recovered) and 73.2 → 74.4 on Qwen3.5-9B (~28% recovery).
+
+### MirrorPop — catch the off-policy sequences that cancel
+
+MusaCoder's rollouts are generated asynchronously, so the rollout policy drifts from the training policy and the per-token importance ratio `ρ_t` no longer sits at 1. Vanilla sequence-level masking scores a response by its *signed* mean log-ratio — but a response that is badly off-policy with roughly equal positive and negative deviations averages to ≈0 and slips through as if it were on-policy (the paper's Figure 11 "cancellation" case). MirrorPop instead uses the mean **absolute** log-ratio, which every token can only push upward, and masks the sequence when it exceeds a threshold δ (Equation 21):
+
+$$
+M_i^{\text{mirrorpop}} = \mathbf{1}\!\left[\frac{1}{L_i}\sum_{t=1}^{L_i}\big|\log \rho_{i,t}\big| \le \delta\right].
+$$
+
+Toggle the two responses below — an on-policy one and a drifted one whose ratios cancel — and see which filter catches the drift:
+
+<MirrorPop />
+
+This is the same failure mode that [Rollout Routing Replay](/articles/rollout-routing-replay) fixes at its source for MoE routers and that [async frontier-RL setups](/articles/frontier-rl-cheaper) wrestle with generally — here it is handled at the masking layer. Of the three stabilizers, MirrorPop is the one whose removal hurts most.
+
+## The numbers
+
+MusaCoder is evaluated under its own strict MooreEval protocol on KernelBench, split into Level 1–3 by difficulty. **Pass@8** asks whether at least one of 8 samples passes verification; **Avg.@8** is the mean correctness rate across the 8; **Faster Rate** counts a candidate only if it is correct, legal, *and* beats the baseline by more than 1.1×. The headline is overall correctness — MusaCoder-27B-RL reaches **93.2 Pass@8 / 88.6 Avg.@8**, ahead of every model the paper tests:
+
+<BenchBars
+  title="KernelBench correctness — Avg.@8, Overall (%)"
+  unit="%"
+  bars={[
+    { label: "MusaCoder-27B", value: 88.6, highlight: true },
+    { label: "MusaCoder-9B", value: 77.2, highlight: true },
+    { label: "Claude Opus 4.7", value: 77.3 },
+    { label: "GLM-5.1", value: 76.25 },
+    { label: "Kimi K2.6", value: 69.1 },
+    { label: "DeepSeek-V4-Pro", value: 54.9 },
+  ]}
+/>
+
+<Figure
+  src="/articles/musacoder-gpu-kernels/fig2.png"
+  alt="Grouped bar chart of KernelBench correctness (Avg.@8 correct rate, %) for GLM-5.1, Kimi K2.6, DeepSeek-V4-Pro, Claude Opus 4.7, and MusaCoder (Ours) across Overall, Level 1, Level 2, and Level 3. MusaCoder's orange bars are highest in every group, most dramatically on Level 3 where it reaches 65.8 versus 38–40 for the baselines."
+  caption="KernelBench correctness (Avg.@8) by difficulty level: MusaCoder leads in every tier and pulls away on the hardest Level 3 (Cheng et al., 2026, Figure 1)."
+/>
+
+The gap widens on the hardest tier. On **Level 3**, MusaCoder-27B-RL scores **72 Pass@8 / 65.75 Avg.@8** against Claude Opus 4.7's 54 / 39.25 and GLM-5.1's 54 / 38.50 — the RL model roughly doubles the average correctness of the frontier baselines on the tasks where kernels are hardest to get right. Notably the 9B model (77.2 Avg.@8) edges Claude Opus 4.7 (77.3 is essentially tied) despite being a fraction of the size, and the RL stage is decisive: MusaCoder-27B jumps from 79.4 (SFT) to 88.6 (RL) Avg.@8.
+
+Correctness is the easy win; **speed is much harder**. Even a good kernel rarely beats a fused `torch.compile` baseline, so absolute Faster Rates are low across the board — but MusaCoder still leads:
+
+<BenchBars
+  title="KernelBench Faster Rate vs eager, Overall (%)"
+  unit="%"
+  bars={[
+    { label: "MusaCoder-27B", value: 15.0, highlight: true },
+    { label: "Claude Opus 4.7", value: 11.8 },
+    { label: "GLM-5.1", value: 7.4 },
+    { label: "DeepSeek-V4-Pro", value: 5.2 },
+    { label: "MusaCoder-9B", value: 5.4, highlight: true },
+  ]}
+/>
+
+Against `torch.compile` (a tougher bar), MusaCoder-27B-RL's Faster Rate is 9.2% vs Claude Opus 4.7's 7.5%. On the authors' ported **MUSA KernelBench** (Table 4), the 27B model leads on both correctness and speed (92.4 Pass@8 / 81.7 Avg.@8 / 12.5 Faster) over DeepSeek-V4-Pro (92.0 / 56.9 / 5.7) and GLM-5.1 (88.0 / 66.4 / 6.9).
+
+The ablation (Table 2) confirms each stabilizer earns its place, measured as removals from the full RL model (93.2 Pass@8):
+
+<BenchBars
+  title="Ablation — Overall Pass@8 as each piece is removed (%)"
+  unit="%"
+  bars={[
+    { label: "full RL", value: 93.2, highlight: true },
+    { label: "− single-turn warmup", value: 90.8 },
+    { label: "− BDR", value: 88.6 },
+    { label: "− PrimeEcho", value: 88.4 },
+    { label: "− MirrorPop", value: 86.0 },
+  ]}
+/>
+
+Dropping MirrorPop costs the most (93.2 → 86.0), consistent with off-policy drift being the dominant instability in asynchronous kernel-generation RL.
+
+## The honest caveats
+
+<Callout type="warn">
+The comparison is **provider-run and provider-defined**. MooreEval, the strict verification protocol, the difficulty split, and the *MUSA* KernelBench variant are all authored by the same team as the model; the closed frontier baselines (Claude Opus 4.7, DeepSeek-V4-Pro/-ProMax, GLM-5.1, Kimi K2.6) were evaluated by the authors under that protocol, not self-reported. Read the numbers as "MusaCoder wins on the bench MusaCoder built," which is a real result but not a neutral one.
+</Callout>
+
+A few more things worth stating plainly:
+
+- **The base models are already strong.** MusaCoder-27B starts from Qwen3.6-27B (67.2 Pass@8) and MusaCoder-9B from Qwen3.5-9B — the recipe adds a lot on top, but this is not a from-scratch capability.
+- **Speed remains the weak axis.** A ~15% Overall Faster Rate means the *large majority* of even correct generated kernels do not beat the reference. The framing is correctness-first for a reason; treat the speedups as a bonus, not the story.
+- **The reward's tuning knobs aren't disclosed.** The paper leaves `λ` (performance weight) and `ν_max` (speedup clip) as symbols; the values in the reward interactive above are illustrative, chosen to show the shape, not read from the paper.
+- **No dedicated limitations section.** The paper does not enumerate its own failure modes or generalization limits, so the boundaries of the approach — how it holds up on operator families outside the ~162 synthesized, or on GPUs beyond the CUDA/MUSA pair — are left for the reader to infer.
+
+## The take
+
+MusaCoder's real contribution is not any one of its parts but the recognition that execution-feedback RL for kernel generation fails in *three specific, nameable ways* — sparse rewards, multi-turn reward hacking, and off-policy cancellation — and a targeted fix for each. The correctness-first reward makes cheating pointless; PrimeEcho keeps the model honest about the turn that ships; BDR rescues the hardest tasks from the dead-gradient zone; MirrorPop stops async drift from poisoning the update. It is careful RL engineering more than a new algorithm, and the payoff — a 9B model tied with the closed frontier and a 27B model ahead of it on the paper's bench — is the kind of result that only shows up when every stage of the pipeline is doing its job. Whether the lead survives a neutral, third-party benchmark is the open question the provider-run setup leaves on the table.
+
+---
+
+*Built on [MusaCoder: Native GPU Kernel Generation with Full-Stack Training on Moore Threads GPU](https://arxiv.org/abs/2606.04847) (Cheng, Lu, Liao et al.; Moore Threads, 2026; CC BY-SA 4.0). All benchmark numbers are quoted from the paper's tables; the interactive diagrams illustrate the reward and stabilization mechanisms and use illustrative parameter values where the paper leaves them unspecified.*
