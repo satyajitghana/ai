@@ -1,0 +1,223 @@
+---
+title: "Mach-Mind-4-Flash: specialize, then integrate"
+description: "Li Auto's Mach-Mind-4-Flash is a 35B / 3B-active MoE that reaches 100B-class scores through post-training alone — no extra pre-training compute. The recipe is specialize-then-integrate: train a dozen domain RL experts in parallel, then fuse them into one generalist with Multi-Teacher On-Policy Distillation (MOPD), a routed reverse-KL objective that kills the see-saw degradation of mixed-reward RL. A separate stage, HMPO, uses a median-length budget to cut reasoning tokens 19-46% for ≤0.7pp accuracy loss. A walk through both mechanisms, the numbers, and the honest gaps."
+date: 2026-07-10
+tags:
+  - llm
+  - reinforcement-learning
+  - knowledge-distillation
+  - mixture-of-experts
+  - explainer
+draft: false
+cover: /articles/mach-mind-4-flash/cover.png
+---
+
+import { MopdFusion } from "@/components/articles/mach-mind-4-flash/mopd-fusion"
+import { HmpoBudget } from "@/components/articles/mach-mind-4-flash/hmpo-budget"
+
+The dominant recipe for a better model is still *scale the pre-training* — more parameters, more
+tokens, more compute. Mach-Mind-4-Flash, from Li Auto's Foundation Model team, is a bet on the other
+axis. It starts from an existing compact base — **Qwen3.5-35B-A3B**, a Mixture-of-Experts model with
+35B total parameters but only **3B active per token** — and pushes it toward the score band of
+100B-class models using **post-training only**: reinforcement learning, expert fusion, and
+inference-time efficiency. No extra pre-training compute.
+
+The one idea to leave with is the shape of that post-training: **specialize, then integrate.** Rather
+than run one big mixed-reward RL job — which tends to rob Peter to pay Paul across capabilities — the
+team trains **more than ten domain specialists in parallel** (across Reasoning, General, and Agent
+tracks), then fuses them into a single deployable generalist. The fusion is the paper's headline
+contribution, **Multi-Teacher On-Policy Distillation (MOPD)**, and a second stage, **HMPO**, trims the
+model's reasoning length without paying for it in accuracy.
+
+<Figure
+  src="/articles/mach-mind-4-flash/fig1.png"
+  alt="The post-training pipeline. A base model goes through Overall SFT, then fans out into three parallel RL tracks: Reasoning RL (Math, Code, STEM experts), General RL (Instruct-Following, Writing, Safe experts), and Agent RL (Code Agent, Tool Use, DeepSearch, Claw Agent experts). All the resulting experts feed into a MOPD block, then a Token Efficiency RL block, producing Mach-Mind-4-Flash."
+  caption="Specialize-then-integrate. From an SFT base, a dozen domain experts are trained in parallel across three tracks, fused by MOPD into one student, then compressed by token-efficiency RL (Foundation Model Team, 2026, Figure 4)."
+/>
+
+## The fusion problem, and MOPD
+
+If you train separate RL experts — a math expert, a code-agent expert, a safety expert — each is
+excellent in its lane. The naive way to get one model with all of those skills is to mix every
+domain's reward into a single RL objective. In practice that fails in a specific way the paper names
+**see-saw degradation**: the gradients from different rewards collide, so a gain on one capability is
+"routinely offset by regressions on others." You climb one hill by sliding down another.
+
+MOPD sidesteps the collision. Every training sample carries a **routing key** $k$ that deterministically
+selects the one frozen domain teacher $\pi_{T_k}$ that should supervise it. The student generates a
+rollout under its *own* policy, and each token is pulled toward its routed teacher with a **token-level
+reverse-KL**:
+
+$$
+\mathcal{L}_{\text{MOPD}}(\theta) = \mathbb{E}_{(x,k)\sim\mathcal{D}}\;\mathbb{E}_{y\sim\pi_\theta(\cdot\mid x)}\!\left[\frac{1}{|y|}\sum_{t=1}^{|y|} D_{\mathrm{KL}}\!\big(\pi_\theta(\cdot\mid x,y_{<t})\;\big\|\;\pi_{T_k}(\cdot\mid x,y_{<t})\big)\right]
+$$
+
+Two things matter here. It is **on-policy** — the distillation runs on the student's own generations,
+not a fixed teacher corpus — which is what makes it behave like RL rather than plain SFT. And it is
+**routed**, so each domain's gradient stays clean: no averaging of conflicting rewards. (Under the
+hood the reverse-KL is optimized with a single-sample $k_1$ estimator and a clipped policy-gradient
+surrogate; domains are mixed in a strict 1:1 ratio.) Flip between the two regimes below and drag the
+training progress — watch how mixed reward lets the weakest capability stall while MOPD lets all three
+climb together:
+
+<MopdFusion />
+
+MOPD sits inside a **unified RL/OPD objective**, $\mathcal{L} = \alpha\,\mathcal{L}_{\text{OPD}} +
+\beta\,\mathcal{L}_{\text{RL}}$, so the same framework can run pure RL ($\alpha=0$), pure distillation
+($\beta=0$), or a joint blend — and new teachers register as config nodes with "zero intrusion into
+the framework's core logic." A pilot on the tool-agent domain shows the mechanism converging: the
+teacher-student top-$K$ token-overlap rate climbs from **0.73 to 0.84** over training.
+
+Fusion is not perfectly lossless, and the paper is candid about it. Across the three tracks it reports
+three distinct outcomes: **capability anchoring** for Reasoning (the frozen expert prevents the
+student from regressing during fusion), **full retention** for General, and **mixed results** for
+Agent — where the fused model sometimes lands *below* its own expert teacher (SWE-bench Verified
+71.1 after fusion vs. 73.8 for the standalone expert). Long-horizon agent behavior is the hardest
+thing to distill without smoothing away.
+
+## HMPO: pay for correct-and-short
+
+The second stage attacks **overthinking** — reasoning chains far longer than the task needs, which
+inflate latency and serving cost for no accuracy gain. **Hybrid Median-length Policy Optimization
+(HMPO)** is a single-stage token-efficiency method with a neat trick for the length budget: don't set
+a threshold, *measure* one. For each query the policy samples a group of $G=10$ rollouts, and the
+budget $b$ is the **median length of the correct ones**:
+
+$$
+b = \operatorname{median}\{\,n_i \mid i \in \mathcal{C}\,\}
+$$
+
+where $\mathcal{C}$ is the set of correct rollouts. The token reward is a cosine decay that starts at
+1 and fades toward $\lambda$ as a correct trace grows, then cliffs to zero the instant it runs over
+budget — and any incorrect trace earns zero at any length:
+
+$$
+R_{\text{token}} = \begin{cases}\min\!\big(1,\ \cos(\tfrac{\pi n}{2b}) + \lambda\big) & \text{if correct and } n < b\\[4pt] 0 & \text{otherwise}\end{cases}
+\qquad
+R_{\text{final}} = R_{\text{acc}}\cdot R_{\text{token}}
+$$
+
+The multiplicative composition enforces a strict **correctness-first, length-second** hierarchy:
+wrong or over-budget traces get exactly zero reward, so efficiency gradients never flow to bad
+answers. And because $b$ is the group median, it **self-tightens** as the policy gets more concise —
+an implicit curriculum with, in the authors' words, zero tuning. Drag the candidate length, the
+training progress, and $\lambda$:
+
+<HmpoBudget />
+
+<Figure
+  src="/articles/mach-mind-4-flash/fig2.png"
+  alt="HMPO overview. Left: a query goes into the policy model, which samples a group of G rollouts, each labelled correct or incorrect with its length. Right: a token-level reward curve that decays from 1 to lambda over the budget then drops to zero, and a length-distribution histogram with a red dashed median line b separating a 'prefer shorter' positive-reward region from a 'no reward' region. The final reward is R_acc times R_token, with default lambda = 0.8."
+  caption="HMPO derives the length budget b from the median length of the group's correct rollouts, then rewards short-and-correct traces on a cosine decay and zeroes everything over budget or incorrect (Foundation Model Team, 2026, Figure 13)."
+/>
+
+Trained on a compact set of ~6.5K math problems (group size $G=10$, $\lambda=0.8$), HMPO cuts
+generation length by **19-46% with at most a 0.7-percentage-point accuracy drop** — and although the
+training is math-only, the learned length control **generalizes** to unseen domains: code generation,
+science QA, and instruction following. As a single-pass method it also costs **1.5-2.5× fewer
+GPU-hours** than the multi-stage length-control baselines it replaces.
+
+## The infrastructure that makes it cheap
+
+None of this is free unless the training loop is fast, and the third contribution is the plumbing: a
+unified RL/OPD framework with **operator-level acceleration** reported at a **17% end-to-end training
+speedup**. The wins are Hopper-specific kernel work — a deep integration of *SonicMoE* into Megatron
+that implements an efficient **Indexed Grouped GEMM** for the MoE MLPs (using TMA copy, warp
+specialization, and multi-stage producer-consumer pipelines), a **gate-up fusion**, and a **segmented
+fusion with the shared expert** that overlaps communication and computation by splitting the shared
+expert into AllGather / compute / ReduceScatter stages staggered against the routed experts. It also
+leans on [multi-token prediction](/articles/multi-token-prediction) and multi-dimensional hybrid
+parallelism. This is the same category of problem as
+[stabilizing MoE RL](/articles/rollout-routing-replay) and [cutting RL's
+cost](/articles/frontier-rl-cheaper): the algorithm is only as good as the systems that let you run it
+at scale.
+
+## The numbers
+
+The result is a 3B-active model that trades blows with much larger ones. On raw reasoning it is
+strong but *not* the frontier — at AIME'26 it lands ahead of the 122B-active Qwen3.5 but behind the
+309B MiMo-V2-Flash and the 1T-parameter Kimi-K2.5:
+
+<BenchBars
+  title="AIME'26 accuracy by model (%)"
+  unit="%"
+  max={100}
+  bars={[
+    { label: "Mach-Mind (3B act)", value: 92.7, highlight: true },
+    { label: "Qwen3.5 (35B)", value: 91.9 },
+    { label: "Qwen3.5 (122B)", value: 91.7 },
+    { label: "Nemotron-3 (120B)", value: 89.9 },
+    { label: "MiMo-V2 (309B)", value: 93.8 },
+    { label: "Kimi-K2.5 (1T)", value: 93.3 },
+  ]}
+/>
+
+Where it genuinely *leads* the pack — beating both the 122B-active Qwen3.5 and the 1-trillion-parameter
+Kimi-K2.5 — is on instruction-following, safety, tool use, and Chinese web search. These are the axes
+the specialize-then-integrate recipe was built to lift:
+
+<BenchBars
+  title="Benchmarks where the 3B-active model leads (%)"
+  unit="%"
+  max={100}
+  bars={[
+    { label: "IFBench", value: 82.8, highlight: true },
+    { label: "Behavioral-Safety", value: 80.7, highlight: true },
+    { label: "BFCL-v4", value: 75.8, highlight: true },
+    { label: "LexInstructEval", value: 74.6, highlight: true },
+    { label: "BrowseComp-zh", value: 72.3, highlight: true },
+  ]}
+/>
+
+For context on those: IFBench 82.8 vs. 76.1 (Qwen 122B) and 67.4 (Kimi 1T); Behavioral-SafetyBench
+80.7 vs. 29.9 and 67.8; BFCL-v4 75.8 vs. 72.2 and 74.5. Elsewhere it is competitive rather than
+dominant — GPQA-Diamond 83.1, LiveCodeBench-V6 80.9, SWE-bench Verified 70.6, $\tau^2$-bench 80.0 —
+solidly in the mix for a model activating a fraction of its rivals' parameters. And the efficiency
+story is where the whole thing pays off: on AIME'26, HMPO puts Mach-Mind-4-Flash at the **upper-left**
+of the accuracy-vs-tokens frontier, matching frontier accuracy at far fewer tokens per trajectory than
+models of much larger active scale.
+
+<Figure
+  src="/articles/mach-mind-4-flash/fig3.png"
+  alt="A scatter plot of accuracy versus average tokens per trajectory on AIME'26, where upper-left is better. Mach-Mind-4-Flash (a gold star) sits at about 92.5% accuracy and ~15.3K tokens, to the left of MiMo-V2-Flash-309B and Kimi-K2.5-1T at similar accuracy but ~16.5K tokens, and well left of Qwen3.5-35B and GLM-4.7-Flash which use 19-20K tokens at lower accuracy."
+  caption="Token efficiency on AIME'26 (upper-left is better). The HMPO-trained model reaches near-frontier accuracy using fewer tokens per trajectory than models with far larger activated parameter counts (Foundation Model Team, 2026, Figure 14)."
+/>
+
+<Callout type="warn">
+Read the wins with their scope. **All numbers are the authors' own** — a single-vendor technical
+report, not an independent evaluation. The "100B-class performance" framing is real but selective:
+Mach-Mind-4-Flash reliably beats the *122B-active* Qwen3.5 it's compared against, yet it **trails the
+1T-parameter Kimi-K2.5** on AIME'25 (92.1 vs. 96.1), GPQA-Diamond (83.1 vs. 87.6), LiveCodeBench (80.9
+vs. 85.0) and SWE-bench Verified (70.6 vs. 76.8) — this is *not* a SOTA claim. Fusion has costs: the
+Agent track shows "mixed results," with the fused model landing below its own standalone expert on
+some agentic tasks. HMPO's compression is real but measured on **single-turn** reasoning and the
+math-trained generalization is the authors' evaluation. The **17%** speedup is Hopper-specific
+infrastructure, not a modeling result. The paper's own limitations are blunt: MOPD leaves "a small but
+consistent gap on extremely long-horizon tasks such as repository-level software engineering"; HMPO
+does not yet extend to multi-turn agentic trajectories; and persistent web browsing (DeepSearch) plus
+long-context comprehension "remain the weakest axes for compact models."
+</Callout>
+
+## The take
+
+Mach-Mind-4-Flash's contribution isn't a new architecture — it reuses an off-the-shelf 35B-A3B MoE —
+it's a **post-training recipe that composes cleanly**. MOPD turns "train many experts, ship one model"
+from a lossy averaging problem into a routed distillation where each capability keeps its own gradient,
+and the see-saw that plagues mixed-reward RL mostly disappears. HMPO is the tidy companion: make the
+length budget a measured group-median instead of a tuned hyperparameter, gate it behind correctness,
+and reasoning gets shorter for almost free. Set against the field's default answer — spend more
+pre-training compute — this is the argument that a lot of headroom is still sitting in the
+*post*-training stack, reachable by a compact model that only lights up 3B parameters at a time.
+Whether a 35B model can truly close the last gap to a trillion-parameter frontier on the hardest
+long-horizon tasks is the open question the paper's own limitations point at — but as a demonstration
+that specialize-then-integrate scales to a dozen domains without falling apart, it's a clean result.
+
+---
+
+*Built on the [Mach-Mind-4-Flash Technical Report](https://arxiv.org/abs/2607.09375) (Foundation Model
+Team, Li Auto Inc., 2026; CC BY-NC-ND 4.0). All benchmark and efficiency figures are quoted from the
+report; the MOPD and HMPO interactives are illustrations of the mechanism, and the capability curves in
+the fusion diagram are illustrative, not measured. Related on this site:
+[Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch),
+[Rollout Routing Replay](/articles/rollout-routing-replay), and
+[MiMo-V2-Flash](/articles/mimo-v2-flash), which also leans on multi-teacher distillation.*
