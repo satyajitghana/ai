@@ -1,15 +1,19 @@
 "use client"
 
-import { useState } from "react"
+import { useRef, useState } from "react"
 import Link from "next/link"
-import { StarIcon } from "@phosphor-icons/react/dist/ssr"
+import {
+  CaretLeftIcon,
+  CaretRightIcon,
+  StarIcon,
+} from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
 
-// Client list so we can offer a Featured filter. Articles arrive already
-// newest-first from the loader; the filter only hides non-featured items, it
-// never reorders, so the list stays chronological. The ★ is a real solid
-// Phosphor icon in a warm gold, not an ASCII glyph.
+// Client list: a Featured filter + pagination. Articles arrive already
+// newest-first from the loader; filtering only hides non-featured items and
+// paging only windows the list — neither reorders, so it stays chronological.
+// The ★ is a real solid Phosphor icon in a warm gold, not an ASCII glyph.
 type ArticleCard = {
   slug: string
   title: string
@@ -21,11 +25,31 @@ type ArticleCard = {
 }
 
 const STAR = "oklch(0.79 0.15 82)" // warm gold
+const PAGE_SIZE = 12
 
 export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
   const [featuredOnly, setFeaturedOnly] = useState(false)
+  const [page, setPage] = useState(1)
+  const topRef = useRef<HTMLDivElement>(null)
+
   const featuredCount = articles.filter((a) => a.featured).length
-  const shown = featuredOnly ? articles.filter((a) => a.featured) : articles
+  const filtered = featuredOnly
+    ? articles.filter((a) => a.featured)
+    : articles
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const current = Math.min(page, totalPages)
+  const start = (current - 1) * PAGE_SIZE
+  const shown = filtered.slice(start, start + PAGE_SIZE)
+
+  const setFilter = (f: boolean) => {
+    setFeaturedOnly(f)
+    setPage(1)
+  }
+  const goto = (p: number) => {
+    setPage(p)
+    topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }
 
   const tab = (active: boolean) =>
     cn(
@@ -35,12 +59,20 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
         : "border-transparent text-muted-foreground hover:text-foreground",
     )
 
+  const arrow = (disabled: boolean) =>
+    cn(
+      "flex items-center rounded-md px-2 py-1 transition-colors",
+      disabled
+        ? "cursor-not-allowed text-muted-foreground/40"
+        : "cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted/50",
+    )
+
   return (
-    <>
-      <div className="mb-6 flex items-center gap-2">
+    <div ref={topRef} className="scroll-mt-24">
+      <div className="mb-6 flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={() => setFeaturedOnly(false)}
+          onClick={() => setFilter(false)}
           aria-pressed={!featuredOnly}
           className={tab(!featuredOnly)}
         >
@@ -48,7 +80,7 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
         </button>
         <button
           type="button"
-          onClick={() => setFeaturedOnly(true)}
+          onClick={() => setFilter(true)}
           aria-pressed={featuredOnly}
           className={tab(featuredOnly)}
         >
@@ -56,6 +88,11 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
           Featured{" "}
           <span className="tabular-nums opacity-50">{featuredCount}</span>
         </button>
+        {filtered.length ? (
+          <span className="ml-auto font-mono text-xs text-muted-foreground/70 tabular-nums">
+            {start + 1}–{start + shown.length} of {filtered.length}
+          </span>
+        ) : null}
       </div>
 
       <ul className="space-y-8" data-stagger>
@@ -90,6 +127,48 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
           </li>
         ))}
       </ul>
-    </>
+
+      {totalPages > 1 ? (
+        <nav
+          className="mt-10 flex items-center justify-center gap-1 font-mono text-xs"
+          aria-label="Pagination"
+        >
+          <button
+            type="button"
+            onClick={() => current > 1 && goto(current - 1)}
+            disabled={current === 1}
+            aria-label="Previous page"
+            className={arrow(current === 1)}
+          >
+            <CaretLeftIcon size={14} weight="bold" />
+          </button>
+          {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => goto(p)}
+              aria-current={p === current ? "page" : undefined}
+              className={cn(
+                "min-w-8 cursor-pointer rounded-md px-2 py-1 tabular-nums transition-colors",
+                p === current
+                  ? "bg-foreground text-background"
+                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+              )}
+            >
+              {p}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => current < totalPages && goto(current + 1)}
+            disabled={current === totalPages}
+            aria-label="Next page"
+            className={arrow(current === totalPages)}
+          >
+            <CaretRightIcon size={14} weight="bold" />
+          </button>
+        </nav>
+      ) : null}
+    </div>
   )
 }

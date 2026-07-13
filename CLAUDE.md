@@ -9,7 +9,7 @@ The agent map for this repo. An **AI-native personal site** (Next.js 16, App Rou
 - `lib/content/` — the content layer. `schema.ts` = Zod frontmatter schemas; `index.ts` = loaders that validate every MDX file (throws loudly on bad frontmatter).
 - `content/**` — MDX content (blog, logs, projects, papers, snippets, notes).
 - `data/*.ts` — typed, hand-curated records (profile, resume, etc.) — single sources of truth for pages, `/api/*`, JSON-LD, the resume PDF, and `llms.txt`.
-- `scripts/` — `validate-content.mts` (the safety net), `build-resume-pdf.mts`, `fetch-arxiv.mts` (arXiv candidate fetcher).
+- `scripts/` — `validate-content.mts` (the safety net), `build-resume-pdf.mts`, `fetch-arxiv.mts` (arXiv candidate fetcher — dedups against ids already in `content/arxiv/`, and anchors its date window to arXiv's newest returned paper so a fast local clock never empties the results).
 - `brand-crew/` — the installable plugin: `skills/`, `commands/`, `agents/`, `hooks/`, `brand/voice.md` (the brand DNA every author reads), `.claude-plugin/plugin.json`.
 - `plans/` — `00-ai-site-master-plan.md` (the site) and `01-brand-crew.md` (the crew). Read these for the full design.
 
