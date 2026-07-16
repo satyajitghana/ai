@@ -1,0 +1,189 @@
+---
+title: "Ring-Zero: what a trillion-parameter model learns from reward alone"
+description: "Zero RL — reinforcement learning from verifiable rewards, no human labels, no SFT — has mostly been studied on small models. Ring-Zero runs it on a 1-trillion-parameter (63B-active) MoE and reports three things: scale sharply raises the ceiling and sample-efficiency, training splits into a 'discovery' then a 'sharpening' phase, and advanced reasoning behaviors emerge on their own. The engineering that makes it stable is a four-stage pipeline and one quiet fix — a training-inference ratio correction that stops the importance weight from exploding. A detailed walk through the method, the real math, the numbers, and the honest caveats: it trails frontier models, and most ablations are run at 104B, not 1T."
+date: 2026-07-15
+tags:
+  - llm
+  - reinforcement-learning
+  - reasoning
+  - mixture-of-experts
+  - explainer
+draft: false
+featured: true
+cover: /articles/ring-zero-trillion-scale-rl/fig1.png
+---
+
+import { PipelineStages } from "@/components/articles/ring-zero-trillion-scale-rl/pipeline-stages"
+import { RatioCorrection } from "@/components/articles/ring-zero-trillion-scale-rl/ratio-correction"
+import { DiscoverySharpening } from "@/components/articles/ring-zero-trillion-scale-rl/discovery-sharpening"
+import { AdaptiveDepth } from "@/components/articles/ring-zero-trillion-scale-rl/adaptive-depth"
+
+**Zero RL** is the stripped-down recipe behind the reasoning-model boom: take a pretrained base model, give it math problems whose answers can be *checked*, reward it for getting them right, and let reinforcement learning grow the chain-of-thought on its own — no supervised fine-tuning, no human-written reasoning traces, no reward model. DeepSeek-R1 made it famous. But almost every published zero-RL study runs on models small enough to fit a modest cluster, which leaves the interesting question open: **what happens when you do this to a genuinely large model?**
+
+Ring-Zero is that experiment. The authors run zero RL directly on **Ling-2.5-1T-Base** — a **1-trillion-parameter** Mixture-of-Experts model with **63B active** parameters per token — and report what changes at scale. The paper frames its results as a vindication of the *bitter lesson*: with enough scale, hand-crafted heuristics for "good reasoning" become unnecessary because the model develops them itself. The contribution is less a single trick than a **stable, four-stage training pipeline** that survives trillion-scale RL, plus a careful account of the training dynamics and the behaviors that emerge.
+
+<Figure
+  src="/articles/ring-zero-trillion-scale-rl/fig1.png"
+  alt="Overview diagram of Ring-2.5-1T-Zero. Top row: a four-box training pipeline — First-stage RL (token-level loss, stability strategies), Self-Distillation (CoT compression, train-infer gap reset), Second-stage RL (sample-level loss, remove KL penalty), Third-stage RL (tier-based training, Low/Medium/High). Bottom left: infrastructure optimization (mixed-precision control with FP32 attention and LM head; context-parallel optimization for MLA and Lightning Attention). Bottom right: four emergent behaviors — anthropomorphism, structured format, parallel reasoning, context anxiety, each with a quoted trace snippet."
+  caption="The whole system: a four-stage RL pipeline over a 1T MoE base, the infrastructure that keeps it stable, and the cognitive behaviors that appear without supervision (Tang et al., 2026, Figure 1)."
+/>
+
+## The pipeline is the method
+
+There is no single loss here. Ring-Zero's real content is a **sequence of four stages**, each one repairing a failure mode the previous stage creates. Click through them:
+
+<PipelineStages />
+
+The logic of the sequence is worth stating plainly. **First-stage RL** uses a *token-level* loss — the per-response loss is deliberately **not** divided by length — so a longer correct trace earns more total credit and the model learns to think at length. That works, but it also teaches the model to pad (more on that below). **Self-distillation** then samples from the stage-1 expert, keeps the *shortest correct* trace, self-filters redundant steps, and fine-tunes the base model on the result — compressing the bloat and, crucially, **resetting the gap between the training and inference engines**. **Second-stage RL** switches to a *sample-level* (length-normalized) loss so gradients no longer reward length, and drops the KL penalty now that the model is a strong starting point. **Third-stage RL** adds three difficulty tiers with their own prompts so one checkpoint can reason short or long on demand.
+
+## The setup
+
+The base is **Ling-2.5-1T-Base**, a hybrid MoE combining **MLA** (multi-head latent attention) and **Lightning Attention** layers, trained *from scratch with no SFT*. The smaller **Ling-2.5-flash-Base** (104B total, 7.4B active) is used as the scaling foil and — importantly — as the workhorse for most ablations. Training runs on **320 × H200** GPUs with Megatron for updates and SGLang for rollouts. Each step draws **G = 16** rollouts per question at temperature 1.0; the reward is dead simple and rule-checkable:
+
+$$
+r_i = r_{\text{acc},i} + r_{\text{format},i}, \qquad r_{\text{acc},i},\, r_{\text{format},i} \in \{0, 1\}
+$$
+
+where $r_{\text{format}}$ checks for well-formed `<think>...</think>` and `<answer>...</answer>` tags and $r_{\text{acc}}$ is rule-based matching early on, LLM-as-judge (Qwen3-Next-80B) later. That is the *entire* supervision signal — no human labels, no learned reward model. This is what "zero" means. It builds directly on ideas we have covered before: the MoE backbone (see [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch) and [Switch Transformers](/articles/switch-transformer)) and RL from verifiable rewards on reasoning (see [Leanstral](/articles/leanstral-formal-proofs)).
+
+## The objective, precisely
+
+Stage-1's policy objective is a **clipped-importance** RL loss with a group-normalized (GRPO-style) advantage:
+
+$$
+\mathcal{J}(\theta)=\mathbb{E}\!\left[\sum_{i=1}^{G}\sum_{t=1}^{|o_i|}\operatorname{sg}(\hat{\rho}_{i,t})\;\hat{A}_{i,t}\;\log \pi^{M}_{\theta}\!\left(o_{i,t}\mid q,\,o_{i,<t}\right)\right]
+$$
+
+The $\operatorname{sg}(\cdot)$ is a **stop-gradient**: the importance weight $\hat{\rho}$ scales each token's contribution but gradient flows only through $\log\pi_\theta$. The weight is a *clipped* importance ratio:
+
+$$
+\rho_{i,t}=\frac{\pi^{M}_{\theta}\!\left(o_{i,t}\mid q,\,o_{i,<t}\right)}{\pi^{S}_{\theta_{\text{old}}}\!\left(o_{i,t}\mid q,\,o_{i,<t}\right)},
+\qquad
+\hat{\rho}_{i,t}=\operatorname{clip}\!\left(\rho_{i,t},\,\epsilon_{\text{low}},\,\epsilon_{\text{high}}\right)
+$$
+
+with $\epsilon_{\text{high}} = 5.0$ and **no lower bound**. Read the numerator and denominator carefully, because this is the paper's quiet but load-bearing fix. The denominator $\pi^{S}_{\theta_{\text{old}}}$ is the probability the **inference engine (SGLang)** assigned when it *generated* the rollout. The numerator $\pi^{M}_{\theta}$ is the probability the **training engine (Megatron)** assigns now. The two engines disagree by tiny floating-point amounts, and a naive ratio that mixes engines lets that disagreement compound until the ratio explodes and training collapses. The **training-inference ratio correction** is simply: put the *training* engine in the numerator, so the ratio measures the update you actually make.
+
+<RatioCorrection />
+
+This is the same disease diagnosed — from the routing angle — in [Rollout Routing Replay](/articles/rollout-routing-replay): when the engine that generates a rollout and the engine that computes the gradient disagree, the importance ratio blows up and MoE RL diverges. Ring-Zero attacks the numerical side of it (and adds a small KL leash, $\beta = 10^{-4}$, with the reference model refreshed every 400 steps, plus **mixed-precision control** — BF16 everywhere except FP32 in the attention softmax and the LM head, the two places rounding error is worst).
+
+## From token-level to sample-level: killing length inertia
+
+The token-level loss has a side effect the paper names **length inertia**. Because the loss is not normalized by length, the model discovers a lazy shortcut: emitting more tokens is mathematically safer, so responses inflate *even on easy problems it already solves on the first try*. The fix is the Stage-2 loss, identical to Stage-1 except for one factor:
+
+$$
+\mathcal{L}_{\text{II}}(\theta)=-\mathbb{E}\!\left[\sum_{i=1}^{G}\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}\operatorname{sg}(\hat{\rho}_{i,t})\;\hat{A}_{i,t}\;\log \pi_{\theta}\!\left(o_{i,t}\mid q,\,o_{i,<t}\right)\right]
+$$
+
+That $\tfrac{1}{|o_i|}$ makes the gradient magnitude **independent of response length**, so there is no longer a gradient reason to ramble. Paired with the self-distillation step that actively trims traces, it holds length flat while accuracy keeps climbing.
+
+## One model, three depths
+
+Stage-3 trains three difficulty tiers jointly — Low (4k budget), Medium (16k), High (64k) — each with its own system prompt $p_k$, so a single checkpoint routes its reasoning depth by prompt:
+
+$$
+\mathcal{L}_{\text{III}}(\theta)=-\sum_{k\in\{l,m,h\}}\mathbb{E}\!\left[\sum_{i=1}^{G}\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}\operatorname{sg}(\hat{\rho}_{i,t})\;\hat{A}_{i,t}\;\log \pi_{\theta}\!\left(o_{i,t}\mid p_k,\,q,\,o_{i,<t}\right)\right]
+$$
+
+Pick a tier and watch the budget, the tokens actually spent, and the accuracy move together:
+
+<AdaptiveDepth />
+
+## Does it work? The numbers
+
+The headline is **scaling**. On the first stage of RL alone, the 1T model clears the 104B model by wide margins on every math benchmark. First-stage 1T scores (with the 104B flash model in prose for contrast): AIME 2024 **89.1%** (flash 71.2), AIME 2025 **83.3%** (63.5), AIME 2026 **84.2%** (65.3), HMMT Feb 2026 **66.2%** (50.3), IMOAnswerBench **59.3%**.
+
+<BenchBars
+  title="Ring-2.5-1T-Zero, first-stage RL only (pass@1, %)"
+  unit="%"
+  bars={[
+    { label: "AIME 2024", value: 89.1, highlight: true },
+    { label: "AIME 2025", value: 83.3, highlight: true },
+    { label: "AIME 2026", value: 84.2, highlight: true },
+    { label: "HMMT Feb26", value: 66.2, highlight: true },
+    { label: "IMOAnswerBench", value: 59.3, highlight: true },
+  ]}
+/>
+
+The full pipeline (second-stage RL, with a 2× YaRN context extension) pushes those to **94.1% / 92.3% / 93.2%** on AIME 2024/25/26. The scaling advantage is visible not just in the endpoint but in the *slope* — the 1T model learns faster per step:
+
+<Figure
+  src="/articles/ring-zero-trillion-scale-rl/fig2.png"
+  alt="Line chart of AIME 2024 accuracy versus training step. A red curve (Ling-2.5-1T-Base) rises from ~21% to ~89% over 3600 steps, staying well above a blue curve (Ling-2.5-flash-Base) that rises from ~14% to ~72% over 5200 steps. The 1T curve is consistently steeper."
+  caption="Model-scale effect: the 1T base (red) reaches a higher accuracy ceiling and gets there in fewer steps than the 104B flash base (blue) on AIME 2024 (Tang et al., 2026, Figure 10a)."
+/>
+
+Honesty check on where this lands. Ring-Zero's best AIME 2026 number (**93.2%**) is genuinely strong — but it still **trails the frontier** models the authors themselves list. This is a zero-RL-at-scale study, not a SOTA claim:
+
+<BenchBars
+  title="AIME 2026: Ring vs frontier models (pass@1, %)"
+  unit="%"
+  bars={[
+    { label: "GPT-5.5", value: 98.3 },
+    { label: "Gemini 3.1 Pro", value: 98.2 },
+    { label: "Qwen3.7-Plus", value: 97.0 },
+    { label: "Kimi K2.6", value: 96.4 },
+    { label: "Claude Opus 4.8", value: 95.7 },
+    { label: "Ring-2.5-1T-Zero", value: 93.2, highlight: true },
+  ]}
+/>
+
+Where Ring-Zero does claim an edge is **CoT quality**, measured three ways. Its traces win LLM-as-judge *comprehensibility* comparisons against GLM-5.1, Kimi-k2.6, MiniMax-M2.7 and Qwen3.5-397B. They *reproduce* better under distillation: fine-tuning student models on only **100K** Ring-Zero traces beats distilling **800K** DeepSeek-R1 traces —
+
+<BenchBars
+  title="Distillation into students: Ring-CoT (100K) vs DeepSeek-R1 (800K)"
+  unit="%"
+  bars={[
+    { label: "Qwen32B · Ring", value: 78.4, highlight: true },
+    { label: "Qwen32B · R1", value: 72.6 },
+    { label: "Llama70B · Ring", value: 74.5, highlight: true },
+    { label: "Llama70B · R1", value: 70.0 },
+  ]}
+/>
+
+— and they are *efficient*: on problems both solve, Ring-Zero averages **6,368 tokens**, less than half its baselines' length.
+
+## Two phases: discovery, then sharpening
+
+The second finding is about *how* RL improves the model over time. Track two quantities: **pass@1024** (can the model solve a problem in *any* of 1024 attempts — a measure of coverage) and **pass@1** (does it nail it on the first try — reliability). They move on different schedules.
+
+<DiscoverySharpening />
+
+Coverage saturates early — pass@1024 flattens around step 800 — meaning RL has already surfaced essentially every reasoning pattern it will ever use (the **discovery** phase). But pass@1 keeps rising long after (the **sharpening** phase): the model is not finding new tricks, it is becoming *reliable* at the ones it has. The paper reads this as evidence for a sharper claim in its discussion — that zero RL **optimizes within a boundary set by pretraining** rather than expanding it. Which is exactly the honest ceiling in its limitations: RL cannot invent a proof technique the base model never saw.
+
+## Behaviors nobody programmed
+
+The third finding is the paper's "bitter lesson" payoff: with scale, the model **spontaneously develops** cognitive behaviors that smaller-model work usually has to elicit with hand-crafted prompts or rewards. The paper documents five:
+
+- **Anthropomorphism** — traces narrate themselves ("I might have a brain fart here", "let me not wing it", "genius idea"), artifacts of the pretraining corpus surfacing as reasoning scaffolding.
+- **Structured formatting** — spontaneous "Step 1: / Step 2: / Verify:" scaffolds appear with no formatting instruction, hinting at a higher-level action space above raw tokens.
+- **Parallel reasoning** — the model branches into competing strategies within a single rollout, compares outcomes, and commits only when evidence converges (tree-of-thought, self-taught).
+- **Self-verification** — it re-checks assumptions, substitutes answers back into the problem's constraints, learned because that is what secures the correctness reward.
+- **Context anxiety** — approaching its token limit, the model *strategically aborts* deep reasoning to guarantee a well-formatted answer, revealing an implicit awareness that format compliance is also rewarded.
+
+The claim is not that these are magic; it is that at 1T scale they arrive *for free*, making the elaborate reasoning-elicitation machinery of small-model RL redundant.
+
+## What the ablations actually establish
+
+Several design choices are backed by ablations — with one caveat that matters (see below): they are run on the **104B flash** model, not the 1T model.
+
+- **RL algorithm.** Comparing GRPO / DAPO / CISPO / GSPO reveals a **speed-stability tradeoff**: amplifying low-probability tokens (CISPO, DAPO) learns fastest but its entropy collapses; GRPO is most stable but slowest. Ring-Zero's clipped-importance-plus-corrections scheme is the attempt to get both.
+- **KL penalty.** Remove it in stage 1 and the log-prob gap diverges, entropy collapses, and reward crashes within ~2,000 steps. With $\beta = 10^{-4}$ it stays healthy.
+- **Ratio correction.** The naive ratio collapses near step 800; a clip-only patch delays collapse to ~2,700 steps; the training-engine-numerator correction trains indefinitely. This is the single most important stability result.
+- **Format reward.** A single opening `<think>` tag lets length explode with no reward gain; requiring properly closed tags with an EOS token is what makes stopping — and therefore credit — well-defined.
+- **Hyperparameters.** Robust to learning rate over $\{1,2,3\}\times10^{-6}$; $G=32$ is fastest per step but $G=8$ fastest in wall-clock; token-level loss grows length, sample-level keeps it flat — motivating the stage-1 to stage-2 switch.
+
+<Callout type="warn">
+**Read the scope before the headline.** (1) The efficiency and stability *ablations* — RL-algorithm choice, KL, ratio correction, format reward, hyperparameters — are run on the **104B flash** model, not the 1T model, for cost. The conclusions are *assumed* to transfer up. (2) On raw accuracy, Ring-Zero **trails the frontier** models it lists (GPT-5.5, Gemini 3.1 Pro, Claude Opus 4.8, Qwen3.7-Plus, Kimi K2.6 all sit at 95.7–98.3% on AIME 2026 vs Ring's 93.2%); the win it claims is CoT *quality*, not peak score, and those quality judgments lean on LLM-as-judge. (3) The five "emergent behaviors" are **qualitative** — quoted trace snippets and interpretation ("context anxiety"), not quantified frequencies. (4) The frontier comparison numbers are **as reported by the authors** for competitors. (5) Adaptive depth carries **negative transfer**: the jointly-trained High tier (93.2%) sits *below* the dedicated second-stage model (94.1%) — flexibility costs a little peak. (6) The model, weights, and 320×H200 infrastructure are **not released**, so the 1T result is not externally reproducible. (7) Training is capped at **64k context** by hardware; the paper expects longer windows to unlock more, i.e. this is not the ceiling of the recipe.
+</Callout>
+
+## The take
+
+Ring-Zero's value is not a new loss function — it is a **demonstration and an engineering recipe**. The demonstration: run the simplest possible RL signal (right/wrong plus format) on a trillion-parameter base, and you get sharp gains, a clean two-phase learning dynamic, and reasoning behaviors that smaller models have to be coaxed into. The recipe: a four-stage pipeline where token-level RL grows reasoning, self-distillation compresses it and resets the engine gap, sample-level RL sustains it without length bloat, and tiered RL makes depth controllable — all held together by a training-inference ratio correction that is easy to overlook and, per the ablation, the difference between training and diverging.
+
+The honest frame is the one the paper itself offers in its limitations: zero RL **sharpens the reasoning already latent in pretraining; it does not transcend it**. That is why coverage saturates while reliability climbs, and why a bigger base — not a cleverer reward — is what moves the ceiling. As a controlled study of what pure reward does at scale, it is unusually candid; as a frontier-accuracy claim, it is not one, and it does not pretend to be.
+
+---
+
+*Built on [Ring-Zero: Scaling Zero RL to a Trillion Parameters for Emergent Reasoning](https://arxiv.org/abs/2607.12395) (Tang, Cao, Liu et al., 2026; CC BY 4.0), the team behind the Ling / Ring models. All benchmark, efficiency, and ablation figures are quoted from the paper; the interactive diagrams are illustrations of the mechanism, not reruns of the experiments. Ablations are on the 104B flash model unless noted; the 1T model and infrastructure are not publicly released.*

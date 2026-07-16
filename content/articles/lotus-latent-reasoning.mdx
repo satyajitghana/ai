@@ -1,0 +1,214 @@
+---
+title: "LOTUS: reasoning in the hidden states, not the token stream"
+description: "Explicit chain-of-thought writes every reasoning step out token-by-token, which is slow; latent CoT reasons in hidden states instead — but past 1B parameters it has always trailed explicit CoT, and the gap grew with scale. LOTUS closes it at 3B with a looped padded Transformer: reuse the same weights for R passes over a fixed latent region, refine all K blocks in parallel, and supervise each latent position against its gold CoT-step token. A walk through the loop, the parallel supervision, the real GSM8K numbers, and the honest limits of a fixed thinking budget."
+date: 2026-07-15
+tags:
+  - llm
+  - reasoning
+  - chain-of-thought
+  - latent-reasoning
+  - inference-optimization
+  - explainer
+draft: false
+cover: /articles/lotus-latent-reasoning/fig1.png
+---
+
+import { LoopedForward } from "@/components/articles/lotus-latent-reasoning/looped-forward"
+import { ThoughtLatency } from "@/components/articles/lotus-latent-reasoning/thought-latency"
+import { LoopDepth } from "@/components/articles/lotus-latent-reasoning/loop-depth"
+
+The way a reasoning model earns its answer is by writing out its work: an explicit **chain of thought (CoT)**,
+one token at a time, before it commits to a final answer. That is where the latency goes. Each of those
+intermediate tokens is a full sequential decode step — a [memory-bound pass over the growing KV
+cache](/articles/how-llm-inference-works) — so the more the model thinks, the slower it answers.
+
+**Latent CoT** is the tempting alternative: do the multi-step reasoning inside the model's *hidden states*,
+replacing decoded tokens with continuous representations, and skip the token-by-token bottleneck entirely.
+The problem is that it has never quite worked at scale. Methods like Coconut, CODI, and SIM-CoT match
+explicit CoT on small models, but **beyond 1B parameters no latent method keeps up on math reasoning, and
+the gap widens as the backbone grows**. LOTUS — *Looped Transformers with parallel supervision on latents*,
+from Ying Fan, Anej Svete, and Kangwook Lee — is, to the authors' knowledge, the first latent-CoT method
+to close that gap at the **3B** scale, while cutting the thought phase by **2.5×–6.9×**.
+
+It gets there by fixing the two things the authors argue were holding latent CoT back.
+
+- **(P1) Sequential generation.** Coconut, CODI, and SIM-CoT still produce their latent tokens
+  *autoregressively* — the sequential bottleneck is still there, just moved into latent space.
+- **(P2) No CoT grounding.** Without supervision that aligns each latent position to a specific gold
+  reasoning step, the latent trace drifts and destabilizes as the model gets bigger.
+
+## The loop: one weight set, R passes, K blocks in parallel
+
+LOTUS builds a **padded latent region** into the prompt. Between two learnable delimiters `⟨BoT⟩` and
+`⟨EoT⟩` it inserts $K$ blocks of $c$ shared, learnable `⟨lat⟩` tokens — a fixed $K\cdot c$ latent positions
+(the deployed config is $K=6$, $c=25$, so 150 positions). The question $Q$ sits before `⟨BoT⟩`; the answer
+$A$ comes after `⟨EoT⟩`.
+
+The reasoning then happens by **looping the base language model over that region**. Let $E$ be the learnable
+latent embeddings and $f_\theta$ the ordinary LM backbone. Starting from the latents, LOTUS reuses the *same
+weights* for $R$ iterations, adding the previous pass's output back in each time:
+
+$$
+h^{(0)} = f_\theta\!\big(E \mid C_{\text{pre}}\big), \qquad
+h^{(t)} = f_\theta\!\big(E + h^{(t-1)} \mid C_{\text{pre}}\big), \quad t = 1,\dots,R
+$$
+
+where $C_{\text{pre}}$ is the reused KV cache of the question. This is a **recurrent-depth (looped)
+Transformer**: it adds computation depth by reusing parameters, not by adding them. The crucial property is
+that all $K\cdot c$ latent positions are refined **together** on each pass — so the whole thought phase is
+$R$ sequential forward passes, not one pass per generated token. Scrub the loop and watch the latents sharpen,
+then read out at the final iteration:
+
+<LoopedForward />
+
+That parallelism is the answer to **(P1)**. Where an autoregressive latent method spends a forward pass per
+latent token — the same shape of bottleneck that makes [multi-token prediction](/articles/multi-token-prediction)
+and [diffusion language models](/articles/illada-diffusion-language-model) attractive — LOTUS spends only $R$
+passes for the entire trace, regardless of how many tokens that trace would have been.
+
+## Parallel supervision: grounding each latent in its gold step
+
+The loop alone is not enough; the latents need to be told *what to compute*. This is the answer to **(P2)**,
+and it is the part that makes LOTUS more than "a looped model." After the final iteration, LOTUS reads each
+post-loop latent position $h^{(R)}_{i,j}$ **through the base LM head** $f_{\text{head}}$ and trains it, with
+cross-entropy, toward the gold CoT-step token that belongs in that slot. Each gold CoT step $i$ is tokenized
+and padded/truncated to $c$ tokens $T_{i,\cdot}$, and every position is supervised at once:
+
+$$
+\mathcal{L}_{\text{step}} = \frac{1}{N_{\text{step}}}\sum_{i=1}^{K}\sum_{j=1}^{c}
+\operatorname{CE}\!\big(f_{\text{head}}(h^{(R)}_{i,j}),\, T_{i,j}\big)
+$$
+
+This is direct, position-aligned supervision to real reasoning tokens — much like ordinary explicit-CoT
+supervision — rather than the indirect hidden-state or KV-cache distillation used by earlier parallel-latent
+methods (PCCoT, KaVa). A separate final forward pass then supervises the answer against the latents:
+
+$$
+\mathcal{L} = \mathcal{L}_{\text{ans}} + \lambda_{\text{step}}\,\mathcal{L}_{\text{step}}
+$$
+
+<Figure
+  src="/articles/lotus-latent-reasoning/fig2.png"
+  alt="LOTUS architecture, two panels. (a) Looped forward: the input row is Q, BoT, a run of lat tokens grouped into block 1 through block K, then EoT. A single base LM f_theta box is applied with a curved loop arrow labelled ×R, producing post-loop hidden states h(R), one per latent position, which are read through f_head up to a row of gold CoT token boxes. (b) Final forward: the post-loop latents are inserted back into the sequence and one more pass through f_theta produces answer hidden states z, read through f_head to answer tokens A1, A2, supervised by L_ans."
+  caption="LOTUS refines K blocks of latent tokens in parallel over R looped passes of one shared base LM, then reads each latent position out through the base LM head to its gold CoT-step token (L_step). A final forward pass produces the answer (L_ans) (Fan et al., 2026, Figure 2)."
+/>
+
+The paper frames why both losses are needed with a **Parallel Chain Likelihood (PCL)** view. Because the
+step loss factorizes over positions rather than autoregressively, it induces
+
+$$
+p_\theta^{\text{PCL}}(T\mid Q) = \prod_{i=1}^{K}\prod_{j=1}^{c} p_\theta(T_{i,j}\mid Q)
+$$
+
+The two losses then split the work: $\mathcal{L}_{\text{step}}$ provides **coverage** — it puts probability
+mass on the correct gold token at each position — while $\mathcal{L}_{\text{ans}}$ provides **selection** —
+it forces the jointly-computed latents to actually support the right answer. The ablation makes the split
+concrete: with only $\mathcal{L}_{\text{step}}$, the model's post-loop latents recover the gold top-1 token
+just **9.1%** of the time; with only $\mathcal{L}_{\text{ans}}$, **9.4%**; with **both**, **70.9%**
+(NLL 3.07 vs 9.29 and 5.97). Neither loss alone builds a readable, correct latent trace.
+
+## Why it is fast
+
+The efficiency story is simple once the loop is clear. Explicit CoT's thought-phase latency scales with **how
+much it writes**; LOTUS's scales with $R$, which is fixed. So the win grows exactly when the rationale gets
+verbose. On Llama-3.2-3B the paper measures the thought phase directly — drag the playhead and watch LOTUS
+finish while explicit CoT is still decoding:
+
+<ThoughtLatency />
+
+On compact math-expression CoT the thought phase drops from **338.8 ms to 133.0 ms** (2.5×), and total
+latency from 384.2 ms to 181.2 ms (about 2.1× overall). Swap in verbose **natural-language** rationales and
+explicit CoT balloons to **963.6 ms** while LOTUS barely moves to **140.8 ms** — a **6.9×** thought-phase
+speedup, at essentially the same accuracy (68.13% vs 68.41%). The query-prefill and answer phases are nearly
+identical across methods; only the thought phase moves.
+
+## The numbers
+
+Held against explicit CoT and the strongest latent baselines on GSM8K (Llama-3.2-3B, in-domain), LOTUS lands
+within about a point and a half of explicit CoT and clearly ahead of the latent baselines:
+
+<BenchBars
+  title="GSM8K accuracy, Llama-3.2-3B in-domain (%)"
+  unit="%"
+  bars={[
+    { label: "Explicit CoT", value: 71.5 },
+    { label: "LOTUS", value: 70.0, highlight: true },
+    { label: "LOTUS + CODI", value: 70.6, highlight: true },
+    { label: "CODI + SIM-CoT", value: 62.3 },
+  ]}
+/>
+
+The pattern holds across backbones — GPT-2 (LOTUS 44.1 vs explicit 42.7), Llama-1B (57.3 vs 58.4), Llama-3B
+(70.0 vs 71.5) — so unlike prior latent methods the gap does **not** widen with scale. And on the
+**out-of-domain** average (GSM-Hard, MultiArith, SVAMP), LOTUS actually edges ahead of explicit CoT, **63.9
+vs 62.1**, led by a near-perfect 99.9% on MultiArith and 75.7% on SVAMP.
+
+<BenchBars
+  title="Thought-phase speedup vs explicit CoT, Llama-3B (×)"
+  unit="×"
+  bars={[
+    { label: "math CoT", value: 2.5, highlight: true },
+    { label: "natural-language CoT", value: 6.9, highlight: true },
+    { label: "total (math)", value: 2.1, highlight: true },
+  ]}
+/>
+
+## How deep does the loop need to be?
+
+Loop depth $R$ is LOTUS's compute knob, and reasoning turns out to need a real amount of it. Train the model
+at increasing $R$ and accuracy climbs steeply — a shallow loop simply cannot fit multi-step arithmetic:
+
+<LoopDepth />
+
+Two honest wrinkles live in this chart. First, depth is **not** free test-time compute you can dial up after
+training: take the model trained at $R=6$ and run it at $R=7$ and accuracy *dips* to 69.3% — LOTUS reasons
+best at the depth it was trained for. Second, the parallel **width** $c$ is nearly free where depth is not:
+sweeping $c$ from 1 to 50 tokens per block (a 50× change in latent positions) moves the thought phase by only
+about 30 ms — 110.9 ms to 141.2 ms — because those positions are processed in parallel. A single token per
+step (c=1) is too narrow (51.4%), but moderate widths (c=25–30) saturate at 70%.
+
+## Does it actually reason, or memorize?
+
+Because LOTUS reads its latents through the ordinary LM head, you can literally decode the thought — the same
+trick behind interpretability tools that [unembed intermediate activations](/articles/jacobian-lens). The
+post-loop latents recover the gold CoT at **70.9% top-1 / 85.8% top-5**. More telling is a multi-path test:
+for a question with a *trained* gold chain (G) and an *unseen-but-valid* alternative chain (U), the readout
+orders their likelihoods $G \ll U \ll \text{random}$ (NLL 0.07, 4.28, 8.16), assigning graded probability to
+valid-but-never-seen reasoning. That ordering is the paper's evidence that the latents encode reasoning
+structure, not just a memorized string.
+
+<Callout type="warn">
+**Read the setup before believing the headline.** (1) *Scope is narrow:* every result is **math word
+problems** (GSM8K-family, trained on GSM8k-Aug); the authors explicitly flag transfer to other domains as
+open. (2) *The budget is fixed:* $K$, $c$, and $R$ are hyperparameters set to cover the expected step count —
+chains **longer than $K$ steps fall back to autoregressive completion**, and making the budget adaptive is
+listed as future work, not a solved problem. (3) *"Bridges the gap" means parity, not a win:* LOTUS is ~1.5
+points **behind** explicit CoT in-domain at 3B (70.0 vs 71.5); it needs the LOTUS+CODI combo to get within a
+point, and it leads only on the OOD average. (4) *Speedups are the paper's own measurements* on Llama-3B
+(H-class GPU), and the flattering 6.9× is specifically the verbose natural-language regime; the compact-math
+number is 2.5×. (5) *Baselines are author-selected* latent methods (Coconut, CODI, SIM-CoT, PCCoT, KaVa) and
+one explicit-CoT reference — not a broad frontier-model comparison.
+</Callout>
+
+## The take
+
+LOTUS's real contribution is a clean recombination: take a **looped padded Transformer** (depth from weight
+reuse, all latent positions refined in parallel) and give it **direct, position-aligned supervision** to gold
+CoT tokens through the base LM head. The loop kills the sequential bottleneck that every prior latent method
+kept; the supervision kills the drift that made latent reasoning fall apart at scale. Together they do
+something no earlier latent-CoT method managed — **stay on the explicit-CoT accuracy curve at 3B** — while
+turning a variable, write-everything thought phase into a fixed $R$-pass one.
+
+The honest frame is that this is a *parity-with-a-speedup* result on math, bounded by a thinking budget you
+have to choose in advance. Whether a fixed $K\cdot c\cdot R$ box holds up when problems demand more steps than
+you budgeted — and whether the story survives outside arithmetic — are the open questions the authors name
+themselves. But as a demonstration that latent reasoning can finally keep pace with explicit reasoning at
+scale, and answer 2.5–6.9× faster while doing it, LOTUS is the first latent-CoT method that clears the bar.
+
+---
+
+*Built on [Bridging the Gap Between Latent and Explicit Reasoning with Looped
+Transformers](https://arxiv.org/abs/2606.31779) (Fan, Svete, Lee; 2026). All accuracy, latency, and ablation
+figures are quoted from the paper (Llama-3.2-3B unless noted; GSM8K-family math benchmarks; deployed config
+$K=6$, $c=25$, $R=6$). The interactive diagrams are illustrations of the mechanism; the gold-CoT tokens in
+the loop diagram are illustrative.*
