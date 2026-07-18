@@ -35,17 +35,17 @@ const RHO_LIMSSR: Record<string, number> = {
 }
 
 const W = 760
-const H = 250
-const ROWS = [56, 118, 180] // row centres
+const H = 264
+const ROWS = [70, 132, 194] // row centres (shifted down to clear the panel subtitle)
 const SLOT_X = 14
 const SLOT_W = 92
 const SLOT_H = 44
 const FUS_X = 140
 const FUS_W = 52
-const FUS_CY = 118
+const FUS_CY = 132
 const SC_X = 216
 const SC_W = 122
-const SC_Y = 78
+const SC_Y = 92
 const SC_H = 80
 
 function hcurve(x1: number, y1: number, x2: number, y2: number) {
@@ -142,7 +142,7 @@ export function MissingModality() {
         })}
 
         {/* fusion node */}
-        <rect x={ox + FUS_X} y={52} width={FUS_W} height={132} rx={9} fill="var(--background)" stroke={good ? ACCENT : "var(--border)"} strokeWidth={1.5} filter="url(#mm-soft)" />
+        <rect x={ox + FUS_X} y={66} width={FUS_W} height={132} rx={9} fill="var(--background)" stroke={good ? ACCENT : "var(--border)"} strokeWidth={1.5} filter="url(#mm-soft)" />
         <text x={ox + FUS_X + FUS_W / 2} y={FUS_CY - 4} textAnchor="middle" className="fill-foreground font-mono" fontSize={11} fontWeight={600}>
           {isL ? "LLM" : "concat"}
         </text>
