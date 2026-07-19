@@ -291,8 +291,9 @@ export function ContextualRetrievalPlayground() {
                 </div>
               </div>
 
-              <div className="mt-2 rounded-md border-l-2 px-3 py-1.5 font-mono text-[11px]" style={{ borderColor: ACCENT }}>
-                <span className="text-muted-foreground">query:</span> <span className="text-foreground">{query.q}</span>
+              <div className="mt-2.5 font-mono text-[11px]">
+                <span className="text-muted-foreground">query&nbsp;&nbsp;</span>
+                <span className="text-foreground">{query.q}</span>
               </div>
 
               {/* two columns */}
