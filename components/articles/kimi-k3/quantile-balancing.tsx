@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Quantile Balancing. Standard sparse MoE keeps experts busy with an auxiliary
 // load-balancing loss and a sensitive coefficient. Kimi K3 instead sets, per expert,
@@ -177,7 +178,7 @@ export function QuantileBalancing() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">target quantile q (fraction of tokens each expert keeps)</div>
-          <input type="range" min={0.1} max={0.6} step={0.05} value={q} onChange={(e) => setQ(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.15_265)]" />
+          <Range min={0.1} max={0.6} step={0.05} value={q} onChange={(e) => setQ(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.58 0.15 265)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

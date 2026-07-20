@@ -3,6 +3,7 @@
 import { memo, useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // A single model's J-lens CKA matrix: cell (i,j) = how similarly layers i and j
 // arrange the 4,096 probe-token steering directions. Bright blocks along the
@@ -207,14 +208,12 @@ export function CkaBlocks() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">relative depth (drag)</div>
-          <input
-            type="range"
+          <Range
             min={0}
             max={100}
             value={Math.round(depth * 100)}
             onChange={(e) => setDepth(Number(e.target.value) / 100)}
-            className="w-full cursor-pointer accent-[oklch(0.64_0.13_195)]"
-          />
+            className="w-full cursor-pointer " accent="oklch(0.64 0.13 195)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

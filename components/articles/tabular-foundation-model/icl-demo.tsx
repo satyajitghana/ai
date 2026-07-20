@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // TabFM's core move, drawn as a diagram: in-context learning for tables. You don't
 // train the model — you paste labeled example rows into the context and it predicts a
@@ -158,7 +159,7 @@ export function IclDemo() {
             <span>context rows (drag) · {k}</span>
             <span>0 gradient steps · {k} rows in → 1 forward pass out</span>
           </div>
-          <input type="range" min={0} max={MAXK} value={k} onChange={(e) => setK(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.60_0.15_255)]" />
+          <Range min={0} max={MAXK} value={k} onChange={(e) => setK(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.60 0.15 255)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

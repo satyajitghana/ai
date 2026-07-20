@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // A granular MoE layer in Soofi S: 128 routed experts, of which a learned sigmoid-gated
 // router activates 6 per token, plus 2 shared experts that are always on. Across the
@@ -129,7 +130,7 @@ export function MoeRouting() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">token (drag to reroute)</div>
-          <input type="range" min={0} max={40} value={token} onChange={(e) => setToken(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.20_320)]" />
+          <Range min={0} max={40} value={token} onChange={(e) => setToken(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.20 320)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

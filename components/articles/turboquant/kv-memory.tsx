@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The payoff, in GB. The KV cache grows linearly with context length; at long context
 // it's the thing that caps how many requests fit on a GPU. TurboQuant compresses the
@@ -102,7 +103,7 @@ export function KvMemory() {
 
         <label className="mt-2 block">
           <span className="sr-only">context length</span>
-          <input type="range" min={8} max={MAXK} step={8} value={ctxK} onChange={(e) => setCtxK(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="context length" />
+          <Range min={8} max={MAXK} step={8} value={ctxK} onChange={(e) => setCtxK(+e.target.value)} className="w-full cursor-pointer " aria-label="context length" accent="oklch(0.72 0.15 195)" />
         </label>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

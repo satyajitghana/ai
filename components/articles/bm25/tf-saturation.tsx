@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // BM25's first fix over TF-IDF, made visible. In TF-IDF a term's contribution grows
 // linearly with its count — a word appearing 20 times counts 20×. BM25 saturates it:
@@ -104,14 +105,14 @@ export function TfSaturation() {
               <span>k1 — saturation rate (Lucene 1.2)</span>
               <span className="tabular-nums text-foreground">{k1.toFixed(1)}</span>
             </div>
-            <input type="range" min={0} max={3} step={0.1} value={k1} onChange={(e) => setK1(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="k1" />
+            <Range min={0} max={3} step={0.1} value={k1} onChange={(e) => setK1(+e.target.value)} className="w-full cursor-pointer " aria-label="k1" accent="oklch(0.72 0.15 195)" />
           </div>
           <div>
             <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-muted-foreground">
               <span>tf — occurrences (marker)</span>
               <span className="tabular-nums text-foreground">{val.toFixed(2)} · {pct}% of max</span>
             </div>
-            <input type="range" min={0} max={TFMAX} step={1} value={tf} onChange={(e) => setTf(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="term frequency marker" />
+            <Range min={0} max={TFMAX} step={1} value={tf} onChange={(e) => setTf(+e.target.value)} className="w-full cursor-pointer " aria-label="term frequency marker" accent="oklch(0.72 0.15 195)" />
           </div>
         </div>
 

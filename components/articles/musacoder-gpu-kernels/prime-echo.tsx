@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // PrimeEcho: first-turn-anchored multi-turn reward, drawn as a rollout. A single sample is
 // a K-turn trajectory — the model writes a kernel, MooreEval returns a score s_k and error
@@ -150,7 +151,7 @@ export function PrimeEcho() {
             <span>anchor weight α = {alpha.toFixed(2)}</span>
             <span>{alpha > 0.5 ? "first-turn-anchored (PrimeEcho)" : "best-of-turns (hackable)"}</span>
           </div>
-          <input type="range" min={0} max={1} step={0.05} value={alpha} onChange={(e) => setAlpha(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.16_250)]" />
+          <Range min={0} max={1} step={0.05} value={alpha} onChange={(e) => setAlpha(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.16 250)" />
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">

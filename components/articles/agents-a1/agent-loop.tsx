@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // A long-horizon agent trajectory, drawn as a climbing chain. Each step is
 // think → act (tool call) → observe → verify; the verifier's outcome is what makes
@@ -155,14 +156,12 @@ export function AgentLoop() {
             <span>step {k + 1} / {STEPS.length} (drag)</span>
             <span className="tabular-nums text-foreground">{shownTok.toLocaleString()} tok · {pct}% of horizon</span>
           </div>
-          <input
-            type="range"
+          <Range
             min={0}
             max={STEPS.length - 1}
             value={k}
             onChange={(e) => { setPlaying(false); setK(Number(e.target.value)) }}
-            className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]"
-          />
+            className="w-full cursor-pointer " accent="oklch(0.72 0.15 195)" />
         </div>
 
         {/* active-step detail — grid-stacked so height never shifts; minmax(0,1fr)

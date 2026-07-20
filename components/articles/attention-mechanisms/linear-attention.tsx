@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { ATT, FigureCard, IDX, IO, Legend, PlayPause, useReducedMotion, useTicker, WARM } from "./shared"
+import { Range } from "@/components/articles/ui/range"
 
 // Linear attention (Katharopoulos 2020), drawn as the cost contrast that is the whole
 // point. Softmax attention materialises an N×N score matrix — it grows quadratically as
@@ -154,8 +155,7 @@ export function LinearAttention() {
           <span>tokens streamed</span>
           <span className="tabular-nums text-foreground">{t + 1} / {N}</span>
         </div>
-        <input
-          type="range"
+        <Range
           min={0}
           max={N - 1}
           value={t}

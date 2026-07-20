@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // LOTUS's core move, drawn as a diagram. A padded latent region — K blocks of c
 // learnable ⟨lat⟩ tokens between ⟨BoT⟩ and ⟨EoT⟩ — is pushed through the SAME base
@@ -189,7 +190,7 @@ export function LoopedForward() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">loop iteration (drag to t = R for readout)</div>
-          <input type="range" min={0} max={R} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.16_300)]" />
+          <Range min={0} max={R} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.58 0.16 300)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

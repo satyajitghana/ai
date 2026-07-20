@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { Range } from "@/components/articles/ui/range"
 
 const ACCENT = "oklch(0.58 0.15 265)";
 
@@ -266,18 +267,16 @@ export function AttnRes() {
 
         <label className="flex flex-1 items-center gap-2">
           <span className="font-mono text-xs text-muted-foreground">current layer</span>
-          <input
-            type="range"
+          <Range
             min={2}
             max={L}
             step={1}
             value={current}
             onChange={(e) => setCurrent(Number(e.target.value))}
             disabled={mode !== "attnres"}
-            className="h-1 min-w-24 flex-1 cursor-pointer appearance-none rounded-full bg-border accent-current disabled:cursor-not-allowed disabled:opacity-40"
+            className="h-1 min-w-24 flex-1 cursor-pointer appearance-none rounded-full bg-border  disabled:cursor-not-allowed disabled:opacity-40"
             style={{ color: ACCENT }}
-            aria-label="current layer"
-          />
+            aria-label="current layer" accent="currentColor" />
         </label>
 
         <span className="font-mono text-xs text-muted-foreground">

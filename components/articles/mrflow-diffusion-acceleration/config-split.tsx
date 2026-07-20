@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Where the compute budget goes, made draggable. The native sampler spends its whole
 // budget on full-resolution diffusion steps. MrFlow re-allocates: most steps at low
@@ -128,7 +129,7 @@ export function ConfigSplit() {
               <span>n_lr · low-res steps</span>
               <span className="text-foreground">{nLr}</span>
             </div>
-            <input type="range" min={4} max={16} value={nLr} onChange={(e) => setNLr(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.66_0.14_155)]" />
+            <Range min={4} max={16} value={nLr} onChange={(e) => setNLr(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.66 0.14 155)" />
           </div>
           <div className="flex items-center gap-1.5">
             <span className="font-mono text-[10px] text-muted-foreground">n_hr · refine steps</span>

@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // The second half of the lens: unembed( J·h ). After the Jacobian transports an
 // activation into the final-layer basis, the model's own unembedding decodes it.
@@ -148,8 +149,7 @@ export function UnembedReadout() {
 
           <label className="mt-4 flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
             <span className="shrink-0">rotate J·h</span>
-            <input
-              type="range"
+            <Range
               min={0}
               max={359}
               step={1}

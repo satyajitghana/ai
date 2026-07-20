@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // What the KV cache buys, drawn as the attention it saves. At decode step k the model
 // needs K/V for every token 0..k. WITHOUT a cache it recomputes all of them every step
@@ -146,7 +147,7 @@ export function KVCache() {
         {/* step scrubber */}
         <div className="mt-1">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">decode step (drag)</div>
-          <input type="range" min={1} max={N - 1} value={k} onChange={(e) => setK(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.66_0.15_150)]" aria-label="decode step" />
+          <Range min={1} max={N - 1} value={k} onChange={(e) => setK(Number(e.target.value))} className="w-full cursor-pointer " aria-label="decode step" accent="oklch(0.66 0.15 150)" />
         </div>
 
         {/* readout line */}
@@ -176,7 +177,7 @@ export function KVCache() {
             <span>context length (13B, ~1 MB/token)</span>
             <span className="tabular-nums text-foreground">{ctxK}k tokens · {cacheGB.toFixed(1)} GB / request</span>
           </div>
-          <input type="range" min={1} max={32} step={1} value={ctxK} onChange={(e) => setCtxK(parseInt(e.target.value))} className="w-full cursor-pointer accent-foreground" aria-label="context length in thousands of tokens" />
+          <Range min={1} max={32} step={1} value={ctxK} onChange={(e) => setCtxK(parseInt(e.target.value))} className="w-full cursor-pointer " aria-label="context length in thousands of tokens" accent="var(--foreground)" />
 
           {/* 80GB VRAM budget, partitioned into concurrent requests by cache size */}
           <svg viewBox="0 0 760 56" className="mt-2 w-full" role="img" aria-label={`An 80GB GPU fits about ${reqsPer80} concurrent requests at this cache size`}>

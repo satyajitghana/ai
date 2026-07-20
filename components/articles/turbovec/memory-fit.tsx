@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // The headline, made tunable. A corpus of D-dimensional float32 embeddings costs
 // dim×4 bytes each; turbovec quantizes each to 2–4 bits after a random rotation, so
@@ -100,7 +101,7 @@ export function MemoryFit() {
             <span>corpus size</span>
             <span className="tabular-nums text-foreground">{millions}M vectors</span>
           </div>
-          <input type="range" min={1} max={50} step={1} value={millions} onChange={(e) => setMillions(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="corpus size in millions" />
+          <Range min={1} max={50} step={1} value={millions} onChange={(e) => setMillions(+e.target.value)} className="w-full cursor-pointer " aria-label="corpus size in millions" accent="oklch(0.72 0.15 195)" />
         </div>
 
         {/* readout */}

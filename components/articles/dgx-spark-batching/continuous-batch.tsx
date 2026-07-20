@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Continuous batching, drawn as a scene. Each user is a stream with its OWN prompt
 // and its OWN KV cache (a paged row of blocks). Every decode step, vLLM gathers all
@@ -202,14 +203,14 @@ export function ContinuousBatch() {
               <span>concurrency (users in the batch)</span>
               <span className="tabular-nums">{n}</span>
             </div>
-            <input type="range" min={1} max={64} value={n} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.68_0.14_195)]" />
+            <Range min={1} max={64} value={n} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.68 0.14 195)" />
           </div>
           <div>
             <div className="mb-1 flex justify-between font-mono text-[10px] text-muted-foreground">
               <span>decode step (watch KV caches grow · streams join & leave)</span>
               <span className="tabular-nums">{step}</span>
             </div>
-            <input type="range" min={0} max={STEPS} value={step} onChange={(e) => setStep(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.72_0.13_75)]" />
+            <Range min={0} max={STEPS} value={step} onChange={(e) => setStep(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.72 0.13 75)" />
           </div>
         </div>
 

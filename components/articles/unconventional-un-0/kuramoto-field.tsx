@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 import {
   ArrowsClockwiseIcon,
   PauseIcon,
@@ -236,16 +237,14 @@ export function KuramotoField() {
               <span>coupling strength K</span>
               <span className="text-foreground tabular-nums">{k.toFixed(2)}</span>
             </div>
-            <input
-              type="range"
+            <Range
               min={0}
               max={6}
               step={0.05}
               value={k}
               onChange={(e) => setK(parseFloat(e.target.value))}
-              className="w-full cursor-pointer accent-foreground"
-              aria-label="coupling strength"
-            />
+              className="w-full cursor-pointer "
+              aria-label="coupling strength" accent="var(--foreground)" />
           </div>
 
           <div className="flex flex-wrap items-center gap-2 font-mono text-xs">

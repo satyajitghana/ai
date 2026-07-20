@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The looped Transformer drawn as a NETWORK. LOTUS gets its depth by reusing one
 // weight set f_θ for R passes, not by stacking R× the parameters. Rolled, it is a
@@ -202,14 +203,12 @@ export function LoopUnroll() {
         {unrolled && (
           <div className="mt-3">
             <div className="mb-1 font-mono text-[10px] text-muted-foreground">unroll depth (drag to t = R)</div>
-            <input
-              type="range"
+            <Range
               min={1}
               max={R}
               value={t}
               onChange={(e) => setT(Number(e.target.value))}
-              className="w-full cursor-pointer accent-[oklch(0.58_0.16_300)]"
-            />
+              className="w-full cursor-pointer " accent="oklch(0.58 0.16 300)" />
           </div>
         )}
 

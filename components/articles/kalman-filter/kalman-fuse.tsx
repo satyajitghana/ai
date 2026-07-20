@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The update step is just multiplying two Gaussians. The prediction is a Gaussian
 // over the state; the measurement is a Gaussian over what you observed; their
@@ -126,7 +127,7 @@ function Slider({ label, value, onChange }: { label: string; value: number; onCh
         <span>{label}</span>
         <span className="text-foreground tabular-nums">{value.toFixed(0)}</span>
       </div>
-      <input type="range" min={3} max={22} step={1} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} className="w-full cursor-pointer accent-foreground" aria-label={label} />
+      <Range min={3} max={22} step={1} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} className="w-full cursor-pointer " aria-label={label} accent="var(--foreground)" />
     </div>
   )
 }

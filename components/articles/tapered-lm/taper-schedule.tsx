@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The idea in one control. Every layer's MLP hidden width is drawn as a bar. At
 // taper 0 the model is the usual uniform stack — every layer identical. Drag the
@@ -85,16 +86,14 @@ export function TaperSchedule() {
             <span>taper strength</span>
             <span className="tabular-nums text-foreground">{s === 0 ? "uniform" : `${ratio}:1 early:late`}</span>
           </div>
-          <input
-            type="range"
+          <Range
             min={0}
             max={0.7}
             step={0.02}
             value={s}
             onChange={(e) => setS(Number(e.target.value))}
-            className="w-full cursor-pointer accent-[oklch(0.7_0.13_250)]"
-            aria-label="taper strength"
-          />
+            className="w-full cursor-pointer "
+            aria-label="taper strength" accent="oklch(0.7 0.13 250)" />
         </div>
 
         {/* readout */}

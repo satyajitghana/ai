@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { ATT, FigureCard, Legend, WARM } from "./shared"
+import { Range } from "@/components/articles/ui/range"
 
 // Differential attention (Ye / Microsoft 2024). A query computes TWO softmax maps and
 // returns their difference:  (softmax(Q₁K₁ᵀ/√d) − λ·softmax(Q₂K₂ᵀ/√d))·V.
@@ -112,8 +113,7 @@ export function DifferentialAttention() {
           <span>λ (subtraction strength · learnable in the real model)</span>
           <span className="tabular-nums text-foreground">{lambda.toFixed(2)}</span>
         </div>
-        <input
-          type="range"
+        <Range
           min={0}
           max={1}
           step={0.02}

@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Token maxing. Drag the horizon: as an agentic task runs longer / wider,
 // tokens per task climb steeply while the per-token price keeps falling — yet
@@ -116,7 +117,7 @@ export function TokenMaxing() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">task horizon — more turns, wider context (drag)</div>
-          <input type="range" min={1} max={KMAX} value={k} onChange={(e) => setK(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.14_250)]" />
+          <Range min={1} max={KMAX} value={k} onChange={(e) => setK(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.14 250)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
