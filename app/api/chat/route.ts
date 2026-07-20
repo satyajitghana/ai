@@ -13,7 +13,8 @@ import {
 // NO-KEY MODE: returns 503 + a pointer to the static agent surfaces.
 export const maxDuration = 60
 
-// The console UI posts a plain {messages:[{role,content}]} shape.
+// The console UI posts a plain {messages:[{role,content}]} shape, plus an
+// optional {context} describing the page the user is currently on.
 const bodySchema = z.object({
   messages: z
     .array(
@@ -24,6 +25,12 @@ const bodySchema = z.object({
     )
     .min(1)
     .max(24),
+  context: z
+    .object({
+      path: z.string().max(400).optional(),
+      title: z.string().max(400).optional(),
+    })
+    .optional(),
 })
 
 // Lets the UI (and curious agents) check availability without spending tokens.
@@ -42,7 +49,32 @@ export async function POST(req: Request) {
   }
 
   const system = await buildSystemPrompt()
-  const uiMessages: UIMessage[] = parsed.data.messages.map((m, i) => ({
+
+  // Page context rides in the volatile `messages` channel (not the cached system
+  // prefix): prepend a short note to the latest user turn so the model knows where
+  // the reader is and can resolve "this page / this article / here".
+  const messages = parsed.data.messages.map((m) => ({ ...m }))
+  const ctx = parsed.data.context
+  if (ctx && (ctx.path || ctx.title)) {
+    let lastUser = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") {
+        lastUser = i
+        break
+      }
+    }
+    if (lastUser !== -1) {
+      const where = ctx.title ? `"${ctx.title}"` : "a page"
+      const at = ctx.path ? ` (${ctx.path})` : ""
+      const note = `[The reader is currently on ${where}${at}. If they say "this page", "this article", "here", or similar, they mean that.]`
+      messages[lastUser] = {
+        ...messages[lastUser],
+        content: `${note}\n\n${messages[lastUser].content}`,
+      }
+    }
+  }
+
+  const uiMessages: UIMessage[] = messages.map((m, i) => ({
     id: String(i),
     role: m.role,
     parts: [{ type: "text", text: m.content }],

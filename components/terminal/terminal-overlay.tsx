@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { useRouter } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
 import {
   KeyReturnIcon,
   SparkleIcon,
@@ -73,6 +73,7 @@ export function TerminalOverlay() {
   const inputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const router = useRouter()
+  const pathname = usePathname()
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -136,7 +137,14 @@ export function TerminalOverlay() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ messages: [{ role: "user", content: question }] }),
+        body: JSON.stringify({
+          messages: [{ role: "user", content: question }],
+          // Tell the AI which page the reader is on, so "this article" resolves.
+          context: {
+            path: pathname,
+            title: typeof document !== "undefined" ? document.title : undefined,
+          },
+        }),
       })
       if (!res.ok || !res.body) {
         setLastAnswer(
@@ -255,7 +263,22 @@ export function TerminalOverlay() {
     else void ask(cmd) // free text → ask the AI
   }
 
-  if (!open) return null
+  if (!open) {
+    // Floating action button — a discoverable way in, on every page (the ⌘K
+    // shortcut still works; this just makes it visible, especially on mobile).
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-label="Ask the site AI"
+        title="Ask · ⌘K"
+        className="group fixed right-4 bottom-4 z-40 flex h-12 w-12 cursor-pointer items-center justify-center rounded-full border bg-background text-muted-foreground shadow-lg transition-colors hover:bg-muted hover:text-foreground sm:right-5 sm:bottom-5"
+      >
+        <SparkleIcon size={20} weight="fill" />
+        <span className="sr-only">Ask the site AI or open the command palette</span>
+      </button>
+    )
+  }
 
   const trimmed = input.trim()
   const verb = trimmed.split(/\s+/)[0].toLowerCase()
