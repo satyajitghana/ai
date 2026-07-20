@@ -1,0 +1,159 @@
+---
+title: "Giving my own search the Contextual BM25 treatment"
+description: "This site's search was a substring indexOf — first match wins, no ranking, and any multi-word query that isn't a verbatim phrase returns nothing. I replaced it with the two things I'd just written up: BM25 for ranking, and Contextual Retrieval for chunks — except the context is deterministic frontmatter instead of a Claude call, so it runs at request time with no model. Here's the rebuild, with the real before/after."
+date: 2026-07-20
+tags:
+  - search
+  - retrieval
+  - bm25
+  - rag
+  - information-retrieval
+draft: false
+---
+
+I recently wrote two pieces back to back: one on [BM25](/articles/bm25), the ranking
+function that refuses to die, and one on [Contextual Retrieval](/blog/contextual-retrieval),
+Anthropic's fix for chunks that forget where they came from. Then I opened `lib/search.ts` —
+the thing powering this site's own `/search` and the `/api/search` endpoint agents hit — and
+found this:
+
+```ts
+// the old lib/search.ts, abridged
+for (const item of getAllContent()) {
+  const fields = [item.title, item.description, item.tags, item.body]
+  for (const text of fields) {
+    if (text.toLowerCase().includes(q)) {   // q = the whole lowercased query
+      results.push({ /* … a ±120-char window around the hit */ })
+      break
+    }
+  }
+}
+```
+
+A substring `indexOf`. It has three problems, and the third is the one that actually bites:
+
+1. **No ranking.** The first document that contains the substring wins, in date order. A tight,
+   on-topic match and an incidental mention are indistinguishable.
+2. **No notion of rarity or length.** Matching "the" counts the same as matching "kalman".
+3. **Multi-word queries fall off a cliff.** `q` is the *entire* query string, so
+   `includes(q)` needs that **exact phrase** somewhere in the text. Nobody searches in verbatim
+   phrases. `"bm25 length normalization"` returns **zero results** — those three words are all
+   in the BM25 article, just never contiguous.
+
+So I ate my own cooking. Here's the rebuild.
+
+## BM25, the same formula I just wrote up
+
+The [BM25 walkthrough](/articles/bm25) has the whole derivation; the code is a direct
+transcription of it. Lucene's non-negative IDF, term-frequency saturation at `k1 = 1.2`, length
+normalization at `b = 0.75`:
+
+```ts
+// lib/search.ts — the ranking core, straight from the article's formula
+const K1 = 1.2
+const B = 0.75
+
+function idf(term: string, ix: Index): number {
+  const n = ix.df.get(term) ?? 0
+  return Math.log(1 + (ix.n - n + 0.5) / (n + 0.5))
+}
+
+// per query term present in a chunk:
+const f = chunk.tf.get(term) ?? 0
+const norm = K1 * (1 - B + (B * chunk.len) / ix.avgdl)
+score += idf(term, ix) * (f * (K1 + 1)) / (f + norm)
+```
+
+Two things fall out for free. The query is **tokenized** into terms and each is scored
+independently, so multi-word queries just work — no phrase has to exist. And rare terms
+dominate: `kalman` carries far more weight than `filter`, because `idf` collapses for common
+words. No stopword list, same as the article promised.
+
+I keep a **postings map** (`term → chunk indices`) so a query only touches chunks that actually
+share a term, instead of scanning the whole corpus. The corpus is one person's writing, so this
+is overkill — but it's the same inverted-index shape a real engine uses, and it's three lines.
+
+## Contextual chunks, minus the Claude call
+
+BM25 alone still has the chunk-amnesia problem from the [Contextual Retrieval
+post](/blog/contextual-retrieval): if I split an article into passages and index each one alone,
+a passage that reads "it drops 41% at parity" has no idea it's *about the Harness Effect, in the
+section on the controlled swap*. A query for either misses it.
+
+Anthropic's fix is to have Claude write a one-line context for every chunk before indexing.
+Mine is cheaper and dumber: the context a chunk lost is sitting right there in the document's
+frontmatter and headings. So before indexing, every chunk inherits its document's **title,
+description, tags, and nearest heading** — deterministically, at request time, no model, no
+build step:
+
+```ts
+// each chunk is packed with weighted terms: its own body, its heading, and the
+// document context it would otherwise have lost when the body was split.
+const contextTokens = tokenize([title, description, tags.join(" ")].join(" "))
+for (const t of bodyTokens) add(t, 1)
+for (const t of headingTokens) add(t, 1)          // section-local: full weight
+for (const t of contextTokens) add(t, CONTEXT_WEIGHT) // 0.5 — present, not dominant
+```
+
+The honest caveat: this is a **poor man's** Contextual Retrieval. Claude's per-chunk context can
+say things the frontmatter can't ("the previous quarter's revenue was \$314M"); my version can
+only replay the structural context the document already carries. And prepending the *same* title
+to every chunk of a document inflates those terms' document-frequency, which is exactly why the
+context terms get `CONTEXT_WEIGHT = 0.5` instead of full weight — present enough to make the
+chunk findable by its subject, quiet enough not to drown the passage's own words. It's the 80%
+of the win for 0% of the inference cost, which is the right trade for a static personal site.
+
+Each result also reports **which section** it matched — the nearest heading rides along as the
+result's `field`, so `/api/search` tells an agent not just *which* document but *where* in it.
+
+## Before / after
+
+Same queries, old substring search vs. the new Contextual BM25, on the live corpus:
+
+```text
+query                          substring indexOf         contextual BM25 (top hit)
+--------------------------------------------------------------------------------------
+"bm25 length normalization"    0 results (no verbatim     articles/bm25
+                                phrase)                    [Start with TF-IDF, and its two flaws]
+
+"revenue grew quarter"         0 results                  blog/contextual-retrieval
+                                                           [The problem: chunks forget …]
+
+"kalman filter"                first dated doc that        articles/kalman-filter  (8.4)
+                                contains the phrase,        + fast-lio2 (8.6, cites it)
+                                unranked                    ranked by relevance, not date
+
+"reciprocal rank fusion"       0 results                  blog/contextual-retrieval
+                                                           [A dependency-free repro]
+```
+
+The multi-word queries are the story. Under substring, anything that isn't a verbatim phrase —
+which is almost everything a person types — returned nothing. Under BM25 every term contributes,
+so the query finds the document even when its words are scattered across a paragraph, and the
+contextual prefix pulls in matches on the *subject* of a passage, not just its literal words.
+
+## It's live
+
+Try it: [`/search?q=length+normalization`](/search?q=length+normalization). Agents get the
+ranked, scored JSON with the section label:
+
+```bash
+curl -s "https://ai.thesatyajit.com/api/search?q=contextual%20retrieval&limit=3" | jq '.results[] | {slug, field, score}'
+```
+
+<Callout type="warn">
+What this still isn't: it's the **lexical half** only. The [contextual retrieval
+post](/blog/contextual-retrieval) makes the case that the real win is *fusing* BM25 with a dense
+retriever, and that reranking the shortlist is what takes the failure rate the last mile. There
+are no embeddings here yet — a query has to share actual terms with a chunk, so a pure paraphrase
+with no lexical overlap can still miss. For a corpus this size, lexical BM25 over contextualized
+chunks is the honest 90% solution; the semantic half is the next commit, not this one.
+</Callout>
+
+## The takeaway
+
+The whole change is `lib/search.ts` — a few hundred lines, no dependencies, no index server, no
+model at request time. It's the two ideas I'd just written about, applied to the smallest
+possible target: my own search bar. BM25 for ranking, structural context for the chunk-amnesia
+problem, and an honest note about the half I haven't built yet. Writing about a technique is a
+good way to understand it; running it in your own site is a better one.
