@@ -110,7 +110,7 @@ const handler = createMcpHandler(
       {
         title: "Search content",
         description:
-          "Case-insensitive substring search across title/description/tags/body of ALL content (blog, logs, projects, papers, snippets, notes). Returns kind, slug, url, and a snippet around the hit.",
+          "BM25 search over contextualized chunks of ALL content (articles, blog, logs, projects, papers, snippets, notes). Ranked, not first-substring. Returns kind, slug, url, the matching section, a snippet, and a score.",
         inputSchema: {
           query: z.string().min(1),
           limit: z.number().int().positive().optional(),
@@ -190,7 +190,7 @@ const handler = createMcpHandler(
       {
         title: "Ask Satyajit",
         description:
-          "Ask a natural-language question about Satyajit. (Chat RAG is currently offline; prefer search_content + get_post.)",
+          "Ask a natural-language question about Satyajit. Runs a small retrieval agent (BM25 search + page fetch) grounded only in the site; returns a cited answer. Needs a server API key — if unavailable, use search_content + get_post directly.",
         inputSchema: { question: z.string().min(1) },
       },
       async ({ question }) => askSatyajitPayload(question)
