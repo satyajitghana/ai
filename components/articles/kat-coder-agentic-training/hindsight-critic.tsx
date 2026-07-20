@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // KAT-Coder-V2.5 — asymmetric actor–critic PPO with hindsight-augmented value
 // estimation. In a long-horizon agentic trajectory the reward is sparse (it lands
@@ -214,14 +215,12 @@ export function HindsightCritic() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">current turn t (drag)</div>
-          <input
-            type="range"
+          <Range
             min={0}
             max={NT - 2}
             value={t}
             onChange={(e) => setT(Number(e.target.value))}
-            className="w-full cursor-pointer accent-[oklch(0.58_0.14_250)]"
-          />
+            className="w-full cursor-pointer " accent="oklch(0.58 0.14 250)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

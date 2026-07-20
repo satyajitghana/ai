@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // The ZUNA 1.1 core: a transformer encoder–decoder diffusion autoencoder.
 // 0.125s EEG segments (32 samples @256Hz) become continuous-valued tokens; the
@@ -220,7 +221,7 @@ export function DiffusionAutoencoder() {
             <span>pipeline (drag) · {stageLabel}</span>
             <span className="tabular-nums">residual (illustrative) <span className="text-foreground">{residual.toFixed(2)}</span></span>
           </div>
-          <input type="range" min={0} max={100} value={Math.round(tau * 100)} onChange={(e) => setTau(Number(e.target.value) / 100)} className="w-full cursor-pointer accent-[oklch(0.66_0.17_45)]" />
+          <Range min={0} max={100} value={Math.round(tau * 100)} onChange={(e) => setTau(Number(e.target.value) / 100)} className="w-full cursor-pointer " accent="oklch(0.66 0.17 45)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

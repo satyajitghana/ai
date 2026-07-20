@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
+import { Range } from "@/components/articles/ui/range"
 
 const COLS = 6
 const ROWS = 4
@@ -124,16 +125,14 @@ export function PhaseDials() {
               <span>coupling strength K</span>
               <span className="text-foreground tabular-nums">{k.toFixed(2)}</span>
             </div>
-            <input
-              type="range"
+            <Range
               min={0}
               max={4}
               step={0.05}
               value={k}
               onChange={(e) => setK(parseFloat(e.target.value))}
-              className="w-full cursor-pointer accent-foreground"
-              aria-label="coupling strength"
-            />
+              className="w-full cursor-pointer "
+              aria-label="coupling strength" accent="var(--foreground)" />
             <div className="mt-1 flex justify-between font-mono text-[10px] text-muted-foreground">
               <span>each to its own rhythm</span>
               <span>locked in step</span>

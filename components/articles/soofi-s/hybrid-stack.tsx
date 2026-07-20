@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Soofi S's 52-layer hybrid backbone (the Nemotron 3 Nano reference design): 23 Mamba-2
 // sequence-mixing layers, 23 granular MoE layers, and just 6 Grouped-Query Attention
@@ -124,7 +125,7 @@ export function HybridStack() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">scrub layer (drag)</div>
-          <input type="range" min={0} max={N - 1} value={sel} onChange={(e) => setSel(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.20_320)]" />
+          <Range min={0} max={N - 1} value={sel} onChange={(e) => setSel(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.20 320)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

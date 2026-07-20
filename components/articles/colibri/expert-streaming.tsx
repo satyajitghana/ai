@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Colibri's three-tier memory, drawn as a real scene. A 744B MoE routes each token
 // to only a few experts per layer. Colibri keeps the int4 dense core RESIDENT in RAM,
@@ -242,11 +243,11 @@ export function ExpertStreaming() {
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <div>
             <div className="mb-1 font-mono text-[10px] text-muted-foreground">token (drag)</div>
-            <input type="range" min={0} max={MAXT} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.15_250)]" />
+            <Range min={0} max={MAXT} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.15 250)" />
           </div>
           <div>
             <div className="mb-1 font-mono text-[10px] text-muted-foreground">LRU cache size · {cacheSize} experts</div>
-            <input type="range" min={4} max={14} value={cacheSize} onChange={(e) => setCacheSize(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.15_250)]" />
+            <Range min={4} max={14} value={cacheSize} onChange={(e) => setCacheSize(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.15 250)" />
           </div>
         </div>
 

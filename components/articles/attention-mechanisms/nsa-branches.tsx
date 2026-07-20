@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { ATT, FigureCard, IDX, IO, Legend, LOCAL } from "./shared"
+import { Range } from "@/components/articles/ui/range"
 
 // Native Sparse Attention (DeepSeek, Yuan 2025). For each query, three branches read
 // the past in parallel over the SAME KV, then a learned gate blends them:
@@ -155,8 +156,7 @@ export function NsaBranches() {
           <span>query position (drag)</span>
           <span className="tabular-nums text-foreground">{q}</span>
         </div>
-        <input
-          type="range"
+        <Range
           min={BLK * TOPN}
           max={N - 1}
           value={q}

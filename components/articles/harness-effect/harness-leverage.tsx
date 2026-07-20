@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Harness leverage. Efficiency (cost cut) is model-invariant — every model gets
 // 32-61% cheaper. But the QUALITY gain from the same orchestration upgrade
@@ -121,7 +122,7 @@ export function HarnessLeverage() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">highlight model — weaker → stronger baseline (drag)</div>
-          <input type="range" min={0} max={MODELS.length - 1} value={sel} onChange={(e) => setSel(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.14_250)]" />
+          <Range min={0} max={MODELS.length - 1} value={sel} onChange={(e) => setSel(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.14 250)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

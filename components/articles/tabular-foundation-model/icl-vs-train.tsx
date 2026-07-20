@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The shape of the work, contrasted honestly. A gradient-boosted tree (XGBoost/LightGBM)
 // fits your table with a loop of boosting rounds before it can predict; TabFM skips the
@@ -86,7 +87,7 @@ export function IclVsTrain() {
             <span>boosting rounds (drag) · {rounds}</span>
             <span>trees: {rounds} rounds · <span style={{ color: SEL }}>TabFM: 1 pass</span></span>
           </div>
-          <input type="range" min={0} max={300} step={10} value={rounds} onChange={(e) => setRounds(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.60_0.15_255)]" />
+          <Range min={0} max={300} step={10} value={rounds} onChange={(e) => setRounds(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.60 0.15 255)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

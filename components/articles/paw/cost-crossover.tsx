@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The economic argument, made draggable. Calling a big model's API costs something on
 // every input. PAW pays a one-time compile (one call to a 4B compiler) and then runs
@@ -94,7 +95,7 @@ export function CostCrossover() {
 
         <label className="mt-1 block">
           <span className="sr-only">number of calls</span>
-          <input type="range" min={1} max={MAXN} value={n} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.55_0.17_275)]" />
+          <Range min={1} max={MAXN} value={n} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.55 0.17 275)" />
         </label>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

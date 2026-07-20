@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Kimi Delta Attention as a gated delta-rule linear-attention recurrence.
 // Scrub t over a streaming token sequence: at each step a single FIXED-SIZE state
@@ -213,16 +214,14 @@ export function KimiDeltaAttention() {
         <div className="mt-4 flex flex-col gap-2">
           <div className="flex items-center gap-3">
             <span className="font-mono text-xs text-muted-foreground">t</span>
-            <input
-              type="range"
+            <Range
               min={1}
               max={T}
               step={1}
               value={t}
               onChange={(e) => setT(Number(e.target.value))}
-              className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-[oklch(0.58_0.15_265)]"
-              aria-label="Scrub the sequence position t"
-            />
+              className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted "
+              aria-label="Scrub the sequence position t" accent="oklch(0.58 0.15 265)" />
           </div>
           <div className="grid grid-cols-2 gap-2 font-mono text-xs">
             <div className="rounded-md border px-3 py-2">

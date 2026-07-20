@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // GRAPE's one idea, drawn as a diagram. A position n acts on a query/key vector
 // through a single group action G(n) = exp(n ω L). Which *kind* of generator L you
@@ -182,7 +183,7 @@ export function GeneratorAction() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">position n (drag)</div>
-          <input type="range" min={0} max={N} value={n} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer" style={{ accentColor: accent }} />
+          <Range min={0} max={N} value={n} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer" style={{ accentColor: accent }} />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

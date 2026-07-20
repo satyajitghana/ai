@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Why linear attention at all. Full attention (FA) compares every token to every
 // other — cost grows with the square of the context length; the KV cache grows
@@ -100,16 +101,14 @@ export function Complexity() {
             <span>context length</span>
             <span className="tabular-nums text-foreground">{ctxK}K tokens</span>
           </div>
-          <input
-            type="range"
+          <Range
             min={8}
             max={MAXK}
             step={8}
             value={ctxK}
             onChange={(e) => setCtxK(Number(e.target.value))}
-            className="w-full cursor-pointer accent-foreground"
-            aria-label="context length in thousands of tokens"
-          />
+            className="w-full cursor-pointer "
+            aria-label="context length in thousands of tokens" accent="var(--foreground)" />
         </div>
 
         {/* readout */}

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // One picture for the whole paper: AR, block diffusion, set diffusion, and order-
 // agnostic diffusion are the same thing at different settings of "which token sets do
@@ -152,7 +153,7 @@ export function Spectrum() {
         {/* slide along the spectrum */}
         <div className="mt-2">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">slide along the spectrum</div>
-          <input type="range" min={0} max={REGIMES.length - 1} step={1} value={ri} onChange={(e) => setRi(+e.target.value)} className="w-full cursor-pointer accent-foreground" aria-label="spectrum position" />
+          <Range min={0} max={REGIMES.length - 1} step={1} value={ri} onChange={(e) => setRi(+e.target.value)} className="w-full cursor-pointer " aria-label="spectrum position" accent="var(--foreground)" />
         </div>
 
         {/* properties + note (grid-stacked so height is constant across regimes) */}

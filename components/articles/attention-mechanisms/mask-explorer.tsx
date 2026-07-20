@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 import {
   ATT,
   FigureCard,
@@ -254,8 +255,7 @@ export function MaskExplorer() {
             <span>query position</span>
             <span className="tabular-nums text-foreground">{q}</span>
           </span>
-          <input
-            type="range"
+          <Range
             min={0}
             max={N - 1}
             value={q}
@@ -270,8 +270,7 @@ export function MaskExplorer() {
               <span>window w</span>
               <span className="tabular-nums text-foreground">{w}</span>
             </span>
-            <input
-              type="range"
+            <Range
               min={2}
               max={9}
               value={w}

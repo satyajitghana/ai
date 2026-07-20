@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The forward process and the objective in one control. Drag the masking ratio t:
 // each token is independently replaced by [MASK] with probability t, and the model
@@ -93,16 +94,14 @@ export function MaskingProcess() {
             <span>masking ratio t</span>
             <span className="tabular-nums text-foreground">{t.toFixed(2)}</span>
           </div>
-          <input
-            type="range"
+          <Range
             min={0.05}
             max={1}
             step={0.01}
             value={t}
             onChange={(e) => setT(parseFloat(e.target.value))}
-            className="w-full cursor-pointer accent-[oklch(0.60_0.15_255)]"
-            aria-label="masking ratio t"
-          />
+            className="w-full cursor-pointer "
+            aria-label="masking ratio t" accent="oklch(0.60 0.15 255)" />
           <div className="mt-1 flex justify-between font-mono text-[10px] text-muted-foreground">
             <span>t→0 · nearly clean</span>
             <span>t→1 · fully masked</span>

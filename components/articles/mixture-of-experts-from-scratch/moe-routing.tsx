@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Token → expert dispatch map, drawn as a composed bipartite scene. A short sequence
 // is routed token-by-token; each token's two chosen experts (of 8) are joined by
@@ -236,8 +237,7 @@ export function MoeRouting() {
         </button>
         <div className="flex flex-1 items-center gap-2">
           <span className="font-mono text-[10px] text-muted-foreground">token</span>
-          <input
-            type="range"
+          <Range
             min={-1}
             max={TOKENS.length - 1}
             value={active}
@@ -245,9 +245,8 @@ export function MoeRouting() {
               setPlaying(false)
               setActive(Number(e.target.value))
             }}
-            className="w-full min-w-24 max-w-56 cursor-pointer accent-[oklch(0.60_0.15_255)]"
-            aria-label="scrub token"
-          />
+            className="w-full min-w-24 max-w-56 cursor-pointer "
+            aria-label="scrub token" accent="oklch(0.60 0.15 255)" />
         </div>
         <button
           type="button"

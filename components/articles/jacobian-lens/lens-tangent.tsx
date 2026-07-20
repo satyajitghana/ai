@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // The Jacobian lens is a *derivative*. A Jacobian is the local linear map that
 // turns a small change in an activation into the resulting change in the output.
@@ -156,17 +157,15 @@ export function LensTangent() {
           </div>
           <label className="flex flex-1 items-center gap-2 font-mono text-[10px] text-muted-foreground">
             <span className="shrink-0">probe</span>
-            <input
-              type="range"
+            <Range
               min={XMIN}
               max={XMAX}
               step={0.05}
               value={probe}
               onChange={(e) => setProbe(parseFloat(e.target.value))}
-              className="h-1 flex-1 cursor-pointer accent-current"
+              className="h-1 flex-1 cursor-pointer "
               style={{ color: LENS_C }}
-              aria-label="Move the probe along the activation coordinate"
-            />
+              aria-label="Move the probe along the activation coordinate" accent="currentColor" />
           </label>
         </div>
 

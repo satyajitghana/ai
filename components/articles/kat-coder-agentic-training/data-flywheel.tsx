@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // KAT-Coder-V2.5 — the SWE data-scaling flywheel. On hard repository tasks the raw
 // rollout pass rate is near zero, so there is nothing to learn from. The fix is a
@@ -173,15 +174,13 @@ export function DataFlywheel() {
                 {stage === "rollout" ? " · hints off" : ""}
               </span>
             </div>
-            <input
-              type="range"
+            <Range
               min={0}
               max={100}
               value={Math.round(h * 100)}
               onChange={(e) => setH(Number(e.target.value) / 100)}
               disabled={stage === "rollout"}
-              className="w-full cursor-pointer accent-[oklch(0.58_0.13_150)] disabled:opacity-40"
-            />
+              className="w-full cursor-pointer  disabled:opacity-40" accent="oklch(0.58 0.13 150)" />
           </div>
           <div className="flex items-center gap-3 font-mono text-[10px] text-muted-foreground">
             <span className="flex items-center gap-1"><span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: FAIL, opacity: 0.5 }} /> failed</span>

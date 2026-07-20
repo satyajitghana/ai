@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { ATT, FigureCard, IDX, IO, Legend, LOCAL } from "./shared"
+import { Range } from "@/components/articles/ui/range"
 
 // KV-cache sharing, drawn as query heads collapsing onto fewer key/value heads.
 //   MHA  — H query heads, H KV heads (one each)          cache 1.00×
@@ -180,8 +181,7 @@ export function KvSharing() {
                 {g} → {name}
               </span>
             </span>
-            <input
-              type="range"
+            <Range
               min={0}
               max={GROUPS.length - 1}
               value={gi}

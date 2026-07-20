@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { ATT, FigureCard, GLOBAL, IDX, Legend, Segmented, WARM } from "./shared"
+import { Range } from "@/components/articles/ui/range"
 
 // PagedAttention (Kwon 2023, vLLM). The KV cache of a sequence lives in fixed-size
 // blocks that need NOT be contiguous — a per-sequence block table maps logical block →
@@ -189,8 +190,7 @@ export function PagedKv() {
             <span>seq A length</span>
             <span className="tabular-nums text-foreground">{lenA} tok · {nA} blk</span>
           </span>
-          <input
-            type="range"
+          <Range
             min={1}
             max={MAXBLK * BSIZE}
             value={lenA}

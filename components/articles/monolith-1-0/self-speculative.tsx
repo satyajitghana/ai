@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Monolith 1.0's self-speculative decoding, drawn as a draft -> verify -> accept pass.
 // The model drafts several tokens cheaply, then verifies all of them in ONE forward pass;
@@ -169,7 +170,7 @@ export function SelfSpeculative() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">phase (scrub) — {PHASES[phase]}</div>
-          <input type="range" min={0} max={2} value={phase} onChange={(e) => setPhase(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.14_200)]" />
+          <Range min={0} max={2} value={phase} onChange={(e) => setPhase(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.14 200)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

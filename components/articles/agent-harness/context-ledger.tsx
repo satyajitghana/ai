@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Why a harness keeps durable state in files instead of stuffing everything into
 // the prompt. Weng's point: experiment logs, diffs, error traces and past
@@ -93,16 +94,14 @@ export function ContextLedger() {
         {/* turn slider */}
         <div className="mt-4 flex items-center gap-3">
           <span className="font-mono text-[10px] text-muted-foreground">turn</span>
-          <input
-            type="range"
+          <Range
             min={0}
             max={TURNS - 1}
             value={t}
             onChange={(e) => setT(Number(e.target.value))}
-            className="h-1 flex-1 cursor-pointer appearance-none rounded bg-muted accent-current"
+            className="h-1 flex-1 cursor-pointer appearance-none rounded bg-muted "
             style={{ color: ACC }}
-            aria-label="task turn"
-          />
+            aria-label="task turn" accent="currentColor" />
           <span className="w-10 text-right font-mono text-[11px] tabular-nums text-foreground">{t + 1}/{TURNS}</span>
         </div>
 

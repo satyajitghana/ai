@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // The whole cost argument, made draggable. RL keeps a rollout fleet fresh by shipping
 // the trainer's new weights to it. The mega-cluster premise assumes you ship the FULL
@@ -145,14 +146,14 @@ export function DeltaCost() {
               <span>delta size</span>
               <span style={{ color: DELTA }}>{delta.toFixed(1)}% · ≈{dGiB.toFixed(0)} GiB/step</span>
             </div>
-            <input type="range" min={0.5} max={100} step={0.5} value={delta} onChange={(e) => setDelta(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.16_295)]" />
+            <Range min={0.5} max={100} step={0.5} value={delta} onChange={(e) => setDelta(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.58 0.16 295)" />
           </label>
           <label className="block">
             <div className="mb-1 flex justify-between font-mono text-[10px] text-muted-foreground">
               <span>full checkpoint cadence</span>
               <span className="text-foreground">every {N} steps</span>
             </div>
-            <input type="range" min={1} max={50} step={1} value={N} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.03_260)]" />
+            <Range min={1} max={50} step={1} value={N} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.03 260)" />
           </label>
         </div>
 

@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // How much depth reasoning needs. Loop depth R is LOTUS's compute knob: the same
 // weights are applied R times, and accuracy climbs steeply with it. Two real curves on
@@ -150,7 +151,7 @@ export function LoopDepth() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">loop depth R (drag)</div>
-          <input type="range" min={minR} max={maxR} value={clampedSel} onChange={(e) => setSel(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.16_300)]" />
+          <Range min={minR} max={maxR} value={clampedSel} onChange={(e) => setSel(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.58 0.16 300)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
