@@ -1,7 +1,9 @@
-import { generateText } from "ai"
+import { generateText, stepCountIs } from "ai"
 import { z } from "zod"
 
 import {
+  agentTools,
+  AGENT_MAX_STEPS,
   buildSystemPrompt,
   chatModel,
   chatModelId,
@@ -38,6 +40,8 @@ export async function POST(req: Request) {
       model: chatModel("fast"),
       system: await buildSystemPrompt(),
       prompt: parsed.data.question,
+      tools: agentTools(),
+      stopWhen: stepCountIs(AGENT_MAX_STEPS),
       maxOutputTokens: 1024,
     })
     return Response.json({ answer: text, model: chatModelId("fast") })

@@ -1,7 +1,14 @@
-import { convertToModelMessages, streamText, type UIMessage } from "ai"
+import {
+  convertToModelMessages,
+  stepCountIs,
+  streamText,
+  type UIMessage,
+} from "ai"
 import { z } from "zod"
 
 import {
+  agentTools,
+  AGENT_MAX_STEPS,
   buildSystemPrompt,
   chatModel,
   chatModelId,
@@ -84,6 +91,8 @@ export async function POST(req: Request) {
     model: chatModel("main"),
     system,
     messages: await convertToModelMessages(uiMessages),
+    tools: agentTools(),
+    stopWhen: stepCountIs(AGENT_MAX_STEPS),
     maxOutputTokens: 1500,
   })
 
