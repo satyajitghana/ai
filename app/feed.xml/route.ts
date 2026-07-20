@@ -1,15 +1,15 @@
 import { Feed } from "feed"
 
 import { profile } from "@/data/profile"
-import { getBlogPosts, getLogs } from "@/lib/content"
+import { getArticles, getBlogPosts, getLogs } from "@/lib/content"
 import { absoluteUrl, siteUrl } from "@/lib/site"
 
-// RSS/Atom feed of blog + logs — subscribable by humans and agents alike.
+// RSS feed of articles + blog + logs — subscribable by humans and agents alike.
 export const dynamic = "force-static"
 
 export function GET() {
   const feed = new Feed({
-    title: `${profile.name} — blog & logs`,
+    title: `${profile.name} — articles, blog & logs`,
     description: profile.tagline,
     id: siteUrl,
     link: siteUrl,
@@ -19,6 +19,13 @@ export function GET() {
   })
 
   const items = [
+    ...getArticles().map((a) => ({
+      title: a.title,
+      id: absoluteUrl(`/articles/${a.slug}`),
+      link: absoluteUrl(`/articles/${a.slug}`),
+      description: a.description,
+      date: new Date(a.date),
+    })),
     ...getBlogPosts().map((p) => ({
       title: p.title,
       id: absoluteUrl(`/blog/${p.slug}`),

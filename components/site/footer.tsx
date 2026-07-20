@@ -19,6 +19,7 @@ const footerLinks = [
   { href: "/github", label: "github" },
   { href: "/changelog", label: "changelog" },
   { href: "/colophon", label: "colophon" },
+  { href: "/feed.xml", label: "rss" },
 ] as const
 
 export function SiteFooter() {
