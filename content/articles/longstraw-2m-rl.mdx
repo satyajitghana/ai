@@ -1,0 +1,170 @@
+---
+title: "LongStraw: fitting million-token RL onto a fixed GPU budget"
+description: "Inference reaches million-token context; RL post-training is mostly stuck at 256K or below. LongStraw (MindLab + Fudan) closes that gap as a systems problem, not an accuracy one: capture the long prompt as detached resident state, replay one GRPO response at a time, and 2M-token — even 4.45M-token — steps fit on eight H20 GPUs. What it measures, the real numbers, and the honest fine print it is careful to print about what it does not claim."
+date: 2026-07-21
+tags:
+  - rl
+  - systems
+  - long-context
+  - llm
+  - explainer
+draft: false
+cover: /articles/longstraw-2m-rl/fig1.png
+---
+
+import { GroupSerialization } from "@/components/articles/longstraw-2m-rl/group-serialization"
+import { PrefixReuseDrift } from "@/components/articles/longstraw-2m-rl/prefix-reuse-drift"
+
+There's a widening gap in how long a context a model can *use* versus how long a context you can *train*
+it on with RL. Inference servers now run million-token windows; RL post-training, as publicly described,
+mostly sits at **256K tokens or below** and leans on length generalization at deployment. That gap
+matters most for agents, whose observations, tool outputs, retrieved documents, and past decisions pile
+up into the history that conditions the next action. [LongStraw](https://github.com/MindLab-Research/longstraw)
+(MindLab and Fudan) sets out to close it — and it is unusually disciplined about framing the result as a
+*systems feasibility* claim, not an accuracy one.
+
+<Callout type="note">
+Read this as a systems paper. LongStraw shows you **can execute** million-token GRPO steps under a fixed
+GPU budget — the memory transaction completes, on real hardware, with finite values. It does **not**
+claim these runs improve reasoning accuracy, and it is careful to say so repeatedly. I'll keep that
+distinction front and center, because it's the whole integrity of the work.
+</Callout>
+
+## Why GRPO is the hard case
+
+Inference has an easy memory story: prefill the prompt, keep the state you need to decode, throw the
+forward graph away. GRPO can't. It samples **G** responses for one prompt and updates the policy from
+their *relative* rewards — so old-policy scoring, reference scoring, and every policy response all depend
+on the *same* long history, and policy learning must also retain or reconstruct what backward needs.
+Quadratic attention plus long-lived backward state make GPU memory the wall. The paper's framing: the
+practical limit is **state lifetime, replay, and distributed ownership — not the attention kernel alone.**
+
+## The move: change the graph boundary
+
+LongStraw's core data structure is **resident state**: evaluate the shared prompt with *no autograd* and
+keep only the minimal, model-native state later tokens need — recurrent state, KV pages, latent pages —
+not the full prompt activation graph. Formally it stores z̄ₚ = stopgrad(zₚ(θ)). Its core algorithm is
+**response replay**: restore that boundary, score the old and reference branches graph-free, rebuild
+*one* policy response under autograd, backpropagate, and pop back to the boundary.
+
+<Figure
+  src="/articles/longstraw-2m-rl/fig1.png"
+  alt="Two-panel diagram. (a) Conventional full-sequence autograd: each group member runs a policy forward with autograd that retains prompt and suffix activations, so the live graph spans the whole prompt P plus the response R_i, then backward and one step. (b) Captured prompt state with serial response replay: a no-grad prompt capture produces a read-only state, old and reference scores are computed pre-step, then responses are replayed serially, each forward-backward freeing its graph before the next, so the live autograd graph spans only R_i."
+  caption="Changing the graph boundary, not the objective. Conventional autograd keeps prompt-dependent activations in every member graph (top); LongStraw captures a read-only prompt state and replays one response graph at a time (bottom). It computes the direct response gradient and, by its own note, does not recover the gradient through the captured prompt state (paper, Figure 2)."
+/>
+
+That last point is the honest heart of it. A full-sequence gradient has two terms — the direct response
+gradient and the prompt-side term that flows back through zₚ(θ). LongStraw keeps the first and drops the
+second. In the paper's own words, printed right on the figure: *"conditional-response gradient only …
+full-sequence gradient parity is not claimed."* The measured objective is **response-only execution**.
+
+## Serial replay makes G a schedule, not a memory multiplier
+
+Because responses are replayed one at a time, the live autograd graph is bounded by a single response —
+so the group size **G** becomes a scheduling/time dimension instead of a memory multiplier. This is the
+lever that makes million-token steps fit. Drag G and watch the measured peak barely move:
+
+<GroupSerialization />
+
+On eight H20 GPUs, Qwen3.6-27B completes an exact-attention response-only GRPO step at **2,097,152
+positions** for both G=2 and G=8 — and going from G=2 to G=8 adds only **0.208 GB** of peak allocated
+memory per rank (97.503 → 97.711 GB). Holding all G response graphs, by contrast, would scale activation
+memory with G and overrun the budget. That's the trade the design makes: G costs wall-clock (271 s per
+member), not memory.
+
+## Two incompatible architectures, same transaction
+
+The design is instantiated for two structurally different models, which is most of the engineering:
+
+- **Qwen3.6-27B** (8× H20, CP8) — 48 Gated-DeltaNet layers + 16 full-attention layers, dense FFNs. It
+  keeps compact recurrent state for GDN and right-sized CP8-sharded KV pages for full attention, composes
+  rank-local softmax statistics into the exact global attention output, replays response blocks in
+  reverse, and allocates K/V gradient pages only when a response backward touches them. NF4 QLoRA,
+  116.7M trainable parameters.
+- **GLM-5.2** (32× H20, CP32/EP32) — 78 MLA/DSA attention layers (21 index + 57 IndexShare) and a
+  3-dense/75-MoE feed-forward stack routing each token to 8 of 256 experts (+1 shared). It holds
+  CPU-resident MLA latent pages and DSA index-key pages, reconstructs the sparse selection across
+  context-parallel owners, and replays the real Megatron router, EP32 all-to-all, and expert compute
+  under whole-layer checkpointing. (This is the same [GLM 5.2](/articles/glm-5-2) whose IndexShare makes
+  a million-token context cheap.)
+
+Qwen solves *preserve and replay dense/recurrent history*; GLM extends it to *dynamic sparse selection,
+routed experts, and cross-rank communication*.
+
+## The numbers, and the ceiling
+
+The headline is how far the training context moves — from the usual quarter-million to millions of
+positions on fixed hardware:
+
+<BenchBars
+  title="RL post-training context reached — millions of positions"
+  unit="M"
+  bars={[
+    { label: "Qwen prefix-reuse, 8× H20 (4.45M)", value: 4.456, highlight: true },
+    { label: "Qwen 2M / GLM 2M step", value: 2.097 },
+    { label: "typical RL post-training", value: 0.256 },
+  ]}
+/>
+
+At **4,456,448 positions**, one captured prefix supports **eight consecutive G=8 optimizer cycles** — 64
+response replays — at **83.894 GB per rank**, comfortably under the H20's 150.755 GB. On 32 H20 GPUs, GLM
+completes a deterministic 2M execution across all 78 layers with two full backward passes. The memory
+plot shows how the operating points sit against the ceiling:
+
+<Figure
+  src="/articles/longstraw-2m-rl/fig2.png"
+  alt="Scatter plot of peak memory per rank in GB against context positions in millions, with a dashed line marking the H20 ceiling at 150.755 GB. A prefix-only pass at 2.1M sits near 59 GB, a conditional-response run near 97 GB, the replay / 8-step pass at 4.45M near 83 GB, and train-block proxy passes climb toward the ceiling near 4.5M where a proxy variant OOMs."
+  caption="Peak memory per rank vs. context positions, Qwen on eight H20s. The 8-step reuse run at 4.45M sits at ~83 GB while train-block proxies climb into the ceiling near 4.5M — the operating point is set by state lifetime and replay, not a single kernel (paper, Figure 10)."
+/>
+
+Note what the plot says and doesn't: 2M is *"an achieved operating point rather than a measured capacity
+ceiling."* They ran it; they don't claim it's the max.
+
+## The refresh knob
+
+Capturing a million-token prompt is the dominant cost, so LongStraw reuses one capture across several
+optimizer steps. But each update moves the parameters, and the cached prompt state goes stale. A 1M
+fresh-prefix oracle measures exactly how stale — and turns "how long can I reuse a prefix" into a number:
+
+<PrefixReuseDrift />
+
+Reuse is nearly free for a step or two (loss drifts ~0.04–0.12%) and clearly not by step four. So the
+refresh interval becomes a measured control, not an assumption.
+
+## The fine print (which is the point)
+
+This is where LongStraw earns its credibility. It defines **four levels of validation** and states plainly
+where each path lands:
+
+<Callout type="warning">
+**What is not claimed.** The runs establish *response-only execution*, not full-sequence gradient parity.
+Qwen's global attention merge uses a BF16 numerator; its distributed **optimizer finalization is
+incomplete** — the prototype all-reduces dQ but leaves page-owner K/V gradients rank-local, so the eight
+AdamW instances are locally-applied, not replica-equivalent. The GLM 2M run predates restored gradient
+finalization, so its stronger global-update claim is *unestablished*. And the 2M workloads are
+**synthetic**: β=0, unclipped surrogate, old and reference scores coincide at step one, rewards and
+advantages are synthetic. The real online sampling→reward→train loop (vLLM-DAPO-MATH) is validated only
+in **short-context, archived external runs** — *"not a 2M online rollout, repeated policy learning, or
+full-sequence gradient parity,"* and no evidence of long-context policy improvement.
+</Callout>
+
+Spelling that out is not a weakness of the paper — it's the substance. A lesser report would have shown a
+2M run and let you assume it means a better model. LongStraw shows a 2M run and tells you exactly which
+narrow, well-defined thing completed.
+
+## The take
+
+The useful reframing here is that **long-context RL is a state-lifetime and ownership problem, not an
+attention-kernel problem.** Once you treat the long prompt as detached resident state and replay
+responses serially, the memory transaction — not the kernel — is what sets how far you can train, and
+million-token steps fit on inventory you already have. It's a real feasibility milestone, and it sits
+next to the other systems-first takes on RL cost like
+[frontier RL is cheaper than you think](/articles/frontier-rl-cheaper). What's left — and the paper is the
+first to say it — is closing the distance from "the step executes" to "the gradient is exact and the
+policy actually improves at 2M tokens." That's the next paper, honestly labeled.
+
+---
+
+*Source: [LongStraw: Long-Context RL Beyond 2M Tokens under a Fixed GPU Budget](https://arxiv.org/abs/2607.14952)
+(Zhou et al., MindLab & Fudan University), July 2026. Figures are the paper's; the two interactives are
+mine, built on its measured numbers.*
