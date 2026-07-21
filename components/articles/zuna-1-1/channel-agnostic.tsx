@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // ZUNA 1.1 is channel-agnostic: every electrode is just a token carrying a 4D
 // rotary position (x, y, z, t) — its 3D scalp coordinate plus a coarse time
@@ -174,7 +175,7 @@ export function ChannelAgnostic() {
 
         <div className="mt-3 flex items-center gap-3">
           <span className="font-mono text-[10px] whitespace-nowrap text-muted-foreground">segment t (0.125s each)</span>
-          <input type="range" min={0} max={15} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.66_0.17_45)]" />
+          <Range min={0} max={15} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.66 0.17 45)" />
           <span className="w-10 shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">t={t}</span>
         </div>
 

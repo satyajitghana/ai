@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { ATT, FigureCard, GLOBAL, Legend, LOCAL, Segmented } from "./shared"
+import { Range } from "@/components/articles/ui/range"
 
 // Self vs cross attention, as two token strips. In self-attention a target query
 // reads the target sequence (causally, in a decoder). In cross-attention the same
@@ -169,8 +170,7 @@ export function CrossAttention() {
             <span>target query</span>
             <span className="tabular-nums text-foreground">{TGT[qt]}</span>
           </span>
-          <input
-            type="range"
+          <Range
             min={0}
             max={TGT.length - 1}
             value={qt}

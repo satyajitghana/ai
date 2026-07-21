@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Honest weight-storage calculator. NVFP4 is NOT free 4× compression: each element
 // is 4 bits, but it also carries an FP8 (E4M3) block scale shared over 16 elements
@@ -111,14 +112,12 @@ export function MemoryCalc() {
               <span className="text-foreground">{p}B</span> params · <span style={{ color: ELT }}>{ratio.toFixed(2)}×</span> smaller
             </span>
           </div>
-          <input
-            type="range"
+          <Range
             min={1}
             max={550}
             value={p}
             onChange={(e) => setP(Number(e.target.value))}
-            className="w-full cursor-pointer accent-[oklch(0.60_0.15_255)]"
-          />
+            className="w-full cursor-pointer " accent="oklch(0.60 0.15 255)" />
           <div className="mt-1 flex justify-between font-mono text-[9px] text-muted-foreground/60">
             <span>1B</span>
             <span>55B active</span>

@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // I3D-ViT — the "inflated" 3D tokenizer, drawn as a scene. A 2D image encoder is
 // inflated into a spatiotemporal one: consecutive frames are grouped into chunks of
@@ -172,15 +173,13 @@ export function I3dVit() {
               <span style={{ color: ACCENT }}>{outTok.toLocaleString()}</span> tokens · {nChunks} chunks
             </span>
           </div>
-          <input
-            type="range"
+          <Range
             min={8}
             max={64}
             step={4}
             value={frames}
             onChange={(e) => setFrames(Number(e.target.value))}
-            className="w-full cursor-pointer accent-[oklch(0.58_0.13_162)]"
-          />
+            className="w-full cursor-pointer " accent="oklch(0.58 0.13 162)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

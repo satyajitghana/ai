@@ -8,7 +8,6 @@
 // (and the route) compiles and runs regardless of the other agents' progress.
 
 import {
-  getAllContent,
   getBlogPost,
   getBlogPosts,
   getLog,
@@ -20,6 +19,7 @@ import {
   getSnippets,
 } from "@/lib/content"
 import { paperLinks } from "@/lib/content/schema"
+import { searchContent } from "@/lib/search"
 
 // ── result helpers ──────────────────────────────────────────────────────────
 
@@ -142,67 +142,24 @@ export function getPostPayload(type: PostType, slug: string) {
   return json(post)
 }
 
-// ── full-text search across all content kinds ───────────────────────────────
-
-function snippetAround(haystack: string, index: number, radius = 120): string {
-  const start = Math.max(0, index - radius)
-  const end = Math.min(haystack.length, index + radius)
-  const prefix = start > 0 ? "…" : ""
-  const suffix = end < haystack.length ? "…" : ""
-  return (
-    prefix + haystack.slice(start, end).replace(/\s+/g, " ").trim() + suffix
-  )
-}
+// ── full-text search across all content kinds (BM25, via lib/search) ─────────
 
 export function searchContentPayload(query: string, limit?: number) {
-  const q = query.trim().toLowerCase()
+  const q = query.trim()
   if (!q) {
     return notice("search_content requires a non-empty query.")
   }
   const cap = limit && limit > 0 ? limit : 20
-
-  type Match = {
-    kind: string
-    slug: string
-    title: string
-    url: string
-    field: string
-    snippet: string
-  }
-  const matches: Match[] = []
-
-  for (const item of getAllContent()) {
-    const fm = item as unknown as {
-      title?: string
-      description?: string
-      tags?: string[]
-    }
-    const title = fm.title ?? item.slug
-    // Search fields in priority order; first hit per item wins for the snippet.
-    const fields: Array<{ name: string; value: string }> = [
-      { name: "title", value: title },
-      { name: "description", value: fm.description ?? "" },
-      { name: "tags", value: (fm.tags ?? []).join(" ") },
-      { name: "body", value: item.body },
-    ]
-
-    for (const f of fields) {
-      const idx = f.value.toLowerCase().indexOf(q)
-      if (idx !== -1) {
-        matches.push({
-          kind: item.kind,
-          slug: item.slug,
-          title,
-          url: item.url,
-          field: f.name,
-          snippet: snippetAround(f.value, idx),
-        })
-        break
-      }
-    }
-    if (matches.length >= cap) break
-  }
-
+  // BM25 over contextualized chunks (lib/search.ts) — ranked, not first-substring.
+  const matches = searchContent(q, cap).map((r) => ({
+    kind: r.kind,
+    slug: r.slug,
+    title: r.title,
+    url: r.url,
+    section: r.field,
+    snippet: r.snippet,
+    score: Number(r.score.toFixed(2)),
+  }))
   return json({ query, count: matches.length, matches })
 }
 
@@ -345,25 +302,27 @@ export function searchSnippetsPayload(query?: string) {
 // Same grounded persona+corpus prompt as /api/chat and /api/ask, via the AI SDK
 // (OpenAI provider). Returns `json` on success so the answer is a clean payload.
 export async function askSatyajitPayload(question: string) {
-  const { buildSystemPrompt, chatModel, chatModelId, isChatOnline } =
-    await import("@/lib/chat")
+  const { buildSystemPrompt, generateWithFallback, isChatOnline } = await import(
+    "@/lib/chat"
+  )
   if (!isChatOnline()) {
     return notice(
-      "Chat is offline (no OPENAI_API_KEY configured). Use search_content + get_post to research, or read /llms-full.txt."
+      "Chat is offline right now. Use search_content + get_post to research, or read /llms-full.txt."
     )
   }
 
-  const { generateText } = await import("ai")
-  const { text } = await generateText({
-    model: chatModel("fast"),
+  // Routed to a GPT-5.4-family model with fallback down the ladder, using the
+  // same small tool set as the site agent — it retrieves the pages it needs
+  // rather than reasoning over a corpus stuffed into the prompt.
+  const { text, model } = await generateWithFallback({
+    question,
     system: await buildSystemPrompt(),
-    prompt: question,
     maxOutputTokens: 1024,
   })
 
   return json({
     question,
     answer: text || "(no answer)",
-    model: chatModelId("fast"),
+    model,
   })
 }

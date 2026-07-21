@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Controllable effort, drawn as a curve. Inkling varies how many tokens it spends
 // per query via the system message + a per-token cost, trading accuracy for
@@ -131,7 +132,7 @@ export function EffortCurve() {
             <span>effort knob (system message + per-token cost) — drag</span>
             <span>{(effort * 100).toFixed(0)}%</span>
           </div>
-          <input type="range" min={0} max={1} step={0.01} value={effort} onChange={(e) => setEffort(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.16_285)]" />
+          <Range min={0} max={1} step={0.01} value={effort} onChange={(e) => setEffort(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.58 0.16 285)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

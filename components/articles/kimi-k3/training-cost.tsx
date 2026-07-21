@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // What it takes to train a 2.8T-A50B model, from first principles. Training compute
 // for an MoE is ~6 x (active params) x (tokens); at ~50B active that is a lot of FLOPs.
@@ -143,7 +144,7 @@ export function TrainingCost() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">token budget (K2 trained on 15.5T — drag)</div>
-          <input type="range" min={5} max={30} step={0.5} value={tokensT} onChange={(e) => setTokensT(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.15_265)]" />
+          <Range min={5} max={30} step={0.5} value={tokensT} onChange={(e) => setTokensT(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.58 0.15 265)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

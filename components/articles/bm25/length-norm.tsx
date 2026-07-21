@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // BM25's second fix: document-length normalization, the b knob. Two documents mention
 // a query term the SAME number of times (tf = 2), but one is short and one is long.
@@ -90,7 +91,7 @@ export function LengthNorm() {
             <span>b — length normalization (Lucene default 0.75)</span>
             <span className="tabular-nums text-foreground">{b.toFixed(2)}</span>
           </div>
-          <input type="range" min={0} max={1} step={0.05} value={b} onChange={(e) => setB(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="b" />
+          <Range min={0} max={1} step={0.05} value={b} onChange={(e) => setB(+e.target.value)} className="w-full cursor-pointer " aria-label="b" accent="oklch(0.72 0.15 195)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

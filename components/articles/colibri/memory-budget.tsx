@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The two numbers you must quote together. "Runs on 25 GB of RAM" is true — but only
 // because ~370 GB of experts live on fast disk. Left: the RAM budget, to scale within
@@ -88,7 +89,7 @@ export function MemoryBudget() {
 
         <div className="mt-2">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">LRU expert cache · {cacheGB} GB</div>
-          <input type="range" min={2} max={13} value={cacheGB} onChange={(e) => setCacheGB(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.64_0.14_158)]" />
+          <Range min={2} max={13} value={cacheGB} onChange={(e) => setCacheGB(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.64 0.14 158)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

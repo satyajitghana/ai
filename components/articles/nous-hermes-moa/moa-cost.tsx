@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // MoA's quality is bought with compute. Depth L and width n set the model-call budget —
 // n proposers per layer across L layers, plus the final aggregator — while quality climbs
@@ -130,14 +131,14 @@ export function MoACost() {
               <span>layers L</span>
               <span className="text-foreground tabular-nums">{L}</span>
             </div>
-            <input type="range" min={1} max={4} step={1} value={L} onChange={(e) => setL(parseInt(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="number of layers" />
+            <Range min={1} max={4} step={1} value={L} onChange={(e) => setL(parseInt(e.target.value))} className="w-full cursor-pointer " aria-label="number of layers" accent="oklch(0.72 0.15 195)" />
           </div>
           <div>
             <div className="mb-1 flex items-center justify-between font-mono text-xs text-muted-foreground">
               <span>proposers n</span>
               <span className="text-foreground tabular-nums">{n}</span>
             </div>
-            <input type="range" min={1} max={6} step={1} value={n} onChange={(e) => setN(parseInt(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="proposers per layer" />
+            <Range min={1} max={6} step={1} value={n} onChange={(e) => setN(parseInt(e.target.value))} className="w-full cursor-pointer " aria-label="proposers per layer" accent="oklch(0.72 0.15 195)" />
           </div>
         </div>
 

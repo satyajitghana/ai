@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // The training objective, animated. A window slides along the sequence; from each
 // position t the model predicts the next n tokens at once, so n loss terms fire per
@@ -127,8 +128,7 @@ export function MTPTraining() {
             <span>position t (drag)</span>
             <span className="tabular-nums text-foreground">{t}</span>
           </div>
-          <input
-            type="range"
+          <Range
             min={0}
             max={lastT}
             step={1}
@@ -137,9 +137,8 @@ export function MTPTraining() {
               setPlaying(false)
               setT(Number(e.target.value))
             }}
-            className="w-full cursor-pointer accent-[oklch(0.66_0.15_150)]"
-            aria-label="window position t"
-          />
+            className="w-full cursor-pointer "
+            aria-label="window position t" accent="oklch(0.66 0.15 150)" />
         </div>
 
         {/* loss readout — min-height reserves the tallest case (n=4, four loss

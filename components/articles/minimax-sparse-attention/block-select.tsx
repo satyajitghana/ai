@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // MiniMax Sparse Attention — the core move, drawn as a real diagram. For a given query,
 // a lightweight Index Branch scores every past KV *block*; the Main Branch then attends
@@ -159,7 +160,7 @@ export function BlockSelect() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">query position (drag)</div>
-          <input type="range" min={K + 1} max={NB - 1} value={qb} onChange={(e) => setQb(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.60_0.15_255)]" />
+          <Range min={K + 1} max={NB - 1} value={qb} onChange={(e) => setQb(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.60 0.15 255)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

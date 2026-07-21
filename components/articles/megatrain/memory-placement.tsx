@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // The inversion at the heart of MegaTrain, drawn as a placement diagram. Mixed-precision
 // Adam needs ~12 bytes per parameter (2 BF16 weight + 2 BF16 grad + 8 FP32 moments). A
@@ -143,16 +144,14 @@ export function MemoryPlacement() {
             <span>model size</span>
             <span className="text-foreground tabular-nums">{size}B params · {persistent} GB state</span>
           </div>
-          <input
-            type="range"
+          <Range
             min={7}
             max={120}
             step={1}
             value={size}
             onChange={(e) => setSize(parseInt(e.target.value))}
-            className="w-full cursor-pointer accent-foreground"
-            aria-label="model size in billions of parameters"
-          />
+            className="w-full cursor-pointer "
+            aria-label="model size in billions of parameters" accent="var(--foreground)" />
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // The thesis, made draggable. Leanstral has no bespoke test-time-scaling method — it
 // just spends more tokens inside the ordinary agent loop. So performance scales
@@ -112,15 +113,13 @@ export function TestTimeScaling() {
         {/* the actual control */}
         <label className="mt-2 block">
           <span className="sr-only">token budget</span>
-          <input
-            type="range"
+          <Range
             min={0}
             max={PTS.length - 1}
             step={1}
             value={i}
             onChange={(e) => { setPlaying(false); setI(Number(e.target.value)) }}
-            className="w-full cursor-pointer accent-[oklch(0.70_0.19_42)]"
-          />
+            className="w-full cursor-pointer " accent="oklch(0.70 0.19 42)" />
         </label>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

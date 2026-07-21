@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // MirrorPop: sequence-level off-policy masking, drawn token by token. In async RL the
 // rollout policy drifts from the training policy, so each token has an importance ratio
@@ -120,7 +121,7 @@ export function MirrorPop() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">threshold δ = {delta.toFixed(2)}</div>
-          <input type="range" min={0.05} max={1} step={0.05} value={delta} onChange={(e) => setDelta(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.16_250)]" />
+          <Range min={0.05} max={1} step={0.05} value={delta} onChange={(e) => setDelta(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.16 250)" />
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">

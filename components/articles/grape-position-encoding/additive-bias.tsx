@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The additive family, drawn as its signature: a monotonic distance penalty on the
 // attention logit. Every Additive-GRAPE scheme adds a term (j − i)·ω·slope to the
@@ -97,14 +98,14 @@ export function AdditiveBias() {
               <span className="font-mono text-[10px] text-muted-foreground">content gate  softplus(vᵀq + uᵀk)</span>
               <span className="font-mono text-[10px]" style={{ color: GATE }}>slope {slopeGated.toFixed(3)}</span>
             </div>
-            <input type="range" min={0} max={100} value={gate} onChange={(e) => setGate(Number(e.target.value))} className="w-full cursor-pointer" style={{ accentColor: GATE }} />
+            <Range min={0} max={100} value={gate} onChange={(e) => setGate(Number(e.target.value))} className="w-full cursor-pointer" style={{ accentColor: GATE }} />
           </div>
           <div>
             <div className="mb-1 flex items-center justify-between">
               <span className="font-mono text-[10px] text-muted-foreground">distance  i − j</span>
               <span className="font-mono text-[10px] text-muted-foreground">{dist} tokens</span>
             </div>
-            <input type="range" min={0} max={DMAX} value={dist} onChange={(e) => setDist(Number(e.target.value))} className="w-full cursor-pointer" style={{ accentColor: ADD }} />
+            <Range min={0} max={DMAX} value={dist} onChange={(e) => setDist(Number(e.target.value))} className="w-full cursor-pointer" style={{ accentColor: ADD }} />
           </div>
         </div>
 

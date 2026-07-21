@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // MusaCoder's execution reward s(c), drawn as a ladder. The paper's core reward move is
 // "correctness-first": every candidate that fails to compile/run, cheats with a PyTorch
@@ -118,13 +119,13 @@ export function RewardLadder() {
         {outcome === "partial" && (
           <div className="mt-3">
             <div className="mb-1 font-mono text-[10px] text-muted-foreground">correctness fraction q = {q.toFixed(2)} → s = −0.5 + 0.5·q = {(-0.5 + 0.5 * q).toFixed(2)}</div>
-            <input type="range" min={0.01} max={0.99} step={0.01} value={q} onChange={(e) => setQ(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.17_25)]" />
+            <Range min={0.01} max={0.99} step={0.01} value={q} onChange={(e) => setQ(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.58 0.17 25)" />
           </div>
         )}
         {outcome === "correct" && (
           <div className="mt-3">
             <div className="mb-1 font-mono text-[10px] text-muted-foreground">speedup ν = {nu.toFixed(1)}× → s = 1 + λ·min(ν−1, ν_max) = {s.toFixed(2)} <span className="text-muted-foreground/60">(λ={LAMBDA}, ν_max={NU_MAX})</span></div>
-            <input type="range" min={1} max={6} step={0.1} value={nu} onChange={(e) => setNu(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.16_250)]" />
+            <Range min={1} max={6} step={0.1} value={nu} onChange={(e) => setNu(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.16 250)" />
           </div>
         )}
         {(outcome === "fail" || outcome === "cheat" || outcome === "wrong") && (

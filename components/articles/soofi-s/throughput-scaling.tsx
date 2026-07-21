@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Soofi S's whole thesis, as a chart. Decoding is memory-bandwidth bound: every
 // generated token must re-read the weights AND the attention cache of every sequence
@@ -102,7 +103,7 @@ export function ThroughputScaling() {
               <span className="text-foreground">{ratio.toFixed(1)}×</span> at {ctx}K
             </span>
           </div>
-          <input type="range" min={0} max={CTX.length - 1} value={i} onChange={(e) => setI(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.20_320)]" />
+          <Range min={0} max={CTX.length - 1} value={i} onChange={(e) => setI(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.20 320)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

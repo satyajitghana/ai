@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { ATT, FigureCard, IDX, IO, Legend, PlayPause, useReducedMotion, useTicker, WARM } from "./shared"
+import { Range } from "@/components/articles/ui/range"
 
 // FlashAttention (Dao 2022) — the exact same attention function, computed IO-aware.
 // The N×N score matrix is split into tiles. A Q-tile stays in fast SRAM while K/V tiles
@@ -159,8 +160,7 @@ export function FlashTiling() {
             <span>K/V tile (inner loop)</span>
             <span className="tabular-nums text-foreground">{j + 1} / {TC}</span>
           </span>
-          <input
-            type="range"
+          <Range
             min={0}
             max={TC - 1}
             value={j}

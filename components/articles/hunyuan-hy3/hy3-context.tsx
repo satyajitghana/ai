@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Long-context / KV-cache widget for Hy3.
 // Native trained window is 256K. The community Hy3-1M-GGUF YaRN-extends to
@@ -104,8 +105,7 @@ export function Hy3Context() {
         </div>
 
         {/* slider */}
-        <input
-          type="range"
+        <Range
           min={MIN_EXP}
           max={MAX_EXP}
           step={1}

@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Monolith 1.0's MoE layer, drawn as a field. Each layer has 128 routed experts
 // (SwiGLU) plus one shared expert that is always on. A router picks the top-2 routed
@@ -190,7 +191,7 @@ export function MoeRouting() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">token index (drag — the 2 routed picks change per token)</div>
-          <input type="range" min={0} max={N_TOK - 1} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.14_200)]" disabled={dense} />
+          <Range min={0} max={N_TOK - 1} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer " disabled={dense} accent="oklch(0.62 0.14 200)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
