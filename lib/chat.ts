@@ -1,4 +1,4 @@
-import { createGoogleGenerativeAI } from "@ai-sdk/google"
+import { createOpenAI } from "@ai-sdk/openai"
 import { stepCountIs, tool } from "ai"
 import { z } from "zod"
 
@@ -12,7 +12,8 @@ import { siteUrl } from "@/lib/site"
 // MCP ask_satyajit tool.
 //
 // PROVIDER: routed through the Vercel AI SDK so the model/provider is a one-line
-// swap. Currently Google Gemini (`@ai-sdk/google`).
+// swap. Currently OpenAI (`@ai-sdk/openai`), GPT-5.6 Luna. Override the model
+// with CHAT_MODEL / CHAT_MODEL_FAST and the key with OPENAI_API_KEY.
 //
 // HARNESS: this is a small tool-using agent, not a corpus dump. Earlier the whole
 // content corpus rode inside the system prompt on every request; now the prompt
@@ -27,8 +28,8 @@ import { siteUrl } from "@/lib/site"
 export type ModelTier = "main" | "fast"
 
 const MODELS: Record<ModelTier, string> = {
-  main: process.env.CHAT_MODEL ?? "gemini-3.1-flash-lite",
-  fast: process.env.CHAT_MODEL_FAST ?? "gemini-3.1-flash-lite",
+  main: process.env.CHAT_MODEL ?? "gpt-5.6-luna",
+  fast: process.env.CHAT_MODEL_FAST ?? "gpt-5.6-luna",
 }
 
 // The agent loop is bounded: search → read a page or two → (think) → answer is
@@ -39,7 +40,7 @@ export const AGENT_MAX_STEPS = 6
 const DATA_PAGES = ["about", "resume", "health", "now", "uses", "reading"] as const
 
 export function isChatOnline(): boolean {
-  return Boolean(process.env.GOOGLE_API_KEY)
+  return Boolean(process.env.OPENAI_API_KEY)
 }
 
 export function chatModelId(tier: ModelTier = "main"): string {
@@ -49,14 +50,14 @@ export function chatModelId(tier: ModelTier = "main"): string {
 // A configured LanguageModel for the AI SDK. Created lazily so importing this
 // module never throws when the key is absent (offline mode handles that).
 export function chatModel(tier: ModelTier = "main") {
-  const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY })
-  return google(MODELS[tier])
+  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  return openai(MODELS[tier])
 }
 
 export const offlinePayload = {
   error: "chat offline",
   detail:
-    "No GOOGLE_API_KEY is configured. The site is still fully agent-readable: start at /llms.txt, fetch any page as .md, or use the /api/* JSON endpoints.",
+    "No OPENAI_API_KEY is configured. The site is still fully agent-readable: start at /llms.txt, fetch any page as .md, or use the /api/* JSON endpoints.",
 } as const
 
 // ── the tool set ────────────────────────────────────────────────────────────
