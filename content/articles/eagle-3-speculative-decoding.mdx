@@ -1,0 +1,145 @@
+---
+title: "EAGLE-3: making the draft model scale, and a from-scratch build"
+description: "Speculative decoding makes an LLM emit several tokens per forward pass by having a cheap draft model propose and the big model verify — losslessly. EAGLE-3 fixes the thing that stopped the draft model from improving with more data: it drops feature prediction for direct token prediction (Training-Time Test) and fuses low/mid/high features, unlocking a scaling law and up to 6.5x speedup. Plus a walk through tiny-speculators, a from-scratch EAGLE-3 trainer on Qwen3-8B."
+date: 2026-07-20
+tags:
+  - inference
+  - speculative-decoding
+  - llm
+  - systems
+  - explainer
+draft: false
+cover: /articles/eagle-3-speculative-decoding/fig1.png
+---
+
+import { DraftVerify } from "@/components/articles/eagle-3-speculative-decoding/draft-verify"
+
+Autoregressive decoding is the tax every LLM pays: one forward pass, one token, and each pass is
+memory-bound — you stream all the weights through the chip to produce a single token. **Speculative
+decoding** is the trick that beats it. A small, cheap **draft** model guesses the next few tokens; the
+big **target** model verifies all of them in one parallel forward pass and keeps the longest prefix it
+agrees with. The output is provably identical to normal sampling — you just get several tokens per
+expensive pass instead of one. [EAGLE-3](https://arxiv.org/abs/2503.01840) (Li et al.) is the current
+peak of the EAGLE family, and its contribution is subtle: it makes the *draft model itself* keep
+getting better with more training data. Up to **6.5× faster**, losslessly.
+
+## Draft and verify
+
+The whole game is **acceptance**: how often the target agrees with the draft's guesses. A token only
+counts if every token before it was accepted too, so its odds decay geometrically — which is why
+deeper drafts hit diminishing returns and the real lever is raising the acceptance rate. Drag it:
+
+<DraftVerify />
+
+The mean **accepted length τ** — tokens produced per target forward pass — is essentially the speedup.
+Verification is exact: the target only ever emits a token it would have sampled itself (rejected
+tokens are resampled from the corrected distribution), so nothing about quality changes. Speculative
+decoding is a pure latency win with no accuracy cost.
+
+## What EAGLE-3 changes
+
+EAGLE's draft model was clever: instead of predicting tokens directly, it autoregressively predicted
+the target's **top-layer feature** and reused the target's own LM head. But that came with a
+feature-prediction loss that **constrained the draft** — and the authors found that scaling up its
+training data barely helped. EAGLE-3 makes two changes.
+
+<Figure
+  src="/articles/eagle-3-speculative-decoding/fig1.png"
+  alt="Three-panel schematic. Top: EAGLE predicts the target's feature f then a token. Middle: direct token prediction. Bottom: Training-Time Test, where the draft model consumes its own previous unconstrained outputs a across simulated steps."
+  caption="Training-Time Test (bottom): the draft is trained on its own multi-step outputs, not just one-step feature targets — so what it sees at inference matches what it saw in training (paper, Figure 3)."
+/>
+
+First, it **drops feature prediction for direct token prediction**, and trains the draft the way it
+will actually run — a technique they call **Training-Time Test (TTT)**. The problem it solves is
+concrete: EAGLE's first drafted token got accepted often, but its *second* collapsed, because at step
+two the draft feeds on its own step-one output, which drifts away from the features it was trained on.
+TTT folds that multi-step rollout into training so the draft learns to consume its own predictions.
+
+Second, freed from the feature constraint, the draft fuses the target's **low, middle, and high**
+features instead of only the top layer — concatenated and projected down — giving it a richer basis
+for predicting tokens two and three ahead.
+
+<Figure
+  src="/articles/eagle-3-speculative-decoding/fig2.png"
+  alt="Diagram of the EAGLE-3 draft pipeline: low/mid/high target features are fused, combined with the embedding of the sampled token, passed through a single decoder layer, and sampled; subsequent steps substitute the draft's own outputs for unavailable features."
+  caption="The draft pipeline: fuse (low, mid, high) features + the sampled token's embedding, run one decoder layer, sample; later steps substitute the draft's own outputs for features it can't yet see (paper, Figure 5)."
+/>
+
+## A scaling law for inference acceleration
+
+Here's the payoff, and it's the reason the paper exists. With the feature constraint removed, the
+draft model's speedup **keeps climbing as you give it more training data** — a relationship never seen
+for EAGLE, which flatlines. EAGLE-3 was trained on roughly **8× more data** than EAGLE, and the curve
+is still going up.
+
+<Figure
+  src="/articles/eagle-3-speculative-decoding/fig4.png"
+  alt="Two-panel plot of speedup versus training-data scale relative to ShareGPT. EAGLE-3's curve rises steadily; EAGLE's plateaus."
+  caption="The scaling law: EAGLE-3's speedup rises with draft-training data; EAGLE's plateaus. Inference acceleration now scales with data, like everything else (paper, Figure 1)."
+/>
+
+That reframes draft-model training as a data-scaling problem instead of a fixed architectural trick —
+the same lesson the rest of the field keeps relearning.
+
+## The numbers
+
+On Vicuna-13B (greedy), EAGLE-3 averages **5.51× speedup** across five tasks, peaking at **6.47×** on
+HumanEval with an accepted length of **7.54** — a clear step over EAGLE-2, and multiples over Medusa
+and vanilla speculative sampling:
+
+<BenchBars
+  title="Mean speedup vs vanilla decoding — Vicuna-13B, temp 0"
+  unit="×"
+  bars={[
+    { label: "EAGLE-3", value: 5.51, highlight: true },
+    { label: "EAGLE-2", value: 4.22 },
+    { label: "EAGLE", value: 3.05 },
+    { label: "Hydra", value: 2.80 },
+    { label: "Medusa", value: 2.12 },
+    { label: "std. spec. sampling", value: 1.92 },
+  ]}
+/>
+
+<Figure
+  src="/articles/eagle-3-speculative-decoding/fig3.png"
+  alt="Bar chart of speedup ratios for many methods across chat and reasoning models, with EAGLE-3 the tallest."
+  caption="Speedup across models and methods; EAGLE-3 leads on chat and reasoning targets alike (paper, Figure 2)."
+/>
+
+The part that matters for real serving is that the win survives **batching**. Most speculative methods
+degrade past batch ~16 (the extra draft compute stops paying off when the GPU is already busy); in
+SGLang, EAGLE-3 still delivers **+38% throughput at batch 64**, and at batch 1 it hits **373 tok/s vs
+158 for plain SGLang** — a 2.36× serving speedup. It's also compatible with EAGLE-2's dynamic draft
+tree, so the two stack.
+
+## From scratch: tiny-speculators
+
+If you want to see the machinery without the framework, [`tiny-speculators`](https://github.com/junuxyz/tiny-speculators)
+(junuxyz) is a from-scratch EAGLE-3 **trainer**, verifier = Qwen3-8B, in five clear stages: prepare
+ShareGPT data → extract the verifier's early/mid/late/final hidden states via vLLM → train the draft
+with the **3-step TTT rollout** (using PyTorch **FlexAttention** for the non-causal TTT mask) → export
+to vLLM's speculators format. The draft is a **single decoder layer** that fuses three hidden states
+(projected `3H → H`), concatenates the sampled token's embedding, and predicts the next token.
+
+It's honest about being a small educational build. Its 60k-sample checkpoint on HumanEval reaches a
+**27.4% draft-token acceptance rate** and a **mean accepted length of 1.82**, cutting single-request
+p50 latency from **2.61s to 1.78s** — while openly noting that at high concurrency it stayed *below*
+plain serving. That gap between a from-scratch draft and the paper's 6.5× is exactly the value of the
+scaling law: acceptance is a data problem, and EAGLE-3's whole point is that more of it keeps helping.
+
+## The take
+
+Speculative decoding was already the standard latency trick; the interesting move in EAGLE-3 is
+turning the *draft model* into something that scales. Drop the constraint that stopped it learning
+(feature prediction), train it on its own multi-step outputs (Training-Time Test), give it more of the
+target's internal features to look at, and its acceptance — and therefore the speedup — rises with
+data instead of plateauing. It pairs naturally with the site's pieces on
+[multi-token prediction](/articles/multi-token-prediction) and
+[DeepSeek's DSpark](/articles/deepseek-dspark): the same idea — predict more per step, verify exactly —
+attacked from three directions.
+
+---
+
+*Source: [EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test](https://arxiv.org/abs/2503.01840)
+(Li, Wei, Zhang, Zhang) and the [tiny-speculators](https://github.com/junuxyz/tiny-speculators) repo.
+Figures are the paper's; the interactive is mine.*
