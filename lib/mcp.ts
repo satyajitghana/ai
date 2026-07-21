@@ -312,7 +312,7 @@ export async function askSatyajitPayload(question: string) {
   } = await import("@/lib/chat")
   if (!isChatOnline()) {
     return notice(
-      "Chat is offline (no GOOGLE_API_KEY configured). Use search_content + get_post to research, or read /llms-full.txt."
+      "Chat is offline (no OPENAI_API_KEY configured). Use search_content + get_post to research, or read /llms-full.txt."
     )
   }
 
