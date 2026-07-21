@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
+import { Range } from "@/components/articles/ui/range"
 
 // A constant-velocity Kalman filter tracking a noisy 1-D signal, live. The true
 // value (faint) is observed only through scattered noisy measurements; the filter
@@ -177,7 +178,7 @@ function Slider({
         <span>{label}</span>
         <span className="text-foreground tabular-nums">{fmt(value)}</span>
       </div>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} className="w-full cursor-pointer accent-foreground" aria-label={label} />
+      <Range min={min} max={max} step={step} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} className="w-full cursor-pointer " aria-label={label} accent="var(--foreground)" />
     </div>
   )
 }

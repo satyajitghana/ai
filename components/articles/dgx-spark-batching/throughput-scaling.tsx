@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The scaling law of continuous batching, on one tok/s axis. As you pack more
 // concurrent users into the batch, AGGREGATE decode throughput climbs and saturates,
@@ -115,7 +116,7 @@ export function ThroughputScaling() {
 
         <label className="mt-1 block">
           <span className="sr-only">concurrency</span>
-          <input type="range" min={1} max={64} value={n} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.68_0.14_195)]" />
+          <Range min={1} max={64} value={n} onChange={(e) => setN(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.68 0.14 195)" />
         </label>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

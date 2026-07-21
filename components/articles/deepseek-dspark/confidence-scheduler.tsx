@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // DSpark's second idea, drawn as a chart. A confidence head scores each drafted
 // position (the bars); a hardware-aware scheduler keeps only the leading prefix
@@ -117,9 +118,9 @@ export function ConfidenceScheduler() {
             <span>drag confidence threshold τ</span>
             <span className="tabular-nums text-foreground">{tau.toFixed(2)}</span>
           </div>
-          <input type="range" min={0} max={0.99} step={0.01} value={tau}
+          <Range min={0} max={0.99} step={0.01} value={tau}
             onChange={(e) => setTau(parseFloat(e.target.value))}
-            className="w-full cursor-pointer accent-foreground" aria-label="confidence threshold" />
+            className="w-full cursor-pointer " aria-label="confidence threshold" accent="var(--foreground)" />
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-[11px] text-muted-foreground">

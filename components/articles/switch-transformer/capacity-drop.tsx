@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Capacity factor and token dropping, drawn as bins. Every expert gets a fixed buffer of
 // expert_capacity = (tokens / experts) * capacity_factor slots. Tokens routed to a full
@@ -153,7 +154,7 @@ export function CapacityDrop() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">load imbalance (drag)</div>
-          <input type="range" min={0} max={100} value={imb} onChange={(e) => setImb(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.60_0.15_255)]" />
+          <Range min={0} max={100} value={imb} onChange={(e) => setImb(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.60 0.15 255)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

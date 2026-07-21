@@ -35,6 +35,10 @@ export function ShareButtons({
   const linkedin = `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(
     url
   )}`
+  // Hacker News submitlink: prefills the submit form with the url + title.
+  const hn = `https://news.ycombinator.com/submitlink?u=${encodeURIComponent(
+    url
+  )}&t=${encodeURIComponent(title)}`
 
   const copy = async () => {
     await navigator.clipboard.writeText(url)
@@ -68,6 +72,22 @@ export function ShareButtons({
         className="flex items-center gap-1 transition-colors hover:text-foreground"
       >
         <LinkedinLogoIcon size={14} weight="fill" />
+      </a>
+      <a
+        href={hn}
+        target="_blank"
+        rel="noreferrer"
+        aria-label="Share on Hacker News"
+        title="Share on Hacker News"
+        className="group flex items-center transition-colors"
+      >
+        <span
+          aria-hidden
+          className="flex h-3.5 w-3.5 items-center justify-center rounded-[2px] text-[9px] font-bold leading-none text-white opacity-70 transition-opacity group-hover:opacity-100"
+          style={{ background: "#ff6600" }}
+        >
+          Y
+        </span>
       </a>
       <button
         type="button"

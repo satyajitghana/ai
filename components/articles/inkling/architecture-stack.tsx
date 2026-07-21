@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Inkling's backbone in one scene: a 66-layer stack whose attention alternates
 // sliding-window and global layers at a 5:1 ratio (8 KV heads), and, inside every
@@ -210,7 +211,7 @@ export function ArchitectureStack() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">layer index (drag)</div>
-          <input type="range" min={0} max={NLAYERS - 1} value={layer} onChange={(e) => setLayer(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.16_285)]" />
+          <Range min={0} max={NLAYERS - 1} value={layer} onChange={(e) => setLayer(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.58 0.16 285)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

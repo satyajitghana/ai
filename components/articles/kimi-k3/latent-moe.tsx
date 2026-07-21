@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Stable LatentMoE, drawn as a field. 896 experts, only 16 lit per token (1.8%).
 // A router scores the field; quantile balancing lights the top 16; the token fans to
@@ -168,7 +169,7 @@ export function LatentMoE() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">token index (drag — the selected 16 change per token)</div>
-          <input type="range" min={0} max={N_TOK - 1} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.15_265)]" disabled={dense} />
+          <Range min={0} max={N_TOK - 1} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer " disabled={dense} accent="oklch(0.58 0.15 265)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

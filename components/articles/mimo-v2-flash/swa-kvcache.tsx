@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // Why the hybrid design is a long-context win. In a full-attention model every layer's KV cache
 // grows with the context length. In MiMo-V2-Flash, 5 of every 6 layers are sliding-window: their
@@ -97,7 +98,7 @@ export function SwaKvCache() {
             <span>context length</span>
             <span className="tabular-nums text-foreground">{ctxK}K tokens</span>
           </div>
-          <input type="range" min={4} max={MAXK} step={4} value={ctxK} onChange={(e) => setCtxK(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="context length" />
+          <Range min={4} max={MAXK} step={4} value={ctxK} onChange={(e) => setCtxK(+e.target.value)} className="w-full cursor-pointer " aria-label="context length" accent="oklch(0.72 0.15 195)" />
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-1 font-mono text-[11px] text-muted-foreground">

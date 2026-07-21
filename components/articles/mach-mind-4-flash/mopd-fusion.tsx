@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // MOPD — Multi-Teacher On-Policy Distillation, drawn as a real diagram. After the base
 // model is SFT'd and split into domain RL experts, MOPD fuses them into ONE student.
@@ -206,7 +207,7 @@ export function MopdFusion() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">training progress (drag)</div>
-          <input type="range" min={0} max={100} value={step} onChange={(e) => setStep(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.60_0.15_255)]" />
+          <Range min={0} max={100} value={step} onChange={(e) => setStep(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.60 0.15 255)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

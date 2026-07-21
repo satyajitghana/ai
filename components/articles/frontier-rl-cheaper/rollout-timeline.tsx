@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The second half of the argument: what small deltas buy you in wall-clock. An RL rollout
 // fleet is only earning its keep while it is GENERATING trajectories. Under the mega-cluster
@@ -144,7 +145,7 @@ export function RolloutTimeline() {
             <span>update payload (% of full model)</span>
             <span style={{ color: T > G ? STALL : GEN }}>{payload.toFixed(1)}%{T > G ? " · handoff exceeds a generation window" : " · hides behind generation"}</span>
           </div>
-          <input type="range" min={0.5} max={100} step={0.5} value={payload} onChange={(e) => setPayload(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.15_150)]" />
+          <Range min={0.5} max={100} step={0.5} value={payload} onChange={(e) => setPayload(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.15 150)" />
         </label>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

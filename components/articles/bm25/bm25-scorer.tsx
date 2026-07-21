@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // A real BM25 engine, running in your browser. Edit the query, drag k1 and b, and
 // every document is re-scored live with the exact Lucene BM25 formula:
@@ -88,11 +89,11 @@ export function Bm25Scorer() {
           <div className="flex gap-4">
             <label className="block">
               <span className="mb-1 flex justify-between gap-3 font-mono text-[10px] text-muted-foreground">k1<span className="text-foreground">{k1.toFixed(1)}</span></span>
-              <input type="range" min={0} max={3} step={0.1} value={k1} onChange={(e) => setK1(+e.target.value)} className="w-24 cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="k1" />
+              <Range min={0} max={3} step={0.1} value={k1} onChange={(e) => setK1(+e.target.value)} className="w-24 cursor-pointer " aria-label="k1" accent="oklch(0.72 0.15 195)" />
             </label>
             <label className="block">
               <span className="mb-1 flex justify-between gap-3 font-mono text-[10px] text-muted-foreground">b<span className="text-foreground">{b.toFixed(2)}</span></span>
-              <input type="range" min={0} max={1} step={0.05} value={b} onChange={(e) => setB(+e.target.value)} className="w-24 cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="b" />
+              <Range min={0} max={1} step={0.05} value={b} onChange={(e) => setB(+e.target.value)} className="w-24 cursor-pointer " aria-label="b" accent="oklch(0.72 0.15 195)" />
             </label>
           </div>
         </div>

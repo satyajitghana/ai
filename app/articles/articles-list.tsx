@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import {
   CaretLeftIcon,
@@ -42,12 +42,34 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
   const start = (current - 1) * PAGE_SIZE
   const shown = filtered.slice(start, start + PAGE_SIZE)
 
+  // Restore page + filter from the URL on mount, so a refresh (or a shared/
+  // bookmarked link) keeps you where you were instead of snapping back to page 1.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search)
+    const p = Number(sp.get("page"))
+    if (Number.isFinite(p) && p >= 1) setPage(p)
+    if (sp.get("featured") === "1") setFeaturedOnly(true)
+  }, [])
+
+  // Reflect state back into the URL on user action (replaceState — no history spam).
+  const writeUrl = (nextPage: number, nextFeatured: boolean) => {
+    const sp = new URLSearchParams(window.location.search)
+    if (nextPage > 1) sp.set("page", String(nextPage))
+    else sp.delete("page")
+    if (nextFeatured) sp.set("featured", "1")
+    else sp.delete("featured")
+    const qs = sp.toString()
+    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname)
+  }
+
   const setFilter = (f: boolean) => {
     setFeaturedOnly(f)
     setPage(1)
+    writeUrl(1, f)
   }
   const goto = (p: number) => {
     setPage(p)
+    writeUrl(p, featuredOnly)
     topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
   }
 

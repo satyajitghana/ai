@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // AutoMixer, made playable. The paper turns data-mixture design into an optimization
 // loop: sample mixtures over dataset groups, train a swarm of ~0.5B proxy models on each,
@@ -126,9 +127,8 @@ export function AutoMixer() {
                 <label htmlFor={`am-${g.id}`} className="truncate font-mono text-[11px] text-foreground" title={g.label}>
                   {g.label}
                 </label>
-                <input
+                <Range
                   id={`am-${g.id}`}
-                  type="range"
                   min={0}
                   max={50}
                   step={0.5}
@@ -138,10 +138,9 @@ export function AutoMixer() {
                     next[i] = Number(e.target.value)
                     setW(next)
                   }}
-                  className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-current"
+                  className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted "
                   style={{ color: ACCENT }}
-                  aria-label={`${g.label} share`}
-                />
+                  aria-label={`${g.label} share`} accent="currentColor" />
                 <span className="text-right font-mono text-[11px] tabular-nums text-muted-foreground">
                   {mix[i].toFixed(1)}
                 </span>

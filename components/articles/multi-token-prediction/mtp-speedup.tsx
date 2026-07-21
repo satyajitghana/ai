@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Why bigger n stops helping. In self-speculative decoding the model drafts n
 // tokens and the target accepts the longest correct prefix. If each drafted
@@ -120,16 +121,14 @@ export function MTPSpeedup() {
             <span>per-position acceptance α</span>
             <span className="tabular-nums text-foreground">{alpha.toFixed(2)}</span>
           </div>
-          <input
-            type="range"
+          <Range
             min={0.3}
             max={0.95}
             step={0.01}
             value={alpha}
             onChange={(e) => setAlpha(parseFloat(e.target.value))}
-            className="w-full cursor-pointer accent-[oklch(0.68_0.14_205)]"
-            aria-label="per-position acceptance probability"
-          />
+            className="w-full cursor-pointer "
+            aria-label="per-position acceptance probability" accent="oklch(0.68 0.14 205)" />
         </div>
 
         {/* n selector */}

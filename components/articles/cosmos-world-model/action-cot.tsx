@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Action-CoT: before it renders a single frame, Cosmos turns an instruction into a
 // 2D motion plan ON THE IMAGE PLANE — a chain-of-thought expressed as where things
@@ -163,7 +164,7 @@ export function ActionCoT() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">draw the plan (scrub)</div>
-          <input type="range" min={0} max={1} step={0.01} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.66_0.16_150)]" />
+          <Range min={0} max={1} step={0.01} value={t} onChange={(e) => setT(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.66 0.16 150)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

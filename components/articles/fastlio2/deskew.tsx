@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // Motion compensation, made visible. A LiDAR doesn't capture a scan instantly — it
 // sweeps over ~100 ms while the platform moves, so each point is measured from a
@@ -79,7 +80,7 @@ export function Deskew() {
               <span>platform speed during scan</span>
               <span className="text-foreground tabular-nums">{v}</span>
             </div>
-            <input type="range" min={0} max={40} step={1} value={v} onChange={(e) => setV(parseInt(e.target.value))} className="w-full cursor-pointer accent-foreground" aria-label="platform speed" />
+            <Range min={0} max={40} step={1} value={v} onChange={(e) => setV(parseInt(e.target.value))} className="w-full cursor-pointer " aria-label="platform speed" accent="var(--foreground)" />
           </div>
           <p className="text-sm leading-6 text-muted-foreground">
             {deskew

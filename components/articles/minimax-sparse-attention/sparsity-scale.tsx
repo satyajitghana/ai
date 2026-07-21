@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The fixed-budget payoff, honestly, drawn as a diagram. MSA attends to a fixed 2,048
 // tokens per query (top-16 blocks × 128) no matter how long the context is — so the
@@ -114,7 +115,7 @@ export function SparsityAtScale() {
 
         <div className="mt-2">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">context length (drag) · {cur.label}</div>
-          <input type="range" min={0} max={LENS.length - 1} value={i} onChange={(e) => setI(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.62_0.15_250)]" />
+          <Range min={0} max={LENS.length - 1} value={i} onChange={(e) => setI(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.15 250)" />
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">

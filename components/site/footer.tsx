@@ -8,6 +8,7 @@ import {
 import { profile } from "@/data/profile"
 
 const footerLinks = [
+  { href: "/models", label: "models" },
   { href: "/publications", label: "publications" },
   { href: "/patents", label: "patents" },
   { href: "/health", label: "health" },
@@ -19,6 +20,7 @@ const footerLinks = [
   { href: "/github", label: "github" },
   { href: "/changelog", label: "changelog" },
   { href: "/colophon", label: "colophon" },
+  { href: "/feed.xml", label: "rss" },
 ] as const
 
 export function SiteFooter() {

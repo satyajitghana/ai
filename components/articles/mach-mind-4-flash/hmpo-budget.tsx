@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // HMPO — Hybrid Median-length Policy Optimization, drawn as a real diagram. For each
 // query the policy samples a group of G rollouts. HMPO sets the length budget b to the
@@ -179,11 +180,11 @@ export function HmpoBudget() {
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <div>
             <div className="mb-1 font-mono text-[10px] text-muted-foreground">candidate length n (drag)</div>
-            <input type="range" min={0} max={N_MAX} step={20} value={cand} onChange={(e) => setCand(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.60_0.15_255)]" />
+            <Range min={0} max={N_MAX} step={20} value={cand} onChange={(e) => setCand(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.60 0.15 255)" />
           </div>
           <div>
             <div className="mb-1 font-mono text-[10px] text-muted-foreground">training progress → policy gets concise (drag)</div>
-            <input type="range" min={0} max={100} value={progress} onChange={(e) => setProgress(Number(e.target.value))} className="w-full cursor-pointer accent-[oklch(0.58_0.14_155)]" />
+            <Range min={0} max={100} value={progress} onChange={(e) => setProgress(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.58 0.14 155)" />
           </div>
         </div>
 

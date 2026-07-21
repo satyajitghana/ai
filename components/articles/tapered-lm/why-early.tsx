@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The evidence behind the design. If you measure how much each layer actually
 // changes the residual stream — the representational "work" it does — the early
@@ -105,7 +106,7 @@ export function WhyEarly() {
             <span>layer (drag to inspect)</span>
             <span className="tabular-nums text-foreground">L{sel}</span>
           </div>
-          <input type="range" min={0} max={L - 1} step={1} value={sel} onChange={(e) => setSel(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.72_0.15_285)]" aria-label="layer" />
+          <Range min={0} max={L - 1} step={1} value={sel} onChange={(e) => setSel(+e.target.value)} className="w-full cursor-pointer " aria-label="layer" accent="oklch(0.72 0.15 285)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">

@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // LongCat Sparse Attention (LSA), drawn against MiniMax's MSA as the reference point.
 // Both make attention sparse by scoring the past KV and reading only a chosen subset.
@@ -330,8 +331,7 @@ export function LsaIndex() {
 
         <div className="mt-3">
           <div className="mb-1 font-mono text-[10px] text-muted-foreground">query position (drag)</div>
-          <input
-            type="range"
+          <Range
             min={RECALL + 1}
             max={NB - 1}
             value={q}

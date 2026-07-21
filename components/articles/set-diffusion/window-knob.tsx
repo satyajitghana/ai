@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { Range } from "@/components/articles/ui/range"
 
 // The single knob that slides set diffusion along the AR↔diffusion spectrum. The
 // position-offset schedule gives each token an active window of width w. Small w →
@@ -94,7 +95,7 @@ export function WindowKnob() {
             <span>window w</span>
             <span className="tabular-nums text-foreground">{w.toFixed(2)}{arLike ? " · ≈ AR" : diffLike ? " · ≈ MDLM" : ""}</span>
           </div>
-          <input type="range" min={0.02} max={1} step={0.02} value={w} onChange={(e) => setW(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.62_0.15_265)]" aria-label="window w" />
+          <Range min={0.02} max={1} step={0.02} value={w} onChange={(e) => setW(+e.target.value)} className="w-full cursor-pointer " aria-label="window w" accent="oklch(0.62 0.15 265)" />
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border font-mono text-xs">

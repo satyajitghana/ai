@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { Range } from "@/components/articles/ui/range"
 
 // The idea the whole method rests on, computed live. A raw key/value vector has its
 // energy concentrated in a few coordinates — a big dynamic range that a fixed set of
@@ -164,7 +165,7 @@ export function Rotation() {
             <span>quantizer bit-width</span>
             <span className="tabular-nums text-foreground">{bits}-bit ({2 ** bits} levels)</span>
           </div>
-          <input type="range" min={1} max={5} step={1} value={bits} onChange={(e) => setBits(+e.target.value)} className="w-full cursor-pointer accent-[oklch(0.72_0.15_195)]" aria-label="bits" />
+          <Range min={1} max={5} step={1} value={bits} onChange={(e) => setBits(+e.target.value)} className="w-full cursor-pointer " aria-label="bits" accent="oklch(0.72 0.15 195)" />
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
