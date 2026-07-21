@@ -15,7 +15,8 @@ vercel link        # or import satyajitghana/ai in the Vercel dashboard
 | `SITE_URL` | canonical base for llms.txt/JSON-LD/sitemap | defaults to `https://ai.thesatyajit.com` |
 | `GITHUB_TOKEN` | live GitHub stats (GraphQL, hourly revalidate) | dummy seed data + "seed data" footnote |
 | `OPENAI_API_KEY` | RAG chat + `/api/ask` + MCP `ask_satyajit` go live | graceful 503 / offline notice |
-| `CHAT_MODEL` | override chat model | `gpt-5.6-luna` |
+| `CHAT_MODEL` | override the `mini` tier (router default) | `gpt-5.4-mini` |
+| `CHAT_MODEL_NANO` / `CHAT_MODEL_MAIN` | override the `nano` / `main` tiers | `gpt-5.4-nano` / `gpt-5.4` |
 
 Server-only — never `NEXT_PUBLIC_`.
 
