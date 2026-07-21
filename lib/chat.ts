@@ -1,5 +1,11 @@
 import { createOpenAI } from "@ai-sdk/openai"
-import { stepCountIs, tool } from "ai"
+import {
+  generateText,
+  stepCountIs,
+  streamText,
+  tool,
+  type ModelMessage,
+} from "ai"
 import { z } from "zod"
 
 import { profile } from "@/data/profile"
@@ -11,9 +17,11 @@ import { siteUrl } from "@/lib/site"
 // Shared chat plumbing for /api/chat (streaming), /api/ask (one-shot), and the
 // MCP ask_satyajit tool.
 //
-// PROVIDER: routed through the Vercel AI SDK so the model/provider is a one-line
-// swap. Currently OpenAI (`@ai-sdk/openai`), GPT-5.6 Luna. Override the model
-// with CHAT_MODEL / CHAT_MODEL_FAST and the key with OPENAI_API_KEY.
+// PROVIDER: routed through the Vercel AI SDK (`@ai-sdk/openai`). A small router
+// picks one of the OpenAI GPT-5.4 family (nano / mini / 5.4) per question, and
+// every call falls back down the ladder on error. Override the per-tier models
+// with CHAT_MODEL_NANO / CHAT_MODEL / CHAT_MODEL_MAIN and the key with
+// OPENAI_API_KEY.
 //
 // HARNESS: this is a small tool-using agent, not a corpus dump. Earlier the whole
 // content corpus rode inside the system prompt on every request; now the prompt
@@ -25,11 +33,18 @@ import { siteUrl } from "@/lib/site"
 // dynamic-loading idea applied to *context*: fewer tokens per turn, and the model
 // sees only what's relevant to the question instead of the entire site.
 
-export type ModelTier = "main" | "fast"
+// A mix of the OpenAI GPT-5.4 family, cheap → strong. A small router picks the
+// starting tier from the question (no extra LLM round-trip — just a heuristic),
+// and every call falls back down the ladder if a model errors (rate limit,
+// transient 5xx, access), so one bad model never takes the agent offline.
+export type ModelTier = "nano" | "mini" | "main"
 
-const MODELS: Record<ModelTier, string> = {
-  main: process.env.CHAT_MODEL ?? "gpt-5.6-luna",
-  fast: process.env.CHAT_MODEL_FAST ?? "gpt-5.6-luna",
+const LADDER = ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"] as const
+
+const TIER_MODEL: Record<ModelTier, string> = {
+  nano: process.env.CHAT_MODEL_NANO ?? "gpt-5.4-nano",
+  mini: process.env.CHAT_MODEL ?? "gpt-5.4-mini",
+  main: process.env.CHAT_MODEL_MAIN ?? "gpt-5.4",
 }
 
 // The agent loop is bounded: search → read a page or two → (think) → answer is
@@ -43,21 +58,126 @@ export function isChatOnline(): boolean {
   return Boolean(process.env.OPENAI_API_KEY)
 }
 
-export function chatModelId(tier: ModelTier = "main"): string {
-  return MODELS[tier]
+// The router: a cheap, deterministic heuristic. Short factual lookups go to
+// nano; comparative / explanatory / long or multi-part questions to the strong
+// model; everything else to mini. Deliberately not an LLM call — routing should
+// cost nothing.
+export function routeTier(question: string): ModelTier {
+  const q = question.trim()
+  const complex =
+    /\b(compare|compared|versus|vs\.?|why|how|explain|deriv|prove|trade-?off|differ|difference|relationship|walk through|architecture|design|reason|implication|nuance)\b/i.test(
+      q,
+    )
+  const multiPart = (q.match(/\?/g)?.length ?? 0) > 1 || /\band\b[^.?!]*\band\b/i.test(q)
+  if (q.length > 320 || (complex && multiPart)) return "main"
+  if (q.length < 90 && !complex) return "nano"
+  return "mini"
+}
+
+// The fallback chain for a tier: the routed model first, then the rest of the
+// ladder (deduped), so an error drops to the next-best model.
+export function modelChain(tier: ModelTier): string[] {
+  const start = TIER_MODEL[tier]
+  const chain = [start]
+  for (const m of LADDER) if (m !== start) chain.push(m)
+  return chain
+}
+
+export function chatModelId(tier: ModelTier = "mini"): string {
+  return TIER_MODEL[tier]
 }
 
 // A configured LanguageModel for the AI SDK. Created lazily so importing this
 // module never throws when the key is absent (offline mode handles that).
-export function chatModel(tier: ModelTier = "main") {
+export function chatModel(tier: ModelTier = "mini") {
   const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  return openai(MODELS[tier])
+  return openai(TIER_MODEL[tier])
+}
+
+// ── router + fallback runners ─────────────────────────────────────────────────
+
+// One-shot answer (/api/ask, MCP ask_satyajit): route by the question, then walk
+// the fallback chain until a model succeeds. Returns the answer and the model
+// that actually produced it.
+export async function generateWithFallback(args: {
+  question: string
+  system: string
+  maxOutputTokens?: number
+}): Promise<{ text: string; model: string }> {
+  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  const chain = modelChain(routeTier(args.question))
+  let lastErr: unknown
+  for (const id of chain) {
+    try {
+      const { text } = await generateText({
+        model: openai(id),
+        system: args.system,
+        prompt: args.question,
+        tools: agentTools(),
+        stopWhen: stepCountIs(AGENT_MAX_STEPS),
+        maxOutputTokens: args.maxOutputTokens ?? 1024,
+      })
+      return { text, model: id }
+    } catch (err) {
+      lastErr = err
+      console.warn(
+        `[chat] model ${id} failed, falling back:`,
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("all models failed")
+}
+
+// Streaming answer (/api/chat): route by `tier`, walk the chain, and only fall
+// back if a model errors *before* emitting any text — once tokens are on the
+// wire we can't safely restart, so a mid-stream error propagates. `onModel`
+// reports which model actually answered (first successful chunk).
+export async function* streamWithFallback(args: {
+  tier: ModelTier
+  system: string
+  messages: ModelMessage[]
+  maxOutputTokens?: number
+  onModel?: (id: string) => void
+}): AsyncGenerator<string> {
+  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  const chain = modelChain(args.tier)
+  let lastErr: unknown
+  for (const id of chain) {
+    const result = streamText({
+      model: openai(id),
+      system: args.system,
+      messages: args.messages,
+      tools: agentTools(),
+      stopWhen: stepCountIs(AGENT_MAX_STEPS),
+      maxOutputTokens: args.maxOutputTokens ?? 1500,
+    })
+    let emitted = false
+    try {
+      for await (const chunk of result.textStream) {
+        if (!emitted) {
+          emitted = true
+          args.onModel?.(id)
+        }
+        yield chunk
+      }
+      return
+    } catch (err) {
+      lastErr = err
+      if (emitted) throw err // tokens already sent — can't restart on another model
+      console.warn(
+        `[chat] stream model ${id} failed pre-output, falling back:`,
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("all models failed")
 }
 
 export const offlinePayload = {
   error: "chat offline",
   detail:
-    "No OPENAI_API_KEY is configured. The site is still fully agent-readable: start at /llms.txt, fetch any page as .md, or use the /api/* JSON endpoints.",
+    "The chat is offline right now. The site is still fully agent-readable: start at /llms.txt, fetch any page as .md, or use the /api/* JSON endpoints.",
 } as const
 
 // ── the tool set ────────────────────────────────────────────────────────────

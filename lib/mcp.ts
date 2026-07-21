@@ -302,35 +302,27 @@ export function searchSnippetsPayload(query?: string) {
 // Same grounded persona+corpus prompt as /api/chat and /api/ask, via the AI SDK
 // (OpenAI provider). Returns `json` on success so the answer is a clean payload.
 export async function askSatyajitPayload(question: string) {
-  const {
-    agentTools,
-    AGENT_MAX_STEPS,
-    buildSystemPrompt,
-    chatModel,
-    chatModelId,
-    isChatOnline,
-  } = await import("@/lib/chat")
+  const { buildSystemPrompt, generateWithFallback, isChatOnline } = await import(
+    "@/lib/chat"
+  )
   if (!isChatOnline()) {
     return notice(
-      "Chat is offline (no OPENAI_API_KEY configured). Use search_content + get_post to research, or read /llms-full.txt."
+      "Chat is offline right now. Use search_content + get_post to research, or read /llms-full.txt."
     )
   }
 
-  const { generateText, stepCountIs } = await import("ai")
-  const { text } = await generateText({
-    model: chatModel("fast"),
+  // Routed to a GPT-5.4-family model with fallback down the ladder, using the
+  // same small tool set as the site agent — it retrieves the pages it needs
+  // rather than reasoning over a corpus stuffed into the prompt.
+  const { text, model } = await generateWithFallback({
+    question,
     system: await buildSystemPrompt(),
-    prompt: question,
-    // Same small tool set as the site agent: it retrieves the pages it needs
-    // rather than reasoning over a corpus stuffed into the prompt.
-    tools: agentTools(),
-    stopWhen: stepCountIs(AGENT_MAX_STEPS),
     maxOutputTokens: 1024,
   })
 
   return json({
     question,
     answer: text || "(no answer)",
-    model: chatModelId("fast"),
+    model,
   })
 }
