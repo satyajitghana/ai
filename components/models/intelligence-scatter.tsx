@@ -16,6 +16,10 @@ const ORIGIN_COLOR: Record<Origin, string> = {
   China: "oklch(0.62 0.19 20)",
   EU: "oklch(0.72 0.15 85)",
   Canada: "oklch(0.6 0.13 200)",
+  UAE: "oklch(0.6 0.13 160)",
+  Korea: "oklch(0.62 0.16 320)",
+  Israel: "oklch(0.68 0.13 130)",
+  India: "oklch(0.68 0.16 40)",
   Other: "oklch(0.65 0.02 260)",
 }
 

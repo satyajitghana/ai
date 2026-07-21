@@ -111,7 +111,17 @@ export function ModelTable({ models }: { models: ModelRecord[] }) {
                 {COLS.map((c) => {
                   const raw = c.fmt ? c.fmt(m) : (c.get(m) ?? "—")
                   if (c.key === "name")
-                    return <td key={c.key} className="whitespace-nowrap px-2.5 py-1.5 font-medium text-foreground">{String(raw)}</td>
+                    return (
+                      <td key={c.key} className="whitespace-nowrap px-2.5 py-1.5 font-medium text-foreground">
+                        {m.article ? (
+                          <a href={`/articles/${m.article}`} className="underline decoration-foreground/25 underline-offset-2 hover:decoration-foreground" title="Read the article">
+                            {String(raw)}
+                          </a>
+                        ) : (
+                          String(raw)
+                        )}
+                      </td>
+                    )
                   if (c.key === "origin")
                     return (
                       <td key={c.key} className="whitespace-nowrap px-2.5 py-1.5">
