@@ -23,11 +23,44 @@ export type BlogFrontmatter = z.infer<typeof blogFrontmatter>
 
 // Curated long-form articles on AI — essays/explainers, distinct from the
 // personal build-log blog. Same shape as blog, plus `featured` to star the
-// standout pieces (a ★ in the index, and they float to the top of the list).
+// standout pieces, and a per-article editorial signal: how `interest`ing
+// (novelty/insight) and `helpful` (practical/reference value) the piece is,
+// 1–5 each. These live in frontmatter so the rating is set right where the
+// article is written; the derived level drives the /articles filter + sort.
 export const articleFrontmatter = blogFrontmatter.extend({
   featured: z.boolean().default(false),
+  interest: z.number().int().min(1).max(5).optional(),
+  helpful: z.number().int().min(1).max(5).optional(),
 })
 export type ArticleFrontmatter = z.infer<typeof articleFrontmatter>
+
+// Derive a 1–5 signal level (with a label) from the two axes. Returns null when
+// a piece hasn't been rated yet, so the UI can treat it as unranked.
+const SIGNAL_TIERS: { min: number; level: number; label: string }[] = [
+  { min: 9, level: 5, label: "Essential" },
+  { min: 8, level: 4, label: "High" },
+  { min: 7, level: 3, label: "Notable" },
+  { min: 6, level: 2, label: "Solid" },
+  { min: 0, level: 1, label: "Niche" },
+]
+
+export type ArticleSignal = {
+  interest: number
+  helpful: number
+  score: number
+  level: number
+  label: string
+}
+
+export function articleSignal(fm: {
+  interest?: number
+  helpful?: number
+}): ArticleSignal | null {
+  if (fm.interest == null || fm.helpful == null) return null
+  const score = fm.interest + fm.helpful
+  const tier = SIGNAL_TIERS.find((t) => score >= t.min) ?? SIGNAL_TIERS[SIGNAL_TIERS.length - 1]
+  return { interest: fm.interest, helpful: fm.helpful, score, level: tier.level, label: tier.label }
+}
 
 export const logFrontmatter = z.object({
   title: z.string().min(1).optional(),

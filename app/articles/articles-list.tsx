@@ -10,10 +10,11 @@ import {
 
 import { cn } from "@/lib/utils"
 
-// Client list: a Featured filter + pagination. Articles arrive already
-// newest-first from the loader; filtering only hides non-featured items and
-// paging only windows the list — neither reorders, so it stays chronological.
-// The ★ is a real solid Phosphor icon in a warm gold, not an ASCII glyph.
+// Client list: filter (All / Featured / High-signal), sort (newest / signal /
+// interest / helpful), pagination — all persisted to the URL. Articles arrive
+// newest-first; "newest" keeps that order, the other sorts reorder a copy.
+// Each card carries a signal badge: 1–5 bars derived from the article's own
+// `interest` + `helpful` frontmatter (see lib/content/schema.ts).
 type ArticleCard = {
   slug: string
   title: string
@@ -22,54 +23,125 @@ type ArticleCard = {
   readingTimeMins: number
   tags: string[]
   featured: boolean
+  interest: number
+  helpful: number
+  signal: number // 1–5 level, 0 = unrated
+  signalLabel: string
 }
 
 const STAR = "oklch(0.79 0.15 82)" // warm gold
 const PAGE_SIZE = 12
 
+// signal level → color for the filled bars (green = high signal, fading down)
+const SIGNAL_COLOR: Record<number, string> = {
+  5: "oklch(0.7 0.17 145)",
+  4: "oklch(0.68 0.14 155)",
+  3: "oklch(0.66 0.12 230)",
+  2: "oklch(0.7 0.06 250)",
+  1: "oklch(0.6 0.03 260)",
+}
+
+function SignalBars({ level, label, interest, helpful }: { level: number; label: string; interest: number; helpful: number }) {
+  if (!level) return null
+  const color = SIGNAL_COLOR[level] ?? SIGNAL_COLOR[1]
+  return (
+    <span
+      className="inline-flex items-center gap-1.5"
+      title={`Signal: ${label} · interest ${interest}/5 · helpful ${helpful}/5`}
+    >
+      <span className="flex items-end gap-[2px]" aria-hidden="true">
+        {[1, 2, 3, 4, 5].map((b) => (
+          <span
+            key={b}
+            className="w-[3px] rounded-[1px]"
+            style={{
+              height: `${3 + b * 2}px`,
+              background: b <= level ? color : "var(--muted)",
+              opacity: b <= level ? 1 : 0.6,
+            }}
+          />
+        ))}
+      </span>
+      <span className="font-mono text-[10px]" style={{ color }}>{label}</span>
+    </span>
+  )
+}
+
+type Filter = "all" | "featured" | "high"
+type Sort = "new" | "signal" | "interest" | "helpful"
+
+const SORTS: { key: Sort; label: string }[] = [
+  { key: "new", label: "newest" },
+  { key: "signal", label: "signal" },
+  { key: "interest", label: "interesting" },
+  { key: "helpful", label: "helpful" },
+]
+
 export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
-  const [featuredOnly, setFeaturedOnly] = useState(false)
+  const [filter, setFilter] = useState<Filter>("all")
+  const [sort, setSort] = useState<Sort>("new")
   const [page, setPage] = useState(1)
   const topRef = useRef<HTMLDivElement>(null)
 
   const featuredCount = articles.filter((a) => a.featured).length
-  const filtered = featuredOnly
-    ? articles.filter((a) => a.featured)
-    : articles
+  const highCount = articles.filter((a) => a.signal >= 4).length
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const filtered = articles.filter((a) =>
+    filter === "featured" ? a.featured : filter === "high" ? a.signal >= 4 : true,
+  )
+
+  // "newest" preserves incoming order; other sorts reorder a copy, tie-broken by date.
+  const sorted =
+    sort === "new"
+      ? filtered
+      : [...filtered].sort((a, b) => {
+          const key = sort === "signal" ? "signal" : sort === "interest" ? "interest" : "helpful"
+          return b[key] - a[key] || b.date.localeCompare(a.date)
+        })
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE))
   const current = Math.min(page, totalPages)
   const start = (current - 1) * PAGE_SIZE
-  const shown = filtered.slice(start, start + PAGE_SIZE)
+  const shown = sorted.slice(start, start + PAGE_SIZE)
 
-  // Restore page + filter from the URL on mount, so a refresh (or a shared/
-  // bookmarked link) keeps you where you were instead of snapping back to page 1.
+  // Restore filter + sort + page from the URL on mount (shareable, refresh-safe).
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search)
+    const f = sp.get("filter")
+    if (f === "high" || f === "featured") setFilter(f)
+    else if (sp.get("featured") === "1") setFilter("featured") // back-compat
+    const s = sp.get("sort")
+    if (s === "signal" || s === "interest" || s === "helpful") setSort(s)
     const p = Number(sp.get("page"))
     if (Number.isFinite(p) && p >= 1) setPage(p)
-    if (sp.get("featured") === "1") setFeaturedOnly(true)
   }, [])
 
-  // Reflect state back into the URL on user action (replaceState — no history spam).
-  const writeUrl = (nextPage: number, nextFeatured: boolean) => {
+  const writeUrl = (nextFilter: Filter, nextSort: Sort, nextPage: number) => {
     const sp = new URLSearchParams(window.location.search)
+    sp.delete("featured") // drop the legacy param
+    if (nextFilter !== "all") sp.set("filter", nextFilter)
+    else sp.delete("filter")
+    if (nextSort !== "new") sp.set("sort", nextSort)
+    else sp.delete("sort")
     if (nextPage > 1) sp.set("page", String(nextPage))
     else sp.delete("page")
-    if (nextFeatured) sp.set("featured", "1")
-    else sp.delete("featured")
     const qs = sp.toString()
     window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname)
   }
 
-  const setFilter = (f: boolean) => {
-    setFeaturedOnly(f)
+  const applyFilter = (f: Filter) => {
+    setFilter(f)
     setPage(1)
-    writeUrl(1, f)
+    writeUrl(f, sort, 1)
+  }
+  const applySort = (s: Sort) => {
+    setSort(s)
+    setPage(1)
+    writeUrl(filter, s, 1)
   }
   const goto = (p: number) => {
     setPage(p)
-    writeUrl(p, featuredOnly)
+    writeUrl(filter, sort, p)
     topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
   }
 
@@ -91,28 +163,34 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
 
   return (
     <div ref={topRef} className="scroll-mt-24">
-      <div className="mb-6 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setFilter(false)}
-          aria-pressed={!featuredOnly}
-          className={tab(!featuredOnly)}
-        >
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <button type="button" onClick={() => applyFilter("all")} aria-pressed={filter === "all"} className={tab(filter === "all")}>
           All <span className="tabular-nums opacity-50">{articles.length}</span>
         </button>
-        <button
-          type="button"
-          onClick={() => setFilter(true)}
-          aria-pressed={featuredOnly}
-          className={tab(featuredOnly)}
-        >
+        <button type="button" onClick={() => applyFilter("featured")} aria-pressed={filter === "featured"} className={tab(filter === "featured")}>
           <StarIcon size={13} weight="fill" style={{ color: STAR }} />
-          Featured{" "}
-          <span className="tabular-nums opacity-50">{featuredCount}</span>
+          Featured <span className="tabular-nums opacity-50">{featuredCount}</span>
         </button>
-        {filtered.length ? (
+        <button type="button" onClick={() => applyFilter("high")} aria-pressed={filter === "high"} className={tab(filter === "high")}>
+          <span className="flex items-end gap-[2px]" aria-hidden="true">
+            {[1, 2, 3].map((b) => (
+              <span key={b} className="w-[3px] rounded-[1px]" style={{ height: `${3 + b * 2}px`, background: SIGNAL_COLOR[4] }} />
+            ))}
+          </span>
+          High signal <span className="tabular-nums opacity-50">{highCount}</span>
+        </button>
+      </div>
+
+      <div className="mb-6 flex flex-wrap items-center gap-2">
+        <span className="font-mono text-[11px] text-muted-foreground/70">sort</span>
+        {SORTS.map((s) => (
+          <button key={s.key} type="button" onClick={() => applySort(s.key)} aria-pressed={sort === s.key} className={tab(sort === s.key)}>
+            {s.label}
+          </button>
+        ))}
+        {sorted.length ? (
           <span className="ml-auto font-mono text-xs text-muted-foreground/70 tabular-nums">
-            {start + 1}–{start + shown.length} of {filtered.length}
+            {start + 1}–{start + shown.length} of {sorted.length}
           </span>
         ) : null}
       </div>
@@ -134,16 +212,16 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
                     />
                   ) : null}
                 </h2>
-                <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                  {a.date}
-                </span>
+                <span className="shrink-0 font-mono text-xs text-muted-foreground">{a.date}</span>
               </div>
-              <p className="mt-1 leading-7 text-muted-foreground">
-                {a.description}
-              </p>
-              <p className="mt-2 font-mono text-xs text-muted-foreground">
-                {a.readingTimeMins} min
-                {a.tags.length ? ` · ${a.tags.join(" · ")}` : ""}
+              <p className="mt-1 leading-7 text-muted-foreground">{a.description}</p>
+              <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs text-muted-foreground">
+                <SignalBars level={a.signal} label={a.signalLabel} interest={a.interest} helpful={a.helpful} />
+                {a.signal ? <span className="text-muted-foreground/40">·</span> : null}
+                <span>
+                  {a.readingTimeMins} min
+                  {a.tags.length ? ` · ${a.tags.join(" · ")}` : ""}
+                </span>
               </p>
             </Link>
           </li>
