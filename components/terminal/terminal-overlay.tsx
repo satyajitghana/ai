@@ -26,9 +26,9 @@ const SECTIONS = [
   "notes",
 ]
 const PAGES = [
-  "about", "resume", "projects", "blog", "articles", "arxiv", "publications",
-  "patents", "health", "now", "uses", "reading", "snippets", "notes", "github",
-  "colophon", "changelog",
+  "about", "resume", "projects", "blog", "articles", "arxiv", "models",
+  "architectures", "publications", "patents", "health", "now", "uses",
+  "reading", "snippets", "notes", "github", "colophon", "changelog",
 ]
 
 const HELP = `commands:
@@ -64,12 +64,24 @@ type Block =
   | { kind: "q"; text: string } // echoed user query
   | { kind: "answer"; text: string; streaming: boolean } // AI answer (markdown)
 
+type Hit = { kind: string; title: string; url: string; snippet: string }
+
+// url from the API is absolute; the palette navigates by pathname.
+function toPath(url: string): string {
+  try {
+    return new URL(url).pathname
+  } catch {
+    return url
+  }
+}
+
 export function TerminalOverlay() {
   const [open, setOpen] = useState(false)
   const [blocks, setBlocks] = useState<Block[]>([])
   const [input, setInput] = useState("")
   const [busy, setBusy] = useState(false)
   const [online, setOnline] = useState<boolean | null>(null)
+  const [hits, setHits] = useState<Hit[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const router = useRouter()
@@ -102,6 +114,28 @@ export function TerminalOverlay() {
       .then((d) => setOnline(Boolean(d.online)))
       .catch(() => setOnline(false))
   }, [online])
+
+  // Instant keyword search (BM25) as you type — free text only, debounced.
+  // Enter still asks the AI; these are the fast "jump to a page" matches.
+  useEffect(() => {
+    const q = input.trim()
+    const verb = q.split(/\s+/)[0].toLowerCase()
+    if (q.length < 2 || VERBS.includes(verb)) {
+      setHits([])
+      return
+    }
+    const ctrl = new AbortController()
+    const t = setTimeout(() => {
+      fetch(`/api/search?q=${encodeURIComponent(q)}&limit=6`, { signal: ctrl.signal })
+        .then((r) => r.json())
+        .then((d) => setHits(Array.isArray(d.results) ? d.results : []))
+        .catch(() => {})
+    }, 140)
+    return () => {
+      clearTimeout(t)
+      ctrl.abort()
+    }
+  }, [input])
 
   useEffect(() => {
     if (open) inputRef.current?.focus()
@@ -263,6 +297,11 @@ export function TerminalOverlay() {
     else void ask(cmd) // free text → ask the AI
   }
 
+  const goHit = (url: string) => {
+    setOpen(false)
+    router.push(toPath(url))
+  }
+
   if (!open) {
     // Floating action button — a discoverable way in, on every page (the ⌘K
     // shortcut still works; this just makes it visible, especially on mobile).
@@ -317,7 +356,7 @@ export function TerminalOverlay() {
                 setInput(top.includes(" ") ? top : `${top} `)
               }
             }}
-            placeholder="ask anything, or run a command…"
+            placeholder="search pages, ask the AI (↵), or run a command…"
             className="w-full bg-transparent text-base outline-none sm:text-sm"
             aria-label="Search or command"
             autoComplete="off"
@@ -354,6 +393,29 @@ export function TerminalOverlay() {
 
         {/* suggestions / ask action */}
         <div className="border-t">
+          {/* instant keyword matches (BM25) — jump straight to a page */}
+          {hits.length ? (
+            <ul className="max-h-[38vh] overflow-y-auto border-b">
+              {hits.map((h) => (
+                <li key={h.url}>
+                  <button
+                    type="button"
+                    onClick={() => goHit(h.url)}
+                    className="flex w-full cursor-pointer items-start gap-2 px-4 py-2 text-left transition-colors hover:bg-muted/60"
+                  >
+                    <span className="mt-0.5 shrink-0 rounded border px-1 py-0.5 text-[9px] uppercase text-muted-foreground">
+                      {h.kind}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] text-foreground">{h.title}</span>
+                      <span className="block truncate text-[11px] text-muted-foreground">{toPath(h.url)}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
           {showAsk ? (
             <button
               type="button"

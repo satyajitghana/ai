@@ -9,6 +9,7 @@ import { profile } from "@/data/profile"
 
 const footerLinks = [
   { href: "/models", label: "models" },
+  { href: "/architectures", label: "architectures" },
   { href: "/publications", label: "publications" },
   { href: "/patents", label: "patents" },
   { href: "/health", label: "health" },
