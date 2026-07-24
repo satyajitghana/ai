@@ -1,0 +1,179 @@
+---
+title: "Ternary15M: a language model where every weight is −1, 0, or +1"
+description: "A from-scratch 15M-parameter TinyStories model where all 42 linear layers are ternary — each weight is exactly −1, 0, or +1 (BitNet b1.58 lineage). That turns every dot product into signed add/subtract/skip with a single scale multiply per output channel. A walk through ternary quantization, why three-valued weights make matmuls multiply-free, quantization-aware training with the straight-through estimator and an absmean scale, the ~1.58-bits/weight footprint, and the honest result: hard-ternary inference costs only +0.01 val loss over the latent model (1.61 vs 1.60), shipped at 43 MB — trained for about $0.70 on one L40S."
+date: 2026-07-24
+interest: 4
+helpful: 3
+tags:
+  - quantization
+  - ternary
+  - bitnet
+  - efficiency
+  - from-scratch
+  - explainer
+draft: false
+featured: false
+---
+
+import { SignedAccumulate } from "@/components/articles/ternary15m/signed-accumulate"
+
+Most quantization is an afterthought: train a model in FP16, then squeeze the weights down to 8 or 4 bits for
+deployment and hope the accuracy survives. [Ternary15M](https://github.com/brianbell-x/ternary15M) does the opposite,
+and takes it to the extreme. It's a 15.19M-parameter, Llama-style language model where **every linear layer is
+ternary** — each weight is one of exactly three values, `−1`, `0`, or `+1`, scaled by a single per-channel number.
+The model is *trained that way from scratch*, not clipped down after the fact. It's a tiny, readable member of the
+[BitNet b1.58](https://arxiv.org/abs/2402.17764) family, and it's a clean place to see why three-valued weights are
+such an interesting bet.
+
+The architecture is deliberately small and standard: dim 288, 6 layers, 6 query / 6 KV heads, a SwiGLU MLP with
+hidden size 768, a 32k vocab, and a 256-token context. All 42 of its attention and feed-forward linear layers
+(6 layers × 7 projections) are ternary; only the embedding table and the RMSNorm gains stay in full precision.
+
+## The whole trick is the sign
+
+Here's why anyone cares about `{−1, 0, +1}` specifically. A neural network is, underneath, a pile of dot products:
+each output is a weighted sum of its inputs. In full precision, every one of those weights is an arbitrary float, so
+every term in the sum is a hardware **multiply**. Multiplies are the expensive part — they dominate the energy and the
+silicon area of a matmul.
+
+Now make each weight a sign instead of a number. If the weight is `+1`, the term is just the input — **add** it. If
+it's `−1`, **subtract** the input. If it's `0`, the input contributes nothing — **skip** it. The multiplies vanish; the
+inner loop of the dot product becomes signed accumulation over the inputs. Toggle between the two below and watch the
+multiply count collapse:
+
+<SignedAccumulate />
+
+The single multiply that survives is the per-output-channel **scale** — one number `s` that rescales the whole
+accumulated sum back to a sensible magnitude. So a ternary matmul is: signed adds across the row, then one multiply at
+the end. On general-purpose GPUs the win is mostly memory-bandwidth (you move far fewer weight bytes); on hardware
+designed for it, killing the multiplies is the point. Either way, the arithmetic is genuinely different from
+"small floats."
+
+## 1.58 bits, and where the bytes actually go
+
+Three states carry log₂(3) ≈ **1.58 bits** of information each — that's where the "b1.58" name comes from, and why a
+ternary weight is often quoted as costing ~1.58 bits versus 16 or 32 for a float. Ternary15M doesn't bit-pack that
+tightly; its exported checkpoint stores each ternary weight as an `int8` (one byte) plus one FP32 scale per output
+channel, which the author notes compresses to roughly 2 bits with basic entropy coding. The latent training checkpoint
+is 182 MB; the deployed ternary model is **43 MB**.
+
+But 43 MB is bigger than 1.58 bits × 15M would suggest, and the reason is worth sitting with:
+
+<Callout type="note">
+At 15M parameters, the model is mostly its embedding table. The tied vocab embedding is 32,000 × 288 ≈ **9.2M
+parameters** — over 60% of the model — and it stays FP32, so it alone is ~37 MB of the 43 MB file. The ternary trick
+only compresses the ~6M weights in the 42 linear layers. The lesson generalizes: at small scale, quantizing the matmuls
+buys you less than you'd hope because the un-quantized embedding dominates the footprint. Ternary pays off hardest on
+*deep* models, where the linear layers, not the vocabulary, are the bulk of the weights.
+</Callout>
+
+## Teaching a network to live with three values
+
+You can't train ternary weights directly, because rounding to `{−1, 0, +1}` has a gradient of zero almost everywhere —
+nudging a latent weight from 0.31 to 0.32 doesn't change the rounded output, so ordinary backprop would see no signal
+and learn nothing. Quantization-aware training gets around this with two ideas working together.
+
+First, the **scale**. Each output channel's weights are ternarized around their own average magnitude — the mean of the
+absolute weights in that row, `absmean(W)`. Dividing by that scale before rounding is what decides which weights round
+to `±1` and which collapse to `0`, and multiplying the scale back afterward keeps the layer's outputs at roughly the
+right size. It's computed per output channel, so every neuron sets its own threshold.
+
+Second, the **straight-through estimator (STE)**. The forward pass uses the *ternarized* weights — so the network
+actually experiences quantization while it learns — but the backward pass pretends the rounding was the identity
+function and passes the gradient straight through to a full-precision **latent** copy of the weights. Those FP32 latents
+are what the optimizer updates; the ternary weights are re-derived from them every forward pass. In PyTorch the whole
+thing is a few lines:
+
+```python
+def forward(self, x: torch.Tensor) -> torch.Tensor:
+    weight = self.weight                                   # FP32 latent weights
+    scale = weight.abs().mean(dim=1, keepdim=True)         # absmean per output channel
+    safe_scale = scale.clamp_min(torch.finfo(weight.dtype).eps)
+    qweight = torch.round(torch.clamp(weight / safe_scale, -1, 1)) * scale
+    weight_ste = weight + (qweight - weight).detach()      # STE: value = qweight, grad → weight
+    return F.linear(x, weight_ste)
+```
+
+The `weight + (qweight - weight).detach()` line is the STE in one expression: numerically it equals `qweight` (the term
+you subtract is detached from the graph), but its gradient with respect to `weight` is 1, so the optimizer trains the
+latent weights as if the quantizer weren't there. At export time the latents are thrown away and the weights are frozen
+to `int8` in `{−1, 0, +1}` plus the FP32 scales:
+
+```python
+def ternary_components(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return int8 {-1, 0, 1} weights and FP32 per-output scales."""
+    scale = weight.detach().float().abs().mean(dim=1, keepdim=True)
+    safe_scale = scale.clamp_min(torch.finfo(torch.float32).eps)
+    qweight = torch.round(torch.clamp(weight.detach().float() / safe_scale, -1, 1))
+    return qweight.to(torch.int8), scale
+```
+
+## Does it work?
+
+The honest, useful result is that at this scale the quantization is nearly free. Trained on
+[TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) (a synthetic corpus of simple children's stories)
+for 655M tokens, the model's validation loss barely moves when you go from the latent weights to the hard-ternary ones:
+
+<BenchBars
+  title="TinyStories validation loss (lower is better; self-reported, single run)"
+  unit=""
+  bars={[
+    { label: "final training", value: 1.5895 },
+    { label: "latent (STE eval)", value: 1.5970 },
+    { label: "hard ternary", value: 1.6074, highlight: true },
+  ]}
+/>
+
+The bars are almost identical on purpose — that *is* the finding. Freezing the network to pure ternary weights costs
+only **+0.01 loss** over the latent model it was trained as. The quantization the model trained under is the same one it
+ships with, so there's no distribution shift at export. And the deployed artifact is a fraction of the size:
+
+<BenchBars
+  title="Deployed model size"
+  unit=" MB"
+  bars={[
+    { label: "latent checkpoint", value: 182 },
+    { label: "ternary export", value: 43, highlight: true },
+  ]}
+/>
+
+The whole run cost about **$0.70** — ~50 minutes on a single L40S at ~200k tokens/second. That cheapness is a feature:
+it makes ternary QAT something you can actually reproduce and poke at, not a claim you take on faith.
+
+<Callout type="warn">
+These numbers are the author's own, from a single training run on one small synthetic dataset, and TinyStories loss is
+not a general capability benchmark. Treat them as a clean proof-of-concept that ternary-from-scratch *converges* at this
+scale — not as evidence about how ternary trades off against full precision on a real, large model. BitNet's own papers
+argue the gap stays small up to billions of parameters, but that's a separate, much larger claim than this repo makes.
+</Callout>
+
+## What a 15M ternary model can and can't do
+
+It's worth being blunt about the ceiling. TinyStories exists precisely so that tiny models can learn *something*
+coherent: the vocabulary and grammar are simple, the stories are short, and 256 tokens of context is plenty. Within that
+box, Ternary15M does the job — it generates grammatical, on-topic little stories, and it does so from weights that are
+almost entirely signs. That's the point of the artifact.
+
+What it can't do is everything a real LM does. There's no world knowledge, no reasoning, no code, no long context, no
+instruction following — 15M parameters and a children's-story corpus don't reach any of that, and ternary quantization
+doesn't change the ceiling in either direction. The value here isn't the model's outputs; it's that the *training
+recipe* — BitLinear layers, an absmean scale, an STE, and a from-scratch schedule — demonstrably works end to end and
+lands within a hundredth of a nat of its full-precision-latent self.
+
+## The take
+
+Ternary15M is a good teaching artifact for a genuinely surprising idea: you can restrict every weight in a network to
+one of three values and, if you *train* it that way rather than clipping after the fact, pay almost nothing in loss. The
+mechanism is clean — signs replace floats, so dot products become signed accumulation with one scale multiply per
+channel; the STE lets gradients flow to a latent copy the quantizer hides; the absmean scale keeps magnitudes sane. The
+honest caveats are that this is a 15M model on TinyStories with self-reported numbers, and that at this scale the FP32
+embedding table, not the ternary matmuls, dominates the file size. But as a from-scratch, $0.70, reproducible window
+into how BitNet-style quantization actually works, it's about as legible as this idea gets.
+
+---
+
+*Source: the [Ternary15M repository](https://github.com/brianbell-x/ternary15M) (Brian Bell, MIT license) — its
+`README`, `MODEL_CARD.md`, `RESULTS.md`, and `ternary15m/model.py`. The lineage is
+[BitNet b1.58](https://arxiv.org/abs/2402.17764) (Ma et al.). Code snippets are from the repo; the interactive diagram
+is mine. The repo ships no figures, so there are none to reproduce here — the numbers above are quoted from its
+`RESULTS.md` and model card.*
