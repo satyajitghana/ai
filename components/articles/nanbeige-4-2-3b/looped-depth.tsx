@@ -7,14 +7,15 @@ import { Range } from "@/components/articles/ui/range"
 // The architectural hook: a Looped Transformer reuses the same physical layers
 // several times instead of stacking more of them. Effective compute depth is
 // (physical layers × loops), but the parameter count is just the physical
-// layers — you buy depth with FLOPs, not weights. This is illustrative of the
-// idea (Nanbeige doesn't publish its exact loop count); L is fixed at 8 here.
+// layers — you buy depth with FLOPs, not weights. The technical report settles
+// on 2 passes (the sweet spot; more passes barely help and destabilize
+// training), so the slider defaults to ×2. L is fixed at 8, illustrative.
 
 const ACCENT = "oklch(0.64 0.1 188)"
 const L = 8 // illustrative physical layer count
 
 export function LoopedDepth() {
-  const [k, setK] = useState(3)
+  const [k, setK] = useState(2)
   const effective = L * k
 
   return (
@@ -79,7 +80,7 @@ export function LoopedDepth() {
 
         <div className="mt-4">
           <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-muted-foreground">
-            <span>loop count</span>
+            <span>loop count{k === 2 ? " · Nanbeige ships ×2" : ""}</span>
             <span className="tabular-nums text-foreground">×{k}</span>
           </div>
           <Range min={1} max={6} step={1} value={k} onChange={(e) => setK(+e.target.value)} className="w-full" aria-label="loop count" accent={ACCENT} />
@@ -88,8 +89,10 @@ export function LoopedDepth() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Both columns do <span style={{ color: ACCENT }}>{effective} layers</span> of computation. The looped
           one stores only {L} layers&rsquo; worth of weights and runs them {k} times; the standard one pays for
-          all {effective} in parameters. That&rsquo;s how a 3B model reaches for the reasoning depth of a much
-          bigger one — the same recurrent-depth idea as <em>LOTUS</em>, traded FLOPs-for-weights.
+          all {effective} in parameters. Nanbeige ships <span style={{ color: ACCENT }}>×2</span>{" "}&mdash; the
+          report finds it keeps ~75% of a standard Transformer&rsquo;s token efficiency while adding real capacity, and
+          that more passes buy almost nothing but slower, less stable training. Same recurrent-depth bet as{" "}
+          <em>LOTUS</em>, traded FLOPs-for-weights.
         </p>
       </div>
     </figure>
