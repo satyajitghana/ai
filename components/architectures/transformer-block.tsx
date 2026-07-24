@@ -14,7 +14,7 @@ export function TransformerBlock() {
       </div>
       <div className="p-3 sm:p-4">
         <svg
-          viewBox="0 0 680 640"
+          viewBox="-190 0 870 640"
           className="w-full"
           role="img"
           aria-label="A pre-norm decoder-only Transformer block. Token and positional embeddings enter at the bottom, flow through a LayerNorm into multi-head self-attention with a residual add, then a LayerNorm into a feed-forward MLP with a residual add. The block repeats N times, followed by a final LayerNorm and an LM head producing logits."
@@ -25,7 +25,25 @@ export function TransformerBlock() {
             </marker>
           </defs>
 
-          <rect x="0" y="0" width="680" height="640" rx="14" fill="#f7f4ea" />
+          <rect x="-190" y="0" width="870" height="640" rx="14" fill="#f7f4ea" />
+
+          {/* ── left annotation callouts (distill-style leaders) ── */}
+          <g>
+            <text x="-176" y="544" fontSize="12.5" fontWeight={600} fill="#3b6ea5">Input</text>
+            <text x="-176" y="560" fontSize="10" fill="#6b6b6b">tokens + positions → vectors</text>
+            <path d="M-32,548 H165" fill="none" stroke="#9a968c" strokeWidth="1" strokeDasharray="4 3" />
+            <circle cx="167" cy="548" r="2.2" fill="#9a968c" />
+
+            <text x="-176" y="398" fontSize="12.5" fontWeight={600} fill="#3b6ea5">Mixing</text>
+            <text x="-176" y="414" fontSize="10" fill="#6b6b6b">tokens attend to the past</text>
+            <path d="M-32,402 H190" fill="none" stroke="#9a968c" strokeWidth="1" strokeDasharray="4 3" />
+            <circle cx="192" cy="402" r="2.2" fill="#9a968c" />
+
+            <text x="-176" y="233" fontSize="12.5" fontWeight={600} fill="#3b6ea5">Thinking</text>
+            <text x="-176" y="249" fontSize="10" fill="#6b6b6b">per-token MLP · d→4d→d</text>
+            <path d="M-32,237 H190" fill="none" stroke="#9a968c" strokeWidth="1" strokeDasharray="4 3" />
+            <circle cx="192" cy="237" r="2.2" fill="#9a968c" />
+          </g>
 
           {/* dashed "repeat x N" block container */}
           <rect x="140" y="156" width="420" height="348" rx="12" fill="#ffffff" fillOpacity="0.5" stroke="#9a968c" strokeWidth="1.2" strokeDasharray="5 4" />
