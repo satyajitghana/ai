@@ -1,6 +1,7 @@
 import type {
   Article,
   BlogPosting,
+  BreadcrumbList,
   Person,
   ScholarlyArticle,
   SoftwareSourceCode,
@@ -76,30 +77,66 @@ export function websiteJsonLd(): WithContext<WebSite> {
 }
 
 export function blogPostingJsonLd(post: BlogPost): WithContext<BlogPosting> {
+  const url = absoluteUrl(`/blog/${post.slug}`)
+  const ogImage = absoluteUrl(`/blog/${post.slug}/opengraph-image`)
   return {
     "@context": "https://schema.org",
     "@type": "BlogPosting",
     headline: post.title,
     description: post.description,
+    image: post.cover ? [absoluteUrl(post.cover), ogImage] : [ogImage],
     datePublished: post.date,
-    ...(post.updated ? { dateModified: post.updated } : {}),
-    url: absoluteUrl(`/blog/${post.slug}`),
+    dateModified: post.updated ?? post.date,
+    url,
+    mainEntityOfPage: { "@type": "WebPage", "@id": url },
     keywords: post.tags.join(", "),
+    wordCount: post.body.split(/\s+/).filter(Boolean).length,
+    timeRequired: `PT${post.readingTimeMins}M`,
+    inLanguage: "en",
+    isAccessibleForFree: true,
     author: { "@id": `${siteUrl}/#person` },
+    publisher: { "@id": `${siteUrl}/#person` },
   }
 }
 
 export function articleJsonLd(article: ContentArticle): WithContext<Article> {
+  const url = absoluteUrl(`/articles/${article.slug}`)
+  const ogImage = absoluteUrl(`/articles/${article.slug}/opengraph-image`)
   return {
     "@context": "https://schema.org",
     "@type": "Article",
     headline: article.title,
     description: article.description,
+    image: article.cover ? [absoluteUrl(article.cover), ogImage] : [ogImage],
     datePublished: article.date,
-    ...(article.updated ? { dateModified: article.updated } : {}),
-    url: absoluteUrl(`/articles/${article.slug}`),
+    dateModified: article.updated ?? article.date,
+    url,
+    mainEntityOfPage: { "@type": "WebPage", "@id": url },
     keywords: article.tags.join(", "),
+    ...(article.tags.length ? { articleSection: article.tags[0] } : {}),
+    wordCount: article.body.split(/\s+/).filter(Boolean).length,
+    timeRequired: `PT${article.readingTimeMins}M`,
+    inLanguage: "en",
+    isAccessibleForFree: true,
     author: { "@id": `${siteUrl}/#person` },
+    publisher: { "@id": `${siteUrl}/#person` },
+  }
+}
+
+// Breadcrumb trail (Home › Section › Page) — a Google rich-result signal that
+// also clarifies site structure to crawlers. Paths are made absolute here.
+export function breadcrumbJsonLd(
+  crumbs: { name: string; path: string }[]
+): WithContext<BreadcrumbList> {
+  return {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: crumbs.map((c, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      name: c.name,
+      item: absoluteUrl(c.path),
+    })),
   }
 }
 

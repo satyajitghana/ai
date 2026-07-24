@@ -11,13 +11,15 @@ import {
 import { absoluteUrl } from "@/lib/site"
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  const staticPages = [
+  const staticPages: MetadataRoute.Sitemap = [
     "/",
     "/about",
     "/resume",
     "/projects",
     "/blog",
     "/articles",
+    "/models",
+    "/architectures",
     "/logs",
     "/arxiv",
     "/publications",
@@ -31,7 +33,16 @@ export default function sitemap(): MetadataRoute.Sitemap {
     "/notes",
     "/colophon",
     "/changelog",
-  ].map((p) => ({ url: absoluteUrl(p) }))
+  ].map((p) => ({
+    url: absoluteUrl(p),
+    // The homepage and the index pages that grow most often rank as the
+    // highest-priority, most-frequently-changing entries.
+    changeFrequency:
+      p === "/" || p === "/articles" || p === "/blog" || p === "/arxiv"
+        ? ("daily" as const)
+        : ("weekly" as const),
+    priority: p === "/" ? 1 : p === "/articles" || p === "/blog" ? 0.8 : 0.6,
+  }))
 
   return [
     ...staticPages,
@@ -42,6 +53,8 @@ export default function sitemap(): MetadataRoute.Sitemap {
     ...getArticles().map((a) => ({
       url: absoluteUrl(`/articles/${a.slug}`),
       lastModified: a.updated ?? a.date,
+      changeFrequency: "monthly" as const,
+      priority: a.featured ? 0.8 : 0.7,
     })),
     ...getLogs().map((l) => ({
       url: absoluteUrl(`/logs/${l.slug}`),
