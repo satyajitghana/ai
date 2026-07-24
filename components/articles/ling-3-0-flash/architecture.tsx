@@ -336,7 +336,8 @@ export function LingArchitecture() {
           <span style={{ color: "#3a6ea5" }}>KDA</span>+MoE blocks (linear&#8209;time memory) then{" "}
           <strong>1×</strong> <span style={{ color: "#b05a5a" }}>Gated&nbsp;MLA</span>+MoE (full attention with RoPE for exact
           recall), repeated <strong>×7</strong>. The right panels expand the two attention modules: <strong>Gated MLA</strong>{" "}
-          (latent Q/K/V projections, RoPE, a sigmoid output gate) and <strong>KDA</strong> (a gated delta&#8209;rule linear
+          (latent Q/K/V projections, RoPE, a sigmoid output gate) and <strong>KDA</strong>{" "}
+          (a gated delta&#8209;rule linear
           attention with per&#8209;channel decay). A recreation of the launch architecture figure in the house paper&#8209;figure style.
         </p>
       </div>
