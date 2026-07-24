@@ -29,6 +29,7 @@ import {
 export type {
   Article,
   ArticleFrontmatter,
+  ArticleSignal,
   BlogFrontmatter,
   BlogPost,
   ContentItem,
@@ -44,7 +45,7 @@ export type {
   Snippet,
   SnippetFrontmatter,
 } from "./schema"
-export { paperLinks } from "./schema"
+export { articleSignal, paperLinks } from "./schema"
 
 const CONTENT_DIR = path.join(process.cwd(), "content")
 

@@ -1,0 +1,215 @@
+---
+title: "Solar Open 2: Upstage's 250B-A15B hybrid-attention MoE"
+description: "Upstage's Solar Open 2 is a 250B-parameter (15B active) Mixture-of-Experts model built on a hybrid attention stack — twelve blocks of one softmax layer and three linear-attention (KDA) layers, no positional encoding, a 1M-token context, and open weights under the Upstage Solar License. A walk through why only 12 of 48 layers keep a KV cache, the selective-weight-transfer init from Solar Open 1 (not depth up-scaling), the ~12T-token training, and the full self-reported English and Korean benchmark suite."
+date: 2026-07-24
+interest: 4
+helpful: 3
+tags:
+  - llm
+  - open-weights
+  - upstage
+  - moe
+  - long-context
+draft: false
+featured: false
+cover: /articles/solar-open2-250b/fig1.png
+---
+
+import { HybridStack } from "@/components/articles/solar-open2-250b/hybrid-stack"
+
+**Solar Open 2** is Upstage's newest open-weight model: a **250B-parameter Mixture-of-Experts** that activates **15B per token**, ships on Hugging Face, and serves a **1M-token context**. Upstage frames it as an *agentic specialist* — built for tool calling, multi-step reasoning, and document-heavy officework — and as a sovereign-AI play, strong in Korean and Japanese as well as English. What makes it worth a close read is not the parameter count but the **architecture**: instead of a conventional softmax-attention transformer, Solar Open 2 runs a **hybrid stack** that interleaves one softmax-attention layer with three linear-attention layers, and drops positional encoding entirely.
+
+I read the [model card](https://huggingface.co/upstage/Solar-Open2-250B) and the accompanying [technical report](https://huggingface.co/upstage/Solar-Open2-250B/blob/main/Solar_Open_2_Tech_Report.pdf) for this. Two framing notes before any benchmark chart: every number below is **self-reported** by Upstage on its own harness, and the comparison set (DeepSeek-V4-Flash, MiMo-V2.5, Command A+, and others) is Upstage's chosen field. I keep both caveats attached throughout.
+
+<Callout type="warn">
+All benchmark numbers here are **Upstage-reported** — its own eval harness, its own choice of comparison models and settings. Solar Open 2 tops **no** row against the strongest open model in its bracket: on most English benchmarks **DeepSeek-V4-Flash** (284B-A13B) leads and Solar Open 2 comes second. Read it as a **strong model for its 15B active size** and a genuinely interesting *architecture*, not a leaderboard winner. The daggered Korean rows (`Ko-AIME'25`, `KBank-MMLU`, `Ko-GDPval`) are Upstage **in-house** benchmarks; treat those as least comparable across vendors.
+</Callout>
+
+## The Solar name, and what this is not
+
+If you know the **Solar** name, you probably know it for **depth up-scaling** — the 2023 trick behind Upstage's original SOLAR 10.7B, where you grow a model by duplicating and stacking layers from a smaller base rather than training a new shape from scratch. It's reasonable to expect the lineage to continue. It doesn't. **Solar Open 2's card describes no depth up-scaling.** What it describes instead is a **selective weight transfer**: the model is initialized from its predecessor, **Solar Open 1** (102B-A12B), but *"only the 2.3% of weights that survive the architectural change are carried over, and everything else is randomly initialized."*
+
+That 2.3% is the honest headline of the training story. The architectural change is drastic enough — a new hybrid attention stack, no positional encoding, an expert pool grown from 128 to 320 — that almost none of the old model's weights fit the new shape. What transfers cleanly are the parts the two generations share: the token embeddings and output layer (same 196,608-token tokenizer), and the fragments of attention and MoE that survive. Everything else starts from noise. So this is not a re-skin of Solar Open 1 and not a depth-up-scaled Solar 10.7B — it is a **mostly-fresh 250B model** that borrows a running start.
+
+## The hybrid attention stack
+
+Here is the distinctive move, and the reason the 1M context is affordable. Solar Open 2 has **48 layers**, arranged as **twelve identical blocks**, each block being **one softmax-attention layer followed by three linear-attention layers** — the pattern the card writes as `[Softmax, Linear×3] × 12`. So **12 of the 48 layers are softmax; 36 are linear.**
+
+The reason this matters is memory. A **softmax** layer keeps a **KV cache** that grows linearly with the sequence — every past token's keys and values must be stored so the next token can attend to them. A **linear-attention** layer does not: it folds the entire past into a **fixed-size recurrent state**, so its memory is constant no matter how long the context runs. By making three of every four layers linear, Solar Open 2 keeps a growing KV cache on only **12 of 48 layers** — *"holding long-context memory to roughly a quarter of an all-softmax model of the same shape,"* per the card.
+
+Toggle between the hybrid stack and an all-softmax baseline, and drag the context length to watch the KV-cache footprint each one carries:
+
+<HybridStack />
+
+The KV-cache arithmetic is worth doing by hand, because it is the whole efficiency argument. Each softmax layer is **grouped-query attention** with **8 KV heads** and `head_dim` 128; storing K and V in fp16 costs, per token per softmax layer:
+
+$$
+2 \times n_{kv} \times d_{head} \times b = 2 \times 8 \times 128 \times 2 = 4096 \text{ bytes}
+$$
+
+Multiply by the number of KV-bearing layers and the context length. At **1M tokens**:
+
+- **Solar Open 2 (12 softmax layers)** → about **48 GiB** of KV cache.
+- **An all-softmax stack (48 layers)** → about **192 GiB** — exactly 4× more.
+
+That 4× is the margin that turns a 1M-token window from "possible on a rack" into "fits alongside the weights." If linear attention is new to you, I built the mechanism up in [how transformers attention works](/articles/how-transformers-attention-works) and the sparse-attention variants in [MiniMax sparse attention](/articles/minimax-sparse-attention); the KV-cache side of the story is [how LLM inference works](/articles/how-llm-inference-works), and squeezing the cache further is [TurboQuant](/articles/turboquant-kv-cache).
+
+Three details make the linear layers actually work at this depth, and the card is specific about all three:
+
+- **NoPE — no positional encoding.** Because the linear layers *"encode token order intrinsically in their recurrent state,"* Upstage removes rotary encoding entirely. The upside the card claims: no RoPE extrapolation limit, so the trained window is not tied to a length distribution seen during training.
+- **KDA with negative eigenvalues.** The linear layers use **Kimi Delta Attention** (the Kimi Linear lineage — see [Kimi K3](/articles/kimi-k3)), but with `allow_neg_eigval=True`, widening the state-transition write strength to $\beta = 2\sigma(\cdot) \in (0, 2)$. Standard linear cores restrict eigenvalues to $[0,1]$ (decay or persist only); allowing the sign to flip restores the ability to *erase* and self-correct — the card ties this to genuine state-tracking (parity, modular counting).
+- **A sigmoid output gate on the softmax layers**, which the card says suppresses the "attention sink" pathology and improves long-context extrapolation.
+
+One ordering detail separates it from its cousins: within each block the **softmax layer comes first** (`S-L-L-L`), unlike the linear-first ordering (`L-L-L-S`) of Kimi Linear and Qwen3.5. Upstage's own architecture figure lays the whole thing out — the 12× block on the left, and insets for the MoE, the GQA softmax layer, and the KDA linear layer, color-coded by which weights transferred from Solar Open 1:
+
+<Figure
+  src="/articles/solar-open2-250b/fig2.png"
+  alt="Solar Open 2 architecture diagram. Left: the 48-layer stack as a block repeated 12 times, each block a softmax-attention layer plus MoE followed by a linear-attention layer plus MoE, fed by a token embedding with a NoPE label and topped by a linear output layer. Insets detail the Mixture-of-Experts block (320 routed experts plus one shared expert, a router, and a sum), the softmax attention layer (GQA with a scaled dot-product and an elementwise sigmoid gate), and the linear attention layer (KDA with L2-normed Q/K, convolutions, a gated delta rule, and a negative-eigenvalue term beta = 2 sigma of x). Modules are colored: blue for full weight transfer from Solar Open 1, green for partial transfer, yellow for random initialization."
+  caption="Solar Open 2 architecture: the [Softmax, Linear×3] × 12 stack, with MoE, GQA-sigmoid-gate softmax, and KDA linear-attention insets. Blue = transferred from Solar Open 1, green = partial, yellow = randomly initialized (Upstage, Solar Open 2 Technical Report, Figure 3)."
+/>
+
+## Where the parameters live
+
+The sparsity is the economic argument, so account for it. Solar Open 2 is **250B total, 15B active** — a **6% activation rate**. Each MoE block holds **321 experts: 320 routed plus 1 shared**; the router keeps the **top-8 routed** experts per token, and the shared expert always runs, so 9 experts fire per token. There are **no dense layers** — every block is MoE. The backbone it inherits from Solar Open 1 is **48 layers, hidden size 4096, head dim 128, 64 query / 8 KV heads**, and the **196,608-token** vocabulary.
+
+If MoE routing is unfamiliar, I built the router, the top-k gate, and the sparsity argument from nothing in [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch) — the same machinery that lets a 250B model serve at roughly the cost of a 15B dense one.
+
+## Training
+
+Upstage is thinner on the data story than on the architecture, and I won't pad it. The concrete figures: **~12 trillion pre-training tokens**, on **NVIDIA B200** GPUs, for **2M GPU-hours**, initialized by the 2.3% selective transfer above. The technical report adds that the run *"maximizes value per token over a globally deduplicated corpus"* and trains on *"purpose-built long-horizon agent scenarios"* spanning conversational tool use, coding, and officework — the agentic focus is baked into the data, not just the eval suite.
+
+The tokenizer is the other inherited advantage. Solar Open 2 reuses Solar Open 1's **Korean-efficient** byte-level BPE tokenizer unchanged; the report claims global-model tokenizers spend **1.2–1.9× more tokens** on the same Korean text. In long agent trajectories, where the working context accumulates over many turns, fewer tokens per unit of Korean text translates directly into lower inference cost and a longer effective window — a real, if narrow, edge.
+
+## The benchmarks
+
+Upstage's headline figure bundles six benchmarks across knowledge/reasoning and agentic/professional work, with Solar Open 2 (dark violet) against Solar Open 100B and the sub-320B open field:
+
+<Figure
+  src="/articles/solar-open2-250b/fig1.png"
+  alt="Six grouped bar panels — MMLU-Pro, MATH (HMMT'26/AIME'26), LiveCodeBench v6, APEX-Agents, SWE-Bench Verified, MCP-Atlas — comparing Solar Open 2 (dark violet) and Solar Open 100B (light violet) against Command A+, Mistral Medium 3.5, MiMo-V2.5, and DeepSeek-V4-Flash (grey). Solar Open 2 leads MMLU-Pro (86.2), MATH (94.8), LiveCodeBench (92.4) narrowly, and APEX-Agents (16.6) by a wide margin; on SWE-Bench Verified (70.4) and MCP-Atlas (58.2) it trails MiMo-V2.5 and DeepSeek-V4-Flash."
+  caption="Upstage's headline suite. Solar Open 2 leads its bracket on MMLU-Pro, MATH, LiveCodeBench, and (by a wide margin) APEX-Agents; it trails on the harder agentic panels (Upstage, Solar Open 2 model card)."
+/>
+
+The clearest *win* is agentic tool-use in the **APEX-Agents** suite, where Solar Open 2 roughly doubles the rest of its bracket — a result consistent with the agent-scenario training:
+
+<BenchBars
+  title="APEX-Agents (%) — Upstage-reported"
+  bars={[
+    { label: "Solar Open 2", value: 16.6, highlight: true },
+    { label: "MiMo-V2.5", value: 13.4 },
+    { label: "DeepSeek-V4-Flash", value: 13.2 },
+    { label: "Mistral Medium 3.5", value: 6.1 },
+    { label: "Command A+", value: 1.6 },
+  ]}
+/>
+
+On coding it edges the field on **LiveCodeBench v6** (92.4 vs DeepSeek-V4-Flash's 92.3) but sits behind on the harder **SWE-Bench Verified** agentic coding task — the "competitive, not leading" pattern in miniature:
+
+<BenchBars
+  title="SWE-Bench Verified (%) — Upstage-reported"
+  bars={[
+    { label: "Solar Open 2", value: 70.4, highlight: true },
+    { label: "Mistral Medium 3.5", value: 69.6 },
+    { label: "MiMo-V2.5", value: 73.0 },
+    { label: "DeepSeek-V4-Flash", value: 73.8 },
+  ]}
+/>
+
+The full English suite, with the best value in each row bolded (Upstage's own marking):
+
+| Benchmark | Solar Open 2<br/>250B-A15B | Solar Open 100B<br/>102B-A12B | Command A+<br/>218B-A25B | Mistral Medium 3.5<br/>128B | MiMo-V2.5<br/>310B-A15B | DeepSeek-V4-Flash<br/>284B-A13B |
+|---|--:|--:|--:|--:|--:|--:|
+| MMLU-Pro | **86.2** | 80.4 | 79.0 | 81.2 | 84.6 | 85.9 |
+| GPQA-Diamond | 86.3 | 66.2 | 75.6 | 77.5 | 83.0 | **88.9** |
+| HLE (no tools) | 28.8 | 11.5 | 11.4 | 12.8 | 24.3 | **32.3** |
+| LiveCodeBench v6 | **92.4** | 56.5 | 86.1 | 84.9 | 89.1 | 92.3 |
+| ArtifactsBench | 55.9 | 43.4 | 42.8 | 49.8 | 59.3 | **61.0** |
+| HMMT 2026 | 93.9 | 68.9 | 73.5 | 62.9 | 61.4 | **94.7** |
+| AIME 2026 | 95.7 | 87.7 | 96.0 | 89.0 | 92.3 | **97.0** |
+| Multi-Challenge | 61.0 | 40.5 | 45.8 | 49.8 | 39.0 | **62.0** |
+| IFBench | 80.0 | 57.7 | 73.9 | 69.0 | 67.1 | **80.3** |
+| AA-LCR | 62.3 | 36.0 | 46.0 | 61.0 | 62.7 | **63.7** |
+| SWE-Bench Verified | 70.4 | 15.4 | 14.4 | 69.6 | 73.0 | **73.8** |
+| Terminal-Bench Hard | 28.3 | 2.3 | 25.0 | 33.3 | **41.7** | 34.1 |
+| APEX-Agents | **16.6** | 2.4 | 1.6 | 6.1 | 13.4 | 13.2 |
+| MCP-Atlas | 58.2 | 34.4 | 27.2 | 30.7 | **63.9** | 58.2 |
+| τ³ (banking) | 19.6 | 7.4 | 5.8 | 5.8 | 8.7 | **22.3** |
+| GDPval-AA v2 (ELO) | 1128 | – | 712 | 929 | 1145 | **1187** |
+
+The shape is consistent: Solar Open 2 leads on **MMLU-Pro, LiveCodeBench, and APEX-Agents**, and is otherwise a close **second to DeepSeek-V4-Flash** — which, at 284B-A13B, is a comparable-scale sparse model. Against the smaller **Solar Open 100B**, the jump is large and uniform (SWE-Bench Verified 15.4 → 70.4, APEX-Agents 2.4 → 16.6), which is the more meaningful comparison since it isolates a generation of progress on one team's harness.
+
+Where Solar Open 2 actually **leads** is Korean — unsurprising given the tokenizer and data focus. It tops **CLIcK, HAE-RAE, KBank-MMLU, KBL, and Ko-GDPval**, beating even the closed **GPT-5.4 mini** and **Claude Haiku 4.5** on several:
+
+<BenchBars
+  title="CLIcK — Korean cultural/commonsense (%) — Upstage-reported"
+  bars={[
+    { label: "Solar Open 2", value: 90.7, highlight: true },
+    { label: "GPT-5.4 mini", value: 89.6 },
+    { label: "DeepSeek-V4-Flash", value: 89.2 },
+    { label: "Claude Haiku 4.5", value: 53.5 },
+  ]}
+/>
+
+| Benchmark | Solar Open 2 | Solar Open 100B | MiMo-V2.5 | DeepSeek-V4-Flash | Claude Haiku 4.5 | GPT-5.4 mini |
+|---|--:|--:|--:|--:|--:|--:|
+| KMMLU-Pro | 78.4 | 64.0 | 69.1 | **78.9** | 67.9 | 78.1 |
+| CLIcK | **90.7** | 78.9 | 78.4 | 89.2 | 53.5 | 89.6 |
+| HAE-RAE v1.1 | **73.8** | 73.3 | 61.7 | 73.1 | 38.5 | 69.4 |
+| Ko-AIME'25 † | 97.7 | 80.0 | 88.0 | **98.0** | 81.7 | 90.7 |
+| HRM8K | 92.2 | 87.6 | 90.7 | **93.4** | 90.6 | 91.3 |
+| KBank-MMLU † | **80.8** | 65.5 | 71.0 | 79.5 | 68.9 | 79.0 |
+| KBL | **75.5** | 65.5 | 69.8 | 72.8 | 69.9 | 75.3 |
+| KorMedMCQA | 93.0 | 84.4 | 87.7 | 94.1 | 87.0 | **94.2** |
+| Ko-GDPval † | **86.8** | 3.4 | 81.0 | 85.0 | 68.3 | 59.4 |
+
+*† Upstage in-house benchmarks — least comparable across vendors.* The report's boldest claim rides on the last row: on Ko-GDPval, a Korean officework-agent benchmark, it says Solar Open 2 *"essentially matches DeepSeek-V4-Pro (1.6T) at less than a sixth of its size."* That is an in-house benchmark and a self-comparison, so weight it accordingly — but the direction (a Korean-specialized 250B beating much larger generalists on Korean agentic work) is plausible and repeated across the daggered rows.
+
+## Running it
+
+The weights are ~250B in bf16, so this is multi-GPU territory: Upstage lists a **minimum of 4× H200** (141 GB) and **recommends 8× H200**. The supported production path is **vLLM** (an Upstage fork), with expert-parallel MoE:
+
+```bash
+vllm serve upstage/Solar-Open2-250B \
+  --served-model-name solar-open2-250b \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --moe-backend triton \
+  --reasoning-parser solar_open2 \
+  --tool-call-parser solar_open2 \
+  --enable-auto-tool-choice
+```
+
+Solar Open 2 is a reasoning model with a two-position knob: `reasoning_effort="high"` turns on chain-of-thought (a reasoning block capped at 131,072 tokens), and `reasoning_effort="none"` answers directly. Because the reasoning trace counts against `max_tokens`, Upstage recommends leaving room — up to 256K for the full response in high-effort mode — and preserving prior reasoning traces across turns.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+
+resp = client.chat.completions.create(
+    model="solar-open2-250b",
+    messages=[{"role": "user", "content": "Prove that the square root of 2 is irrational."}],
+    reasoning_effort="high",
+    temperature=1.0,
+    top_p=1.0,
+    max_tokens=131584,
+)
+print(resp.choices[0].message.reasoning)  # reasoning returned separately
+print(resp.choices[0].message.content)
+```
+
+Two nice touches for agent builders. The same vLLM server exposes **both** an OpenAI-compatible `/v1` endpoint and an **Anthropic-compatible `/v1/messages`** endpoint, so **Claude Code** can point straight at it (`ANTHROPIC_BASE_URL=http://localhost:8000`) with no proxy, and MCP tools reach the model through the standard tool-calling interface. For smaller boxes, **NotaAI** publishes official quantized builds — INT4, NVFP4, and an INT4-GlobalPruned variant; the [NVFP4](/articles/nemotron-nvfp4) format is the same 4-bit floating layout NVIDIA pushes for Blackwell.
+
+## License: open weights, with a name tax
+
+Solar Open 2 is **open-weight, not fully open-source**. It ships under the **Upstage Solar License**, and the derivative terms are specific: any model you create, fine-tune, or distill from it must **prefix its name with "Solar"** (e.g. `Solar-MyModel-v1`), **prominently display "Built with Solar"** in public materials, and **include a copy of the license**. That is looser than a research-only license — commercial use and derivatives are allowed — but it is a **branded** license, not Apache-2.0. If you plan to build on it, the naming and attribution requirements are load-bearing, not boilerplate.
+
+## The take
+
+Solar Open 2's real interest is **architectural**, not positional. It is a clean, well-documented instance of the **hybrid linear/softmax** direction — three linear-attention layers for every softmax one, no positional encoding, KDA with negative eigenvalues — that makes a **1M-token context** affordable by keeping a KV cache on only a quarter of its layers. Paired with a 6%-activation MoE and a Korean-efficient tokenizer, that is a coherent systems story aimed squarely at long-horizon agents, and the honest, unusual init note (2.3% of weights transferred, the rest random) is a refreshing departure from the Solar brand's depth-up-scaling past.
+
+The caveats are the standard open-weights ones, stated plainly. Every number is Upstage's own harness against a field it chose, and on that field Solar Open 2 is **a consistent second to DeepSeek-V4-Flash** on English work — leading its bracket on a few benchmarks (MMLU-Pro, LiveCodeBench, APEX-Agents) but not the pack. Its clearest edge is **Korean**, much of it measured on **in-house** benchmarks. And the license carries a name-and-attribution tax that Apache-2.0 models don't. For a team that wants an **open, agent-capable, genuinely long-context** model — especially one working in Korean — and can run 4–8× H200, Solar Open 2 earns a serious look. As the strongest open model at 250B, that title still belongs to the model it keeps finishing behind.
+
+---
+
+*Built from the [Solar Open 2 model card](https://huggingface.co/upstage/Solar-Open2-250B) and [technical report](https://huggingface.co/upstage/Solar-Open2-250B/blob/main/Solar_Open_2_Tech_Report.pdf) (250B-A15B, hybrid attention, 1M context, Upstage Solar License). All benchmark numbers are Upstage-reported; the two figures are reproduced from Upstage's model card and technical report for commentary. The interactive stack diagram is an illustration of the mechanism — the layer pattern, the KV-cache-bearing layers, and the fp16 KV-cache arithmetic use the published config; the linear-attention state memory is a small constant left out of the readout for clarity.*
