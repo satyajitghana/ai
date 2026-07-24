@@ -1,0 +1,192 @@
+---
+title: "Scaling agentic RL: 365,000 environments behind one contract"
+description: "Prime Intellect integrated 23 agentic tasksets — software-engineering, terminal, and web-search — behind a single taskset API: ~365,000 tasks with prebuilt per-task sandbox images, grading material withheld until scoring, and gold-patch/no-op-validated re-uploads. A walk through why agentic RL is bottlenecked on verified, reproducible environments; the one-contract design (verifiers v1's taskset/harness/runtime split and the Harbor format); the catalog and its counts; the validation pipeline; and the honest failure modes — reward hacks and PR-test false negatives."
+date: 2026-07-24
+interest: 5
+helpful: 4
+tags:
+  - reinforcement-learning
+  - agents
+  - environments
+  - infrastructure
+  - prime-intellect
+  - explainer
+draft: false
+featured: true
+cover: /articles/scaling-agentic-rl/cover.png
+---
+
+import { RolloutPipeline } from "@/components/articles/scaling-agentic-rl/rollout-pipeline"
+import { TasksetMap } from "@/components/articles/scaling-agentic-rl/taskset-map"
+
+The reinforcement-learning recipe for agents is, by now, boring in the good way: put the agent in an environment, let it act, check whether it succeeded, and reward it for succeeding. The hard part was never the algorithm. It is the phrase "check whether it succeeded." At scale you need *hundreds of thousands* of tasks that each come with a sandbox the agent can act in and a **grader that produces a clean, reproducible reward** — and the open-source ecosystem, for all its great datasets, does not ship that. Every SWE benchmark, every terminal corpus, every search eval invents its own harness, its own image conventions, its own grading scripts, and its own failure modes. They do not compose.
+
+[Prime Intellect's post](https://www.primeintellect.ai/blog/scaling-agentic-rl) (Daniel Auras and team, July 2026) is an engineering answer to exactly that: they took **23 agentic tasksets across three domains and put them behind one taskset API** — roughly **365,000 tasks** (~198,000 software-engineering across 20+ languages, ~28,600 terminal, ~137,600 search), each with a prebuilt sandbox image, each grader withheld until scoring, many re-uploaded only after gold-validation. This piece walks the thesis, the design, the catalog, and the caveats.
+
+<Callout type="warn">
+This is a **company engineering post**. Prime Intellect sells the sandbox/compute platform (Prime Sandboxes, `prime-rl`) that this catalog runs on, so read the framing as a product argument, not a neutral survey. The task **counts are their displayed, shipped figures**; several shrink after validation (the [validation table](#gold-validated-then-re-uploaded) below shows by how much). And there is **no independent benchmark of training quality** here — the post ships a training *config* (GLM-4.5-Air on `scaleswe_v1`, 6 H200 nodes, 2 days) but no accuracy numbers, so treat the value as *infrastructure*, not a SOTA result. What is genuinely useful is the design pattern, which stands on its own.
+</Callout>
+
+## The bottleneck is the environment, not the algorithm
+
+Here is the shape of the problem the post is solving. Each upstream taskset made reasonable choices for its *own* harness, and those choices don't compose: SWE-bench applies test patches inside a generated eval script; R2E-Gym bakes tests into the image and compares against expected outputs; every search benchmark invents its own judge. If you want to train **one** agent across all of them, you have to normalize those lifecycles without breaking each taskset's own scoring semantics — because the scoring semantics are the whole point. A reward you can't trust is worse than no reward.
+
+Prime Intellect frames it in one line: *"A taskset row is only useful if it can produce a clean reward signal."* And a "surprising fraction" of open agentic data fails that precondition — broken images, network-dependent tests, expected outputs that drifted, and tasks that score as solved without touching the code at all. Scaling RL, in this telling, is far less about the loss function (see [Ring-Zero](/articles/ring-zero-trillion-scale-rl) and [frontier RL economics](/articles/frontier-rl-cheaper) for the loss/systems side) and far more about **manufacturing verified, reproducible environments in bulk**.
+
+## One environment, three layers
+
+The enabling idea is [verifiers v1](https://www.primeintellect.ai/blog/verifiers-v1), which decomposes an environment into three independent layers:
+
+- **Taskset** — the data and its scoring logic (what problem, what counts as solved). *This post is the taskset layer.*
+- **Harness** — how the agent is driven (Codex, their own harness, or yours).
+- **Runtime** — where it executes (a Prime sandbox, local Docker, …).
+
+Because those layers are independent, one command can run any taskset in any harness on any runtime:
+
+```bash
+# ScaleSWE, in the Codex harness, on Prime Sandboxes:
+uv run eval scaleswe-v1 --harness.id codex --harness.runtime.type prime -n 3
+```
+
+The taskset-layer packaging format is called **Harbor**: SWE-bench Verified "runs the Harbor Hub packaging against the official instance images," and Terminal-Bench 2 is wrapped "through the same Harbor taskset, so the eval suite and the training corpora share one task format and one scoring contract." That last clause is the whole design in miniature — *the thing you evaluate on and the thing you train on speak the same format and the same scoring contract.*
+
+## A rollout, end to end
+
+Concretely, every taskset exposes the same handful of hooks, and a rollout walks them in the same order. The one beat worth internalizing is the **integrity** move: during a rollout the agent lives inside the *same* sandbox as the grading machinery, so "anything readable in the container is fair game for a reward hack." So the grading material — the test patch, the expected outputs, the grader — is **withheld until scoring**, then restored only to compute the reward. Step through it:
+
+<RolloutPipeline />
+
+The contract that makes this uniform is small — a typed data schema plus four hooks:
+
+```python
+import verifiers.v1 as vf
+
+class MyTaskData(vf.TaskData):
+    base_commit: str    # state the sandbox resets to
+    test_patch: str     # grading material — withheld until scoring
+    gold_patch: str     # reference fix — used only by `validate`
+
+class MyTask(vf.Task[MyTaskData]):
+    async def setup(self, runtime): ...            # prepare the repo in the task's image
+    async def finalize(self, trace, runtime): ...  # capture the agent's diff into the trace
+
+    @vf.reward
+    async def solved(self, runtime) -> float:      # restore tests, apply test_patch,
+        ...                                        # run the taskset's own upstream grader
+
+    async def validate(self, runtime) -> bool:     # gold patch must score 1.0;
+        ...                                        # the no-op (setup-only) run must not
+```
+
+Some upstream authors deliberately ship the tests readable — R2E-Gym keeps its grading tests at `/r2e_tests`, Multi-SWE leaves grading scripts and `test.patch` under `/home`. That is fine for an attach-at-eval harness, but not for a *live RL sandbox* under optimization pressure, so Prime Intellect's integrations hide those artifacts and restore them only for scoring.
+
+## Four decisions that make tasksets compose
+
+The integrations keep every taskset's original grading path — upstream log parsers, upstream report generation, upstream test commands — and normalize everything *around* it. Four decisions do the work:
+
+- **One API.** Every taskset loads from a typed config (dataset, split, filters), provisions a sandbox from the task's image, and scores with the taskset's own logic. Swapping splits or adding a `filter_fn` works the same everywhere.
+- **One image registry.** Task images live in Prime's own registry, co-located with the sandboxes — **~135,000 prebuilt open-source task images**, which they claim is the largest such catalog hosted by any sandbox provider. The point is operational: no Docker Hub rate limits "when running a thousand concurrent rollouts," and reproducibility from a pinned per-task image rather than a build step that can drift.
+- **One integrity standard.** Grading material withheld until scoring, as above — the reward-hack defense.
+- **One validation bar.** Before a dataset earns a default slot, it runs gold-patch and no-op validation, and a cleaned version is re-uploaded with exclusions preserved. That is the next section.
+
+## The catalog: 23 tasksets, three domains
+
+Pick a domain to see its tasksets and their (shipped) task counts. The three domains are lopsided — software engineering and search dominate the raw count; terminal is smaller but denser in verified benchmarks.
+
+<TasksetMap />
+
+The domain split of the ~365,000 total:
+
+<BenchBars
+  title="Tasks by domain (~365,000 total)"
+  unit="k"
+  bars={[
+    { label: "SWE · 20+ langs", value: 198, highlight: true },
+    { label: "Search", value: 137.6 },
+    { label: "Terminal", value: 28.6 },
+  ]}
+/>
+
+### Software engineering
+
+Real repositories, real diffs; the reward is whether hidden tests pass after the agent's patch. Counts are the displayed shipped totals; parenthetical notes flag the gold-validated re-upload sizes where they differ.
+
+| Taskset | Tasks | What it is |
+|---|---|---|
+| SWE-bench Verified | 500 | Human-filtered GitHub issues in major Python repos; the canonical benchmark |
+| SWE-bench Multilingual | 300 | The canonical set across C, C++, Go, Java, JS/TS, PHP, Ruby, Rust |
+| SWE-bench Pro | 731 | Harder successor; large-scale diffs from license-friendly repos |
+| SWE-smith | 83,519 | Bugs *injected* into healthy repos, keeping the tests that catch them (8 languages) |
+| R2E-Gym | 4,578 | Executable envs from real commits with synthesized issues (4,522 gold-validated) |
+| Multi-SWE | 6,835 | Containerized RL + eval instances across 7 languages (2,232 in the validated RL set) |
+| SWE-rebench-V2 | 32,079 | Continuously mined fresh PRs, 20 languages, decontaminated by recency (6,275 verified) |
+| Scale-SWE | 17,202 | Python tasks with test patches applied just before eval (from 20,181 raw) |
+| SWE-Lego | 15,903 | SWE-bench-style training data at scale; tests applied only at scoring |
+| OpenSWE | 36,884 | Tasks paired with per-task eval scripts kept out of the sandbox until scoring |
+| Senior SWE-Bench | 50 | Investigation/design tasks from 12 production repos; pytest/vitest + optional LLM rubric |
+
+### Terminal
+
+Give the agent a shell and a goal; a hidden pytest grader checks the end state. Smaller in raw count, but this is where the community-standard evals live.
+
+| Taskset | Tasks | What it is |
+|---|---|---|
+| TMax | 14,600 | Terminal tasks, each pinned to a prebuilt image; all 14,600 boot-and-setup verified |
+| Terminal-Lego | ~13,800 | Docker-verified Terminal-Bench-style tasks built from real StackOverflow issues |
+| OpenThoughts-TBLite | 100 | High-signal 100-task terminal-agent benchmark; hidden grader |
+| Terminal-Bench 2 | 89 | Community-standard eval; 89 rigorously verified tasks |
+
+### Search
+
+The search tasksets share one design decision: they are **harness-agnostic and tool-free**. The taskset ships questions and scoring *only* — the harness brings its own search tool (the Codex harness's built-in web search, Prime's search skill, or yours). The same tasks then train and evaluate any search-capable agent without the environment prescribing a retrieval pipeline.
+
+| Taskset | Tasks | What it is |
+|---|---|---|
+| PaperSearchQA | 59,907 | Biomedical deep-research QA (54,907 train + 5,000 test); judge-graded |
+| WideSeek | 44,632 | WideSearch-style table compilation; scored by item-level cell F1 |
+| S1-DeepResearch | ~15,000 | Multi-hop resolution questions with gold answers; judge-graded |
+| OpenSeeker | 11,677 | Web-research QA with the original judge prompt |
+| DeepDive | 3,250 | Hard multi-hop research (2,234 RL + 1,016 SFT); strict boxed-answer judge |
+| BrowseComp | 1,266 | OpenAI's browsing benchmark, in its Explanation/Exact-Answer/Confidence format |
+| REDSearcher | 1,000 | Long-horizon web-research questions |
+| BrowseComp-Plus | 830 | BrowseComp re-grounded in a fixed 100,195-doc corpus, with a controlled BM25 `search` tool |
+
+BrowseComp-Plus is the one exception to bring-your-own-search: because it serves the benchmark's own BM25 retriever over a fixed corpus, the retriever becomes a *controlled variable* and runs are reproducible — evidence recall is tracked alongside accuracy.
+
+## Gold-validated, then re-uploaded
+
+This is the part that separates the catalog from a link farm. For each dataset, Prime Intellect ran the **gold patch through the full scoring path** in fresh sandboxes, **retried failures up to 10×** to separate flaky from deterministically broken, ran **independent second passes** to catch noisy rows, and ran **multiple no-edit passes** to drop tasks that score `1.0` with no fix at all. The two-sided precondition is simple: *gold patch applied → tests pass; no patch → tests fail.* Every dropped row is persisted in the re-upload so you can audit the exclusion.
+
+The shrinkage is not cosmetic — for the noisiest sources, most of the raw rows do not survive:
+
+| Verified re-upload | Raw | Verified | What dropped |
+|---|---|---|---|
+| R2E-Gym-Subset-Verified | 4,578 | 4,522 | 56 network/timing-sensitive `aiohttp`/`tornado` tests |
+| SWE-Lego-Real-Data-Verified | 4,432 | 4,323 | flaky rows, via two independent passes |
+| Multi-SWE-RL-Verified | 4,703 | 2,232 | a no-edit filter caught tasks gradeable as solved with zero edits |
+| SWE-rebench-V2-Filtered-Verified | 32,079 | 6,275 | wholesale-broken images; inline GitHub issue/PR references scrubbed |
+| SWE-Bench-Verified-Quick | 500 | 468 | the slowest examples, for quick online-evals |
+
+Two of these deserve a callout. **SWE-rebench-V2** goes from 32,079 to 6,275 — an 80% cut — and its design goal is worth stealing: it *"continuously mines fresh GitHub PRs into tasks… naturally decontaminated by recency."* If your tasks are always newer than any model's training cutoff, benchmark contamination stops being a worry by construction. And **Multi-SWE**'s no-edit filter is the quiet hero: a task that grades as solved before the agent does anything is pure reward-hack fuel, and it takes a dedicated pass to find them. The same tooling ships publicly — `uv run validate <taskset-id>` is the model-free sibling of `eval`, running the gold check and the setup-only no-op check in independent runtimes.
+
+## Why this matters for RL at scale
+
+Strip the product framing and the reusable lesson is a data-engineering one. RL at scale does not fail on the gradient; it fails on **thousands of tiny reward bugs** — a flaky test, a drifted output, a container that won't boot, a task solvable without work — each of which quietly poisons the learning signal. The contribution here is treating environments as a *manufactured, versioned, validated artifact*: one task format, one scoring contract, prebuilt per-task images for reproducibility, grading hidden until scoring for integrity, and a gold/no-op validation gate before anything is trusted. That is the same discipline data teams already apply to training corpora, finally applied to the *reward* side — which, for agentic RL, is where the actual difficulty lives.
+
+## Where the reward signal still lies
+
+The post is refreshingly candid that this is mitigation, not a solved problem. A reward signal can lie in two directions, and Prime Intellect names both.
+
+<Callout type="warn">
+**False positives — reward hacks.** As long as grading runs *where the agent lives*, "a policy under RL pressure will eventually find whatever seam is left" — an editable test file, tamperable grading state, an artifact that leaks the answer. Withholding grading material raises the bar significantly but is not a guarantee; the structural fix they put on the roadmap is **grading in isolated sandboxes**, so the environment the agent can touch and the one that scores it are separate.
+
+**False negatives — correct-but-different fixes.** Validation cannot catch this one by construction. Tasks mined from merged PRs inherit that PR's tests, and those tests often assert *implementation details* rather than behavior — an exact error string, a private helper's name, a precise return shape. An agent that fixes the underlying issue a different but equally correct way still fails them, and the reward reads as a false negative. Gold-patch validation is blind to it (the original patch passes its own tests by definition). At RL scale these near-misses are noise that *punishes correct work*. Their mitigation — "Agentic Judging" — is announced but not yet detailed.
+</Callout>
+
+## The take
+
+The headline number — 365,000 environments — is the least interesting thing here. The interesting thing is the **contract**: 23 datasets that each shipped their own harness, image conventions, and grader now load through one typed API, run on prebuilt per-task images, hide their grading material until scoring, and pass a gold/no-op validation gate before they are trusted — with the failed rows kept for audit. That is the unglamorous, correct answer to "how do you get reproducible reward at scale," and it is exactly the layer that has been missing while everyone argued about losses. Take the counts as shipped figures and the training value as unbenchmarked; take the design pattern as the real deliverable. If agentic RL is bottlenecked on verified environments — and the evidence says it is — then a validated, versioned, one-contract catalog is a more load-bearing contribution than another clever objective.
+
+---
+
+*Built on Prime Intellect's [Scaling Agentic RL: 365,000+ Environments for SWE, Terminal, and Search](https://www.primeintellect.ai/blog/scaling-agentic-rl) (Daniel Auras and the Prime Intellect Team, July 2026), with the taskset details drawn from the post and the [research-environments](https://github.com/PrimeIntellect-ai/research-environments) and [verifiers](https://github.com/PrimeIntellect-ai/verifiers) repos it links. All task counts and validation figures are Prime Intellect's own reported numbers. The two interactive diagrams are my redrawings of the mechanism (the rollout pipeline and the taskset map), not reproductions of the post's charts; the hero image is the post's own cover art. There is no independent benchmark of training outcomes in the source, and I have not run one.*

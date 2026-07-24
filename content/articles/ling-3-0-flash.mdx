@@ -1,0 +1,239 @@
+---
+title: "Ling-3.0-flash: a 124B open MoE that runs like a 5B and reaches for 1M tokens"
+description: "inclusionAI's Ling-3.0-flash is a 124B-parameter, ~5.1B-active open MoE that reaches a 1M-token context by interleaving Kimi Delta Attention (linear-time) with Gated MLA (full attention) at a 5:1 ratio, over a 512-expert / 8-active FFN. A first-principles tour of the hybrid-attention stack, the E512A8 + shared-expert MoE, and where the launch benchmarks land it against the 1T flagship and the frontier — plus the striking resemblance to Kimi K3."
+date: 2026-07-24
+interest: 5
+helpful: 4
+tags:
+  - llm
+  - mixture-of-experts
+  - linear-attention
+  - hybrid-attention
+  - open-weights
+  - explainer
+draft: false
+featured: true
+cover: /articles/ling-3-0-flash/fig1.png
+---
+
+import { LingArchitecture } from "@/components/articles/ling-3-0-flash/architecture"
+import { KvVsState } from "@/components/articles/ling-3-0-flash/kv-vs-state"
+
+[Ling-3.0-flash](https://huggingface.co/inclusionAI/Ling-3.0-flash), released 2026-07-23 by **inclusionAI**
+(Ant Group's Ling/Bailing MoE family), is a **124B-parameter** open Mixture-of-Experts that activates only
+**~5.1B parameters per token** — about **4%**. It ships with a **256K native context** that is designed to
+extend to **1M tokens**, a hybrid-reasoning ("thinking") mode, and a claim that lands harder than the spec sheet:
+with roughly **1/8 the total** and **1/12 the active** parameters, it *matches or beats inclusionAI's own 1T
+flagship* on most of the benchmarks it was launched against.
+
+The interesting part is not the sparsity ratio on its own — it's the **attention stack** that makes a cheap
+million-token context tractable. Ling-3.0-flash is built on **hybrid linear attention**: it interleaves **KDA
+(Kimi Delta Attention)** — a gated delta-rule linear-attention layer with constant-size memory — with **Gated
+MLA** full attention, at a **5:1 ratio**, and feeds each block into a **512-expert MoE** that fires just **8
+experts** plus **1 shared expert** per token. This is a first-principles tour of each piece, why it matters, and
+where the launch numbers put it.
+
+<LingArchitecture />
+
+Read the center stack bottom-to-top: tokens are embedded, pass through **7 groups** of blocks — each group is
+**5×** (KDA + MoE) followed by **1×** (Gated MLA + MoE) — then a final norm, a 157k-vocab output projection, and
+a multi-token-prediction head. The two right-hand panels expand the attention modules. Take the ideas one at a
+time.
+
+## KDA: constant-size memory over a very long context
+
+Ordinary softmax attention keeps a **KV cache** that grows by one entry per token. At a 256K–1M context that cache
+*is* the cost: decoding becomes [memory-bound on a cache that scales with sequence length](/articles/how-llm-inference-works),
+and it only gets heavier as the context fills.
+
+**KDA** avoids that. It is a **gated delta-rule linear attention**: instead of a growing cache it keeps a
+**fixed-size recurrent state** $S_t$ that each token updates in place — it *erases* a little of the old state (a
+per-channel gated decay) and *writes* the new key/value association (the delta rule). A compact way to write the
+family is
+
+$$
+S_t = \mathrm{Diag}(\alpha_t)\, S_{t-1} + \beta_t\, k_t v_t^{\top}, \qquad o_t = S_t\, q_t
+$$
+
+where $\alpha_t$ is the gated decay (the erase), $\beta_t\, k_t v_t^{\top}$ is the written delta, and $o_t$ reads
+the state with the query. The state $S_t$ is a fixed $d \times d$ matrix — its size does **not** depend on how many
+tokens came before. That is exactly the structure the right-hand KDA panel draws: queries and keys go through a
+short conv and an L2 norm, values through a conv, and learned $\alpha$/$\beta$ gates (softplus $\varphi$ and sigmoid
+$\sigma$) control the decay and write, with a final sigmoid output gate.
+
+Because the state is constant-size, KDA runs in **linear time and constant memory** in the sequence length — so
+five of every six layers pay *no* growing-cache cost at all. Only the single Gated-MLA layer per group keeps a
+real KV cache, so the model's total long-context memory grows at roughly **1/6 the slope** of an all-attention
+model. Drag the context length and watch the gap open up:
+
+<KvVsState />
+
+This is the lever behind "1M-token context" being a design target rather than a marketing number. It is not free —
+a linear-attention state is a **lossy summary**, not a perfect record — which is exactly why Ling keeps full
+attention in the mix.
+
+## Gated MLA: one full-attention layer per group for exact recall
+
+Every group's sixth block is a **Gated MLA** layer — **Multi-head Latent Attention** with **RoPE** and a learned
+sigmoid gate. MLA compresses keys and values into a low-rank latent before attending, which shrinks the KV cache
+of the full-attention layers themselves; RoPE gives the positional structure that makes long-range *exact* recall
+work. The left panel's callout says it plainly: the **1M-token context** rides on RoPE-equipped MLA, while KDA
+carries the **linear time complexity**.
+
+The division of labour is the whole point. KDA is cheap but forgetful; full attention is exact but expensive. A
+**5:1** interleave keeps one exact-recall layer in every group so the lossy linear layers have something precise to
+anchor to — you get most of full attention's fidelity at a fraction of its memory. This is the same bet Moonshot
+made in [Kimi K3](/articles/kimi-k3), and the resemblance is not subtle (more on that below).
+
+## The MoE: 8 of 512, plus a shared expert, kept balanced
+
+Ling-3.0-flash's feed-forward is a **fine-grained MoE**: **512 routed experts**, of which only **8** fire per
+token — an activation ratio of **1/64** — plus **1 shared expert** that runs on every token to carry the common,
+always-useful computation. That extreme sparsity is what lets a 124B model spend only ~5.1B parameters per token:
+the compute is that of a ~5B model while the *knowledge capacity* is that of a 124B one.
+
+At 1/64 activation two problems that are mild in a denser MoE turn first-order. **Routing** has to be learned well
+or most of the capacity is wasted, and **load balance** matters even more — if a few experts hog the tokens, the
+rest never train and the effective model collapses to something far smaller than 124B. Ling's answer is
+**ALF-LB (adaptive load balancing)**: rather than a single brittle auxiliary-loss coefficient, it adapts the
+balancing pressure per expert so utilisation stays even without destabilising training — the same *spirit* as K3's
+aux-loss-free balancing, aimed at keeping all 512 experts alive.
+
+Two more structural details worth stating:
+
+- **The first 2 blocks use a dense FFN instead of MoE.** Early layers do broad, low-level feature mixing where
+  routing buys little and can hurt stability, so Ling keeps them dense and only switches to sparse experts deeper
+  in the stack — a common, load-bearing choice at this sparsity.
+- **Multi-Token Prediction (MTP).** The training objective is next-token prediction **plus** an auxiliary
+  multi-token-prediction head (the node at the top of the stack). MTP densifies the learning signal per step and
+  doubles as a **self-speculative decoding** draft head at inference, which is part of how a "flash" model earns
+  the name.
+
+Rounding out the sheet: a **157k-token vocabulary**, an **embedding dimension of 2,560**, and the 7-group hybrid
+stack above.
+
+## The Kimi K3 resemblance
+
+If this all sounds familiar, it should. [Kimi K3](/articles/kimi-k3) is built on the same three bets — **KDA**
+for constant-size long-context memory, **full attention interleaved** for exact recall, and an **extreme-but-stable
+sparse MoE** with a balancing scheme that avoids a brittle aux-loss knob. Ling-3.0-flash runs the same playbook at
+a very different scale: **124B/5.1B** for a fast production model versus K3's **2.8T/~50B** frontier system, and
+**8-of-512** routing versus K3's 16-of-896. The convergence is the story — two independent open labs arriving at
+the *same* architecture for efficient long-context reasoning strongly suggests this hybrid-linear + sparse-MoE
+recipe is where open models are settling.
+
+## The benchmarks
+
+On its launch suite, inclusionAI compares the **Ling-3.0-flash(RC3)-Thinking** build against a field of thinking
+models: its own 1T **Ring-2.6-1T**, **MiniMax-M2.7**, **Step-3.7-Flash-high**, **Deepseek-v4-flash-max**,
+**Nemotron-3-Super-120B**, **GPT-5.4-mini-high**, and **Claude-Sonnet-4.6-maxthink**. The full grid:
+
+<Figure
+  src="/articles/ling-3-0-flash/fig1.png"
+  alt="A 12-panel grouped bar chart of Ling-3.0-flash(RC3)-Thinking against Ring-2.6-1T-expert, MiniMax-M2.7, Step-3.7-Flash-high, Deepseek-v4-flash-max, Nemotron-3-Super-120B, GPT-5.4-mini-high and Claude-Sonnet-4.6-maxthink across SWE-Bench Pro, SWE-Bench Multilingual, Terminal-Bench v2.1-AA, Tau3-banking-AA, MCP-Atlas, SkillsBench, WideSearch, BrowseComp, IFBench, SysBench, MRCR-128k and Multi-IF. Ling-3.0-flash is highlighted in blue and leads or ties on most agentic panels."
+  caption="Ling-3.0-flash(RC3)-Thinking vs a field of thinking models across coding, agentic, long-context and instruction-following benchmarks (inclusionAI, launch report)."
+/>
+
+The headline result is coding. On **SWE-Bench Pro** the 124B model edges the entire field — including the 1T
+sibling and every frontier opponent it was tested against:
+
+<BenchBars
+  title="SWE-Bench Pro (%)"
+  bars={[
+    { label: "Ling-3.0-flash", value: 56.63, highlight: true },
+    { label: "Step-3.7-Flash", value: 56.3 },
+    { label: "MiniMax-M2.7", value: 56.2 },
+    { label: "Ring-2.6-1T", value: 53.9 },
+    { label: "Deepseek-v4", value: 52.6 },
+    { label: "Claude-Sonnet-4.6", value: 48.29 },
+    { label: "GPT-5.4-mini", value: 47.88 },
+    { label: "Nemotron-3-120B", value: 34.06 },
+  ]}
+/>
+
+Long-context and instruction-following are where the hybrid stack should pay off, and it does. On **MRCR-128k** it
+sits second, just behind Claude and comfortably ahead of the 1T Ring and everything else — while GPT-5.4-mini,
+MiniMax and Step fall off a cliff:
+
+<BenchBars
+  title="MRCR-128k — long context (%)"
+  bars={[
+    { label: "Claude-Sonnet-4.6", value: 92.46 },
+    { label: "Ling-3.0-flash", value: 90.78, highlight: true },
+    { label: "Ring-2.6-1T", value: 90.06 },
+    { label: "Deepseek-v4", value: 88.5 },
+    { label: "GPT-5.4-mini", value: 56.09 },
+    { label: "Nemotron-3-120B", value: 40.76 },
+    { label: "Step-3.7-Flash", value: 39.19 },
+    { label: "MiniMax-M2.7", value: 27.68 },
+  ]}
+/>
+
+On **SysBench** (system-prompt adherence) it's in a three-way near-tie at the top with Claude and Deepseek:
+
+<BenchBars
+  title="SysBench (%)"
+  bars={[
+    { label: "Claude-Sonnet-4.6", value: 94.85 },
+    { label: "Deepseek-v4", value: 93.86 },
+    { label: "Ling-3.0-flash", value: 93.63, highlight: true },
+    { label: "GPT-5.4-mini", value: 93.31 },
+    { label: "Step-3.7-Flash", value: 91.38 },
+    { label: "Nemotron-3-120B", value: 90.73 },
+    { label: "Ring-2.6-1T", value: 86.47 },
+    { label: "MiniMax-M2.7", value: 86.19 },
+  ]}
+/>
+
+It is not a clean sweep. On **Terminal-Bench v2.1-AA** — long-horizon, tool-heavy agent work — Claude-Sonnet-4.6
+is well clear and Deepseek leads the open pack; Ling lands mid-field, ahead of its own 1T sibling but not the
+frontier:
+
+<BenchBars
+  title="Terminal-Bench v2.1-AA (%)"
+  bars={[
+    { label: "Claude-Sonnet-4.6", value: 71.2 },
+    { label: "Deepseek-v4", value: 62 },
+    { label: "Ling-3.0-flash", value: 57, highlight: true },
+    { label: "GPT-5.4-mini", value: 55.81 },
+    { label: "MiniMax-M2.7", value: 55 },
+    { label: "Ring-2.6-1T", value: 43.1 },
+    { label: "Step-3.7-Flash", value: 39.3 },
+    { label: "Nemotron-3-120B", value: 39 },
+  ]}
+/>
+
+The pattern is consistent with the architecture: Ling is strongest where **structured recall and instruction
+adherence** dominate (SWE-Bench Pro, MRCR-128k, SysBench, IFBench), and merely competitive on the longest-horizon
+agent loops where a top proprietary model still pulls ahead. For a 124B model activating ~5.1B parameters, being in
+that conversation — and beating a 1T model at 1/12 the active compute — is the result.
+
+<Callout type="warning">
+**Read these as vendor numbers.** (1) Every score above is **inclusionAI's own launch report** for the
+**RC3-Thinking** build, run against opponents at their listed settings (e.g. `Claude-Sonnet-4.6-maxthink`); treat
+cross-lab comparisons as directional, not audited. (2) The **1M-token context** is a stated design target extending
+a **256K native** window — long-context quality at the far end is not established by MRCR-128k alone. (3)
+Architecture details (the 5:1 KDA:MLA interleave, E512A8 + shared expert, ALF-LB, dense first-2-blocks, MTP) are
+drawn from inclusionAI's release and community write-ups; exact per-layer counts may differ in the final tech
+report. (4) The diagram is a **faithful recreation** of the launch architecture figure in our house style, not the
+original image.
+</Callout>
+
+## The take
+
+Strip away the "beats a 1T model" headline and what's genuinely useful about Ling-3.0-flash is a **coherent,
+reproducible recipe**: **KDA** buys a linear-time, constant-memory path to very long context; a **1-in-6 Gated MLA**
+layer buys back the exact recall linear attention loses; an **8-of-512 + shared-expert** MoE with **ALF-LB** buys
+124B of capacity at ~5B of active compute and keeps all the experts trained; and **MTP** plus dense early blocks
+make the whole thing converge and decode fast. That it is essentially the [Kimi K3](/articles/kimi-k3) architecture
+at 1/22 the size is the most telling part — the frontier recipe for efficient long-context reasoning is now open,
+and it runs on a single node.
+
+---
+
+*Sources: the [Ling-3.0-flash model card](https://huggingface.co/inclusionAI/Ling-3.0-flash) and inclusionAI's
+launch materials (architecture, hybrid KDA/MLA interleave, MoE configuration, benchmarks), the
+[Kilo announcement](https://blog.kilo.ai/p/announcing-ling-30-flash-free-on) (124B/5.1B, 256K→1M context), and
+inclusionAI's launch benchmark chart (reproduced above). Benchmark numbers are quoted from inclusionAI's own
+report for the RC3-Thinking build. The architecture diagram is a house-style recreation of the launch figure; the
+KV-vs-state chart is illustrative (order-of-magnitude, to show the shape).*

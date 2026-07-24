@@ -6,7 +6,7 @@ import { Citation } from "@/components/site/citation"
 import { PageShell } from "@/components/site/page-shell"
 import { ShareButtons } from "@/components/site/share-buttons"
 import { getArticle, getArticles } from "@/lib/content"
-import { articleJsonLd, JsonLd } from "@/lib/jsonld"
+import { articleJsonLd, breadcrumbJsonLd, JsonLd } from "@/lib/jsonld"
 
 // Unknown slugs still 404 via notFound() below; `true` (a static literal, as
 // Next requires) lets newly-added content resolve in dev without a restart.
@@ -54,6 +54,13 @@ export default async function Page({
   return (
     <PageShell>
       <JsonLd data={articleJsonLd(article)} />
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: "Home", path: "/" },
+          { name: "Articles", path: "/articles" },
+          { name: article.title, path: `/articles/${slug}` },
+        ])}
+      />
       <article>
         <header className="mb-10">
           <div className="flex items-start justify-between gap-4">
