@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { usePathname, useRouter } from "next/navigation"
 import {
+  CircleNotchIcon,
   KeyReturnIcon,
   SparkleIcon,
   TerminalWindowIcon,
@@ -82,6 +83,7 @@ export function TerminalOverlay() {
   const [busy, setBusy] = useState(false)
   const [online, setOnline] = useState<boolean | null>(null)
   const [hits, setHits] = useState<Hit[]>([])
+  const [searching, setSearching] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const router = useRouter()
@@ -122,14 +124,20 @@ export function TerminalOverlay() {
     const verb = q.split(/\s+/)[0].toLowerCase()
     if (q.length < 2 || VERBS.includes(verb)) {
       setHits([])
+      setSearching(false)
       return
     }
+    setSearching(true)
     const ctrl = new AbortController()
     const t = setTimeout(() => {
       fetch(`/api/search?q=${encodeURIComponent(q)}&limit=6`, { signal: ctrl.signal })
         .then((r) => r.json())
         .then((d) => setHits(Array.isArray(d.results) ? d.results : []))
         .catch(() => {})
+        .finally(() => {
+          // only the latest (non-aborted) request clears the indicator
+          if (!ctrl.signal.aborted) setSearching(false)
+        })
     }, 140)
     return () => {
       clearTimeout(t)
@@ -363,6 +371,13 @@ export function TerminalOverlay() {
             spellCheck={false}
             enterKeyHint="search"
           />
+          {searching ? (
+            <CircleNotchIcon
+              size={15}
+              className="shrink-0 animate-spin text-muted-foreground"
+              aria-label="Searching"
+            />
+          ) : null}
           <kbd className="hidden shrink-0 rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground sm:inline">
             esc
           </kbd>
@@ -393,6 +408,14 @@ export function TerminalOverlay() {
 
         {/* suggestions / ask action */}
         <div className="border-t">
+          {/* loading indicator while the keyword search is in flight */}
+          {searching && !hits.length ? (
+            <div className="flex items-center gap-2 border-b px-4 py-2.5 text-muted-foreground">
+              <CircleNotchIcon size={14} className="animate-spin" />
+              <span className="text-[13px]">searching pages…</span>
+            </div>
+          ) : null}
+
           {/* instant keyword matches (BM25) — jump straight to a page */}
           {hits.length ? (
             <ul className="max-h-[38vh] overflow-y-auto border-b">
