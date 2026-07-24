@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import Link from "next/link"
 import {
   ArrowsOutIcon,
@@ -148,7 +149,6 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
   const [expanded, setExpanded] = useState<ArchCard | null>(null)
   const topRef = useRef<HTMLDivElement>(null)
 
-  const diagramCount = items.filter((a) => a.hasDiagram).length
   const families = FAMILY_ORDER.filter((f) => items.some((a) => a.family === f))
   const familyCounts = Object.fromEntries(
     families.map((f) => [f, items.filter((a) => a.family === f).length]),
@@ -237,9 +237,6 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
             {FAMILY_LABEL[f]} <span className="tabular-nums opacity-50">{familyCounts[f]}</span>
           </button>
         ))}
-        <button type="button" onClick={() => applyFamily("diagram")} aria-pressed={family === "diagram"} className={chip(family === "diagram")}>
-          ◈ diagram <span className="tabular-nums opacity-50">{diagramCount}</span>
-        </button>
       </div>
 
       <div className="mb-6 flex flex-wrap items-center gap-2">
@@ -305,17 +302,20 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
         ))}
       </div>
 
-      {/* expanded block modal */}
-      {expanded ? (
+      {/* expanded block modal — portaled to <body> so it escapes any ancestor
+          stacking context (e.g. the sticky nav) and can scroll tall diagrams */}
+      {expanded && typeof document !== "undefined"
+        ? createPortal(
         <div
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-background/80 p-3 pt-[6vh] backdrop-blur-sm sm:p-6"
+          className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain bg-background/85 backdrop-blur-sm"
           onClick={() => setExpanded(null)}
           role="dialog"
           aria-modal="true"
           aria-label={expanded.name}
         >
+          <div className="flex min-h-full items-start justify-center p-3 sm:p-6">
           <div
-            className="w-full max-w-4xl rounded-xl border bg-background p-5 shadow-lg sm:p-6"
+            className="my-2 w-full max-w-4xl rounded-xl border bg-background p-4 shadow-lg sm:my-6 sm:p-6"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-4">
@@ -350,8 +350,11 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
               </span>
             </div>
           </div>
-        </div>
-      ) : null}
+          </div>
+        </div>,
+            document.body,
+          )
+        : null}
     </div>
   )
 }
