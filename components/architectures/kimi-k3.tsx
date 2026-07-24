@@ -228,13 +228,14 @@ export function KimiK3Architecture() {
           ))}
           <Line d={`M${busX} 82 L899 82`} color={RESID} w={1.1} arrow />
 
-          <text x={942} y={540} textAnchor="middle" fill={INK} fontSize="12" fontWeight={600}>Block Attention Residuals (AttnRes α)</text>
+          <text x={942} y={734} textAnchor="middle" fill={INK} fontSize="12" fontWeight={600}>Block Attention Residuals (AttnRes α)</text>
         </svg>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Two module types repeat down the stack — <strong>KDA</strong> (Kimi Delta Attention: a gated delta-rule
           linear-attention block) and <strong>Stable LatentMoE</strong> (shared + routed experts under a stabilizing
-          norm), interleaved with a <strong>Gated MLA</strong> full-attention layer. The twist is the residual
+          norm), interleaved with a <strong>Gated MLA</strong>{" "}
+          full-attention layer. The twist is the residual
           pathway: every module&rsquo;s output is mixed back through an <strong>AttnRes</strong> gate{" "}
           <span style={{ color: RESID }}>α</span> that can read <em>all</em> earlier blocks and the embedding, not just
           the one below it — a learnable, weighted skip across the whole depth.
