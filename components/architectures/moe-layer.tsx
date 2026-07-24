@@ -76,6 +76,7 @@ export function MoeLayer() {
           ))}
 
           {/* section label */}
+          <rect x="292" y="223" width="136" height="14" fill="#f7f4ea" />
           <text x="360" y="230" textAnchor="middle" dominantBaseline="central" fontSize="10" fill="#6b6b6b">
             experts (each a small FFN)
           </text>
