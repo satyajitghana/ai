@@ -149,7 +149,6 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
   const [expanded, setExpanded] = useState<ArchCard | null>(null)
   const topRef = useRef<HTMLDivElement>(null)
 
-  const diagramCount = items.filter((a) => a.hasDiagram).length
   const families = FAMILY_ORDER.filter((f) => items.some((a) => a.family === f))
   const familyCounts = Object.fromEntries(
     families.map((f) => [f, items.filter((a) => a.family === f).length]),
@@ -238,9 +237,6 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
             {FAMILY_LABEL[f]} <span className="tabular-nums opacity-50">{familyCounts[f]}</span>
           </button>
         ))}
-        <button type="button" onClick={() => applyFamily("diagram")} aria-pressed={family === "diagram"} className={chip(family === "diagram")}>
-          ◈ diagram <span className="tabular-nums opacity-50">{diagramCount}</span>
-        </button>
       </div>
 
       <div className="mb-6 flex flex-wrap items-center gap-2">

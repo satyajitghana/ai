@@ -14,8 +14,8 @@ import { TransformerBlock } from "./transformer-block"
 const DIAGRAMS: Record<string, ComponentType> = {
   transformer: TransformerBlock,
   "mixture-of-experts": MoeLayer,
-  "multi-head-attention": AttentionKvSharing,
-  "kimi-delta-attention": KimiK3Architecture,
+  "attention-kv": AttentionKvSharing,
+  "kimi-k3": KimiK3Architecture,
 }
 
 export const ARCH_DIAGRAM_SLUGS = new Set(Object.keys(DIAGRAMS))

@@ -16,25 +16,29 @@ export const metadata: Metadata = {
 export default function Page() {
   // Slim, serializable projection handed to the client gallery. The signal is
   // derived from each entry's own interest + uniqueness (data/architectures.ts).
-  const items = architectures.map((a) => {
-    const s = architectureSignal(a)
-    return {
-      slug: a.slug,
-      name: a.name,
-      family: a.family,
-      year: a.year,
-      tags: a.tags,
-      interest: a.interest,
-      uniqueness: a.uniqueness,
-      summary: a.summary,
-      article: a.article ?? null,
-      paper: a.paper ?? null,
-      signal: s.level,
-      signalLabel: s.label,
-      score: s.score,
-      hasDiagram: ARCH_DIAGRAM_SLUGS.has(a.slug),
-    }
-  })
+  // Only architectures that have a vetted diagram are shown — the gallery is a
+  // set of unique model architectures, each with its own figure.
+  const items = architectures
+    .filter((a) => ARCH_DIAGRAM_SLUGS.has(a.slug))
+    .map((a) => {
+      const s = architectureSignal(a)
+      return {
+        slug: a.slug,
+        name: a.name,
+        family: a.family,
+        year: a.year,
+        tags: a.tags,
+        interest: a.interest,
+        uniqueness: a.uniqueness,
+        summary: a.summary,
+        article: a.article ?? null,
+        paper: a.paper ?? null,
+        signal: s.level,
+        signalLabel: s.label,
+        score: s.score,
+        hasDiagram: true,
+      }
+    })
 
   return (
     <PageShell
