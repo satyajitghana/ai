@@ -2,16 +2,20 @@
 
 import { useEffect, useRef, useState } from "react"
 import Link from "next/link"
-import { ArrowUpRightIcon, CaretDownIcon } from "@phosphor-icons/react/dist/ssr"
+import {
+  ArrowsOutIcon,
+  ArrowUpRightIcon,
+  XIcon,
+} from "@phosphor-icons/react/dist/ssr"
 
 import { ArchDiagram } from "@/components/architectures/registry"
 import { cn } from "@/lib/utils"
 
-// Client gallery for /architectures: filter by family (and "has diagram"), sort
-// by uniqueness / interest / signal / newest / name — persisted to the URL. Each
-// card carries a 1–5 signal badge derived from the entry's own interest +
-// uniqueness (see data/architectures.ts). Entries with a vetted distill diagram
-// get an inline, collapsible figure.
+// Client gallery for /architectures: a grid of architecture "blocks". Diagrams
+// render inline by default; cards lift on hover and expand into a full-size
+// modal on click. Filter by family (and "has diagram"), sort by uniqueness /
+// interest / signal / newest / name — persisted to the URL. Each card carries a
+// 1–5 signal badge derived from the entry's own interest + uniqueness.
 type ArchCard = {
   slug: string
   name: string
@@ -49,7 +53,6 @@ const FAMILY_LABEL: Record<string, string> = {
   other: "Other",
 }
 
-// family display order (roughly by count / importance)
 const FAMILY_ORDER = [
   "transformer",
   "attention",
@@ -86,6 +89,49 @@ function SignalBars({ level, label, interest, uniqueness }: { level: number; lab
   )
 }
 
+// Shared metadata row (family chip + signal + raw scores).
+function MetaRow({ a }: { a: ArchCard }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-xs text-muted-foreground">
+      <span className="rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/80">
+        {FAMILY_LABEL[a.family]}
+      </span>
+      <SignalBars level={a.signal} label={a.signalLabel} interest={a.interest} uniqueness={a.uniqueness} />
+      <span className="text-muted-foreground/60">interest {a.interest}/5 · unique {a.uniqueness}/5</span>
+    </div>
+  )
+}
+
+// article / paper link (used in both card + modal); stops propagation so it
+// navigates instead of expanding the card.
+function SourceLink({ a }: { a: ArchCard }) {
+  if (a.article) {
+    return (
+      <Link
+        href={`/articles/${a.article}`}
+        onClick={(e) => e.stopPropagation()}
+        className="flex items-center gap-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
+      >
+        read the explainer <ArrowUpRightIcon size={12} weight="bold" />
+      </Link>
+    )
+  }
+  if (a.paper) {
+    return (
+      <a
+        href={a.paper}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="flex items-center gap-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
+      >
+        paper <ArrowUpRightIcon size={12} weight="bold" />
+      </a>
+    )
+  }
+  return null
+}
+
 type Sort = "unique" | "interest" | "signal" | "new" | "name"
 
 const SORTS: { key: Sort; label: string }[] = [
@@ -99,7 +145,7 @@ const SORTS: { key: Sort; label: string }[] = [
 export function ArchitecturesList({ items }: { items: ArchCard[] }) {
   const [family, setFamily] = useState<string>("all")
   const [sort, setSort] = useState<Sort>("unique")
-  const [open, setOpen] = useState<Record<string, boolean>>({})
+  const [expanded, setExpanded] = useState<ArchCard | null>(null)
   const topRef = useRef<HTMLDivElement>(null)
 
   const diagramCount = items.filter((a) => a.hasDiagram).length
@@ -138,6 +184,21 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
     if (s === "interest" || s === "signal" || s === "new" || s === "name") setSort(s)
   }, [])
 
+  // Modal: close on Escape, lock body scroll while open.
+  useEffect(() => {
+    if (!expanded) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpanded(null)
+    }
+    window.addEventListener("keydown", onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    return () => {
+      window.removeEventListener("keydown", onKey)
+      document.body.style.overflow = prev
+    }
+  }, [expanded])
+
   const writeUrl = (nextFamily: string, nextSort: Sort) => {
     const sp = new URLSearchParams(window.location.search)
     if (nextFamily !== "all") sp.set("family", nextFamily)
@@ -156,7 +217,6 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
     setSort(s)
     writeUrl(family, s)
   }
-  const toggle = (slug: string) => setOpen((o) => ({ ...o, [slug]: !o[slug] }))
 
   const chip = (active: boolean) =>
     cn(
@@ -194,74 +254,104 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
         </span>
       </div>
 
-      <ul className="space-y-5" data-stagger>
+      {/* grid — diagram blocks span full width (readable), text blocks pair 2-up */}
+      <div className="grid grid-flow-row-dense grid-cols-1 gap-4 sm:grid-cols-2">
         {sorted.map((a) => (
-          <li key={a.slug} className="rounded-xl border bg-gradient-to-b from-muted/10 to-transparent p-4 sm:p-5">
-            <div className="flex items-baseline justify-between gap-4">
-              <h2 className="font-heading text-lg font-semibold">{a.name}</h2>
+          <div
+            key={a.slug}
+            onClick={() => setExpanded(a)}
+            className={cn(
+              "group relative flex cursor-pointer flex-col rounded-xl border bg-gradient-to-b from-muted/10 to-transparent p-4 transition-all duration-150 hover:-translate-y-0.5 hover:border-foreground/25 hover:shadow-md sm:p-5",
+              a.hasDiagram && "sm:col-span-2",
+            )}
+          >
+            {/* expand affordance — keyboard-focusable, visible on hover */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                setExpanded(a)
+              }}
+              aria-label={`Expand ${a.name}`}
+              className="absolute right-2.5 top-2.5 z-10 rounded-md border bg-background/70 p-1 text-muted-foreground opacity-0 backdrop-blur transition-all hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+            >
+              <ArrowsOutIcon size={14} weight="bold" />
+            </button>
+
+            <div className="flex items-baseline justify-between gap-4 pr-6">
+              <h2 className="font-heading text-lg font-semibold group-hover:text-foreground">{a.name}</h2>
               <span className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">{a.year}</span>
             </div>
 
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-xs text-muted-foreground">
-              <span className="rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/80">
-                {FAMILY_LABEL[a.family]}
-              </span>
-              <SignalBars level={a.signal} label={a.signalLabel} interest={a.interest} uniqueness={a.uniqueness} />
-              <span className="text-muted-foreground/60">
-                interest {a.interest}/5 · unique {a.uniqueness}/5
-              </span>
+            <div className="mt-2">
+              <MetaRow a={a} />
             </div>
 
             <p className="mt-3 leading-7 text-muted-foreground">{a.summary}</p>
 
-            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-xs">
-              {a.tags.length ? (
-                <span className="text-muted-foreground/70">{a.tags.join(" · ")}</span>
-              ) : null}
-              <span className="ml-auto flex items-center gap-3">
-                {a.article ? (
-                  <Link
-                    href={`/articles/${a.article}`}
-                    className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
-                  >
-                    read the explainer <ArrowUpRightIcon size={12} weight="bold" />
-                  </Link>
-                ) : a.paper ? (
-                  <a
-                    href={a.paper}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
-                  >
-                    paper <ArrowUpRightIcon size={12} weight="bold" />
-                  </a>
-                ) : null}
-                {a.hasDiagram ? (
-                  <button
-                    type="button"
-                    onClick={() => toggle(a.slug)}
-                    aria-expanded={!!open[a.slug]}
-                    className="flex cursor-pointer items-center gap-1 text-foreground/80 transition-colors hover:text-foreground"
-                  >
-                    {open[a.slug] ? "hide" : "◈ show"} diagram
-                    <CaretDownIcon
-                      size={12}
-                      weight="bold"
-                      className={cn("transition-transform", open[a.slug] && "rotate-180")}
-                    />
-                  </button>
-                ) : null}
-              </span>
-            </div>
-
-            {a.hasDiagram && open[a.slug] ? (
-              <div className="mt-1">
+            {a.hasDiagram ? (
+              <div className="mt-4 overflow-hidden rounded-lg border transition-shadow [&>figure]:my-0 [&>figure]:rounded-none [&>figure]:border-0 [&>figure]:bg-transparent">
                 <ArchDiagram slug={a.slug} />
               </div>
             ) : null}
-          </li>
+
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-xs">
+              {a.tags.length ? <span className="text-muted-foreground/70">{a.tags.join(" · ")}</span> : null}
+              <span className="ml-auto">
+                <SourceLink a={a} />
+              </span>
+            </div>
+          </div>
         ))}
-      </ul>
+      </div>
+
+      {/* expanded block modal */}
+      {expanded ? (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-background/80 p-3 pt-[6vh] backdrop-blur-sm sm:p-6"
+          onClick={() => setExpanded(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label={expanded.name}
+        >
+          <div
+            className="w-full max-w-4xl rounded-xl border bg-background p-5 shadow-lg sm:p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="font-heading text-2xl font-bold tracking-tight">{expanded.name}</h2>
+                <p className="mt-1 font-mono text-xs text-muted-foreground tabular-nums">{expanded.year}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExpanded(null)}
+                aria-label="Close"
+                className="shrink-0 rounded-md border p-1.5 text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <XIcon size={16} weight="bold" />
+              </button>
+            </div>
+
+            <div className="mt-3">
+              <MetaRow a={expanded} />
+            </div>
+
+            <p className="mt-4 leading-7 text-muted-foreground">{expanded.summary}</p>
+
+            {expanded.hasDiagram ? <ArchDiagram slug={expanded.slug} /> : null}
+
+            <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-4 font-mono text-xs">
+              {expanded.tags.length ? (
+                <span className="text-muted-foreground/70">{expanded.tags.join(" · ")}</span>
+              ) : null}
+              <span className="ml-auto">
+                <SourceLink a={expanded} />
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
