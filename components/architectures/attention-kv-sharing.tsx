@@ -77,10 +77,6 @@ export function AttentionKvSharing() {
                 {HEADS.map((i) => (
                   <rect key={`q-${i}`} x={px + 14 + i * 18} y="98" width="12" height="22" rx="3" fill="#cfe0f5" stroke="#2a2a2a" strokeWidth="1" />
                 ))}
-                <text x={cx} y="134" textAnchor="middle" dominantBaseline="central" fontSize="9.5" fill="#6b6b6b">
-                  8 query heads
-                </text>
-
                 {/* connections + KV heads, per variant */}
                 {p.v === "MHA" && (
                   <>
@@ -133,6 +129,12 @@ export function AttentionKvSharing() {
                     <text x={cx} y="252" textAnchor="middle" dominantBaseline="central" fontSize="11" fill="#2a2a2a">c</text>
                   </>
                 )}
+
+                {/* "8 query heads" label — drawn on top of the connectors */}
+                <rect x={cx - 37} y="127" width="74" height="15" fill="#fbf9f2" />
+                <text x={cx} y="134" textAnchor="middle" dominantBaseline="central" fontSize="9.5" fill="#6b6b6b">
+                  8 query heads
+                </text>
 
                 {/* KV label */}
                 <text x={cx} y="284" textAnchor="middle" dominantBaseline="central" fontSize="10" fill="#2a2a2a">

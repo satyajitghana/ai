@@ -104,6 +104,7 @@ export function TransformerBlock() {
               </text>
             </g>
           ))}
+          <rect x="196" y="440" width="208" height="12" fill="#f7f4ea" />
           <text x="300" y="446" textAnchor="middle" dominantBaseline="central" fontSize="8.5" fill="#4a4a4a">
             causal (masked) attention over past tokens
           </text>

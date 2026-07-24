@@ -110,8 +110,8 @@ function SubLayer({ a, moduleLabel, moduleFill, connectRight = false }: { a: num
     <g>
       {/* main branch spine (behind boxes) */}
       <Line d={`M ${cx} ${split} L ${cx} ${a}`} />
-      {/* residual skip arc to the left, rejoining at ⊕ */}
-      <Line d={`M ${cx} ${split} C 344 ${split - 12}, 344 ${a + 12}, ${cx - 9} ${a + 3}`} />
+      {/* residual skip arc to the left, rejoining at ⊕ (bulged clear of the boxes) */}
+      <Line d={`M ${cx} ${split} C 316 ${split - 6}, 316 ${a + 6}, ${cx - 9} ${a + 3}`} />
       <Box x={cx - 36} y={normC - 11} w={72} h={22} fill={NEUTRAL} label="RMSNorm" fs={10} />
       <Box x={cx - 55} y={modC - 15} w={110} h={30} fill={moduleFill} label={moduleLabel} fs={11} bold />
       <Op cx={cx} cy={a} sym="+" r={9} />
