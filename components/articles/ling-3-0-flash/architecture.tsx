@@ -245,10 +245,11 @@ export function LingArchitecture() {
           <Line d="M 838 338 L 838 314" arrow />
           {/* V column: single Linear */}
           <Box x={902} y={458} w={64} h={24} fill={SALMON} label="Linear" fs={10} />
-          <text x={934} y={452} textAnchor="middle" fill={INK} fontSize={10}>V</text>
           <Line d="M 934 458 L 934 314" arrow />
-          <text x={742} y={452} textAnchor="middle" fill={INK} fontSize={10}>Q</text>
-          <text x={838} y={452} textAnchor="middle" fill={INK} fontSize={10}>K</text>
+          {/* Q K V labels — just under the core, left of each inlet arrow */}
+          <text x={734} y={332} textAnchor="end" fill={INK} fontSize={11} fontWeight={600}>Q</text>
+          <text x={830} y={332} textAnchor="end" fill={INK} fontSize={11} fontWeight={600}>K</text>
+          <text x={926} y={332} textAnchor="end" fill={INK} fontSize={11} fontWeight={600}>V</text>
           {/* σ gate column */}
           <Box x={1060} y={458} w={64} h={24} fill={SALMON} label="Linear" fs={10} />
           <Op cx={1092} cy={378} sym="σ" r={11} fill={WHITE} />
@@ -312,12 +313,12 @@ export function LingArchitecture() {
           <Box x={999} y={966} w={58} h={24} fill={BLUE} label="Linear" fs={10} />
           <Line d="M 1028 966 L 1028 910" arrow />
           <Line d="M 1028 887 L 1028 814" arrow />
-          {/* labels for Q K V α β */}
-          <text x={724} y={960} textAnchor="middle" fill={INK} fontSize={10}>Q</text>
-          <text x={800} y={960} textAnchor="middle" fill={INK} fontSize={10}>K</text>
-          <text x={876} y={960} textAnchor="middle" fill={INK} fontSize={10}>V</text>
-          <text x={952} y={960} textAnchor="middle" fill={INK} fontSize={10}>α</text>
-          <text x={1028} y={960} textAnchor="middle" fill={INK} fontSize={10}>β</text>
+          {/* labels for Q K V α β — set just under the core, left of each inlet arrow */}
+          <text x={716} y={832} textAnchor="end" fill={INK} fontSize={11} fontWeight={600}>Q</text>
+          <text x={792} y={832} textAnchor="end" fill={INK} fontSize={11} fontWeight={600}>K</text>
+          <text x={868} y={832} textAnchor="end" fill={INK} fontSize={11} fontWeight={600}>V</text>
+          <text x={944} y={832} textAnchor="end" fill={INK} fontSize={11} fontWeight={600}>α</text>
+          <text x={1020} y={832} textAnchor="end" fill={INK} fontSize={11} fontWeight={600}>β</text>
           {/* gate column: MLP → σ → ⊙ */}
           <Box x={1112} y={966} w={58} h={24} fill={NEUTRAL} label="MLP" fs={10} />
           <Op cx={1141} cy={898} sym="σ" r={11} fill={WHITE} />
