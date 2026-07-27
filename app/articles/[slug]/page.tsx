@@ -34,7 +34,7 @@ export async function generateMetadata({
     openGraph: {
       type: "article",
       publishedTime: article.date,
-      modifiedTime: article.updated ?? article.date,
+      modifiedTime: article.lastUpdated,
       tags: article.tags,
     },
   }

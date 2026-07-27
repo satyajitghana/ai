@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 }
 
 export default function Page() {
-  // Strictly newest-first by date (from the loader). A slim, serializable
+  // Strictly newest-first by last-updated (from the loader). A slim, serializable
   // projection is handed to the client list, which adds the Featured filter and
   // the ★ badge without changing order.
   const articles = getArticles().map((a) => {
@@ -22,6 +22,8 @@ export default function Page() {
       slug: a.slug,
       title: a.title,
       date: a.date,
+      updated: a.updated ?? null,
+      lastUpdated: a.lastUpdated,
       description: a.description,
       readingTimeMins: a.readingTimeMins,
       tags: a.tags,

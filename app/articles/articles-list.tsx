@@ -10,15 +10,18 @@ import {
 
 import { cn } from "@/lib/utils"
 
-// Client list: filter (All / Featured / High-signal), sort (newest / signal /
+// Client list: filter (All / Featured / High-signal), sort (updated / signal /
 // interest / helpful), pagination — all persisted to the URL. Articles arrive
-// newest-first; "newest" keeps that order, the other sorts reorder a copy.
+// last-updated-first (see lib/content/index.ts); "updated" keeps that order,
+// the other sorts reorder a copy, tie-broken by lastUpdated.
 // Each card carries a signal badge: 1–5 bars derived from the article's own
 // `interest` + `helpful` frontmatter (see lib/content/schema.ts).
 type ArticleCard = {
   slug: string
   title: string
   date: string
+  updated: string | null
+  lastUpdated: string
   description: string
   readingTimeMins: number
   tags: string[]
@@ -71,7 +74,7 @@ type Filter = "all" | "featured" | "high"
 type Sort = "new" | "signal" | "interest" | "helpful"
 
 const SORTS: { key: Sort; label: string }[] = [
-  { key: "new", label: "newest" },
+  { key: "new", label: "updated" },
   { key: "signal", label: "signal" },
   { key: "interest", label: "interesting" },
   { key: "helpful", label: "helpful" },
@@ -90,13 +93,14 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
     filter === "featured" ? a.featured : filter === "high" ? a.signal >= 4 : true,
   )
 
-  // "newest" preserves incoming order; other sorts reorder a copy, tie-broken by date.
+  // "updated" preserves incoming order (already last-updated-first from the
+  // loader); other sorts reorder a copy, tie-broken by lastUpdated.
   const sorted =
     sort === "new"
       ? filtered
       : [...filtered].sort((a, b) => {
           const key = sort === "signal" ? "signal" : sort === "interest" ? "interest" : "helpful"
-          return b[key] - a[key] || b.date.localeCompare(a.date)
+          return b[key] - a[key] || b.lastUpdated.localeCompare(a.lastUpdated)
         })
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE))
@@ -212,7 +216,12 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
                     />
                   ) : null}
                 </h2>
-                <span className="shrink-0 font-mono text-xs text-muted-foreground">{a.date}</span>
+                <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                  {a.date}
+                  {a.updated && a.updated !== a.date ? (
+                    <span className="text-muted-foreground/60"> · updated {a.updated}</span>
+                  ) : null}
+                </span>
               </div>
               <p className="mt-1 leading-7 text-muted-foreground">{a.description}</p>
               <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs text-muted-foreground">
