@@ -129,12 +129,15 @@ export type ContentKind =
   | "notes"
 
 // A loaded content item: validated frontmatter + slug + raw markdown body + derived fields.
+// `lastUpdated` is always present (`updated ?? date`) so every kind has a single,
+// reliable "last touched" signal to sort/display by, even when `updated` is unset.
 export type ContentItem<T> = T & {
   kind: ContentKind
   slug: string
   body: string
   readingTimeMins: number
   url: string
+  lastUpdated: string
 }
 
 export type BlogPost = ContentItem<BlogFrontmatter>

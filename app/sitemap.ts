@@ -52,7 +52,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     })),
     ...getArticles().map((a) => ({
       url: absoluteUrl(`/articles/${a.slug}`),
-      lastModified: a.updated ?? a.date,
+      lastModified: a.lastUpdated,
       changeFrequency: "monthly" as const,
       priority: a.featured ? 0.8 : 0.7,
     })),

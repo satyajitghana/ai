@@ -109,7 +109,7 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
     description: article.description,
     image: article.cover ? [absoluteUrl(article.cover), ogImage] : [ogImage],
     datePublished: article.date,
-    dateModified: article.updated ?? article.date,
+    dateModified: article.lastUpdated,
     url,
     mainEntityOfPage: { "@type": "WebPage", "@id": url },
     keywords: article.tags.join(", "),
