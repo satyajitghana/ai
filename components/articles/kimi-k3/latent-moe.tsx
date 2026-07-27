@@ -162,7 +162,7 @@ export function LatentMoE() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            active params <span style={{ color: ACCENT }}>{dense ? "~2.8T (all experts)" : "~50B (16 experts)"}</span> · compute{" "}
+            active params <span style={{ color: ACCENT }}>{dense ? "~2.8T (all experts)" : "104B (16 routed + 2 shared)"}</span> · compute{" "}
             <span className="text-foreground">{dense ? "100%" : `${activePct}% of experts`}</span>
           </div>
         </div>
@@ -175,7 +175,7 @@ export function LatentMoE() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The experts live in a learned <span style={{ color: ACCENT }}>latent</span> space; a router picks{" "}
           <span className="text-foreground">16 of 896</span> for each token — {activePct}% of the field — so a 2.8T-parameter
-          model activates only about <span className="text-foreground">50B</span> parameters per token. At this sparsity, which
+          model activates only <span className="text-foreground">104B</span> parameters per token. At this sparsity, which
           16 you pick, and keeping every expert equally busy, becomes the whole ballgame — which is what{" "}
           <span style={{ color: ACCENT }}>quantile balancing</span> is for.
         </p>

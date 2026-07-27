@@ -67,7 +67,7 @@ export function K3Architecture() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex items-center justify-between border-b px-4 py-2 font-mono text-xs text-muted-foreground">
         <span>kimi-k3 · transformer block</span>
-        <span>2.8T-A50B · 1M ctx</span>
+        <span>2.8T-A104B · 1M ctx</span>
       </div>
 
       <div className="px-3 pt-3">
