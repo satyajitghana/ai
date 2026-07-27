@@ -3,8 +3,8 @@
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
 
-// What it takes to train a 2.8T-A50B model, from first principles. Training compute
-// for an MoE is ~6 x (active params) x (tokens); at ~50B active that is a lot of FLOPs.
+// What it takes to train a 2.8T-A104B model, from first principles. Training compute
+// for an MoE is ~6 x (active params) x (tokens); at 104B active that is a lot of FLOPs.
 // Drag the token budget and pick a cluster size to read off the estimated GPU-hours and
 // wall-clock. Assumptions are labeled and honest — Moonshot has not published K3's exact
 // token count or cluster, so this is an order-of-magnitude estimate (K2 trained on 15.5T
@@ -12,7 +12,7 @@ import { Range } from "@/components/articles/ui/range"
 
 const ACCENT = "oklch(0.58 0.15 265)"
 
-const ACTIVE = 50e9 // active params per token
+const ACTIVE = 104.2e9 // active params per token (tech report, Table 1)
 const TOTAL = 2.8e12 // total params
 const PER_ACCEL = 4e14 // effective FLOP/s per H-class accelerator (~40% MFU)
 const FP4_BYTES = 0.5 // MXFP4 = 4-bit weights = 0.5 byte/param
@@ -86,7 +86,7 @@ export function TrainingCost() {
           {/* model node */}
           <rect x={610} y={72} width={126} height={54} rx={10} fill="var(--background)" stroke={ACCENT} strokeWidth={1.5} filter="url(#tc-soft)" />
           <text x={673} y={94} textAnchor="middle" className="fill-foreground font-mono" fontSize={12} fontWeight={600}>Kimi K3</text>
-          <text x={673} y={111} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9}>2.8T · 50B active</text>
+          <text x={673} y={111} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9}>2.8T · 104B active</text>
 
           {/* flow arrows */}
           <path d={`M 190 99 C 220 99, 220 99, 248 99`} fill="none" stroke={ACCENT} strokeWidth={1.6} markerEnd="url(#tc-arrow)" opacity={0.8} />
@@ -138,7 +138,7 @@ export function TrainingCost() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            assumptions: 6·N·D · active = 50B · ~0.4 PFLOP/s/accel (~40% MFU)
+            assumptions: 6·N·D · active = 104B · ~0.4 PFLOP/s/accel (~40% MFU)
           </div>
         </div>
 
@@ -149,7 +149,7 @@ export function TrainingCost() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The MoE sparsity that makes K3 cheap to <span className="text-foreground">serve</span> also makes it cheaper to{" "}
-          <span style={{ color: ACCENT }}>train</span>: compute scales with the ~50B <span className="text-foreground">active</span>{" "}
+          <span style={{ color: ACCENT }}>train</span>: compute scales with the 104B <span className="text-foreground">active</span>{" "}
           params, not the full 2.8T. Even so, a frontier token budget on a few thousand accelerators is weeks of wall-clock and
           millions of GPU-hours — and the 2.8T weights still fit in <span className="text-foreground">~1.4 TB</span> only because
           they are trained MXFP4-native. Numbers are a first-principles estimate; Moonshot has not published K3's exact recipe.
