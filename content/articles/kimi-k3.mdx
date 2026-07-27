@@ -122,6 +122,21 @@ so K3 interleaves KDA with full-attention layers (via Gated MLA) to keep exact r
 the assumptions of conventional prefix caching, so Moonshot contributed a KDA implementation to the vLLM community to make
 serving practical.
 
+### FlashKDA: the equation, shipped as a kernel
+
+Moonshot also open-sourced the kernel underneath. **[FlashKDA](https://github.com/MoonshotAI/FlashKDA)** (MIT) —
+"Flash Kimi Delta Attention" — is a set of CUTLASS kernels for exactly the recurrence above, and its exposed signature
+is a direct read-out of that math. The main kernel, `flash_kda.fwd`, takes query, key and value plus a **gate**
+tensor and **beta logits passed through a sigmoid** — the gate is $\alpha_t$, the channel-wise decay; beta is
+$\beta_t$, the delta-rule write strength — with an optional recurrent state in and out, which is $S_t$ itself: the
+fixed-size matrix that is the whole reason a 1M context stays tractable. It also batches variable-length sequences
+via cumulative sequence lengths and runs mixed precision (bf16 activations, fp32 params).
+
+FlashKDA needs SM90+ (Hopper and newer), CUDA 12.9+ and PyTorch 2.4+, ships benchmarks for H20 and GB200, and
+auto-integrates with the `flash-linear-attention` library (v0.5.0+) through a `chunk_kda` op — the same KDA lineage as
+the vLLM contribution above, now available as a standalone package rather than only living inside a serving
+framework.
+
 ### NoPE: no positional encoding at all
 
 Here is a detail the weights make unambiguous, and it is one of the quietly radical choices in K3: **there is no
@@ -216,6 +231,25 @@ blocks in full detail on the left, and on the right the **Block Attention Residu
 output flows through an `α` gate that can read *every* earlier block and the embedding, not just the layer below it.
 
 <KimiK3Architecture />
+
+### MoonEP: the same static-shapes claim, from the communication side
+
+**[MoonEP](https://github.com/MoonshotAI/MoonEP)** (MIT) is Moonshot's expert-parallel communication library, and it
+is the static-shapes claim from the quantile-balancing section above, attacked from the other direction. Quantile
+balancing makes every expert's *load* equal before dispatch; MoonEP instead guarantees every rank *receives* exactly
+$S \times K$ tokens — $S$ input tokens per rank, $K$ routed top-$k$ per token — no matter how skewed the actual
+routing is. The mechanism is a small number of redundant experts, planned online from the current router outputs by
+a near-optimal GPU planning kernel and prefetched before expert computation runs, with their gradients reduced back
+to their home ranks on the backward pass. Because those redundant experts absorb whatever skew is left, every rank
+ends up with an identical, statically-known token count — "statically known shapes eliminate per-layer MoE host
+synchronization" is not a paraphrase of that claim, it is MoonEP's own description of what it buys. Tokens land
+directly in their expert-grouped positions on remote ranks through zero-copy buffer views, so only a fixed
+$S \times K$ buffer is needed per layer, with no per-layer host synchronization to stall the pipeline.
+
+Moonshot's own benchmarks against DeepEP v2 on H20 make the case concrete: MoonEP's communication time stays close to
+flat as imbalance (maxvio) grows, while DeepEP v2 degrades steadily and eventually OOMs under high imbalance — and
+MoonEP's iteration time holds flat across the same range. It targets NVIDIA GPUs today, with Zhenwu PPU support listed
+as under review, and credits DeepEP, Echo and UltraEP as inspiration.
 
 ## Native vision, trained from scratch
 
@@ -315,6 +349,41 @@ A few mechanisms make that work at 1M context:
   a model is quantized after the fact. Separately, K3's pre-trained multi-token-prediction layer is fine-tuned into an
   EAGLE-3-style **draft model** for speculative decoding, optimized directly against the acceptance rate rather than a
   KL surrogate.
+
+### AgentENV: the sandbox layer, and it is open source
+
+The piece that makes all of the above physically possible is the sandbox. Long-horizon agentic RL means running an
+enormous number of real machines that agents can break, and **[AgentENV](https://github.com/kvcache-ai/AgentEnv)** —
+built by Moonshot with partners, and released under MIT — is the microVM runtime they built for it.
+
+The motivation is refreshingly blunt. Container-based sandboxes were not enough: in early experiments, aggressive agent
+exploration caused **kernel panics and deadlocks**. And clamping down is the wrong fix, because hard tasks need a
+sandbox close to a real machine — agents should be able to mount disks, run containers, even launch VMs. So AgentENV
+runs each sandbox as an isolated **Firecracker** microVM, buying isolation and fidelity a container cannot.
+
+On top of that it adds three lifecycle operations tuned specifically for RL:
+
+- **Pause / resume.** A paused sandbox consumes no memory or CPU. This matters more than it sounds: the sandbox spends
+  as much as **98% of its lifetime** just waiting on the model's next inference result. Pausing that window is the
+  difference between renting an idle fleet and not.
+- **Fork.** Branch a new sandbox from the *exact* state of a running one while the original keeps going — which is how
+  you run a reward judge against a trajectory without any side effects leaking back into it.
+- **Snapshot.** Periodic checkpoints for error recovery.
+
+The engineering is in the latencies: incremental checkpointing saves only pages dirtied since the last checkpoint,
+giving **133 ms checkpoint and 49 ms resume**. Images use OverlayBD with a custom `ublk` driver, storage-layer sharing
+and P2P transport, so tens of thousands of sandboxes with distinct images launch in **under a second**; copy-on-write
+memory and page-cache tuning push memory overcommit to **6.5×** in real workloads.
+
+<Callout type="note">
+The scale number is the one worth sitting with. Across K3's training and evaluation, Moonshot created
+**51,219,741 sandboxes** spanning **1,505,678 distinct images**. That is what "agentic RL" costs when you actually run
+it — and it is the part of the frontier stack that almost never gets published, let alone open-sourced.
+</Callout>
+
+AgentENV is one of three pieces of that stack Moonshot has now open-sourced: **MoonEP** (expert-parallel
+communication, covered under Stable LatentMoE above) and **FlashKDA** (the attention kernel, covered under Kimi Delta
+Attention above) are the other two — sandbox, communication and kernel, all MIT-licensed.
 
 ## The benchmarks
 
@@ -480,7 +549,10 @@ the config, and a 47-page report on the table, that claim is now something anyon
 
 *Sources: the [Kimi K3 technical report](https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf) (architecture,
 scaling law, post-training, infrastructure, evaluations, case studies), the released
-[model weights and card](https://huggingface.co/moonshotai/Kimi-K3) (config, deployment, license), and the
+[model weights and card](https://huggingface.co/moonshotai/Kimi-K3) (config, deployment, license), the
+[AgentENV repository](https://github.com/kvcache-ai/AgentEnv) (sandbox runtime), the
+[MoonEP repository](https://github.com/MoonshotAI/MoonEP) (expert-parallel communication), the
+[FlashKDA repository](https://github.com/MoonshotAI/FlashKDA) (attention kernels), and the
 [Kimi K3 tech blog](https://www.kimi.com/blog/kimi-k3) (pricing). Figures 3–5 here are the report's Figures 2, 7 and 13,
 reproduced for commentary. Benchmark numbers are Moonshot's except where marked third-party; the training-cost figures
 are a first-principles estimate from $C \approx 6\,N_{\text{active}}\,D$ with clearly labeled assumptions, using K2's
