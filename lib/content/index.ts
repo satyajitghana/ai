@@ -89,6 +89,9 @@ function load<T>(kind: ContentKind, schema: ZodType<T>): ContentItem<T>[] {
     }
     const slug = path.basename(file, ".mdx")
     const body = stripLeadingImports(content)
+    // Every kind has `date`; only blog/articles/notes may also have `updated`.
+    // `lastUpdated` folds those into one always-present "last touched" signal.
+    const fm = parsed.data as unknown as { date: string; updated?: string }
     return {
       ...parsed.data,
       kind,
@@ -96,13 +99,19 @@ function load<T>(kind: ContentKind, schema: ZodType<T>): ContentItem<T>[] {
       body,
       readingTimeMins: readingTime(body),
       url: absoluteUrl(`/${kind}/${slug}`),
+      lastUpdated: fm.updated ?? fm.date,
     } as ContentItem<T>
   })
 
-  // Newest first by `date` (all kinds carry a date field).
+  // Newest first by `lastUpdated`, tie-broken by `date` (kinds without an
+  // `updated` field have lastUpdated === date, so their order is unchanged).
+  const lastUpdatedOf = (i: ContentItem<T>) =>
+    String((i as unknown as { lastUpdated: string }).lastUpdated)
   const dateOf = (i: ContentItem<T>) =>
     String((i as unknown as { date: string }).date)
-  return items.sort((a, b) => dateOf(b).localeCompare(dateOf(a)))
+  return items.sort(
+    (a, b) => lastUpdatedOf(b).localeCompare(lastUpdatedOf(a)) || dateOf(b).localeCompare(dateOf(a))
+  )
 }
 
 export function getBlogPosts({ includeDrafts = false } = {}): BlogPost[] {
