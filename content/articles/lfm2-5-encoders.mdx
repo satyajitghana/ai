@@ -1,0 +1,235 @@
+---
+title: "LFM2.5-Encoder: classification in one forward pass, zero completion tokens"
+description: "Liquid AI's LFM2.5-Encoder-230M (229,693,184 params) and -350M (354,483,968 params) are bidirectional encoders for classification, not generation: mean-pool the last hidden state, one linear head, sigmoid per label, no decode loop. The 350M model ranks 4th of 14 on a 17-task GLUE/SuperGLUE/multilingual eval at 81.02, a point behind ModernBERT-large and two behind XLM-R XL, a model ten times its size."
+date: 2026-08-03
+interest: 3
+helpful: 4
+tags:
+  - explainer
+  - encoders
+  - classification
+  - nlp
+  - open-weights
+draft: false
+cover: /articles/lfm2-5-encoders/fig1.png
+---
+
+import { ForwardPassVsDecode } from "@/components/articles/lfm2-5-encoders/forward-pass-vs-decode"
+import { SigmoidVsSoftmax } from "@/components/articles/lfm2-5-encoders/sigmoid-vs-softmax"
+
+The default way to classify text with an LLM today is to prompt a decoder and parse whatever
+comes back. Write instructions, describe the labels, ask for JSON, decode the answer one token
+at a time, then hand the string to a parser and hope it's valid. It works, and it's also the
+slow way to do something that has a much cheaper shape: a fixed-size answer picked from a fixed
+set of labels doesn't need to be *generated* at all.
+
+That's the pitch behind Liquid AI's **LFM2.5-Encoder** models, released a week ago alongside a
+fine-tuning tutorial in their [cookbook](https://github.com/Liquid4All/cookbook) repo: **one
+forward pass, zero completion tokens.** I read the code behind that line, not just the slide it's
+on, and it holds up exactly as stated.
+
+## Two new encoders, built from a decoder
+
+**LFM2.5-Encoder-230M** and **LFM2.5-Encoder-350M** are bidirectional encoders — the BERT
+shape, not the chat-model shape. Their parameter counts, read straight from the safetensors
+metadata rather than the rounded name: **229,693,184** and **354,483,968**. Both use the LFM2
+hybrid backbone (interleaved gated short convolutions and grouped-query attention), hidden size
+**1024**, vocabulary **65,536**, context length **8,192 tokens**, and cover 15 languages. They ship
+under the LFM Open License v1.0, and both were created on Hugging Face on **2026-07-27** — about
+a week old as I write this.
+
+The interesting part is how they were built: each size starts from the corresponding causal
+**LFM2.5 decoder** checkpoint and is converted into an encoder with three changes.
+
+1. **Bidirectional attention** replaces the causal mask, so every position can see the whole
+   sequence instead of only what came before it.
+2. The short-convolution layers switch from causal padding to **symmetric center padding**, so a
+   kernel mixes information from both neighbors instead of only the left one.
+3. Pretraining continues with **masked-language-modeling at 30% token masking** — twice BERT's
+   original 15%, which is a real methodological choice, not a rounding difference, in how hard the
+   denoising task is made.
+
+<Figure
+  src="/articles/lfm2-5-encoders/fig1.png"
+  alt="Diagram titled 'Bi-directional patches, LFM 2.5-Encoders' with two panels, Attention and ShortConv. Each panel contrasts a 'before' causal version, where a highlighted token's connections point only to earlier tokens in the sequence, against an 'after' full-context bidirectional version, where the same token connects to every position on both sides."
+  caption="Turning a causal decoder into a bidirectional encoder: attention drops its causal mask, and the ShortConv kernel switches from left-only to symmetric center padding so it reads both neighbors (Liquid AI, 2026)."
+/>
+
+This is the same bidirectional-vs-causal distinction the [architectures gallery](/architectures)
+draws for BERT: full attention lets every position condition on the entire input, which is what
+you want when the job is producing *a representation* rather than continuing a sequence.
+Generation needs causal masking so the model can't peek at the future it's about to write;
+classification has no future to hide — the whole document is already there, and every token
+should get to see all of it before you summarize what the document means.
+
+## The mechanism: mean-pool, one Linear, sigmoid
+
+Liquid's fine-tuning tutorial (`examples/lfm-encoder-classification/` in the cookbook) is a
+complete, runnable project — `train.py`, `predict.py`, a YAML config, sample data — and the model
+class inside it, `DocumentClassifier`, is short enough to read in full. It loads the pretrained
+encoder, throws away the masked-token prediction head it was pretrained with, and keeps only the
+backbone:
+
+```python
+outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
+hidden = outputs.last_hidden_state              # [batch, seq_len, 1024]
+
+mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
+pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
+
+logits = self.classifier(self.dropout(pooled))   # one nn.Linear(1024, num_labels)
+loss = nn.functional.binary_cross_entropy_with_logits(logits, labels.float())
+```
+
+That's the entire model on top of the backbone: an attention-masked mean over the last hidden
+state,
+
+$$
+\text{pooled} = \frac{\sum_i m_i \, h_i}{\sum_i m_i}
+$$
+
+(padding tokens carry $m_i = 0$ so they don't dilute the average), then one `nn.Linear` sized
+`[hidden, num_labels]`, trained with `binary_cross_entropy_with_logits` — the loss for **multi-label**
+classification, where a document can carry zero, one, or several labels, as opposed to
+cross-entropy's "exactly one correct class." At inference, `predict.py` does the other half in
+three lines:
+
+```python
+with torch.inference_mode():
+    probabilities = torch.sigmoid(model(**inputs).logits)[0].cpu().tolist()
+predicted = [label for label, p, t in zip(labels, probabilities, thresholds) if p >= t]
+```
+
+No `generate()`, no sampling, no stop tokens, no text to hand to a parser. One forward pass in,
+a fixed-length array of probabilities out, compared against per-label thresholds tuned on a
+validation split. That is what "zero completion tokens" means in the code, not just the slide.
+
+<ForwardPassVsDecode />
+
+## Sigmoid, not softmax — and why it has to be
+
+The reason this needs its own head, rather than reusing whatever classifier head ships with a
+decoder fine-tune, is the difference between picking one thing and scoring several independently.
+**Softmax** turns a set of logits into a probability distribution that sums to 1 — it is built to
+choose exactly one winner, which is correct for single-label problems (a document *is* sports,
+politics, or tech, never more than one). **Sigmoid** applied per label makes each label its own
+independent yes/no question: $\sigma(z_i) = 1/(1+e^{-z_i})$, with no normalization across labels,
+so two labels can both clear the threshold, or none can. A support ticket about a double charge is
+legitimately both a billing issue and a technical one; softmax would be forced to pick a single
+"real" answer and quietly discard the other.
+
+<SigmoidVsSoftmax />
+
+## Where it lands: 4th of 14, honestly
+
+Liquid's own eval — a 17-task suite spanning GLUE, SuperGLUE, and five multilingual tasks,
+averaged over 5 seeds with standard deviations reported — puts LFM2.5-Encoder-350M **4th of 14**
+models at a mean score of **81.02**, and LFM2.5-Encoder-230M **6th** at **79.29**.
+
+<BenchBars
+  title="17-task GLUE / SuperGLUE / multilingual mean score"
+  unit=""
+  bars={[
+    { label: "XLM-R XL (3.5B)", value: 83.06 },
+    { label: "ModernBERT-large (395M)", value: 81.68 },
+    { label: "XLM-R large (560M)", value: 81.34 },
+    { label: "LFM2.5-Encoder-350M", value: 81.02, highlight: true },
+    { label: "mDeBERTa-v3 (280M)", value: 80.37 },
+    { label: "LFM2.5-Encoder-230M", value: 79.29, highlight: true },
+    { label: "ModernBERT-base (149M)", value: 78.19 },
+    { label: "XLM-R base (280M)", value: 77.46 },
+  ]}
+/>
+
+That ranking is worth sitting with rather than rounding up. LFM2.5-Encoder-350M sits a point below
+ModernBERT-large and two points below XLM-R XL — a model **ten times its size**. It is not the
+best encoder on this benchmark, and Liquid doesn't present it as one. It's the fourth-best, at a
+fraction of the parameters of the model above it, next to a considerably larger one. The 230M
+model separately beats ModernBERT-base despite being the larger of the two by parameter count — a
+real, checkable comparison the raw numbers support either way you read them.
+
+<Figure
+  src="/articles/lfm2-5-encoders/fig2.png"
+  alt="Horizontal bar chart titled '17-task fine-tuning benchmark, mean score across GLUE, SuperGLUE, and 5 multilingual tasks.' Fourteen models are ranked from XLM-R XL at 83.06 down to EuroBERT-2.1B at 72.19. LFM2.5-Encoder-350M is highlighted in dark purple in 4th place at 81.02, and LFM2.5-Encoder-230M is highlighted in 6th place at 79.29. Two other Liquid models, LFM2.5-ColBERT-350M and LFM2.5-Embedding-350M, are highlighted in light purple further down the ranking at 76.18 and 75.68."
+  caption="Liquid's own 17-task ranking, mean over 5 seeds with reported standard deviations — the full 14-model field, not a cherry-picked comparison set (Liquid AI, 2026)."
+/>
+
+The chart also settles a question Liquid answers candidly in the same blog post: why build a new
+general-purpose encoder instead of reusing their existing retrieval models? Because those
+retrieval-tuned siblings — **LFM2.5-ColBERT-350M** and **LFM2.5-Embedding-350M** — score **76.18**
+and **75.68** on this same suite, both below the general-purpose LFM2.5-Encoder-350M's 81.02. In
+their own words: *"Because retrieval is only a subset of what encoders enable, we chose to build a
+general-purpose encoder rather than adapt the existing retrievers."* A model tuned to make
+embeddings cluster well for search is not automatically a good classification backbone, and
+Liquid's own numbers show the gap rather than hiding it.
+
+On raw speed, Liquid also reports the 350M encoder running about **3.3× faster than
+ModernBERT-base at 8,192 tokens on CPU**; a separate blog claim puts the 230M model specifically
+at roughly **3.7×** faster than ModernBERT-base at the same length (about 28 seconds versus over a
+minute and a half). Those are two distinct comparisons, not one number restated — worth keeping
+straight if you quote either.
+
+## The tutorial's own result
+
+The cookbook ships a second, harder example beyond the 4-label sample data: fine-tuning
+LFM2.5-Encoder-350M on **ECtHR-A** (`coastalcph/lex_glue`), European Court of Human Rights cases
+labeled by which of 10 Convention articles they violate — real long documents, real multi-label
+targets, 9,000 / 1,000 / 1,000 train/validation/test examples, CC BY 4.0. Trained at the full
+8,192-token context, one seed, 3 epochs:
+
+| Split | Metric | Score |
+|---|---|---|
+| Validation | micro-F1 (after per-label threshold tuning) | 0.8060 |
+| Test | micro-F1 | 0.7913 |
+| Test | macro-F1 | 0.7062 |
+| Test | micro average precision | 0.8400 |
+
+The README says outright that these numbers are from one seed — no variance reported, unlike the
+17-task pretraining eval above. Read it as "this recipe works on a real long-document benchmark,"
+not as a tuned, reproducible leaderboard number. Thresholds are tuned only on the validation split
+and never touch test until a separate, explicit `--evaluate-test` flag is passed — a small
+detail, but the right one for anyone checking the tutorial's methodology.
+
+## What you give up
+
+An encoder with a classification head cannot do several things a decoder can, and it's worth
+naming them plainly rather than only listing what it's good at:
+
+<Callout type="note">
+It cannot generate. There's no explanation, no rationale, no free-text answer — only probabilities
+over a label set that's fixed at training time. Adding a new label means retraining the head (a
+small, cheap step, but a step), not writing a new prompt. And it needs supervised examples per
+task: this is a fine-tuning recipe, not a zero-shot classifier out of the box, even though Liquid's
+own HF Spaces (prompt routing, PII detection, policy linting) show the same base encoder
+fine-tuned across several different classification tasks.
+</Callout>
+
+The honesty gaps worth naming too: these models are about a week old, with limited independent
+adoption to point to yet. The 17-task eval is Liquid's own compilation — methodologically solid
+(5 seeds, reported std, a full 14-model field rather than a curated subset), but not yet
+replicated by anyone outside Liquid. And the cookbook repo carries no LICENSE file at its root as
+of this writing, which matters if you plan to reuse the tutorial code itself, distinct from the
+separately-licensed model weights.
+
+## The take
+
+The argument here isn't that encoders are back or that decoders are wrong for classification —
+it's narrower and more useful than that: match the tool to the shape of the answer. If you already
+know the output is a choice from a fixed set of labels, a bidirectional encoder can produce that
+choice as a probability vector in one forward pass, with nothing to decode and nothing to parse.
+If you don't know the shape of the answer in advance — you need explanation, planning, or free
+text — that's what the decode loop and [its own cost structure](/articles/how-llm-inference-works)
+are for. LFM2.5-Encoder is a clean, current example of the first case done right: a small model,
+an honestly-reported 4th-of-14 ranking against models many times its size, and a fine-tuning recipe
+short enough to read start to finish in one sitting.
+
+---
+
+*Built on Liquid AI's [LFM2.5-Encoders blog post](https://www.liquid.ai/blog/lfm2-5-encoders), the
+[LiquidAI/LFM2.5-Encoder-230M](https://huggingface.co/LiquidAI/LFM2.5-Encoder-230M) and
+[LiquidAI/LFM2.5-Encoder-350M](https://huggingface.co/LiquidAI/LFM2.5-Encoder-350M) model cards,
+and the [`examples/lfm-encoder-classification`](https://github.com/Liquid4All/cookbook/tree/main/examples/lfm-encoder-classification)
+tutorial in Liquid4All/cookbook. Parameter counts are read from HF safetensors metadata, not the
+rounded model names. The 17-task benchmark and both embedded figures are Liquid AI's own,
+reproduced for commentary; the two interactive diagrams are original illustrations of the
+mechanism using illustrative example data, not measured traces.*

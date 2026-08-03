@@ -1,0 +1,294 @@
+---
+title: "Instella-MoE: a 16B MoE that never touches an NVIDIA GPU"
+description: "AMD's Instella-MoE is a 16B-total, 2.8B-active Mixture-of-Experts model trained end-to-end — pretrain through RL — entirely on MI300X and MI325X GPUs, shipping all six stage checkpoints, training code, and data recipes. A gated MLA attention output and FarSkip-Collective's deliberately stale activations (+12.7% pretraining throughput, −39.2% TTFT) land it ahead of OLMo-3-7B, SmolLM3-3B, and Moonlight-16B-A3B on average, trailing only Qwen3.5-4B-Base."
+date: 2026-08-03
+interest: 4
+helpful: 4
+tags:
+  - llm
+  - mixture-of-experts
+  - amd
+  - rocm
+  - explainer
+draft: false
+cover: /articles/instella-moe/fig2.png
+---
+
+import { OpennessInventory } from "@/components/articles/instella-moe/openness-inventory"
+import { GatedMLA } from "@/components/articles/instella-moe/gated-mla"
+import { FarskipTimeline } from "@/components/articles/instella-moe/farskip-timeline"
+
+Every big open MoE release from the last two years shares one unstated assumption: it was trained
+on NVIDIA GPUs. [AMD's Instella-MoE](https://github.com/AMD-AGI/Instella-MoE) breaks that
+assumption on purpose. It is a **16B-total, 2.8B-active** Mixture-of-Experts model, and every
+stage of it — pretraining, mid-training, long-context extension, SFT, DPO, RL — ran on **AMD
+Instinct MI300X and MI325X** GPUs under ROCm, with nothing borrowed from a CUDA cluster. AMD
+[released six checkpoints](https://huggingface.co/collections/amd/instella-moe), one per stage,
+plus the training, inference, and RL codebases, under the tagline "fully open" — a word this piece
+is going to hold them to.
+
+<Figure
+  src="/articles/instella-moe/fig1.png"
+  alt="A six-stage flow diagram: Pretraining, Mid-training, and Long-Context Extension grouped under Base Model Training; Supervised Fine-Tuning, Preference Tuning, and Reinforcement Learning grouped under Post-Training and Alignment. Each stage has an arrow to the next and a labeled checkpoint name below it, from Instella-MoE-16B-A3B-Pretrain through the final Instella-MoE-16B-A3B-Think checkpoint."
+  caption="The Instella-MoE training pipeline — six stages, six checkpoints, pretrain through RL (AMD, 2026)."
+/>
+
+Two things make this worth a full read rather than a spec-sheet skim. First, the architecture has a
+real new idea in it: **Gated MLA**, a per-token gate on the attention output, which turns out to be
+the same move [Kimi K3](/articles/kimi-k3) landed on independently. Second, the systems story —
+**FarSkip-Collective** — is a genuinely interesting trick: it makes MoE training and serving faster
+by *deliberately* feeding the model stale, outdated activations. That sounds like a bug. It is the
+entire point.
+
+## Six checkpoints, all the way down
+
+Most "open" model releases mean one thing: a final `safetensors` file and a model card. Instella-MoE
+releases the **entire pipeline** — a checkpoint at every stage, not just the one you'd chat with:
+
+`Instella-MoE-16B-A3B-Pretrain` → `-Midtrain` → `-Base` → `-SFT` → `-DPO` → `-Think`. Every one of
+those six ships with its own weights, training config, and a named, token-counted data recipe. That
+is a materially different claim from "we released the weights." Pick a stage below and see exactly
+what shipped for it:
+
+<OpennessInventory />
+
+AMD draws its own line here, and it is a useful one: in the blog post the fully-open bucket is
+**OLMo-3, SmolLM3, and OLMoE** — full data, full code, checkpoints along the way — while
+**Moonlight-16B-A3B, Qwen3.5, and Gemma-4** get filed as "open-weight": you get the final weights and
+usually a report, not the recipe. Instella-MoE places itself in the first group, and the checkpoint
+list above is the receipt.
+
+What is genuinely missing, and it matters: **no training compute figure, no cluster size, no
+wall-clock duration** anywhere in the repo or the blog. "Fully open" usually implies you could, in
+principle, reproduce the run — and the one number every reproduction attempt needs first is exactly
+the one AMD didn't publish.
+
+## The shape of the model
+
+Strip away the training story and here is what actually runs at inference time:
+
+| | |
+|---|---|
+| Total / active parameters | **16B / 2.8B** |
+| Layers | 27 decoder layers |
+| Hidden dimension | 2048 |
+| Attention | Gated Multi-head Latent Attention (Gated MLA) |
+| MoE routing | 2 shared experts (always on) + 6 of 64 routed experts (top-6) |
+| Pretraining objective | next-token + Multi-Token Prediction |
+| Tokenizer / vocabulary | DeepSeek-V3 tokenizer · 128,896 tokens |
+| Context | 4K pretrained → 64K via YaRN + document masking |
+| Training frameworks | Primus (Megatron-LM based) · Miles (RL, SGLang + Slime) |
+| Inference | SGLang v0.5.9 with FarSkip-Collective overlays |
+| Hardware | AMD Instinct MI300X + MI325X, ROCm |
+
+The MoE layer is a shared-plus-routed design: 2 experts run on every token no matter what (the
+model's general-purpose knowledge), and a router picks 6 more out of 64 candidates per token — the
+same [top-*k* routing](/articles/mixture-of-experts-from-scratch) and shared-expert idea DeepSeek-MoE
+popularized, applied at a 16B/2.8B ratio. The pretraining objective adds
+[Multi-Token Prediction](/articles/multi-token-prediction) on top of ordinary next-token loss, DeepSeek-V3
+style — training the model to predict a short run of future tokens, not just the next one, which both
+improves the base model and hands you a natural draft head for speculative decoding later.
+
+### Gated MLA: a per-token filter on attention
+
+Standard Multi-head Latent Attention compresses the KV cache into a small latent vector, then
+reconstructs keys and values from it — cheap to store, same attention math otherwise. Gated MLA adds
+one more piece: after attention produces its output, a **dedicated linear projection reads the input
+token and produces a gate**, one value per channel, and that gate multiplies the attention output
+**before** it goes through the final output projection.
+
+Concretely: attention answers "what did this token look up." The gate answers a second, separate
+question — "how much of what it found is actually worth keeping" — and answers it per channel, per
+token, learned from data. AMD's own framing is direct: the gate lets the model "selectively
+attenuate low-utility attention responses for each token." Attention decides what to look at; the
+gate decides how much of the answer to trust.
+
+<GatedMLA />
+
+The reason this is worth pausing on: **the same idea shows up independently in [Kimi K3](/articles/kimi-k3)**,
+which also augments MLA with an input-dependent output gate — Moonshot's version is a heavier,
+full-rank gate; AMD's is a single lightweight linear projection. Two labs, thousands of miles apart,
+training on different hardware stacks, converged on "put a learned gate after MLA's output" as a
+cheap way to buy expressivity. When two independent teams reach for the same fix, that is usually a
+sign the fix is addressing something real in the base mechanism, not a one-off trick.
+
+## FarSkip-Collective: paying with staleness to buy overlap
+
+Here is the problem FarSkip-Collective solves. In expert-parallel MoE training, each MoE layer's
+routing decision depends on that layer's own, freshly-computed attention output. Once the router
+picks experts, the tokens have to physically move across GPUs to wherever their chosen experts live
+— an **all-to-all** collective. That communication cannot start until the fresh activation exists,
+and the expert compute that follows cannot start until the communication finishes. Compute and
+communication are chained, not parallel, and on a large expert-parallel cluster that chain is
+expensive: the GPUs sit idle every time the network is busy, and vice versa.
+
+FarSkip-Collective's fix is to break the dependency that causes the chain. Instead of routing on the
+fresh activation, it deliberately routes the MoE (and attention) sub-blocks on an **outdated,
+partial activation** — a slightly stale copy of the signal that was already available earlier. Stale
+data has one property fresh data doesn't: it's already sitting there, so the communication that
+depends on it doesn't have to wait for this layer's compute to finish. It can start **alongside**
+that compute instead of after it.
+
+<FarskipTimeline />
+
+That is the whole trick, and it generalizes past this one model: the separate FarSkip-Collective
+paper (Dukler et al., MLSys 2026) reports **97.3%** prefill communication-computation overlap and
+**88.9%** training all-to-all overlap, validated on models from 16B up to 109B parameters — including
+converting Llama 4 Scout to the FarSkip architecture via self-distillation and landing within **1%**
+of the original's accuracy. For Instella-MoE specifically, AMD reports the trade paid off exactly as
+advertised:
+
+<Figure
+  src="/articles/instella-moe/fig3.png"
+  alt="Two bar charts on a normalized-throughput axis. Left, Training: Instella-MoE pretraining throughput at 112.7 versus a standard MoE baseline at 100.0. Right, Inference: Instella-MoE time-to-first-token throughput at 139.2 versus the baseline at 100.0."
+  caption="FarSkip-Collective's measured pretraining and inference throughput gains (AMD, 2026)."
+/>
+
+**+12.7%** pretraining throughput from overlapping expert-parallel communication, and **up to 39.2%
+lower Time to First Token** when serving with expert parallelism — a systems win that costs nothing
+in serial correctness, because the model is trained end-to-end to expect stale inputs at those
+points rather than having staleness bolted on after the fact at serving time.
+
+## Where it lands
+
+AMD ran its evaluations through **OLMES**, Allen AI's open evaluation harness — a real third-party
+framework, even though AMD is the one running it. On standard benchmarks, the base checkpoint lands
+second among six comparably-sized models, ahead of every "fully open" peer:
+
+<BenchBars
+  title="Base model average score (OLMES)"
+  unit=""
+  bars={[
+    { label: "Qwen3.5-4B-Base", value: 79.5 },
+    { label: "Instella-MoE-Base", value: 76.7, highlight: true },
+    { label: "Moonlight-16B-A3B", value: 76.2 },
+    { label: "SmolLM3-3B-Base", value: 70.5 },
+    { label: "OLMo-3-7B", value: 70.1 },
+    { label: "OLMoE-1B-7B", value: 61.9 },
+  ]}
+/>
+
+Instella-MoE-Base runs at **2.8B active parameters** — less than every model above it except
+Moonlight, and well under OLMo-3-7B's 7B dense parameters. It also leads all six on
+`WinoGrande` at **86.5**, and posts `HumanEval+` **65.7**, a solid coding number for a base
+checkpoint that hasn't seen SFT yet.
+
+Long context is where the honest counterexample lives. At 64K tokens on HELMET and RULER, the
+**dense** 7B OLMo-3 actually wins:
+
+| Model | HELMET avg | RULER avg |
+|---|---|---|
+| OLMo-3-7B (dense) | **43.1** | **80.2** |
+| Instella-MoE-Base | 41.5 | 79.4 |
+| SmolLM3-3B-Base | 37.6 | 78.6 |
+
+AMD reports this without burying it. A sparse 2.8B-active model narrowly losing to a dense 7B on
+long-range retrieval is a plausible, checkable result, not a suspicious one — and it's a useful
+reminder that "active parameters" isn't the only variable that determines long-context strength.
+
+After SFT, the post-training funnel adds up:
+
+<BenchBars
+  title="Post-trained average score"
+  unit=""
+  bars={[
+    { label: "Instella-MoE-Think", value: 73.22, highlight: true },
+    { label: "OLMo-3-7B-Think", value: 71.97 },
+    { label: "Instella-MoE-DPO", value: 72.67 },
+    { label: "Gemma-4-E4B-think", value: 70.47 },
+    { label: "Instella-MoE-SFT", value: 71.58 },
+    { label: "Qwen3.5-4B-think", value: 69.73 },
+  ]}
+/>
+
+<Figure
+  src="/articles/instella-moe/fig2.png"
+  alt="Two scatter plots of performance versus active parameters. Left, Base Models: Instella-MoE-16B-A3B-Base, an orange star marked fully open, sits at about 2.8B active parameters and 76.7 average score, just below Qwen3.5-4B-Base at 79.5, open-weight, and just above Moonlight-16B-A3B at 76.2, with SmolLM3-3B-Base, OLMo-3-7B, OLMoE-1B-7B, Gemma-4 and Llama-3.2-3B lower. Right, Post-Trained / RL Models: Instella-MoE-16B-A3B-Think, an orange star, leads at about 73.2, ahead of Qwen3.5-4B, Gemma-4-E4B-it, OLMo-3-7B-Think and the rest."
+  caption="Base and post-trained Instella-MoE performance vs. similarly sized open models (AMD, 2026)."
+/>
+
+SFT → DPO → Think is a steady climb, not a single post-training jump, and the RL stage's gain is
+concentrated exactly where you'd expect from an instruction-following-focused reward: `IFEval` moves
+from **77.08** after DPO to **83.70** after RL, the single largest jump on the sheet. The RL recipe
+itself is worth a note for anyone who followed [Rollout Routing Replay](/articles/rollout-routing-replay):
+Instella-MoE's IF-RL stage uses R3 alongside GRPO/DAPO-style tricks (zero-gradient filtering, active
+sampling, token-level loss, no KL term) — the same fix for MoE-RL's rollout/training routing mismatch,
+here as one ingredient in a larger recipe rather than the whole story. A second RL stage,
+Multi-Teacher On-Policy Distillation, then anchors the model back to both an IF-specialized teacher
+and the DPO checkpoint, so the instruction-following gain doesn't come at the cost of the math and
+code ability DPO already had.
+
+## What's still closed
+
+"Fully open" is doing real work as a claim here, so it deserves the same scrutiny as any benchmark
+number.
+
+**What's released, precisely:** all six stage checkpoints on Hugging Face; the full training
+codebase (`Primus`-based, Megatron-LM lineage) under **MIT**; the inference overlays and RL codebase
+(`Miles`, built on SGLang); per-stage YAML configs; and named, token-counted data mixtures for every
+stage, down to the individual sub-corpus (`Nemotron-CC-Math-v1`, `Dolma3 Dolmino`, `cranecode`,
+`instella-gsm8k-synthetic`, and dozens more).
+
+**What isn't released:** the model **weights** carry a **Research RAIL license** — academic and
+research use only, not the permissive MIT the code ships under. So the license itself is split: the
+code is as open as it gets, the weights are open-but-restricted. Beyond licensing, three things are
+just missing: training compute and cluster size (undisclosed anywhere), wall-clock training
+duration, and a peer-reviewed technical report — the citation AMD gives today is for a *different,
+earlier* dense 3B Instella model plus the separate FarSkip-Collective systems paper, not an
+Instella-MoE-specific report. The blog itself says the report is "coming soon."
+
+There's a methodology gap worth naming too: it isn't stated whether the comparison models' scores
+(Qwen3.5, Gemma-4, Moonlight, SmolLM3) were re-run by AMD under the same OLMES harness, or taken from
+those models' own published numbers. Either is defensible, but the blog doesn't say which, so treat
+cross-model comparisons as directionally trustworthy rather than exactly apples-to-apples.
+
+<Callout type="warn">
+AMD is candid about the rest: the models are released "for research purposes only," explicitly not
+intended for "safety-critical applications" or "health and medical applications," shipped "without
+any safety promises," and multilingual ability "has not been tested." That's an unusually direct
+limitations section for a benchmark-forward launch blog, and it's worth taking at face value rather
+than reading past it.
+</Callout>
+
+## What training off NVIDIA proves, and what it doesn't
+
+The part of this release that will get repeated the most is also the simplest to state: a
+competitive, 16B-parameter MoE, trained through every post-training stage including RL, ran entirely
+on AMD Instinct hardware. That is a real data point. It says the ROCm software stack — Primus for
+pretraining, Miles and SGLang for RL and serving, FarSkip-Collective's overlays making expert
+parallelism efficient on this hardware specifically — can carry a full modern LLM pipeline, not just
+a pretraining demo.
+
+It does not say AMD hardware is cheaper, faster, or as mature to develop against as the CUDA
+ecosystem for this workload — none of the numbers that would let you compute a cost-per-FLOP or a
+wall-clock comparison are published. It does not say the result would look the same at 10× the
+scale. And it's one vendor's own benchmark of its own model on its own hardware, run through a
+credible third-party harness but not independently reproduced elsewhere yet. What it *does* rule out
+is the null hypothesis that this can't be done at all outside NVIDIA — six checkpoints and a working
+RL pipeline are hard to argue with on that specific point, even while the cost question stays open.
+
+## The take
+
+Two real ideas, evaluated honestly, and a rare complete-pipeline release: Gated MLA is a cheap,
+convergent fix (the same one Kimi K3 found independently) for getting more out of MLA's compressed
+attention; FarSkip-Collective is the more interesting systems idea, because it's not "make the
+network faster" — it's "make the network's timing not matter" by feeding the model activations that
+are already a step behind, on purpose. Together with a genuinely complete checkpoint trail —
+pretrain through RL, not just a final drop — Instella-MoE beats every other "fully open" peer AMD
+names and trails only a larger, open-weight-only Qwen3.5-4B. The unresolved part is exactly the part
+AMD chose not to publish: what the whole run cost, on how many GPUs, for how long. Until the
+technical report lands, that number stays the reader's to estimate, not AMD's to claim.
+
+---
+
+*Sources: the [Instella-MoE GitHub repository](https://github.com/AMD-AGI/Instella-MoE) (architecture,
+training stages, license, data preparation), the
+[ROCm technical blog](https://rocm.blogs.amd.com/artificial-intelligence/instella-moe/README.html)
+(benchmarks, FarSkip-Collective and Gated MLA framing, figures), the
+[Hugging Face model collection](https://huggingface.co/collections/amd/instella-moe) (six checkpoints),
+and the [FarSkip-Collective paper](https://arxiv.org/abs/2511.11505) (Dukler et al., MLSys 2026 — overlap
+percentages, cross-scale validation, Llama 4 Scout conversion). Figures reproduced here are the blog's
+own Figures 1–3. Benchmark numbers are AMD's, via OLMES; the training-cost and cluster-size figures this
+piece flags as missing are missing because AMD has not published them, not because they were left out
+here. Interactive diagrams are mine; the FarSkip timeline and gate values are illustrative, not measured
+traces.*
