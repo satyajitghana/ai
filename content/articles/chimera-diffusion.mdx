@@ -1,0 +1,353 @@
+---
+title: "Chimera: unbundling RoPE into a diffusion Transformer that extrapolates 6× on video"
+description: "Adobe's Chimera swaps full attention in a single-stream text/image/video diffusion Transformer for linear Kimi Delta Attention plus periodic Multi-head Latent Attention, drops positional embeddings entirely, and backs it with HeteroP, a per-tensor hyperparameter-transfer scheme that makes Chinchilla-style scaling laws for visual diffusion fit cleanly. Its mechanistic RoPE audit shows why that works: reassigning RoPE's three bundled inductive biases to dedicated modules buys genuine zero-shot 6× video-length extrapolation (6.5% FID degradation vs 50%+ for Wan2.1 and HunyuanVideo) — and a compute-efficiency number the abstract states as 7.3× but the paper's own Section 5.5 arithmetic gives as 6.8×."
+date: 2026-08-03
+interest: 5
+helpful: 4
+tags:
+  - diffusion
+  - linear-attention
+  - video-generation
+  - scaling-laws
+  - positional-encoding
+  - explainer
+cover: /articles/chimera-diffusion/fig1.png
+---
+
+import { RopeUnbundling } from "@/components/articles/chimera-diffusion/rope-unbundling"
+import { HeteroPDrift } from "@/components/articles/chimera-diffusion/hetero-p-drift"
+import { LengthExtrapolation } from "@/components/articles/chimera-diffusion/length-extrapolation"
+
+Visual generation is hitting the same wall language models hit a few years back: the tokens keep multiplying.
+A high-resolution image is thousands of tokens, a video clip is tens of thousands, and once you want text,
+image, and video sharing one context, full attention's quadratic cost stops being a rounding error and starts
+being the budget. Language models solved their version of this with linear and hybrid attention. The catch,
+as [Chimera](https://arxiv.org/abs/2607.28611) — Adobe Research's new hybrid visual diffusion Transformer —
+points out, is that those solutions don't transfer directly: a diffusion backbone has to preserve spatiotemporal
+locality and support genuinely bidirectional interaction across modalities, neither of which a causal language
+model has to worry about.
+
+Chimera's answer is a single-stream backbone that processes text, image, and video tokens together, mixing them
+with **Kimi Delta Attention (KDA)** for cheap $O(N)$ state tracking, periodic **Multi-head Latent Attention
+(MLA)** for exact global interaction, and **modality-aware short convolutions** for local structure — with no
+positional embeddings anywhere in the stack. The paper backs this with **HeteroP**, a hyperparameter-transfer
+scheme built for a backbone that is not one uniform shape, and fits genuine Chinchilla-style scaling laws on top
+of it. The headline results: a real zero-shot **6× video-length extrapolation** (5-second training clips
+generalizing to 30 seconds with only 6.5% FID degradation, versus 50%+ for two full-attention baselines), and a
+compute-efficiency claim over a matched Wan2.1 baseline that the abstract prints as **7.3×** but the paper's own
+arithmetic, two pages later, computes as **6.8×**. Both numbers are worth seeing, and the mechanism behind the
+extrapolation result is the more interesting story.
+
+<Figure
+  src="/articles/chimera-diffusion/fig1.png"
+  alt="The Chimera block diagram. Left: the full block stack — packed multi-modality tokens and a timestep embedding feed a repeated N-times stage of linear attention (KDA) plus MoE feed-forward, each wrapped in identity hyper-connections (iHC), followed by a single global-attention (MLA) plus MoE stage. Center top: the global-attention module, showing MLA taking a concatenation of an unrotated direct key path and a compressed latent key/value path. Center bottom: the linear-attention module, showing KDA fed by short convolutions on query, key, and gating branches. Right top: the MoE module routing tokens through a Top-K gate to a bank of 56 experts. Right bottom: the iHC module, duplicating the residual stream into an identity path and a pre-mapped path through attention or FFN, recombined by a post-mapping."
+  caption="Chimera's block: a 3:1 stack of linear-attention (KDA) stages and one global-attention (MLA) stage, each MoE-routed and wrapped in identity hyper-connections (Adobe Research, 2026, Figure 2)."
+/>
+
+## One stream, three mechanisms, no positions
+
+Text tokens (from a frozen T5-style encoder) and visual tokens (from a frozen Wan2.1 VAE, patchified) are
+concatenated into a single sequence and pushed through the same stack. Visual tokens are flattened in
+**temporal-major raster order** — position $(i,j,k)$ in a $(T, H, W)$ grid maps to sequence index
+$m = iHW + jW + k$, with a single image just a one-frame video — so there is one token order for every modality,
+not a per-modality scheme bolted on afterward.
+
+Inside a block, the attention sublayer is either KDA or MLA on a fixed **3:1 KDA-to-MLA schedule**: three linear
+layers, then one global layer, repeating. The first and last blocks use a dense SwiGLU feed-forward; every other
+block routes through **sparse MoE** — 56 experts, top-8 active, no shared experts, balanced by an auxiliary-loss-free
+bias added only at top-K selection (not to the mixture weights). With that bias, batch-level `MaxVio` — the metric
+tracking how far the busiest expert's load sits above the average — settles near 0.5; strip the bias out and it
+blows past 5, close to the theoretical collapse bound of 6. Every sublayer — attention and FFN alike — is wrapped in
+**Identity Hyper-Connections (iHC)**: the residual stream is duplicated into $M{=}4$ parallel copies with
+token-dependent read/write gates, a simplified version of hyper-connections that fixes the residual-mixing matrix
+to the identity instead of learning a doubly-stochastic one via Sinkhorn iterations — cheaper, at the cost of losing
+learned cross-stream mixing.
+
+None of KDA, MLA, or NoPE is new by itself — they're the same three ideas [Kimi K3](/articles/kimi-k3) uses to run
+a 1M-token language model, adopted here essentially as-is and pointed at diffusion instead of next-token
+prediction. **KDA** keeps a fixed-size recurrent state per head instead of a growing KV cache:
+
+$$
+S_t = \big(I - \beta_t k_t k_t^{\top}\big)\,\mathrm{Diag}(\alpha_t)\,S_{t-1} + \beta_t k_t v_t^{\top}
+$$
+
+with $\alpha_t \in (0,1)^{d_k}$ a **per-channel** forget gate and $\beta_t$ a scalar write strength — the exact
+recurrence [KDA has a half-life](/articles/kda-half-life) walks through: each channel forgets a fixed fraction of
+its state per step, so it has a half-life $n_{1/2} = \ln(0.5)/\ln(\alpha)$ measured in tokens. That article works
+the math out for language tokens; Chimera is the same forget-gate law now doing memory management for pixels and
+frames instead of words. **MLA** restores exact bidirectional interaction on top, compressing keys and values
+through a low-rank projection, with one twist: the direct key path is left **unrotated** — no RoPE at all, on
+either mechanism. That's the part worth slowing down on.
+
+## What RoPE was actually doing
+
+Every visual diffusion Transformer before this one, and most language models, lean on RoPE to inject position.
+Chimera's authors run a mechanistic audit of what that rotation is actually buying, on Qwen3-4B first and then on
+the visual diffusion models FLUX.2 and Wan2.2, and decompose each attention logit into its per-frequency-pair
+cosine contributions (the pieces sum to the real logit to within $3 \times 10^{-13}$, so this isn't an
+approximation of the mechanism — it's an exact accounting of it).
+
+The clearest case is layer 0, head 1 in Qwen3-4B, a strong "previous-token" head: 98.5% of its queries attend most
+strongly to the immediately preceding token. Trace *why*, and it's one channel pair — the fastest-rotating one,
+turning roughly one radian per token — whose cosine happens to peak exactly at offset 1. The slow, high-amplitude
+pairs sitting alongside it contribute a flat, content-driven background that doesn't move the peak at all. Search
+across every head for the best "attend exactly $n$ tokens back" detector and the same pattern holds: the strongest
+head hits a 0.56 fraction at $n{=}2$, but only 0.07 at $n{=}10$ — RoPE-based position selection is a short-range
+tool, not a general one, in both language and visual models alike.
+
+From that audit the paper pulls out three things RoPE is doing at once, inside the same rotated channels:
+
+1. **Position selection** — a canonical previous-token/induction-head trick, and (per the numbers above)
+   reliable only at short offsets.
+2. **Recency decay** — an *implicit* average property of the summed rotations, not an explicit mechanism, and one
+   a trained head can learn to bypass.
+3. **Layout encoding** — the channel partition across positional axes (time, height, width, text index) is set by
+   hand at design time; every additional axis divides the available channels further and never adapts.
+
+Chimera's move is to stop asking one set of rotated channels to do all three jobs and give each its own dedicated
+module instead:
+
+<RopeUnbundling />
+
+Token order for KDA comes for free from the recurrence itself — a scan is inherently order-aware, no rotation
+required. Position selection moves to the **modality-aware short convolution**: a depthwise kernel mixing tokens at
+explicit index offsets, which is a cheap, parameter-light way to do exactly the short-range job the audit found
+RoPE was actually good at. Recency decay moves to **KDA's own forget gate** $\alpha_t$ — explicit and
+content-adaptive, rather than an emergent side effect. And layout encoding falls out of the convolution's native
+shape: **causal 1D** along the token index for text, **causal-in-time 3D** over the $(T,H,W)$ grid for video — each
+modality's structure is encoded by the operator itself, with no channels spent partitioning anything. Text and
+visual tokens each get their own kernel here, implemented as one fused Triton pass that measures 2.2–2.3× faster
+forward, 1.5–1.8× faster forward-plus-backward, and up to 4× less peak activation memory than the naive
+gather-convolve-scatter version.
+
+With all three biases reassigned, MLA is left to do only content matching — the paper's framing is that MLA
+without RoPE is the limiting case where every channel has zero rotary frequency, so its logits depend purely on
+content. KDA's queries and keys carry no positional phase either. Nothing in the stack is tied to how long the
+training sequences were, which is the actual, mechanistic reason extrapolation works — not a property tacked on
+after the fact, but the direct consequence of where each inductive bias now lives. It's the same bet
+[Kimi K3](/articles/kimi-k3) makes for a 1M-token language model: no RoPE means nothing to rescale when the
+context grows past training length. Chimera is that bet, replayed in a diffusion Transformer over image and video
+tokens instead of a causal LM over text.
+
+## HeteroP: a scaling ratio per tensor, not per model
+
+Fitting a Chinchilla-style law needs a family of models at different sizes, each trained with hyperparameters as
+good as they'd be at full scale — otherwise you're not comparing model sizes, you're comparing tuning quality.
+The standard fix is µP-style hyperparameter transfer: tune a small proxy model, then derive the large model's
+learning rate, init, and weight decay from a single width ratio. Chimera's backbone breaks that assumption,
+because it isn't one uniform width. Widening the model changes the KDA head width, the MLA compression rank, the
+MoE expert width, the router width, and the timestep-conditioning MLP width all differently — a single global
+ratio, tuned for the backbone, is the wrong ratio for the rest.
+
+**HeteroP**'s fix is to stop pretending there's one ratio. For each parameter group $W$, it computes its own width
+ratio from that group's own **functional fan-in**, plus one shared depth ratio from the block-count ratio:
+
+$$
+(m_W, m_L) = \left(\frac{\mathrm{fan\text{-}in}(W)}{\mathrm{fan\text{-}in}(W^{(0)})},\ \frac{n_{blk}}{n_{blk}^{(0)}}\right)
+$$
+
+Concretely: hidden weights get init variance and learning rate scaled by $m_W^{-1}$ and weight decay scaled by
+$m_W$ (keeping the LR-times-decay product invariant); attention and FFN residual branches get an additional
+$m_L^{-1}$ output scaling, a depth correction borrowed from CompleteP; input adapters, norms, and the readout keep
+their base LR and init (standard µP convention), with the readout's forward pass separately rescaled by $m_W^{-1}$.
+The proxy model is width 512, depth 4 (22M activated, 59M total parameters); the largest is width 2048, depth 32.
+
+<HeteroPDrift />
+
+The validation is direct: under HeteroP, the optimal base learning rate sits at about $10^{-3}$ across a 56× range
+in activated parameters (20M to 1.12B) and an 8× range in depth (4 to 32 layers). Under standard
+parameterization — one global ratio for everything — the optimum drifts sixfold, from $10^{-4}$ to $6\times
+10^{-4}$, and several of the high-learning-rate runs at large scale diverge outright. That drift isn't just an
+inconvenience for the scaling-law fit, it actively biases it: trained without HeteroP, the same image model
+family gives a fitted exponent of $N_{opt}\propto C^{0.588}$ (envelope) or $C^{0.581}$ (isoFLOP) — inflated by
+0.08–0.10 over HeteroP's 0.505/0.481 — which the paper's own extrapolation shows prescribes a compute-optimal
+model roughly **2× oversized (and correspondingly undertrained)** three orders of magnitude of compute out from
+where it was fit. Get the transfer wrong, and the law tells you to build the wrong-shaped model at scale.
+
+## What the scaling law says
+
+With HeteroP holding hyperparameter quality constant across scale, the paper fits $\hat L(N,D) = E + AN^{-a} +
+BD^{-b}$ — activated parameters $N$, visual-latent-token count $D$ — using three independent estimators (a
+training-loss envelope, an isoFLOP profile, and a direct parametric fit) for image and video pretraining
+separately. All three estimators agree, and they disagree with each other by modality:
+
+| Modality | $N_{opt}$ exponent (across 3 estimators) | Split |
+|---|---|---|
+| Image (256²) | 0.48–0.52 | Nearly balanced between model size and data |
+| Video (180p) | 0.53–0.56 | Modestly favors model size at higher budgets |
+
+The parametric fits — $\hat L_{image} = 0.126 + 5.28N^{-0.315} + 33.8D^{-0.336}$ ($R^2{=}0.993$) and
+$\hat L_{video} = 0.124 + 8.07N^{-0.330} + 145.2D^{-0.394}$ — land on nearly identical irreducible-loss terms
+(0.126 vs 0.124), consistent with both modalities sharing the same denoiser and VAE. The paper adds an axis prior
+scaling-law work doesn't have: the compute-optimal **image-to-video data ratio**. It drifts from roughly 4:1 to 3:1
+as compute grows from $10^{18}$ to $10^{19}$ FLOPs (image gets relatively cheaper to learn from per token as
+budget grows), while the video-loss-optimal ratio stays pinned at 1:1 — the video-heaviest mixture the authors
+actually tested, so that half of the result is a boundary effect, not a discovered optimum, and the paper is
+upfront that it didn't search past it.
+
+## The number that doesn't quite add up
+
+Guided by those laws, the paper trains an 11B-total / 2B-activated Chimera and compares it against matched 2B
+full-attention baselines — Wan2.1 and Z-Image — all four models trained in-house to the same $5\times10^{20}$-FLOP
+budget on identical data. At a shared training loss of 0.149, Wan2.1 needs $4.29\times10^{20}$ FLOPs and Z-Image
+needs $3.75\times10^{20}$; Chimera-dense (no MoE, no iHC, no HeteroP) reaches it in $2.55\times10^{20}$ — a clean
+**1.7×**. The complete configuration (MoE + iHC + HeteroP) reaches it in $6.27\times10^{19}$ FLOPs.
+
+<Figure
+  src="/articles/chimera-diffusion/fig2.png"
+  alt="A line chart of training loss against cumulative FLOPs for four 2-billion-parameter models: Wan2.1, Z-Image, Chimera-dense, and the complete Chimera-MoE-iHC-HeteroP configuration. All four curves descend and flatten; Chimera-dense sits below Wan2.1 and Z-Image throughout, and the complete configuration sits well below all three, reaching the shared reference loss line labeled Wan ref. at a small fraction of the FLOPs. Dashed vertical markers at the reference loss are labeled x1.2, x1.7, and x7.3."
+  caption="Chimera's own Figure 12 — compute efficiency at a shared training loss of 0.149. The plotted label reads ×7.3 for the complete configuration (Adobe Research, 2026, Figure 12)."
+/>
+
+Do the division on the two numbers printed a page earlier and you get $4.29\times10^{20} / 6.27\times10^{19} =
+6.84$ — which is exactly what Section 5.5's own sentence says: "a 6.8× compute-efficiency gain over Wan." The
+abstract, the introduction, and the plotted label in Figure 12 above all instead say **7.3×**, from the same pair
+of FLOPs figures.
+
+<Callout type="warn">
+I'm not accusing anyone of anything here — I re-fetched the paper's own HTML and confirmed both numbers appear
+verbatim: "6.8 × compute-efficiency gain over Wan" in the Section 5.5 prose, right next to the $4.29\times10^{20}$
+and $6.27\times10^{19}$ FLOPs figures it's computed from, and "7.3 ×" in the abstract, the introduction, and baked
+into Figure 12's own plotted label. $4.29 / 0.627 = 6.84$, not $7.3$, using the numbers exactly as printed. It's
+possible the true, unrounded internal FLOPs values reconcile to 7.3× and the 3-significant-figure numbers printed
+in the text are what drifted — the paper doesn't say either way, and I found no footnote reconciling the two. What
+I can say: **using the checkable numbers, the arithmetic supports 6.8×, not 7.3×.** If you're going to cite
+Chimera's headline efficiency gain, cite 6.8×, or go verify the underlying FLOPs yourself.
+</Callout>
+
+Worth separating, too: the component ablation (dense → +MoE → +iHC → +HeteroP) reports a **4.1×** cumulative gain
+at loss 0.149 — MoE alone gets to 1.5×, +iHC to 1.7×, +HeteroP the rest of the way. That 4.1× is measured *relative
+to Chimera-dense*, not to Wan2.1, so it isn't a third candidate for the headline number — it's answering a
+different question (how much of the complete system's win comes from which piece), and it's consistent with
+either the 6.8× or 7.3× reading of the Wan-relative number, since $1.7 \times 4.1 \approx 7.0$, which lands between
+the two and settles nothing on its own.
+
+## Zero-shot length extrapolation: NoPE's actual payoff
+
+This is where the RoPE audit cashes out. Chimera is trained only on 5-second, 81-frame clips, then asked — with
+**no length-specific fine-tuning at all** — to generate 30 seconds, 6× its training length. Every metric below is
+computed only on the final 5 seconds of each generated clip, isolating the extrapolated region, over 512 generated
+vs. 512 reference videos at matched prompts, seeds, resolution, and fps:
+
+<Figure
+  src="/articles/chimera-diffusion/fig3.png"
+  alt="A line chart of FID percent change from the 5-second baseline, plotted against generated video duration from 5 to 30 seconds, for three models. Wan2.1-T2V-1.3B and HunyuanVideo-1.5 both rise steeply, crossing 50 percent degradation by 30 seconds. Chimera (Gated Delta-Net / KDA) stays nearly flat, dipping slightly below zero before ending around 6.5 percent."
+  caption="FID degradation from the 5-second baseline as generated video length grows to 30 seconds — Chimera vs. two full-attention, RoPE-based baselines (Adobe Research, 2026, Figure 16b)."
+/>
+
+<LengthExtrapolation />
+
+The numbers: Chimera's FID goes from 77.1 at 5 seconds to 82.1 at 30 — a **6.5%** degradation. FVD moves from
+685.8 to 829.5, up 20.9%. Wan2.1-T2V-1.3B's FID degrades **50.5%** over the same stretch, HunyuanVideo-1.5's
+**53.6%** — both well past the point where a video model's later seconds are visibly falling apart. Chimera also
+posts the lowest *absolute* FID and FVD of the three at 30 seconds, not merely the smallest percentage move — it
+isn't winning by having started worse and degrading less, it's ahead the whole way.
+
+This is the sibling result to [SANA-Video 2.0](/articles/sana-video2), the other linear-attention video approach
+covered here, and the two make an interesting contrast. SANA-Video 2.0 keeps the same 3:1 linear-to-global
+attention idea and Block Attention Residuals for cross-depth flow, but keeps RoPE and optimizes for raw
+single-GPU latency at a fixed, modest clip length. Chimera keeps RoPE out entirely and stakes the design on
+exactly the axis SANA-Video 2.0 doesn't test: generalizing far past the lengths it was trained on. Different bets,
+same underlying conviction that softmax attention over every token pair was never the part of video generation
+worth paying full price for.
+
+## What $O(N)$ buys in memory and latency
+
+A softmax KV cache costs $O(N \cdot H \cdot d_h)$ — grows with sequence length. KDA's recurrent state costs
+$O(H \cdot d_h^2)$ — fixed, independent of $N$. Measured directly: a matched KDA/MLA and MHA/MLA backbone, both
+around 2B activated parameters at the same 3:1 ratio, batch size 1, BF16, 512 text tokens plus 18×28 visual
+tokens per frame, on one NVIDIA A100-SXM4-80GB —
+
+<BenchBars
+  title="Max sequence length before OOM, single 80GB GPU (thousand tokens)"
+  unit="k"
+  bars={[
+    { label: "MHA/MLA (3:1)", value: 152 },
+    { label: "KDA/MLA (3:1)", value: 255, highlight: true },
+  ]}
+/>
+
+— the linear variant supports 1.68× longer sequences before it runs out of memory, and runs 2.14× faster at the
+255k-token point both backbones can reach. The paper is careful about what this comparison actually shows:
+FlashAttention removes the quadratic attention *workspace*, but not the quadratic *arithmetic* — so this isn't a
+straw-man comparison against an un-optimized baseline, it's the honest gap that remains after the standard fix.
+
+## Benchmarks, and what 600 H100-days buys
+
+Trained for only about 600 H100-days, Chimera is competitive on text-to-image quality with models that cost far
+more to build:
+
+<BenchBars
+  title="DPG-Bench overall score"
+  unit=""
+  bars={[
+    { label: "Seedream 3.0", value: 88.27 },
+    { label: "Chimera", value: 85.12, highlight: true },
+    { label: "Z-Image-Turbo", value: 84.86 },
+    { label: "SD3-Medium", value: 84.08 },
+    { label: "FLUX.1-dev", value: 84.00 },
+  ]}
+/>
+
+On GenEval, Chimera lands at 0.82 overall — tied with Z-Image-Turbo, matching FLUX.1-dev, beaten only by
+Seedream 3.0's 0.84 — and it beats both FLUX.1-dev and Z-Image-Turbo on DPG-Bench specifically. The paper also
+quotes Z-Image-Turbo's *own* reported training budget, about 12.4K H100-days, as roughly 20× Chimera's — worth
+reading as a cross-lab comparison rather than a controlled one: different codebases, different clusters, and a
+number each lab measured on its own infrastructure, not a shared benchmark. The GenEval/DPG-Bench baseline rows
+themselves are the field's normal practice, too — each competitor's own published number, not re-run under
+Chimera's exact sampling protocol. Worth knowing before quoting either comparison as settled.
+
+## Honest limits
+
+The paper is unusually direct about what it hasn't shown yet:
+
+<Callout type="note">
+- **MoE underperforms its LM-scaling expectation.** Sparsity buys only about **1.5×** compute efficiency here,
+  well short of the commonly cited $\sqrt{\text{sparsity}}$ heuristic — the authors attribute this to weak expert
+  specialization (routing stays close to uniform across tokens and timesteps) and call it out as an architectural
+  ceiling, not a training bug. A negative result reported plainly rather than smoothed over.
+- **Muon underperforms AdamW throughout** their tests. They hypothesize Adam's implicit low-rank bias matters for
+  diffusion training specifically, but say so as a hypothesis, backed by a brief spectral-analysis follow-up, not
+  a systematic sweep.
+- Several structural ratios are **held fixed across the entire scaling study** and never made scale-dependent:
+  iHC's stream count, MoE's expert count and top-K, and MLA's KV-compression ratio. The paper flags directly that
+  whether the optimal compression ratio is itself scale-dependent is left to future work.
+- Only **text-to-image and text-to-video generation** are evaluated — no multimodal *understanding* task, despite
+  the single-stream design being a natural fit for one (the paper name-drops this as a target direction, not a
+  result).
+- The timestep-conditioning MLP's width is scale-sensitive enough to destabilize training if mismatched to the
+  backbone — a 4096-dim MLP paired with a 1024-wide backbone went unstable — and it's patched ad hoc rather than
+  covered by the main HeteroP table.
+</Callout>
+
+Set against that, the scaling-law and compute-efficiency measurements themselves are unusually rigorous for the
+genre: Wan2.1 and Z-Image aren't cited from their own papers here, they're re-implemented and trained in-house at
+matched 2B scale on identical data, specifically so the efficiency comparison isn't citing someone else's number
+under someone else's conditions.
+
+## The take
+
+The RoPE audit is the part of this paper worth remembering past the benchmark tables. It's not "we removed
+positional embeddings and it worked" — it's a demonstration, with an exact per-frequency accounting, that RoPE was
+quietly doing three separate jobs through the same rotated channels, that one of those jobs (position selection)
+only works at short range anyway, and that giving each job its own dedicated, non-attention mechanism is what
+actually buys extrapolation — not a side effect of going linear, a direct consequence of where position now lives
+in the model. HeteroP is the less flashy but equally load-bearing half: none of the scaling-law numbers mean
+anything if the hyperparameters drift as you change scale, and a heterogeneous backbone needs a heterogeneous
+transfer scheme to keep them from drifting.
+
+The 6.8-versus-7.3 gap doesn't undercut any of that — it's a rounding-sized discrepancy in one headline multiplier,
+not in the mechanism. But it's exactly the kind of thing worth checking yourself before repeating a number,
+which is the whole reason to read the arithmetic instead of just the abstract.
+
+---
+
+*Source: [Chimera: Designing and Chinchilla-Scaling Hybrid Visual Diffusion Transformers](https://arxiv.org/abs/2607.28611)
+(Ge, Jiang, Wang et al., Adobe Research, 2026), read from the arXiv HTML render. Figures 1–3 here are the paper's
+Figures 2, 12, and 16b, reproduced for commentary; all benchmark and scaling-law numbers are the paper's own,
+self-measured against in-house-trained baselines except where marked as cited. The RoPE re-assignment, HeteroP
+drift, and length-extrapolation diagrams are mine — the first is a schematic of the paper's own finding, the second
+reproduces the real numbers from its Figure 7 ablation on an illustrative loss curve, the third traces the actual
+tested points from its Figure 16b. Related: [Kimi K3](/articles/kimi-k3) for where KDA, MLA, and NoPE come from;
+[KDA has a half-life](/articles/kda-half-life) for the forget-gate math this piece leans on; and
+[SANA-Video 2.0](/articles/sana-video2) for the other linear-attention video architecture on this site.*
