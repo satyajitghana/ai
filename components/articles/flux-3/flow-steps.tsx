@@ -224,9 +224,9 @@ export function FlowSteps() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Generation integrates the learned velocity field from noise to data. When the field is{" "}
-          <span style={{ color: ACCENT }}>straight</span> (rectified), the Euler polyline is the true path at{" "}
-          <span className="text-foreground">any</span> step count — drop to 2 steps and it still lands. Flip to a{" "}
-          <span style={{ color: MISS }}>curved</span> field and few steps cut the corner and miss; the error only
+          <span style={{ color: ACCENT }}>straight</span>{" "}(rectified), the Euler polyline is the true path at{" "}
+          <span className="text-foreground">any</span>{" "}step count — drop to 2 steps and it still lands. Flip to a{" "}
+          <span style={{ color: MISS }}>curved</span>{" "}field and few steps cut the corner and miss; the error only
           closes as you add steps. Straightening the paths is why a flow backbone can generate in a handful of steps.
         </p>
       </div>

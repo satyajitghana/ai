@@ -137,7 +137,7 @@ export function TaperDirection() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Same parameter budget every time — only the <em>placement</em> changes. Front-loading capacity
+          Same parameter budget every time — only the <em>placement</em>{" "}changes. Front-loading capacity
           helps; centering it is worse than uniform; and back-loading (wider-late) is the worst of
           all, +1.01 perplexity over doing nothing. Where you spend the width matters, and the
           direction is unambiguous.

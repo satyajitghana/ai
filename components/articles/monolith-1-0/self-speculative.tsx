@@ -163,8 +163,8 @@ export function SelfSpeculative() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            keeps <span style={{ color: ACCENT }}>{acc}</span> drafts + 1 fix ·{" "}
-            <span className="text-foreground">{DOMAINS[domain].speedup}</span> decode speedup
+            keeps <span style={{ color: ACCENT }}>{acc}</span>{" "}drafts + 1 fix ·{" "}
+            <span className="text-foreground">{DOMAINS[domain].speedup}</span>{" "}decode speedup
           </div>
         </div>
 
@@ -174,11 +174,11 @@ export function SelfSpeculative() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The model drafts <span className="text-foreground">6</span> tokens cheaply, then checks all of them in one
-          verification pass. It keeps the longest correct prefix, <span style={{ color: ACCENT }}>corrects</span> the first
+          The model drafts <span className="text-foreground">6</span>{" "}tokens cheaply, then checks all of them in one
+          verification pass. It keeps the longest correct prefix, <span style={{ color: ACCENT }}>corrects</span>{" "}the first
           miss, and drops the rest — so a single expensive pass emits several tokens instead of one. Code is more
           predictable than prose, so the drafts survive verification more often: Basalt reports{" "}
-          <span className="text-foreground">~2.1x</span> on natural language and <span className="text-foreground">~2.7x</span>{" "}
+          <span className="text-foreground">~2.1x</span>{" "}on natural language and <span className="text-foreground">~2.7x</span>{" "}
           on code. It is exact-decoding — the verify pass guarantees the output matches the base model token for token.
         </p>
       </div>

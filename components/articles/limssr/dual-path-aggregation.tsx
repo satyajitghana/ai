@@ -220,16 +220,16 @@ export function DualPathAggregation() {
             })}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            {count}/3 present &middot; gate <span style={{ color: ACCENT }}>{(w1 * 100).toFixed(0)}%</span> reason / {(w2 * 100).toFixed(0)}% recover
+            {count}/3 present &middot; gate <span style={{ color: ACCENT }}>{(w1 * 100).toFixed(0)}%</span>{" "}reason / {(w2 * 100).toFixed(0)}% recover
           </div>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           When every modality is present the two paths agree and split the vote. Drop modalities and the
           recovery path has little left to cross-attend over, so its <span className="text-foreground">learnable
-          confidence</span> falls and the gate shifts weight to the calibrated path &mdash; the one that already
+          confidence</span>{" "}falls and the gate shifts weight to the calibrated path &mdash; the one that already
           discounts what it cannot trust. That shift is the anti-hallucination mechanism: on FS1000 the full gate
-          cuts mean-squared error from <span className="text-foreground">18.18</span> (simple fusion) to{" "}
+          cuts mean-squared error from <span className="text-foreground">18.18</span>{" "}(simple fusion) to{" "}
           <span style={{ color: ACCENT }}>14.08</span>, at &rho; 0.789. (Gate dynamics illustrative.)
         </p>
       </div>

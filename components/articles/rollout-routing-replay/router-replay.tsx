@@ -232,7 +232,7 @@ export function RouterReplay() {
             w<sub>t</sub>
           </span>{" "}
           swings away from 1 — token B goes to <span style={{ color: BAD }}>3.42×</span>, token C to <span style={{ color: BAD }}>0.27×</span>. Turn{" "}
-          <span style={{ color: ACC }}>R3 on</span> and the training pass replays the rollout mask <span className="font-mono text-xs">I_infer</span>; the same experts
+          <span style={{ color: ACC }}>R3 on</span>{" "}and the training pass replays the rollout mask <span className="font-mono text-xs">I_infer</span>; the same experts
           fire, softmax still runs over the training logits so the router keeps learning, and every token returns to{" "}
           <span style={{ color: ACC }}>w ≈ 1</span>.
         </p>

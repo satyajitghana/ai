@@ -234,8 +234,8 @@ export function ExpertStreaming() {
             </button>
           </div>
           <div className="ml-auto flex items-center gap-3 font-mono text-[10px] text-muted-foreground">
-            <span><span style={{ color: HIT }}>{hits}</span> hit</span>
-            <span><span style={{ color: MISS }}>{misses}</span> miss</span>
+            <span><span style={{ color: HIT }}>{hits}</span>{" "}hit</span>
+            <span><span style={{ color: MISS }}>{misses}</span>{" "}miss</span>
             <span>cache {cache.length}/{cacheSize}</span>
           </div>
         </div>
@@ -255,13 +255,13 @@ export function ExpertStreaming() {
         <div className="mt-3 rounded-lg border bg-muted/20 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
           this layer, this token: <span style={{ color: MISS }}>{misses} disk fetch{misses === 1 ? "" : "es"}</span> ×19 MB ={" "}
           <span className="text-foreground">{layerMB} MB</span> → ~{layerSec.toFixed(2)} s at ~1 GB/s NVMe.{" "}
-          Across all {LAYERS} layers a cold token reads <span className="text-foreground">~{tokenGB.toFixed(1)} GB</span> from disk — that read is the critical path.
+          Across all {LAYERS} layers a cold token reads <span className="text-foreground">~{tokenGB.toFixed(1)} GB</span>{" "}from disk — that read is the critical path.
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The dense core never leaves RAM; the routed experts do. A <span style={{ color: HIT }}>hit</span> is served from the
-          in-RAM LRU cache (or a <span style={{ color: ACCENT }}>pinned</span> hot expert) at memory speed. A{" "}
-          <span style={{ color: MISS }}>miss</span> is a disk fetch that <span className="text-foreground">blocks the token</span> until
+          The dense core never leaves RAM; the routed experts do. A <span style={{ color: HIT }}>hit</span>{" "}is served from the
+          in-RAM LRU cache (or a <span style={{ color: ACCENT }}>pinned</span>{" "}hot expert) at memory speed. A{" "}
+          <span style={{ color: MISS }}>miss</span>{" "}is a disk fetch that <span className="text-foreground">blocks the token</span>{" "}until
           the ~19 MB expert arrives. Grow the cache or pin the hottest experts and misses fall — the engine literally gets faster the
           more you use it. But every uncached expert a token needs is another read the NVMe has to finish first.
         </p>

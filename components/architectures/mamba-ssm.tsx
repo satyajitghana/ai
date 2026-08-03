@@ -120,9 +120,9 @@ export function MambaSsm() {
         </svg>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Instead of attending over the whole sequence, Mamba <em>scans</em> it: a single fixed-size state is carried
+          Instead of attending over the whole sequence, Mamba <em>scans</em>{" "}it: a single fixed-size state is carried
           step to step by a linear recurrence, and the transition parameters (<span style={{ color: "#8a2b2b" }}>&#916;,&nbsp;B,&nbsp;C</span>)
-          are computed <em>from the input</em> &mdash; so the model can selectively remember or forget while staying linear in length.
+          are computed <em>from the input</em>{" "}&mdash; so the model can selectively remember or forget while staying linear in length.
         </p>
       </div>
     </figure>

@@ -110,7 +110,7 @@ export function SwaKvCache() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The five sliding-window layers per block stop growing once the context passes the
           128-token window, so at {ctxK}K tokens only the 1-in-6 global layers still scale — the
-          cache is <span className="text-foreground">{ratio.toFixed(1)}× smaller</span> than a
+          cache is <span className="text-foreground">{ratio.toFixed(1)}× smaller</span>{" "}than a
           full-attention model of the same depth. That&apos;s most of why a 309B model serves 256K
           context at 150 tokens/second.
         </p>

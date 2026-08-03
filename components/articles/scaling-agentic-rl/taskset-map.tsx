@@ -232,12 +232,12 @@ export function TasksetMap() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            {active.sets.length} tasksets · <span style={{ color: ACCENT }}>{active.total}</span> tasks
+            {active.sets.length} tasksets · <span style={{ color: ACCENT }}>{active.total}</span>{" "}tasks
           </div>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Every taskset loads through the <span className="text-foreground">same</span> contract — a typed config, a
+          Every taskset loads through the <span className="text-foreground">same</span>{" "}contract — a typed config, a
           sandbox from the task&apos;s own prebuilt image, and the taskset&apos;s own upstream grader — so one agent can
           train across all three domains without a bespoke harness per dataset.
         </p>

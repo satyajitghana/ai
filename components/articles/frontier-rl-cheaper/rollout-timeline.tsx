@@ -152,9 +152,9 @@ export function RolloutTimeline() {
           The fleet only earns while it is <span style={{ color: GEN }}>generating</span>. Ship the full checkpoint on every
           update and it idles through each cross-region transfer — the reason the naive answer is one co-located cluster.
           Async RL overlaps the transfer with generation and swaps weights in place, so a small{" "}
-          <span style={{ color: SWAP }}>delta</span> hides behind a single generation window and the fleet stays warm at{" "}
+          <span style={{ color: SWAP }}>delta</span>{" "}hides behind a single generation window and the fleet stays warm at{" "}
           <span style={{ color: GEN }}>{utilAsync.toFixed(0)}%</span>, one policy version off-policy. Drag the payload up: once the
-          handoff no longer fits inside a generation window it <span style={{ color: STALL }}>stalls</span> and staleness climbs —
+          handoff no longer fits inside a generation window it <span style={{ color: STALL }}>stalls</span>{" "}and staleness climbs —
           which is exactly why the {"<"}2% delta, not async alone, is what makes distributed rollouts practical.
         </p>
       </div>

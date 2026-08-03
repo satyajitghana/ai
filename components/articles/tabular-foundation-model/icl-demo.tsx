@@ -164,7 +164,7 @@ export function IclDemo() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Nothing is <span className="text-foreground">trained</span>. The labeled rows are the &ldquo;training set,&rdquo;
-          but they enter as <span style={{ color: SEL }}>context</span> — like examples in a prompt — and the model answers the
+          but they enter as <span style={{ color: SEL }}>context</span>{" "}— like examples in a prompt — and the model answers the
           test row in a single forward pass. Add rows and the prediction <span className="text-foreground">firms up</span>;
           drop them all and it can only guess. This is TabFM&rsquo;s inheritance from TabPFN and TabICL: prediction as
           <em> in-context inference</em>, not gradient fitting.

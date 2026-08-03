@@ -93,9 +93,9 @@ export function MemoryBudget() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Resident footprint here is <span className="text-foreground">{residentGB.toFixed(1)} GB</span> of the ~25 GB budget; the
-          engine auto-sizes the cache from free memory and keeps <span style={{ color: SAFE }}>{safeGB.toFixed(1)} GB</span> in
-          reserve so it never OOM-kills. But the model is <span className="text-foreground">~15× larger than the RAM</span> — those
+          Resident footprint here is <span className="text-foreground">{residentGB.toFixed(1)} GB</span>{" "}of the ~25 GB budget; the
+          engine auto-sizes the cache from free memory and keeps <span style={{ color: SAFE }}>{safeGB.toFixed(1)} GB</span>{" "}in
+          reserve so it never OOM-kills. But the model is <span className="text-foreground">~15× larger than the RAM</span>{" "}— those
           370 GB have to sit on fast NVMe. Quote &ldquo;25 GB of RAM&rdquo; without &ldquo;plus 370 GB of disk&rdquo; and you have
           only half the picture.
         </p>

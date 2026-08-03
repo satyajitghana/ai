@@ -283,25 +283,25 @@ export function BitLayout() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            effective <span style={{ color: ELT }}>{f.eff}</span> bits/element
+            effective <span style={{ color: ELT }}>{f.eff}</span>{" "}bits/element
             {f.block ? ` · ${f.elt} + ${f.block === 16 ? "8/16" : "8/32"} scale` : ""}
           </div>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Every format above stores each value in the same <span className="text-foreground">4-bit E2M1</span> cell (1
+          Every format above stores each value in the same <span className="text-foreground">4-bit E2M1</span>{" "}cell (1
           sign, 2 exponent, 1 mantissa) — {f.name === "BF16" ? "except BF16, the 16-bit baseline. " : ""}the difference is
-          the <span style={{ color: SCALE }}>shared scale</span> that restores dynamic range.{" "}
+          the <span style={{ color: SCALE }}>shared scale</span>{" "}that restores dynamic range.{" "}
           {fmt === "nvfp4" ? (
             <>
-              NVFP4 shares a fine <span style={{ color: SCALE }}>FP8 (E4M3)</span> scale across every{" "}
-              <span className="text-foreground">16</span> elements — plus one FP32 per-tensor scale — for an effective{" "}
-              <span className="text-foreground">4.5 bits/element</span> and an E6M4-like range from 4-bit storage.
+              NVFP4 shares a fine <span style={{ color: SCALE }}>FP8 (E4M3)</span>{" "}scale across every{" "}
+              <span className="text-foreground">16</span>{" "}elements — plus one FP32 per-tensor scale — for an effective{" "}
+              <span className="text-foreground">4.5 bits/element</span>{" "}and an E6M4-like range from 4-bit storage.
             </>
           ) : fmt === "mxfp4" ? (
             <>
-              MXFP4 shares a coarser <span style={{ color: SCALE }}>power-of-2 (E8M0)</span> scale across{" "}
-              <span className="text-foreground">32</span> elements — cheaper (4.25 bits/element) but blunter, so a single
+              MXFP4 shares a coarser <span style={{ color: SCALE }}>power-of-2 (E8M0)</span>{" "}scale across{" "}
+              <span className="text-foreground">32</span>{" "}elements — cheaper (4.25 bits/element) but blunter, so a single
               outlier drags a wider block.
             </>
           ) : (

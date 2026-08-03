@@ -95,7 +95,7 @@ export function DraftVerify() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Acceptance is what everything hinges on. Because a token only counts if the whole prefix
-          before it was accepted, its odds decay as <span style={{ color: ACCENT }}>α^i</span> — so a
+          before it was accepted, its odds decay as <span style={{ color: ACCENT }}>α^i</span>{" "}— so a
           deeper draft has sharply diminishing returns, and the real lever is pushing α up. That is
           exactly what EAGLE-3 does: a better-trained draft raises acceptance, and{" "}
           <span className="text-foreground">τ is (almost) the speedup</span>. Verification stays

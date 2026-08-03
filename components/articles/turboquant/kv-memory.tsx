@@ -108,8 +108,8 @@ export function KvMemory() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Both grow linearly, but TurboQuant's slope is <span className="text-foreground">~4.4× shallower</span>.
-          In a fixed {BUDGET_GB} GB slice, fp16 tops out near <span className="text-foreground">{fp16MaxK}K</span> tokens;
-          the compressed cache reaches <span className="text-foreground">{tqMaxK}K</span> — the same GPU, a much longer
+          In a fixed {BUDGET_GB} GB slice, fp16 tops out near <span className="text-foreground">{fp16MaxK}K</span>{" "}tokens;
+          the compressed cache reaches <span className="text-foreground">{tqMaxK}K</span>{" "}— the same GPU, a much longer
           context. (In practice the repo reports ~1.45–2.0× usable, since prefill still allocates a full cache and only
           full-attention layers compress.)
         </p>

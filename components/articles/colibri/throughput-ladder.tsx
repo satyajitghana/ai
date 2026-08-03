@@ -113,14 +113,14 @@ export function ThroughputLadder() {
             </button>
           ))}
           <div className="ml-auto font-mono text-[11px] text-muted-foreground">
-            <span className="text-foreground">{active.tps.toFixed(2)}</span> tok/s ·{" "}
+            <span className="text-foreground">{active.tps.toFixed(2)}</span>{" "}tok/s ·{" "}
             <span className="text-foreground">~{secPerTok.toFixed(1)} s</span> / token
           </div>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Read the seconds-per-token, not just the rate. The best real community result —{" "}
-          <span style={{ color: GOOD }}>0.37 tok/s</span> with a warm cache, MTP and pinning — is still{" "}
+          <span style={{ color: GOOD }}>0.37 tok/s</span>{" "}with a warm cache, MTP and pinning — is still{" "}
           <span className="text-foreground">~3 seconds per token</span>. Cold, it is 10–20 seconds per token. The two dashed
           references are other community machines; the M5 Max&apos;s 1.06 tok/s comes from far more RAM (128 GB), which lets far
           more experts stay resident. This is a feasibility feat, not an interactive-speed setup.

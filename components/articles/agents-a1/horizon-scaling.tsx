@@ -106,10 +106,10 @@ export function HorizonScaling() {
         </svg>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Agents-A1 and <span className="text-foreground">Qwen3.5-35B-A3B</span> are the{" "}
-          <span className="text-foreground">same 35B model</span> (~3B active). The ~18-point vertical
+          Agents-A1 and <span className="text-foreground">Qwen3.5-35B-A3B</span>{" "}are the{" "}
+          <span className="text-foreground">same 35B model</span>{" "}(~3B active). The ~18-point vertical
           jump is entirely the three-stage horizon-scaling training — and it lands the 35B student in
-          the band held by the <span className="text-foreground">~1T-parameter</span> frontier models.
+          the band held by the <span className="text-foreground">~1T-parameter</span>{" "}frontier models.
           Score = mean of BrowseComp, Seal-0, GAIA, IFBench, and FrontierScience-Olympiad.
         </p>
       </div>

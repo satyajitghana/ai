@@ -132,13 +132,13 @@ export function KimiK3Architecture() {
         </svg>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Read bottom&#8209;to&#8209;top. Kimi K3 stacks a <strong>hybrid block</strong> &mdash;{" "}
-          <span style={{ color: "#3a6ea5" }}>KDA</span> (linear&#8209;time attention),{" "}
-          <span style={{ color: "#b05a5a" }}>Gated MLA</span> (full attention for exact recall) and{" "}
+          Read bottom&#8209;to&#8209;top. Kimi K3 stacks a <strong>hybrid block</strong>{" "}&mdash;{" "}
+          <span style={{ color: "#3a6ea5" }}>KDA</span>{" "}(linear&#8209;time attention),{" "}
+          <span style={{ color: "#b05a5a" }}>Gated MLA</span>{" "}(full attention for exact recall) and{" "}
           <span style={{ color: "#3f7d3f" }}>Stable LatentMoE</span>{" "}
           (shared + routed experts) &mdash; into the residual stream. The twist is{" "}
           <strong>Block Attention Residuals</strong>: every residual add pulls a{" "}
-          <span style={{ color: RESID }}>gated read (α)</span> off a <span style={{ color: RESID }}>bus</span> carrying{" "}
+          <span style={{ color: RESID }}>gated read (α)</span>{" "}off a <span style={{ color: RESID }}>bus</span>{" "}carrying{" "}
           <em>every</em>{" "}
           earlier block&rsquo;s output, not just the layer below &mdash; a learnable skip across the whole depth.
         </p>

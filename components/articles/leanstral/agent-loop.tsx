@@ -172,7 +172,7 @@ export function AgentLoop() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The point: this is the <em>same</em> loop a human uses in Mistral Vibe, and the same loop the
+          The point: this is the <em>same</em>{" "}loop a human uses in Mistral Vibe, and the same loop the
           model was trained in. Test-time scaling is just running it longer — no conjecture pool, no
           parallel prover orchestration, no blueprint stage.
         </p>

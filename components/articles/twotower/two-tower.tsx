@@ -199,8 +199,8 @@ export function TwoTower() {
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
           Two stacks of layers, two jobs. A forward pass sweeps up both towers; at each level the
-          denoiser layer <span style={{ color: TRAIN }}>cross-attends</span> to the{" "}
-          <span style={{ color: FROZEN }}>aligned frozen layer</span> for what&apos;s already decided, and
+          denoiser layer <span style={{ color: TRAIN }}>cross-attends</span>{" "}to the{" "}
+          <span style={{ color: FROZEN }}>aligned frozen layer</span>{" "}for what&apos;s already decided, and
           the masked block resolves in parallel rather than left-to-right. When the block is done it
           commits into the context tower and the next block begins — <em>autoregressive across blocks,
           diffusion within one</em>. The frozen tower keeps the pretrained model&apos;s causal reading

@@ -121,11 +121,11 @@ export function Retention() {
         </svg>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Averaged over everything, the 1-bit model keeps ~<span className="text-foreground">90%</span> of
-          full precision and ternary ~<span className="text-foreground">95%</span> — but that average is
-          the story&apos;s villain. <span className="text-foreground">Math</span> survives almost intact
-          (~96% at 1-bit), while <span style={{ color: ONE }}>agentic tool-calling</span> and{" "}
-          <span style={{ color: ONE }}>vision</span> shed ~18% each. If your workload is the reasoning that
+          Averaged over everything, the 1-bit model keeps ~<span className="text-foreground">90%</span>{" "}of
+          full precision and ternary ~<span className="text-foreground">95%</span>{" "}— but that average is
+          the story&apos;s villain. <span className="text-foreground">Math</span>{" "}survives almost intact
+          (~96% at 1-bit), while <span style={{ color: ONE }}>agentic tool-calling</span>{" "}and{" "}
+          <span style={{ color: ONE }}>vision</span>{" "}shed ~18% each. If your workload is the reasoning that
           quantizes gracefully, this is a great trade; if it&apos;s multi-step tool use, read the fine print.
         </p>
       </div>

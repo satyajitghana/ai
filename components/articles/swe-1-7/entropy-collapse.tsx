@@ -210,19 +210,19 @@ export function EntropyCollapse() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           {replay ? (
             <>
-              With <span className="text-foreground">top-p replay</span> on, token{" "}
-              <span style={{ color: CUT }}>C</span> sits outside the keep-set, so it is never sampled and never becomes an
+              With <span className="text-foreground">top-p replay</span>{" "}on, token{" "}
+              <span style={{ color: CUT }}>C</span>{" "}sits outside the keep-set, so it is never sampled and never becomes an
               optimization target. The collapse update can&apos;t fire — entropy holds. The trainer renormalizes over the{" "}
-              <span className="text-foreground">same recorded mask</span> the sampler used, so train/inference divergence
+              <span className="text-foreground">same recorded mask</span>{" "}the sampler used, so train/inference divergence
               stays bounded instead of blowing up.
             </>
           ) : (
             <>
-              Each step samples the junk token <span style={{ color: CUT }}>C</span> on an off-track rollout (negative
-              advantage). The update pushes the dominant token <span style={{ color: KEPT }}>A</span> up more than the
-              runner-up <span style={{ color: KEPT }}>B</span> and pushes <span style={{ color: CUT }}>C</span> down — the
-              distribution <span className="text-foreground">sharpens</span> and entropy bleeds. Flip{" "}
-              <span className="text-foreground">top-p replay</span> on to cut this path.
+              Each step samples the junk token <span style={{ color: CUT }}>C</span>{" "}on an off-track rollout (negative
+              advantage). The update pushes the dominant token <span style={{ color: KEPT }}>A</span>{" "}up more than the
+              runner-up <span style={{ color: KEPT }}>B</span>{" "}and pushes <span style={{ color: CUT }}>C</span>{" "}down — the
+              distribution <span className="text-foreground">sharpens</span>{" "}and entropy bleeds. Flip{" "}
+              <span className="text-foreground">top-p replay</span>{" "}on to cut this path.
             </>
           )}
         </p>

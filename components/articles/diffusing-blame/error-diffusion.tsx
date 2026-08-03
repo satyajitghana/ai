@@ -206,20 +206,20 @@ export function ErrorDiffusion() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           {stage === "forward" ? (
             <>
-              The <span style={{ color: FWD }}>forward pass</span> is the same either way: input to hidden 1 to hidden 2 to the
-              output error <span className="font-mono">S</span>. Step to <span className="text-foreground">diffuse</span> to see the two rules part company.
+              The <span style={{ color: FWD }}>forward pass</span>{" "}is the same either way: input to hidden 1 to hidden 2 to the
+              output error <span className="font-mono">S</span>. Step to <span className="text-foreground">diffuse</span>{" "}to see the two rules part company.
             </>
           ) : !ed ? (
             <>
               Backprop sends blame back <span className="text-foreground">one layer at a time</span>, and every hop multiplies by{" "}
-              <span style={{ color: BP }}>Wᵀ</span> — the same forward weights, transposed. That transpose is{" "}
+              <span style={{ color: BP }}>Wᵀ</span>{" "}— the same forward weights, transposed. That transpose is{" "}
               <span className="text-foreground">weight transport</span>: each synapse would have to read its partner&apos;s value
               backwards. No known biological synapse can do that.
             </>
           ) : (
             <>
-              Error Diffusion <span style={{ color: ED }}>broadcasts</span> the output error straight to every hidden unit — no
-              reverse chain, no transpose. Routing is by modulo: unit <span className="font-mono">i</span> learns from channel{" "}
+              Error Diffusion <span style={{ color: ED }}>broadcasts</span>{" "}the output error straight to every hidden unit — no
+              reverse chain, no transpose. Routing is by modulo: unit <span className="font-mono">i</span>{" "}learns from channel{" "}
               <span className="font-mono" style={{ color: ED }}>c{"(i mod C)"}</span>, so unit 3 wraps back to{" "}
               <span className="font-mono" style={{ color: ED }}>c0</span>. Every layer updates{" "}
               {stage === "update" ? <span className="text-foreground">locally, at once</span> : "in parallel"} — no signal has to

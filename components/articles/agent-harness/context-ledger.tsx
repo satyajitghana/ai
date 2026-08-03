@@ -123,8 +123,8 @@ export function ContextLedger() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The naive prompt appends every log, diff, and trace, so it grows with the task and{" "}
-          <span style={{ color: OVER }}>overflows the window</span> by turn 7 — the model starts losing the early details. The file-backed
-          harness keeps a <span style={{ color: ACC }}>bounded working set</span> in context and spills the growing history to disk, where it
+          <span style={{ color: OVER }}>overflows the window</span>{" "}by turn 7 — the model starts losing the early details. The file-backed
+          harness keeps a <span style={{ color: ACC }}>bounded working set</span>{" "}in context and spills the growing history to disk, where it
           stays retrievable with <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">grep</code> and{" "}
           <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">read</code>. Same task, flat context cost.
         </p>

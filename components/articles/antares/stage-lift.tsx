@@ -84,10 +84,10 @@ export function StageLift() {
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
-          The backbone starts at <span style={{ color: ACCENT }}>0.000</span> — same weights, no idea how to
+          The backbone starts at <span style={{ color: ACCENT }}>0.000</span>{" "}— same weights, no idea how to
           do the job. Training is the entire difference, and even the 350M GRPO model beats a
           753B open model. GRPO adds a real slice on top of SFT
-          (<span className="tabular-nums">+{((row.grpo - row.sft)).toFixed(3)}</span> at {size}): learning to
+          (<span className="tabular-nums">+{((row.grpo - row.sft)).toFixed(3)}</span>{" "}at {size}): learning to
           verify and stop, not just imitate.
         </p>
       </div>

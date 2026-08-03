@@ -131,8 +131,8 @@ export function TtsStack() {
           Two models, trained in five stages: the LM and the flow-matching decoder are pretrained
           independently, jointly annealed on high-quality data, then each gets its own
           reinforcement-learning pass (plus a robustness stage for the decoder). The split is why
-          you can instruct <span className="text-foreground">what</span> to say and{" "}
-          <span className="text-foreground">how</span> separately — content lives in the LM, voice
+          you can instruct <span className="text-foreground">what</span>{" "}to say and{" "}
+          <span className="text-foreground">how</span>{" "}separately — content lives in the LM, voice
           and prosody in the decoder.
         </p>
       </div>

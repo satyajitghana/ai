@@ -132,13 +132,13 @@ export function Hy3Quant() {
 
         {/* readout */}
         <div className="mt-3 border-t pt-3 font-mono text-[11px] text-muted-foreground">
-          at <span className="text-foreground">{ram} GB</span> the largest GGUF that fits is{" "}
+          at <span className="text-foreground">{ram} GB</span>{" "}the largest GGUF that fits is{" "}
           <span style={{ color: HY }}>{ROWS.find((r) => r.id === fitId)?.name ?? "none"}</span>
           {fitId ? ` (${ROWS.find((r) => r.id === fitId)?.note})` : " — pick a bigger budget or add a GPU"}.
         </div>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           The bar is the exact on-disk size the card reports. The thin pip on the right is an{" "}
-          <span className="text-foreground">illustrative</span> quality ordering from bits-per-weight — not a measured
+          <span className="text-foreground">illustrative</span>{" "}quality ordering from bits-per-weight — not a measured
           score. Below Q2_K the model still forms sentences; the card is explicit that it proves coherence, not reasoning
           or long-context retrieval. Add KV-cache memory on top (see the context section): a 1M window is another
           160–320 GB depending on cache precision.

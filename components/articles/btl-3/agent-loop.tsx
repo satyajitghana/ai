@@ -204,9 +204,9 @@ export function AgentLoop() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Every turn runs the same loop, but the <span className="text-foreground">route</span> step decides what happens next.
-          When a task needs tools, BTL-3 emits one or many calls, <span className="text-foreground">observes</span> the results, and{" "}
-          <span style={{ color: ACCENT }}>recovers</span> if one fails. When none is needed it answers directly and stops —
+          Every turn runs the same loop, but the <span className="text-foreground">route</span>{" "}step decides what happens next.
+          When a task needs tools, BTL-3 emits one or many calls, <span className="text-foreground">observes</span>{" "}the results, and{" "}
+          <span style={{ color: ACCENT }}>recovers</span>{" "}if one fails. When none is needed it answers directly and stops —
           the behaviour BFCL scores as <span className="text-foreground">irrelevance</span>. All scores are Bad Theory Labs&rsquo; own.
         </p>
       </div>

@@ -116,9 +116,9 @@ export function LidBand() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The full trajectory is <span style={{ color: OOD }}>unseen</span> — no model trained on 32k-token
+          The full trajectory is <span style={{ color: OOD }}>unseen</span>{" "}— no model trained on 32k-token
           tasks has been asked to handle a 2M-token one. But every <span style={{ color: IN }}>individual
-          call</span> the RLM makes stays inside the length regime it was trained on, so the pieces keep
+          call</span>{" "}the RLM makes stays inside the length regime it was trained on, so the pieces keep
           working even as the whole gets far longer. That is <span className="text-foreground">locally
           in-distribution</span>: the harness, not the weights, carries the generalization.
         </p>

@@ -97,7 +97,7 @@ export function GroupSerialization() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Serial replay bounds the live autograd graph to a <span style={{ color: OK }}>single response</span>,
-          so going from G=2 to G=8 costs only the measured <span className="text-foreground">+0.208 GB</span> —
+          so going from G=2 to G=8 costs only the measured <span className="text-foreground">+0.208 GB</span>{" "}—
           group size turns into a time cost, not a memory one. Holding every response graph would scale
           activation memory with G and run past the budget (the <span style={{ color: BAD }}>illustrative</span>{" "}
           curve). That is the point: <span className="text-foreground">G is a schedule, not a multiplier.</span>

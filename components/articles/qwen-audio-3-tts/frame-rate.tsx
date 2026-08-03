@@ -83,10 +83,10 @@ export function FrameRate() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Every token is one autoregressive step, and steps are serial — so halving the frame
           rate roughly halves the time-to-audio. Most neural speech codecs sit at 25–75 Hz;
-          Qwen's supervised tokenizer at <span style={{ color: ACCENT }}>12.5 Hz</span> keeps the
+          Qwen's supervised tokenizer at <span style={{ color: ACCENT }}>12.5 Hz</span>{" "}keeps the
           token stream {baseTokens === tokens ? "as short as it gets here" : `~${mult.toFixed(1)}× shorter than the ${hz.toFixed(0)} Hz setting`}{" "}
           while still preserving content and speaker — the whole point of making the tokenizer
-          <span className="text-foreground"> supervised</span> rather than a raw reconstruction codec.
+          <span className="text-foreground"> supervised</span>{" "}rather than a raw reconstruction codec.
         </p>
       </div>
     </figure>

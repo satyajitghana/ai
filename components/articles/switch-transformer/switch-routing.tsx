@@ -173,7 +173,7 @@ export function SwitchRouting() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            <span style={{ color: SEL }}>{routesPerToken}</span> expert{routesPerToken > 1 ? "s" : ""}/token · {totalRoutes} routes · {totalRoutes} routed copies to move
+            <span style={{ color: SEL }}>{routesPerToken}</span>{" "}expert{routesPerToken > 1 ? "s" : ""}/token · {totalRoutes} routes · {totalRoutes} routed copies to move
           </div>
         </div>
 

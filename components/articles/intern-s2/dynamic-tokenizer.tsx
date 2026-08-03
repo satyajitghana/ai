@@ -190,7 +190,7 @@ export function DynamicTokenizer() {
           chemical bond, a residue, or a sample&apos;s magnitude. It splits where its merge
           statistics say to split, so the units that carry scientific meaning end up{" "}
           <span className="text-foreground">smeared across token boundaries</span>. Intern-S2&apos;s
-          tokenizer emits those units directly — the difference between a model that <em>sees</em> a
+          tokenizer emits those units directly — the difference between a model that <em>sees</em>{" "}a
           molecule and one that sees a string that happens to look like one.
         </p>
       </div>

@@ -101,7 +101,7 @@ export function RoundingCliff() {
             <span>clears-chance threshold (points above {CHANCE.toFixed(1)})</span>
             <span>
               +{threshold} pts ·{" "}
-              <span style={{ color: ACCENT }}>{clears} of 5</span> clear
+              <span style={{ color: ACCENT }}>{clears} of 5</span>{" "}clear
             </span>
           </div>
           <Range
@@ -116,12 +116,12 @@ export function RoundingCliff() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Slide the threshold up and the two <span style={{ color: FAIL }}>rounded-after-training</span> checkpoints
+          Slide the threshold up and the two <span style={{ color: FAIL }}>rounded-after-training</span>{" "}checkpoints
           never move off the chance line — they score{" "}
-          <em>below</em> 25.0, so no positive threshold ever counts them. The three{" "}
-          <span style={{ color: ACCENT }}>trained-in-format</span> models start out clearing every threshold up to{" "}
+          <em>below</em>{" "}25.0, so no positive threshold ever counts them. The three{" "}
+          <span style={{ color: ACCENT }}>trained-in-format</span>{" "}models start out clearing every threshold up to{" "}
           22 points, which is the line Fermion draws in the post. Push past{" "}
-          <span className="text-foreground">+22.2</span> and the weakest of the three — the 2-bit,
+          <span className="text-foreground">+22.2</span>{" "}and the weakest of the three — the 2-bit,
           training-aware model at 47.24 — flips to failing first; Neutrino-1 8B (72.1) and Ternary-Bonsai-8B (65.75)
           hold until roughly +40 and +47 points respectively.
         </p>

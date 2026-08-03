@@ -116,8 +116,8 @@ export function TwoModels() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          {m.name} carries <span className="text-foreground">{m.total}B</span> parameters but activates only{" "}
-          <span className="text-foreground">{m.active}B</span> per token — about {sparsity}× sparse, the whole
+          {m.name} carries <span className="text-foreground">{m.total}B</span>{" "}parameters but activates only{" "}
+          <span className="text-foreground">{m.active}B</span>{" "}per token — about {sparsity}× sparse, the whole
           point of a <a className="underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground" href="/articles/mixture-of-experts-from-scratch">mixture of experts</a>.
           Same recipe, scaled down: XS.2 is the {" "}{MODELS[1].open}.
         </p>

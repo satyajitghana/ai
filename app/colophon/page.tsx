@@ -29,7 +29,7 @@ export default function ColophonPage() {
           page is built to be read by humans and by machines at the same time.
           Humans get a quiet, editorial single column. Agents get the same
           content as structured data — append{" "}
-          <span className="font-mono text-sm">.md</span> to any page for clean
+          <span className="font-mono text-sm">.md</span>{" "}to any page for clean
           markdown, read{" "}
           <a
             href="/llms.txt"
@@ -38,7 +38,7 @@ export default function ColophonPage() {
             /llms.txt
           </a>{" "}
           for the index, query{" "}
-          <span className="font-mono text-sm">/api/*</span> for JSON, follow the
+          <span className="font-mono text-sm">/api/*</span>{" "}for JSON, follow the
           JSON-LD embedded in each page, or call the{" "}
           {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- API endpoint for agents, not a page */}
           <a
@@ -54,21 +54,21 @@ export default function ColophonPage() {
       <CommandHeader cmd="cat stack.md" />
       <ul className="max-w-prose space-y-2 leading-7">
         <li>
-          <span className="font-medium">Next.js 16</span> — App Router, React
+          <span className="font-medium">Next.js 16</span>{" "}— App Router, React
           Server Components.
         </li>
         <li>
-          <span className="font-medium">Tailwind CSS v4</span> with shadcn
+          <span className="font-medium">Tailwind CSS v4</span>{" "}with shadcn
           design tokens.
         </li>
         <li>
-          <span className="font-medium">MDX</span> for long-form content, with a{" "}
-          <span className="font-medium">Zod</span> content layer that validates
+          <span className="font-medium">MDX</span>{" "}for long-form content, with a{" "}
+          <span className="font-medium">Zod</span>{" "}content layer that validates
           every file&apos;s frontmatter at build time.
         </li>
         <li>
-          <span className="font-medium">Hanken Grotesk</span> for headings,{" "}
-          <span className="font-medium">IBM Plex Mono</span> for dates, tags, and
+          <span className="font-medium">Hanken Grotesk</span>{" "}for headings,{" "}
+          <span className="font-medium">IBM Plex Mono</span>{" "}for dates, tags, and
           labels.
         </li>
       </ul>

@@ -362,8 +362,8 @@ export function HarnessLoop() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The model never edits the repo directly. Each phase emits a{" "}
-          <span className="text-foreground">tool call</span> the harness runs, and each result is an{" "}
-          <span className="text-foreground">observation</span> fed back into the next generation. The harness owns the control flow: it
+          <span className="text-foreground">tool call</span>{" "}the harness runs, and each result is an{" "}
+          <span className="text-foreground">observation</span>{" "}fed back into the next generation. The harness owns the control flow: it
           decides when to loop back and when the goal is met and the loop exits.
         </p>
       </div>

@@ -199,10 +199,10 @@ export function AutoMixer() {
       </div>
 
       <p className="border-t px-4 py-3 text-sm leading-6 text-muted-foreground">
-        A <span className="text-foreground">toy linear surrogate</span> — the coefficients are illustrative, picked so the
-        directions track the paper. Load <span className="text-foreground">AutoMixer-optimized</span> and coding and math
+        A <span className="text-foreground">toy linear surrogate</span>{" "}— the coefficients are illustrative, picked so the
+        directions track the paper. Load <span className="text-foreground">AutoMixer-optimized</span>{" "}and coding and math
         rise while commonsense slips a little, exactly the trade the report measures (Table 3). The real AutoMixer fits{" "}
-        <span className="text-foreground">non-linear</span> surrogates over 50+ dataset groups from a swarm of ~60 proxy
+        <span className="text-foreground">non-linear</span>{" "}surrogates over 50+ dataset groups from a swarm of ~60 proxy
         models, then optimizes the mixture under a KL leash to the prior.
       </p>
     </figure>

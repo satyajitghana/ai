@@ -193,8 +193,8 @@ export function DiffusionTransformer() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           A Diffusion Transformer denoises image latents by treating patches as tokens: a stack of blocks predicts the
           noise <em>&epsilon;</em>, while the timestep and caption are pooled through a small MLP that
-          <em> adaptively modulates</em> each block&rsquo;s norm (adaLN). In the MMDiT variant, image and text tokens keep
-          separate projections but mix through one <em>joint</em> self-attention.
+          <em> adaptively modulates</em>{" "}each block&rsquo;s norm (adaLN). In the MMDiT variant, image and text tokens keep
+          separate projections but mix through one <em>joint</em>{" "}self-attention.
         </p>
       </div>
     </figure>

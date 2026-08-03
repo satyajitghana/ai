@@ -245,7 +245,7 @@ export function SignedAccumulate() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            <span style={{ color: ACCENT }}>{muls}</span> multiply{muls === 1 ? "" : "s"} · {addsub} add/sub
+            <span style={{ color: ACCENT }}>{muls}</span>{" "}multiply{muls === 1 ? "" : "s"} · {addsub} add/sub
             {skips ? ` · ${skips} skip` : ""}
           </div>
         </div>
@@ -267,12 +267,12 @@ export function SignedAccumulate() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Same dot product, two costs. In{" "}
-          <span className="text-foreground">full precision</span> every element is a{" "}
-          <span className="text-foreground">multiply</span> then an add — {N} multiplies here. In{" "}
-          <span style={{ color: ACCENT }}>ternary</span> the weight is only a sign, so each term is{" "}
-          <span className="text-foreground">add</span> (+1), <span className="text-foreground">subtract</span> (−1), or{" "}
-          <span className="text-foreground">skip</span> (0). The inner loop has{" "}
-          <span style={{ color: ACCENT }}>zero</span> multiplies; a single per-channel scale
+          <span className="text-foreground">full precision</span>{" "}every element is a{" "}
+          <span className="text-foreground">multiply</span>{" "}then an add — {N} multiplies here. In{" "}
+          <span style={{ color: ACCENT }}>ternary</span>{" "}the weight is only a sign, so each term is{" "}
+          <span className="text-foreground">add</span>{" "}(+1), <span className="text-foreground">subtract</span>{" "}(−1), or{" "}
+          <span className="text-foreground">skip</span>{" "}(0). The inner loop has{" "}
+          <span style={{ color: ACCENT }}>zero</span>{" "}multiplies; a single per-channel scale
           (×{SCALE}) is applied once at the end → output {fmt(output)}.
         </p>
       </div>

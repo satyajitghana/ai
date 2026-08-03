@@ -219,7 +219,7 @@ export function MissingModality() {
             })}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            {count}/3 present &middot; naive <span style={{ color: rhoNaive < 0.5 ? WARN : undefined }}>{rhoNaive.toFixed(3)}</span> &middot;{" "}
+            {count}/3 present &middot; naive <span style={{ color: rhoNaive < 0.5 ? WARN : undefined }}>{rhoNaive.toFixed(3)}</span>{" "}&middot;{" "}
             LIMSSR <span style={{ color: ACCENT }}>{rhoLimssr.toFixed(3)}</span>
           </div>
         </div>
@@ -227,9 +227,9 @@ export function MissingModality() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The naive model owns a fixed slot per modality. Remove one and it feeds zeros, so the score slides
           &mdash; and with audio only it falls to <span className="text-foreground">0.177</span>, barely above chance.
-          LIMSSR turns the empty slot into a <span style={{ color: ACCENT }}>special token</span> and tells the LLM,
+          LIMSSR turns the empty slot into a <span style={{ color: ACCENT }}>special token</span>{" "}and tells the LLM,
           in words, which modalities are gone; the LLM infers the missing part&rsquo;s latent role from what
-          remains rather than reconstructing it, holding <span style={{ color: ACCENT }}>0.687</span> on the same
+          remains rather than reconstructing it, holding <span style={{ color: ACCENT }}>0.687</span>{" "}on the same
           audio-only case. (Illustrative pipeline; &rho; values are the paper&rsquo;s FS1000 numbers.)
         </p>
       </div>

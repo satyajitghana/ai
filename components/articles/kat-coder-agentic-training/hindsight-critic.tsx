@@ -224,10 +224,10 @@ export function HindsightCritic() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The <span style={{ color: ACT }}>actor</span> only ever reads the visible state <span className="font-mono">sₜ</span>,
-          so it behaves identically in training and deployment. The <span style={{ color: HIND }}>critic</span> is fed a
-          privileged <span style={{ color: HIND }}>hindsight context cₜ</span> — the eventual reward, test outcomes, coverage,
-          patch diffs, and later turns — which flows <em>backward in time</em> (dashed arrows) and never touches the actor.
+          The <span style={{ color: ACT }}>actor</span>{" "}only ever reads the visible state <span className="font-mono">sₜ</span>,
+          so it behaves identically in training and deployment. The <span style={{ color: HIND }}>critic</span>{" "}is fed a
+          privileged <span style={{ color: HIND }}>hindsight context cₜ</span>{" "}— the eventual reward, test outcomes, coverage,
+          patch diffs, and later turns — which flows <em>backward in time</em>{" "}(dashed arrows) and never touches the actor.
           Turn hindsight off and the value estimate has to be guessed from the present: its uncertainty band balloons early in
           the trajectory, far from the sparse end-of-episode reward. That extra variance is exactly what destabilizes
           long-horizon credit assignment.

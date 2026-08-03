@@ -297,9 +297,9 @@ export function AttnRes() {
       <p className="px-4 pb-4 pt-1 text-sm leading-6 text-muted-foreground">
         A plain residual stream forces every layer to add the same accumulated state from
         the layer just below it — information from far-earlier depths is smeared together.
-        Attention Residuals instead let a layer <em>selectively retrieve</em> from a few
+        Attention Residuals instead let a layer <em>selectively retrieve</em>{" "}from a few
         specific earlier depths (a learned read), improving gradient flow and depth scaling.
-        Switch to <span className="font-mono">AttnRes</span> and scrub the current layer to
+        Switch to <span className="font-mono">AttnRes</span>{" "}and scrub the current layer to
         watch the read targets change.
       </p>
     </figure>

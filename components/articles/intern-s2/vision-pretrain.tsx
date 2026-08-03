@@ -186,8 +186,8 @@ export function VisionPretrain() {
             <>
               Intern-S2 reads the page the way you do: text, a figure, and an equation are
               encoded together into <span style={{ color: ACCENT }}>one representation</span>,
-              so the model can learn that <em>this</em> curve belongs to <em>that</em> caption and
-              <em> that</em> variable. Symbolic semantics and visual relationships are modelled{" "}
+              so the model can learn that <em>this</em>{" "}curve belongs to <em>that</em>{" "}caption and
+              <em> that</em>{" "}variable. Symbolic semantics and visual relationships are modelled{" "}
               <span className="text-foreground">jointly</span>, in the same space.
             </>
           ) : (
