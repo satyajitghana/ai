@@ -48,6 +48,17 @@ const H = 178
 const STAGE_Y = 26
 const STAGE_H = 56
 
+// Precomputed stacked-bar segment geometry (no mutation during render).
+const MIX_SEGMENTS = (() => {
+  let acc = 0
+  return MIX.map((m, i) => {
+    const x = (acc / 100) * W
+    const w = (m.pct / 100) * W
+    acc += m.pct
+    return { label: m.label, x, w, opacity: Math.min(0.32 + i * 0.1, 0.95) }
+  })
+})()
+
 function stageBox(x: number, w: number, label: string, sub: string, key: string) {
   return (
     <g key={key}>
@@ -180,27 +191,18 @@ export function FaraGenPipeline() {
         <div className="mt-4">
           <div className="mb-1.5 font-mono text-[10px] text-muted-foreground">training mix (~2M samples, by category)</div>
           <svg viewBox={`0 0 ${W} 34`} className="w-full" role="img" aria-label="Training mix: 60 percent web trajectories, 12.8 percent synthetic environments, 12.5 percent form filling, 8.8 percent grounding, 4.9 percent VQA, 0.8 percent GUI drag and misc.">
-            {(() => {
-              let acc = 0
-              return MIX.map((m, i) => {
-                const x = (acc / 100) * W
-                const w = (m.pct / 100) * W
-                acc += m.pct
-                const shade = 0.32 + i * 0.1
-                return (
-                  <rect
-                    key={m.label}
-                    x={x}
-                    y={0}
-                    width={Math.max(w - 1, 0)}
-                    height={20}
-                    rx={2}
-                    fill={ACCENT}
-                    opacity={Math.min(shade, 0.95)}
-                  />
-                )
-              })
-            })()}
+            {MIX_SEGMENTS.map((seg) => (
+              <rect
+                key={seg.label}
+                x={seg.x}
+                y={0}
+                width={Math.max(seg.w - 1, 0)}
+                height={20}
+                rx={2}
+                fill={ACCENT}
+                opacity={seg.opacity}
+              />
+            ))}
           </svg>
           <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-muted-foreground">
             {MIX.map((m) => (
