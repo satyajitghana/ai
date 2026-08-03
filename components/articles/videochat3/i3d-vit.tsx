@@ -170,7 +170,7 @@ export function I3dVit() {
             <span>input frames (drag)</span>
             <span>
               in <span style={{ color: ACCENT }}>{inTok.toLocaleString()}</span> → out{" "}
-              <span style={{ color: ACCENT }}>{outTok.toLocaleString()}</span> tokens · {nChunks} chunks
+              <span style={{ color: ACCENT }}>{outTok.toLocaleString()}</span>{" "}tokens · {nChunks} chunks
             </span>
           </div>
           <Range
@@ -186,7 +186,7 @@ export function I3dVit() {
           The tokenizer never sees frames one at a time. It groups {T} consecutive frames into a{" "}
           <span className="text-foreground">chunk</span>, runs self-attention inside the chunk so motion is modelled
           locally, then pools the chunk down to a single temporal slot — {SPF} spatial tokens per frame become{" "}
-          <span style={{ color: ACCENT }}>{SPF / 16} per frame</span> after the 2×2 merge and ×4 temporal pool. A{" "}
+          <span style={{ color: ACCENT }}>{SPF / 16} per frame</span>{" "}after the 2×2 merge and ×4 temporal pool. A{" "}
           <span className="text-foreground">16× spatiotemporal compression</span>, and the token budget grows with the
           frame count instead of exploding with it.
         </p>

@@ -260,10 +260,10 @@ export function QuantizeRerank() {
       </div>
 
       <div className="border-t px-4 py-3 text-sm leading-6 text-muted-foreground">
-        <span className="text-foreground">1-bit</span> codes shrink each vector 32× and turn a distance into a{" "}
+        <span className="text-foreground">1-bit</span>{" "}codes shrink each vector 32× and turn a distance into a{" "}
         <span style={{ color: ACC }}>popcount</span>, but they collapse points to quadrant centroids, so the coarse ranking is
-        wrong: with <span style={{ color: MISS }}>refinement off</span> a true neighbour gets pushed out. Turn{" "}
-        <span style={{ color: ACC }}>refinement on</span> and the shortlist is re-scored with exact vectors — as long as the
+        wrong: with <span style={{ color: MISS }}>refinement off</span>{" "}a true neighbour gets pushed out. Turn{" "}
+        <span style={{ color: ACC }}>refinement on</span>{" "}and the shortlist is re-scored with exact vectors — as long as the
         true neighbour survived into the top-{SHORT}, it comes back. That is the whole trick: quantize to go fast, refine to
         stay accurate.
       </div>

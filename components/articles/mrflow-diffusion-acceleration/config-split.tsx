@@ -147,7 +147,7 @@ export function ConfigSplit() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Speedup is the honest part: fewer, cheaper steps mean less compute, full stop. Quality is the
-          <span className="text-foreground"> config-dependent</span> part. Strip the refine steps to zero and the SR
+          <span className="text-foreground"> config-dependent</span>{" "}part. Strip the refine steps to zero and the SR
           network&apos;s artifacts survive; starve the LR stage and the composition never sets. The advertised
           &ldquo;within 1% of native&rdquo; lives at the conservative end of this slider — the aggressive end is where
           the real degradation shows up.

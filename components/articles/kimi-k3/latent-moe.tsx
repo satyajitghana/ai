@@ -173,11 +173,11 @@ export function LatentMoE() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The experts live in a learned <span style={{ color: ACCENT }}>latent</span> space; a router picks{" "}
-          <span className="text-foreground">16 of 896</span> for each token — {activePct}% of the field — so a 2.8T-parameter
-          model activates only <span className="text-foreground">104B</span> parameters per token. At this sparsity, which
+          The experts live in a learned <span style={{ color: ACCENT }}>latent</span>{" "}space; a router picks{" "}
+          <span className="text-foreground">16 of 896</span>{" "}for each token — {activePct}% of the field — so a 2.8T-parameter
+          model activates only <span className="text-foreground">104B</span>{" "}parameters per token. At this sparsity, which
           16 you pick, and keeping every expert equally busy, becomes the whole ballgame — which is what{" "}
-          <span style={{ color: ACCENT }}>quantile balancing</span> is for.
+          <span style={{ color: ACCENT }}>quantile balancing</span>{" "}is for.
         </p>
       </div>
     </figure>

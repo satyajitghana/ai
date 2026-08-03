@@ -165,8 +165,8 @@ export function MixtureOfDepths() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           A router at every layer keeps only a fixed fraction of tokens for the block; the rest
-          <em> skip</em> it through the residual connection. Because the selected set changes layer to layer, each
-          token gets a <em>different effective depth</em> &mdash; and the network spends compute only where it helps.
+          <em> skip</em>{" "}it through the residual connection. Because the selected set changes layer to layer, each
+          token gets a <em>different effective depth</em>{" "}&mdash; and the network spends compute only where it helps.
         </p>
       </div>
     </figure>

@@ -109,7 +109,7 @@ export function MemoryCalc() {
           <div className="mb-1 flex items-center justify-between font-mono text-[10px] text-muted-foreground">
             <span>parameters (drag)</span>
             <span>
-              <span className="text-foreground">{p}B</span> params · <span style={{ color: ELT }}>{ratio.toFixed(2)}×</span> smaller
+              <span className="text-foreground">{p}B</span>{" "}params · <span style={{ color: ELT }}>{ratio.toFixed(2)}×</span>{" "}smaller
             </span>
           </div>
           <Range
@@ -126,10 +126,10 @@ export function MemoryCalc() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Storing weights as 4-bit <span style={{ color: ELT }}>elements</span> is not a clean 4× win: NVFP4 also carries
-          an <span style={{ color: OVER }}>FP8 block scale</span> shared over 16 elements — 0.5 extra bits each — for a
-          real cost of <span className="text-foreground">4.5 bits/param</span> and a{" "}
-          <span style={{ color: ELT }}>{ratio.toFixed(2)}×</span> shrink over BF16. And this is weight storage only:
+          Storing weights as 4-bit <span style={{ color: ELT }}>elements</span>{" "}is not a clean 4× win: NVFP4 also carries
+          an <span style={{ color: OVER }}>FP8 block scale</span>{" "}shared over 16 elements — 0.5 extra bits each — for a
+          real cost of <span className="text-foreground">4.5 bits/param</span>{" "}and a{" "}
+          <span style={{ color: ELT }}>{ratio.toFixed(2)}×</span>{" "}shrink over BF16. And this is weight storage only:
           mixed-precision training keeps embeddings, projections, the final layers and the MTP head at higher precision,
           plus optimizer state and activations — so live training memory is larger than either bar.
         </p>

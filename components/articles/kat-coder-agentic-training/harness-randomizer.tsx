@@ -184,7 +184,7 @@ export function HarnessRandomizer() {
           behavior depends on how history was concatenated, reflection fires on a fixed schedule. By randomizing the
           <span style={{ color: ACCENT }}> protocol</span>, <span style={{ color: ACCENT }}>context strategy</span>, and
           <span style={{ color: ACCENT }}> control flow</span>, KAT-Coder forces the model to solve the
-          <span style={{ color: TASK }}> underlying task</span> — the reward is tied to the outcome, identical across all{" "}
+          <span style={{ color: TASK }}> underlying task</span>{" "}— the reward is tied to the outcome, identical across all{" "}
           {combos} surfaces. white-box harnesses (simple, uncompressed) give clean training signals; black-box harnesses
           (Claude Code, Codex, OpenHands…) add the compression and reorganization of real deployments.
         </p>

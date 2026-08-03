@@ -304,11 +304,11 @@ export function NavGraph() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Brute force scores the query against all <span className="text-foreground">{N}</span> vectors. The graph search
-          starts at a far <span style={{ color: ACC }}>entry</span> node and keeps hopping to the neighbour closest to the{" "}
+          Brute force scores the query against all <span className="text-foreground">{N}</span>{" "}vectors. The graph search
+          starts at a far <span style={{ color: ACC }}>entry</span>{" "}node and keeps hopping to the neighbour closest to the{" "}
           <span style={{ color: QC }}>query</span>, stopping at the nearest point. It reaches the answer after{" "}
           <span style={{ color: ACC }}>{last} hops</span>, computing distances to{" "}
-          <span style={{ color: ACC }}>{computedAt[last]}</span> of {N} vectors — the rest are never touched. The hop count
+          <span style={{ color: ACC }}>{computedAt[last]}</span>{" "}of {N} vectors — the rest are never touched. The hop count
           grows roughly logarithmically, so at 10M vectors the same descent scores a few thousand, not ten million.
         </p>
       </div>

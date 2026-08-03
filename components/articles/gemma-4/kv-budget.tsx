@@ -122,12 +122,12 @@ export function KvBudget() {
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
-          At <span className="font-mono text-foreground">{ctxK}k</span> tokens, the sliding window caps
+          At <span className="font-mono text-foreground">{ctxK}k</span>{" "}tokens, the sliding window caps
           the cost of 5-in-6 layers at <span className="font-mono">W={W}</span>, so only the global layers keep growing
-          with context. Reusing <span className="font-mono">K</span> as <span className="font-mono">V</span> on those
+          with context. Reusing <span className="font-mono">K</span>{" "}as <span className="font-mono">V</span>{" "}on those
           global layers stores one tensor instead of two, halving the part that still scales. Step the context up
           and the gap widens — the sliding window matters more the longer the prompt. Schematic scaling, not the exact
-          config; the paper reports a <span className="text-foreground">37.5% cut</span> to the global KV cache from
+          config; the paper reports a <span className="text-foreground">37.5% cut</span>{" "}to the global KV cache from
           these tricks combined.
         </p>
       </div>

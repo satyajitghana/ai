@@ -139,10 +139,10 @@ export function Hy3Context() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           GQA is what makes the window affordable: 8 KV heads instead of 64 shrinks the cache 8×. Even so, KV cost is{" "}
-          <span className="text-foreground">linear in context</span> — every doubling doubles the memory.{" "}
+          <span className="text-foreground">linear in context</span>{" "}— every doubling doubles the memory.{" "}
           {extended ? (
             <>
-              Past the <span style={{ color: WARN }}>256K</span> line you are in the community YaRN extension: the
+              Past the <span style={{ color: WARN }}>256K</span>{" "}line you are in the community YaRN extension: the
               hatched region is <span style={{ color: WARN }}>extrapolated</span>, not trained, and the GGUF card marks it
               experimental and not needle-certified.
             </>

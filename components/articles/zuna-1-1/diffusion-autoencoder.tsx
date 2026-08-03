@@ -227,10 +227,10 @@ export function DiffusionAutoencoder() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Each 0.125-second segment (32 samples at 256 Hz) becomes one continuous-valued token. The encoder compresses the
           clean context into a <span className="text-foreground">latent</span>, which conditions every decoder layer through
-          adaptive-RMS norm. The decoder is trained with a <span style={{ color: ACCENT }}>rectified-flow</span> objective:
+          adaptive-RMS norm. The decoder is trained with a <span style={{ color: ACCENT }}>rectified-flow</span>{" "}objective:
           it learns a straight-line transport from a noise sample to the true signal at the requested coordinate. Drag τ from
           0 to 1 and the reconstruction (solid) walks off the noise field and onto the clean target (dashed). The same decoder
-          fills a <span className="text-foreground">missing</span> channel, cleans a <span className="text-foreground">noisy</span>{" "}
+          fills a <span className="text-foreground">missing</span>{" "}channel, cleans a <span className="text-foreground">noisy</span>{" "}
           one, or predicts a position that was never recorded — only the conditioning changes.
         </p>
       </div>

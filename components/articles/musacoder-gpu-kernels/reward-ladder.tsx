@@ -130,16 +130,16 @@ export function RewardLadder() {
         )}
         {(outcome === "fail" || outcome === "cheat" || outcome === "wrong") && (
           <div className="mt-3 font-mono text-[10px] text-muted-foreground">
-            all three collapse to a flat <span style={{ color: BAD }}>s = −1</span> — no partial credit for code that doesn&apos;t run, cheats with a high-level fallback, or is numerically wrong.
+            all three collapse to a flat <span style={{ color: BAD }}>s = −1</span>{" "}— no partial credit for code that doesn&apos;t run, cheats with a high-level fallback, or is numerically wrong.
           </div>
         )}
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
           The reward is a <span className="text-foreground">correctness-first hierarchy</span>. A kernel that fails to compile,
-          throws at runtime, smuggles in a forbidden <span className="font-mono text-xs">aten::*</span> fallback, or is simply
+          throws at runtime, smuggles in a forbidden <span className="font-mono text-xs">aten::*</span>{" "}fallback, or is simply
           wrong all earn the same floor of <span style={{ color: BAD }}>−1</span>. Partial correctness earns a bounded,
           still-negative shaping term in <span className="font-mono text-xs">[−0.5, 0)</span>. Only a fully correct,
-          <em> legal, native</em> kernel clears the wall into <span style={{ color: ACC }}>positive</span> reward — and only
+          <em> legal, native</em>{" "}kernel clears the wall into <span style={{ color: ACC }}>positive</span>{" "}reward — and only
           then does the clipped speedup bonus apply. That ordering is what stops the model from trading correctness for a
           flashy speedup.
         </p>

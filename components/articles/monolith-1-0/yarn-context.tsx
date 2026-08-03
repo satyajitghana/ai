@@ -142,14 +142,14 @@ export function YarnContext() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            RoPE base <span className="text-foreground">5e6</span> · <span style={{ color: ACCENT }}>256x</span> the 4K pretraining length
+            RoPE base <span className="text-foreground">5e6</span> · <span style={{ color: ACCENT }}>256x</span>{" "}the 4K pretraining length
           </div>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Monolith pretrains at a cheap <span className="text-foreground">4,096</span>-token window, then applies YaRN twice
-          on a <span className="text-foreground">5e6</span> RoPE base to reach{" "}
-          <span style={{ color: ACCENT }}>1,048,576</span> tokens — a 256x stretch done in two 16x steps instead of one
+          on a <span className="text-foreground">5e6</span>{" "}RoPE base to reach{" "}
+          <span style={{ color: ACCENT }}>1,048,576</span>{" "}tokens — a 256x stretch done in two 16x steps instead of one
           reckless jump. Each stage re-anchors the rotary frequencies so positions far past training stay in distribution;
           two smaller stretches keep long-range attention coherent where a single 256x jump would smear it.
         </p>

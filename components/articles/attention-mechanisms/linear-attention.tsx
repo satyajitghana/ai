@@ -170,7 +170,7 @@ export function LinearAttention() {
           softmax cells: <span className="tabular-nums" style={{ color: IDX }}>{matCells}</span>
         </span>
         <span>
-          linear state: <span className="tabular-nums" style={{ color: ATT }}>{stateCells}</span> (constant)
+          linear state: <span className="tabular-nums" style={{ color: ATT }}>{stateCells}</span>{" "}(constant)
         </span>
         <span className="ml-auto text-foreground">{(matCells / stateCells).toFixed(1)}× fewer to keep</span>
       </div>
@@ -185,10 +185,10 @@ export function LinearAttention() {
 
       <p className="mt-3 text-sm leading-6 text-muted-foreground">
         Softmax puts a non-linearity between Q and K, so you cannot reassociate the product — the full{" "}
-        <span style={{ color: IDX }}>N×N matrix</span> has to exist. Replace softmax with a kernel
-        feature map <span className="text-foreground">φ</span> and the algebra reassociates:{" "}
-        <span className="text-foreground">φ(Q)(φ(K)ᵀV)</span> lets you fold the past into one{" "}
-        <span style={{ color: ATT }}>d×d state</span> and update it per token, exactly like an RNN. Constant memory,
+        <span style={{ color: IDX }}>N×N matrix</span>{" "}has to exist. Replace softmax with a kernel
+        feature map <span className="text-foreground">φ</span>{" "}and the algebra reassociates:{" "}
+        <span className="text-foreground">φ(Q)(φ(K)ᵀV)</span>{" "}lets you fold the past into one{" "}
+        <span style={{ color: ATT }}>d×d state</span>{" "}and update it per token, exactly like an RNN. Constant memory,
         linear time, unbounded context — at the cost of approximating the softmax, which usually shows up as weaker
         recall. Performer (FAVOR+) is the same idea with a random-feature φ that provably approximates the softmax
         kernel; "lightning" and gated-linear variants add decay so old state fades.

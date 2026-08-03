@@ -125,7 +125,7 @@ export function OnlineSoftmaxStream() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            <span style={{ color: EXACT }}>{nExact} exact</span> · <span style={{ color: APPROX }}>{nApprox} approx</span> of {seen} streamed
+            <span style={{ color: EXACT }}>{nExact} exact</span> · <span style={{ color: APPROX }}>{nApprox} approx</span>{" "}of {seen} streamed
           </div>
         </div>
 
@@ -161,7 +161,7 @@ export function OnlineSoftmaxStream() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Every block left of the scan cursor has already been decided — dispatched to the exact inner loop
           (<span style={{ color: EXACT }}>green</span>) or, if its pooled-key score fell below the threshold,{" "}
-          <span style={{ color: APPROX }}>approximated</span> from that same score via a zeroth-order Taylor term
+          <span style={{ color: APPROX }}>approximated</span>{" "}from that same score via a zeroth-order Taylor term
           and folded into the identical online-softmax accumulator. Nothing right of the cursor has been read
           yet — that is what &ldquo;on-the-fly&rdquo; means. The two bars below are the payoff: keep-or-drop
           sparse attention only ever covers the exact fraction of the softmax mass, while reusing the proxy

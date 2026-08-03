@@ -114,10 +114,10 @@ export function Footprint() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The same 27B weights, re-encoded. Ternary spends{" "}
-          <span className="text-foreground">1.71 bits</span> each ({" "}
-          <span className="font-mono">{"{−1, 0, +1}"}</span> plus an FP16 per-group scale), the
-          1-bit variant just <span className="text-foreground">1.125</span> ({" "}
-          <span className="font-mono">{"{−1, +1}"}</span> plus a scale) — collapsing a 54 GB model to
+          <span className="text-foreground">1.71 bits</span>{" "}each ({" "}
+          <span className="font-mono">{"{−1, 0, +1}"}</span>{" "}plus an FP16 per-group scale), the
+          1-bit variant just <span className="text-foreground">1.125</span>{" "}({" "}
+          <span className="font-mono">{"{−1, +1}"}</span>{" "}plus a scale) — collapsing a 54 GB model to
           3.9 GB, small enough to live inside a phone&apos;s app-memory budget. The capability is
           still Qwen3.6-27B&apos;s; what changes is whether it fits.
         </p>

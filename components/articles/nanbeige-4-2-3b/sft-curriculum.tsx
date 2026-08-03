@@ -86,8 +86,8 @@ export function SftCurriculum() {
 
         <p className="mt-1 text-sm leading-6 text-muted-foreground">
           Each row is one SFT stage. The context window grows 64K &rarr; 128K &rarr; 256K, and the mix of what the
-          loss is computed on slides from <span style={{ color: REASON }}>reasoning-STEM</span> toward{" "}
-          <span style={{ color: ACCENT }}>long-horizon agentic data</span> — the model builds a reasoning
+          loss is computed on slides from <span style={{ color: REASON }}>reasoning-STEM</span>{" "}toward{" "}
+          <span style={{ color: ACCENT }}>long-horizon agentic data</span>{" "}— the model builds a reasoning
           foundation first, then spends most of the final stage learning to plan, call tools, read execution
           feedback, and recover from its own mistakes. Bad intermediate turns stay in context but are masked
           out of the loss, so it learns recovery without being trained to repeat the error.

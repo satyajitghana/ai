@@ -165,9 +165,9 @@ export function SpeedQuality() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Just running the model with <span style={{ color: GRAY }}>fewer native steps</span> trades quality away
-          fast. MrFlow&apos;s <span style={{ color: ACCENT }}>frontier</span> stays near native quality much further to
-          the right — but this is the <span className="text-foreground">good</span> case. Add refine steps (+3) and you
+          Just running the model with <span style={{ color: GRAY }}>fewer native steps</span>{" "}trades quality away
+          fast. MrFlow&apos;s <span style={{ color: ACCENT }}>frontier</span>{" "}stays near native quality much further to
+          the right — but this is the <span className="text-foreground">good</span>{" "}case. Add refine steps (+3) and you
           buy back quality at the cost of speed; push the split harder and degradation climbs. On a less forgiving model
           or an aggressive config (FLUX at (12,1) drops ~18% on OneIG), the &ldquo;within 1%&rdquo; headline no longer
           holds.

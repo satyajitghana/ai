@@ -168,21 +168,21 @@ export function ParetoFrontier() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            kept <span style={{ color: ACCENT }}>{mode === "greedy" ? 1 : FRONT.length}</span> of {PTS.length}
+            kept <span style={{ color: ACCENT }}>{mode === "greedy" ? 1 : FRONT.length}</span>{" "}of {PTS.length}
           </div>
         </div>
 
         <p className="mt-3 min-h-[4.5rem] text-sm leading-6 text-muted-foreground sm:min-h-[3rem]">
           {mode === "greedy" ? (
             <>
-              Greedy keeps only the highest-<span className="text-foreground">average</span> prompt (<span style={{ color: ACCENT }}>γ</span>).
-              The specialist <span style={{ color: WARM }}>α</span> — which is best of all on instance B — looks mediocre on
+              Greedy keeps only the highest-<span className="text-foreground">average</span>{" "}prompt (<span style={{ color: ACCENT }}>γ</span>).
+              The specialist <span style={{ color: WARM }}>α</span>{" "}— which is best of all on instance B — looks mediocre on
               average and gets thrown away, so its lessons can never be recombined.
             </>
           ) : (
             <>
-              GEPA keeps every <span className="text-foreground">non-dominated</span> candidate — the four on the frontier,
-              including both specialists <span style={{ color: ACCENT }}>α</span> and <span style={{ color: ACCENT }}>δ</span> —
+              GEPA keeps every <span className="text-foreground">non-dominated</span>{" "}candidate — the four on the frontier,
+              including both specialists <span style={{ color: ACCENT }}>α</span>{" "}and <span style={{ color: ACCENT }}>δ</span>{" "}—
               and samples parents from that set. A prompt that wins even one instance stays in the gene pool.
             </>
           )}

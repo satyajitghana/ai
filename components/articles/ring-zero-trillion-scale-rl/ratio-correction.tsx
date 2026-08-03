@@ -152,9 +152,9 @@ export function RatioCorrection() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          With the <span style={{ color: ACCENT }}>corrected</span> numerator the ratio stays pinned near 1 however far the
+          With the <span style={{ color: ACCENT }}>corrected</span>{" "}numerator the ratio stays pinned near 1 however far the
           policy drifts — the clip almost never fires, so every token keeps contributing gradient. With the{" "}
-          <span style={{ color: WARN }}>naive</span> numerator the train/infer logit gap compounds into ratios far above the
+          <span style={{ color: WARN }}>naive</span>{" "}numerator the train/infer logit gap compounds into ratios far above the
           ε_high = 5 ceiling; those tokens are clipped to a constant, their gradient vanishes, and (in the paper&rsquo;s
           runs) training collapses. The ablation shows the naive ratio failing near step 800 and a clip-only patch only
           delaying collapse to ~2,700 steps, while the correction trains indefinitely.

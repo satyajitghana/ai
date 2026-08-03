@@ -155,11 +155,11 @@ export function PrimeEcho() {
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
-          Because the <span style={{ color: AMBER }}>first turn</span> is what actually ships, PrimeEcho keeps α high, so the
+          Because the <span style={{ color: AMBER }}>first turn</span>{" "}is what actually ships, PrimeEcho keeps α high, so the
           reward is anchored to zero-shot quality. Later turns still contribute through the
-          <span style={{ color: ACC }}> best-of-turns</span> term — enough to give exploration signal — but not enough to make
+          <span style={{ color: ACC }}> best-of-turns</span>{" "}term — enough to give exploration signal — but not enough to make
           it worth deliberately failing turn 1 to &quot;fix&quot; it later. Drop α toward 0 on the
-          <span className="text-foreground"> &quot;fixed on turn 4&quot;</span> trajectory and the reward climbs even though the
+          <span className="text-foreground"> &quot;fixed on turn 4&quot;</span>{" "}trajectory and the reward climbs even though the
           model shipped a broken kernel first: that is exactly the multi-turn reward hacking PrimeEcho is built to prevent.
         </p>
       </div>

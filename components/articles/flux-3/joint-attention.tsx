@@ -218,17 +218,17 @@ export function JointAttention() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            attends <span style={{ color: ACCENT }}>{attended.length}</span> of {N} · cross-modal{" "}
+            attends <span style={{ color: ACCENT }}>{attended.length}</span>{" "}of {N} · cross-modal{" "}
             <span style={{ color: ACCENT }}>{crossShare}%</span>
           </div>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Every modality is tokenized into <span className="text-foreground">one</span> sequence, and a single
+          Every modality is tokenized into <span className="text-foreground">one</span>{" "}sequence, and a single
           attention operation lets a query read the whole thing. In{" "}
-          <span className="text-foreground">joint</span> mode the{" "}
-          <span style={{ color: LOCAL }}>{LANES[qm].name}</span> query fans out across text, image, video and audio;
-          switch to <span className="text-foreground">per-modality</span> and it is trapped in its own lane. Joint
+          <span className="text-foreground">joint</span>{" "}mode the{" "}
+          <span style={{ color: LOCAL }}>{LANES[qm].name}</span>{" "}query fans out across text, image, video and audio;
+          switch to <span className="text-foreground">per-modality</span>{" "}and it is trapped in its own lane. Joint
           attention is how the sound learns to match the impact and the motion learns to follow the caption — the
           modalities become evidence about one shared reality.
         </p>

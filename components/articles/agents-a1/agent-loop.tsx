@@ -192,7 +192,7 @@ export function AgentLoop() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The <span className="text-foreground">verifier outcome</span> on each step — did the code
+          The <span className="text-foreground">verifier outcome</span>{" "}on each step — did the code
           converge, did the answer match — is what turns a raw trace into a{" "}
           <span className="text-foreground">trainable target</span>. Chaining hundreds of these is the
           horizon Agents-A1 scales, instead of the parameter count.

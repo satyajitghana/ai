@@ -179,11 +179,11 @@ export function HybridStack() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          <span className="text-foreground">Pure linear</span> is cheap but its fixed-size state is rank-limited — it
-          cannot carry every token-to-token interaction. <span className="text-foreground">Hybrid</span> makes every
-          fourth layer a full-softmax <span style={{ color: AMBER }}>anchor</span> (25%), restoring exact interactions at
-          fixed depths, while <span style={{ color: GREEN }}>AttnRes</span> routes each completed block&apos;s summary
-          forward so those refreshed features propagate. <span className="text-foreground">Full softmax</span> is exact
+          <span className="text-foreground">Pure linear</span>{" "}is cheap but its fixed-size state is rank-limited — it
+          cannot carry every token-to-token interaction. <span className="text-foreground">Hybrid</span>{" "}makes every
+          fourth layer a full-softmax <span style={{ color: AMBER }}>anchor</span>{" "}(25%), restoring exact interactions at
+          fixed depths, while <span style={{ color: GREEN }}>AttnRes</span>{" "}routes each completed block&apos;s summary
+          forward so those refreshed features propagate. <span className="text-foreground">Full softmax</span>{" "}is exact
           everywhere — and quadratic everywhere.
         </p>
       </div>

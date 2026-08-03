@@ -73,8 +73,8 @@ export function PowerFactory() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Same megawatts in the door. Intelligent Power Smoothing trims <span style={{ color: ACCENT }}>~10%</span>{" "}
-          off average draw and <span style={{ color: ACCENT }}>~20%</span> off 50 ms peaks, and DSX MaxLPS turns that
-          reclaimed headroom into up to <span style={{ color: ACCENT }}>40% more GPUs</span> — the AI-factory version
+          off average draw and <span style={{ color: ACCENT }}>~20%</span>{" "}off 50 ms peaks, and DSX MaxLPS turns that
+          reclaimed headroom into up to <span style={{ color: ACCENT }}>40% more GPUs</span>{" "}— the AI-factory version
           of performance per watt.
         </p>
       </div>

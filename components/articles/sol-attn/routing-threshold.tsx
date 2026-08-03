@@ -190,7 +190,7 @@ export function RoutingThreshold() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            selects <span style={{ color: SEL }}>{sel.size}</span> of {N} · sparsity {(100 * (1 - sel.size / N)).toFixed(1)}%
+            selects <span style={{ color: SEL }}>{sel.size}</span>{" "}of {N} · sparsity {(100 * (1 - sel.size / N)).toFixed(1)}%
           </div>
         </div>
 
@@ -204,8 +204,8 @@ export function RoutingThreshold() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           {budgetNote}.{" "}
-          Switch the row from <span className="text-foreground">peaked</span> to{" "}
-          <span className="text-foreground">diffuse</span> at a fixed <code>{cfg.label}</code>: top-k&apos;s count
+          Switch the row from <span className="text-foreground">peaked</span>{" "}to{" "}
+          <span className="text-foreground">diffuse</span>{" "}at a fixed <code>{cfg.label}</code>: top-k&apos;s count
           never moves (it is defined to be k); top-p&apos;s count can swing by an order of magnitude, because the
           same cumulative-mass target lands on very different numbers of blocks depending on how concentrated the
           row is. Sol-Attn&apos;s threshold, calibrated to a shared standardized cutoff β, is the one that stays

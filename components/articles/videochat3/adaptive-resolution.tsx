@@ -185,13 +185,13 @@ export function AdaptiveResolution() {
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
             <span style={{ color: HIGH }}>{nHigh}</span>/{N} high-res ·{" "}
-            <span style={{ color: HIGH }}>{savedPct}%</span> fewer tokens than all-448²
+            <span style={{ color: HIGH }}>{savedPct}%</span>{" "}fewer tokens than all-448²
           </div>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Most of a stream is <span className="text-foreground">silence</span> — nothing worth spending pixels on — so
-          those frames run at a 224² quota. A <span style={{ color: STANDBY }}>Standby</span> cue says the answer is
+          Most of a stream is <span className="text-foreground">silence</span>{" "}— nothing worth spending pixels on — so
+          those frames run at a 224² quota. A <span style={{ color: STANDBY }}>Standby</span>{" "}cue says the answer is
           about to appear; the frames that follow jump to 448² (
           <span style={{ color: HIGH }}>4× the tokens</span>) to catch the detail. Spend the budget where the evidence
           is, not uniformly. The failure mode: mark too few frames critical and a fast event is seen only in low-res.

@@ -83,7 +83,7 @@ export function AttnStrip() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Only <span className="text-foreground">{globals} of {LAYERS}</span> layers here attend over the whole
+          Only <span className="text-foreground">{globals} of {LAYERS}</span>{" "}layers here attend over the whole
           context; the rest are bounded by a sliding window and cost the same at 8k or 128k. Push the ratio to 4:1
           (E2B) and one more layer per block goes global. Fewer global layers means a smaller cache to carry — which
           is exactly what the budget chart below measures.

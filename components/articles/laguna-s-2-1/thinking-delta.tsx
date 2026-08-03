@@ -74,7 +74,7 @@ export function ThinkingDelta() {
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
           The dashed line is the no-thinking baseline. On DeepSWE — the least saturated of these benchmarks —
-          the internal monologue <span style={{ color: ACCENT }}>more than doubles</span> the score. poolside
+          the internal monologue <span style={{ color: ACCENT }}>more than doubles</span>{" "}the score. poolside
           ships max thinking on by default and lets the model pick its own budget; it says it&rsquo;s watched
           coherent reasoning run for hours and hundreds of thousands of tokens.
         </p>

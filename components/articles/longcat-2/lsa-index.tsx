@@ -319,11 +319,11 @@ export function LsaIndex() {
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
             {mode === "msa" ? (
               <>
-                reads <span style={{ color: MSA }}>{msaBlocks.size}</span> whole blocks · ~{msaTokens} tok
+                reads <span style={{ color: MSA }}>{msaBlocks.size}</span>{" "}whole blocks · ~{msaTokens} tok
               </>
             ) : (
               <>
-                reads <span style={{ color: LSA }}>tokens</span> in {recalled.size} recalled blocks · ~{Math.round(lsaTokens)} tok
+                reads <span style={{ color: LSA }}>tokens</span>{" "}in {recalled.size} recalled blocks · ~{Math.round(lsaTokens)} tok
               </>
             )}
           </div>
@@ -342,10 +342,10 @@ export function LsaIndex() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Both methods first score the past at the <span className="text-foreground">block</span> level (the pips above each block).{" "}
-          <span style={{ color: MSA }}>MSA</span> stops there — it keeps the top-{BLK_K} whole blocks and attends every token inside them.{" "}
-          <span style={{ color: LSA }}>LSA</span> treats that as a coarse <em>recall</em>, then runs a second, fine pass that keeps only
-          the most relevant individual <span className="text-foreground">tokens</span> inside the recalled blocks — token-precise selection
+          Both methods first score the past at the <span className="text-foreground">block</span>{" "}level (the pips above each block).{" "}
+          <span style={{ color: MSA }}>MSA</span>{" "}stops there — it keeps the top-{BLK_K} whole blocks and attends every token inside them.{" "}
+          <span style={{ color: LSA }}>LSA</span>{" "}treats that as a coarse <em>recall</em>, then runs a second, fine pass that keeps only
+          the most relevant individual <span className="text-foreground">tokens</span>{" "}inside the recalled blocks — token-precise selection
           for a smaller candidate set to score. The local block (
           <span style={{ color: LOCAL }}>amber</span>) is always kept.
         </p>

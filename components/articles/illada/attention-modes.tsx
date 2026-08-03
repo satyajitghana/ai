@@ -171,16 +171,16 @@ export function AttentionModes() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           {causal ? (
             <>
-              Causal: query <span className="text-foreground">&ldquo;{TOKENS[focus]}&rdquo;</span> sees only{" "}
+              Causal: query <span className="text-foreground">&ldquo;{TOKENS[focus]}&rdquo;</span>{" "}sees only{" "}
               {seenByFocus} of {N} positions — the future is masked out, because an
               autoregressive model would otherwise read the token it&rsquo;s supposed to
               predict. That lower-triangle is the price of left-to-right factorization.
             </>
           ) : (
             <>
-              Bidirectional: query <span className="text-foreground">&ldquo;{TOKENS[focus]}&rdquo;</span> attends
+              Bidirectional: query <span className="text-foreground">&ldquo;{TOKENS[focus]}&rdquo;</span>{" "}attends
               to all {N} positions, future included. A masked diffusion LM predicts{" "}
-              <em>masked</em> positions, not &ldquo;the next&rdquo; one, so there&rsquo;s
+              <em>masked</em>{" "}positions, not &ldquo;the next&rdquo; one, so there&rsquo;s
               nothing to hide — it gets full left-and-right context at every layer, which
               is exactly what helps on infilling and global-structure tasks. Click any row
               to change the query.

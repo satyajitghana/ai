@@ -66,7 +66,7 @@ export function SparsityDepth() {
 
         <div className="mb-2 flex items-baseline justify-between">
           <span className="font-mono text-xs text-muted-foreground">
-            layer <span className="font-semibold text-foreground">{layer}</span> of {N_LAYERS}
+            layer <span className="font-semibold text-foreground">{layer}</span>{" "}of {N_LAYERS}
           </span>
           {inSpike ? (
             <span className="font-mono text-[10px]" style={{ color: "oklch(0.55 0.19 15)" }}>
@@ -133,9 +133,9 @@ export function SparsityDepth() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The four <span style={{ color: "oklch(0.62 0.17 250)" }}>attention</span> projections hold a flat{" "}
+          The four <span style={{ color: "oklch(0.62 0.17 250)" }}>attention</span>{" "}projections hold a flat{" "}
           61.8-63.5% band at every one of the 36 layers — barely worth scrubbing. The{" "}
-          <span style={{ color: "oklch(0.55 0.19 15)" }}>feed-forward down and gate</span> rows are the exception:
+          <span style={{ color: "oklch(0.55 0.19 15)" }}>feed-forward down and gate</span>{" "}rows are the exception:
           they spike to 72.47% and 70.48% at layers 3 and 4, roughly ten points above the body of the network, then
           settle back to the 62% baseline by layer 5. Nothing in the ternary format asked for that shape — the format
           only fixes how much of each tensor falls silent; the training decided <em>where</em>.

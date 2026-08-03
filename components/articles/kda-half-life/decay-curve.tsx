@@ -128,10 +128,10 @@ export function DecayCurve() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The curve is <span className="font-mono">Sₙ = αⁿS₀</span> — a channel&rsquo;s memory after n tokens. It
+          The curve is <span className="font-mono">Sₙ = αⁿS₀</span>{" "}— a channel&rsquo;s memory after n tokens. It
           crosses the dashed half-line at <span className="font-mono">n½ = ln(0.5)/ln(α)</span>, the same formula
-          a physicist uses for an isotope, because <span className="font-mono">αⁿ</span> and{" "}
-          <span className="font-mono">e^(−λn)</span> are the same function with{" "}
+          a physicist uses for an isotope, because <span className="font-mono">αⁿ</span>{" "}and{" "}
+          <span className="font-mono">e^(−λn)</span>{" "}are the same function with{" "}
           <span className="text-foreground">λ = −ln α</span>. At α = 0.99 a channel has forgotten half of what it
           knew after about <span style={{ color: DECAY }}>69 tokens</span>. Nudge α to 0.999 and that becomes
           roughly 693.

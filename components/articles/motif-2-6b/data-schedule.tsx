@@ -99,11 +99,11 @@ export function DataSchedule() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The swing is the point. <span className="text-foreground">General Web</span> falls from
-          68% to 33% while <span style={{ color: "oklch(0.64 0.17 25)" }}>Korean</span> climbs 1% →
+          The swing is the point. <span className="text-foreground">General Web</span>{" "}falls from
+          68% to 33% while <span style={{ color: "oklch(0.64 0.17 25)" }}>Korean</span>{" "}climbs 1% →
           30% and <span style={{ color: "oklch(0.7 0.15 145)" }}>Math</span>,{" "}
           <span style={{ color: "oklch(0.6 0.15 262)" }}>Code</span>, and{" "}
-          <span style={{ color: "oklch(0.68 0.16 300)" }}>Reasoning</span> all rise. The model
+          <span style={{ color: "oklch(0.68 0.16 300)" }}>Reasoning</span>{" "}all rise. The model
           learns language on broad web text first, then spends its final, best-behaved tokens on
           the dense skills the benchmarks actually test.
         </p>

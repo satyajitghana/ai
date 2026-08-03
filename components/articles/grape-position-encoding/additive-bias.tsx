@@ -115,9 +115,9 @@ export function AdditiveBias() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The additive family is the same rank-1 nilpotent action seen as a logit bias. ALiBi fixes one slope per
-          head — a static <span style={{ color: ADD }}>geometric fan</span> that decays with distance no matter the
+          head — a static <span style={{ color: ADD }}>geometric fan</span>{" "}that decays with distance no matter the
           content. GRAPE-A-QK keeps the exact unipotent structure but lets softplus gates on the query and key set
-          the slope, so the <span style={{ color: GATE }}>decay adapts to content</span> — and drops out of first
+          the slope, so the <span style={{ color: GATE }}>decay adapts to content</span>{" "}— and drops out of first
           principles rather than being hand-set. FoX is the path-integral version: a per-token cumulative gate.
         </p>
       </div>

@@ -165,9 +165,9 @@ export function EngineStack() {
           Six of these eight lines never touch Sol-Attn at all — their sparse-attention slot, where they have
           one, is <span className="text-foreground">PISA</span>, an earlier piecewise sparse-attention method
           from the same group. Sol-Attn is wired into two lines (highlighted{" "}
-          <span style={{ color: ACCENT }}>green</span> above) as of the same day this paper posted, and the
+          <span style={{ color: ACCENT }}>green</span>{" "}above) as of the same day this paper posted, and the
           engine repo itself marks their end-to-end number{" "}
-          <span style={{ color: PENDING }}>pending</span> re-benchmark — it does not yet claim a shipped number
+          <span style={{ color: PENDING }}>pending</span>{" "}re-benchmark — it does not yet claim a shipped number
           for Sol-Attn in the engine. The paper&apos;s own separate integration test (different two models,
           B200 rather than GB200) reports 3.48× and 5.08×; that is a real number, just not one measured on
           this table under this harness.

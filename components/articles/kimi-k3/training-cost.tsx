@@ -148,10 +148,10 @@ export function TrainingCost() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The MoE sparsity that makes K3 cheap to <span className="text-foreground">serve</span> also makes it cheaper to{" "}
+          The MoE sparsity that makes K3 cheap to <span className="text-foreground">serve</span>{" "}also makes it cheaper to{" "}
           <span style={{ color: ACCENT }}>train</span>: compute scales with the 104B <span className="text-foreground">active</span>{" "}
           params, not the full 2.8T. Even so, a frontier token budget on a few thousand accelerators is weeks of wall-clock and
-          millions of GPU-hours — and the 2.8T weights still fit in <span className="text-foreground">~1.4 TB</span> only because
+          millions of GPU-hours — and the 2.8T weights still fit in <span className="text-foreground">~1.4 TB</span>{" "}only because
           they are trained MXFP4-native. Numbers are a first-principles estimate; Moonshot has not published K3's exact recipe.
         </p>
       </div>

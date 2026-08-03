@@ -165,7 +165,7 @@ export function InvertedIndex() {
           at index time. A query walks only its own terms' postings and scores their union;{" "}
           {skipped > 0 ? (
             <>
-              the other <span className="text-foreground">{skipped}</span> document
+              the other <span className="text-foreground">{skipped}</span>{" "}document
               {skipped === 1 ? " is" : "s are"} never opened.
             </>
           ) : (

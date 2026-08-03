@@ -95,10 +95,10 @@ export function KvVsState() {
           aria-label="context length"
         />
         <div className="mt-2 flex flex-wrap items-baseline gap-x-6 gap-y-1 font-mono text-xs text-muted-foreground">
-          <span>context: <strong className="text-foreground">{fmtTok(tok)}</strong> tokens</span>
+          <span>context: <strong className="text-foreground">{fmtTok(tok)}</strong>{" "}tokens</span>
           <span>full-attn KV: <strong className="text-foreground">{full.toFixed(0)} GB</strong></span>
           <span>Ling hybrid: <strong className="text-foreground">{hybrid.toFixed(0)} GB</strong></span>
-          <span>≈ <strong className="text-foreground">{save.toFixed(1)}×</strong> smaller</span>
+          <span>≈ <strong className="text-foreground">{save.toFixed(1)}×</strong>{" "}smaller</span>
         </div>
       </div>
     </figure>

@@ -182,10 +182,10 @@ export function QuantileBalancing() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Allocation comes straight from the <span style={{ color: ACCENT }}>quantile</span> of each expert's router scores:
-          keep the top <span className="text-foreground">q</span> fraction of tokens, and every expert ends up equally busy —
+          Allocation comes straight from the <span style={{ color: ACCENT }}>quantile</span>{" "}of each expert's router scores:
+          keep the top <span className="text-foreground">q</span>{" "}fraction of tokens, and every expert ends up equally busy —
           no auxiliary loss, no sensitive balance coefficient to tune. Flip to{" "}
-          <span className="text-foreground">aux-loss</span> and the same target leaves some experts starved and others
+          <span className="text-foreground">aux-loss</span>{" "}and the same target leaves some experts starved and others
           overloaded — the imbalance quantile balancing is built to remove.
         </p>
       </div>

@@ -112,7 +112,7 @@ export function TextTax() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          On <span className="text-foreground">{bench.key}</span> Audex ranks{" "}
+          On <span className="text-foreground">{bench.key}</span>{" "}Audex ranks{" "}
           <span style={{ color: AUDEX }}>
             #{audexRank} of {rows.length}
           </span>

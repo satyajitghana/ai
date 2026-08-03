@@ -172,7 +172,7 @@ export function ActionCoT() {
           Cosmos maps the instruction to a 2D trajectory <span style={{ color: PLAN }}>on the image plane</span>:
           where the gripper (or the camera, or an object) should move, waypoint by waypoint. That plan then conditions
           the diffusion tower, so the frames it denoises are the ones that <span className="text-foreground">carry out
-          the motion</span> rather than merely look plausible. Reasoning about <em>action</em> happens in pixel space,
+          the motion</span>{" "}rather than merely look plausible. Reasoning about <em>action</em>{" "}happens in pixel space,
           where the physics has to hold.
         </p>
       </div>

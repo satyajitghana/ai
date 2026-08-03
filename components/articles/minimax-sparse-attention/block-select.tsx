@@ -154,7 +154,7 @@ export function BlockSelect() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            attends <span style={{ color: SEL }}>{chosen.size}</span> of {qb + 1} blocks · {chosen.size * BLK} tokens
+            attends <span style={{ color: SEL }}>{chosen.size}</span>{" "}of {qb + 1} blocks · {chosen.size * BLK} tokens
           </div>
         </div>
 
@@ -164,9 +164,9 @@ export function BlockSelect() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          However far back the context runs, the query attends to a <span className="text-foreground">fixed</span> handful
+          However far back the context runs, the query attends to a <span className="text-foreground">fixed</span>{" "}handful
           of blocks — top-{K} by index score, plus its local block. Flip the GQA group and the arrows swing to{" "}
-          <span style={{ color: SEL }}>different blocks</span> over identical keys and values: each group of query heads
+          <span style={{ color: SEL }}>different blocks</span>{" "}over identical keys and values: each group of query heads
           keeps its own sparse view of the past. (Real config: block 128, top-16 = 2,048 tokens per query.)
         </p>
       </div>

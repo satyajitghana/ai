@@ -25,9 +25,9 @@ export default async function GitHubPage() {
     <PageShell title="GitHub" agentPath={{ json: "/api/github" }}>
       {/* Stat strip */}
       <p className="font-mono text-xs text-muted-foreground">
-        <span className="text-foreground">{user.publicRepos}</span> repos ·{" "}
-        <span className="text-foreground">{user.totalStars}</span> stars ·{" "}
-        <span className="text-foreground">{user.followers}</span> followers ·{" "}
+        <span className="text-foreground">{user.publicRepos}</span>{" "}repos ·{" "}
+        <span className="text-foreground">{user.totalStars}</span>{" "}stars ·{" "}
+        <span className="text-foreground">{user.followers}</span>{" "}followers ·{" "}
         <span className="text-foreground">
           {contributions.totalContributions}
         </span>{" "}

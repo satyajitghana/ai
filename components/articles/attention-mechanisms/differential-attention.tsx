@@ -144,9 +144,9 @@ export function DifferentialAttention() {
 
       <p className="mt-3 text-sm leading-6 text-muted-foreground">
         Softmax attention always spends some mass on tokens that do not matter — it has to, because the weights are
-        forced to sum to 1. Differential attention computes the map <em>twice</em> with separate projections and returns
+        forced to sum to 1. Differential attention computes the map <em>twice</em>{" "}with separate projections and returns
         the difference. The irrelevant mass is roughly common to both maps, so it subtracts away, while the genuine
-        peaks — which differ between the two — survive. <span className="text-foreground">λ</span> is learned per head
+        peaks — which differ between the two — survive. <span className="text-foreground">λ</span>{" "}is learned per head
         (reparameterised, initialised around 0.8), and the reported effect is sparser, less "distracted" attention and
         better long-context retrieval.
       </p>

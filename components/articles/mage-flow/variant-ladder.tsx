@@ -75,7 +75,7 @@ export function VariantLadder() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The distillation rung is what makes 4B <em>interactive</em>: a 30-step Base becomes a{" "}
           <span style={{ color: ACCENT }}>4-step Turbo</span>, and generation drops to{" "}
-          <span className="text-foreground">{TASKS.generate.rungs[2].sec}s</span> an image — with peak memory
+          <span className="text-foreground">{TASKS.generate.rungs[2].sec}s</span>{" "}an image — with peak memory
           still around 18 GB.
         </p>
       </div>

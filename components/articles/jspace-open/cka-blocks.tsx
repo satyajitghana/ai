@@ -217,10 +217,10 @@ export function CkaBlocks() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Each cell is the CKA between two layers&rsquo; token geometries: <span className="text-foreground">bright yellow</span> on the diagonal
+          Each cell is the CKA between two layers&rsquo; token geometries: <span className="text-foreground">bright yellow</span>{" "}on the diagonal
           (a layer is identical to itself), fading through teal to purple as two layers stop arranging the vocabulary the same way. The three
           outlined squares are the model&rsquo;s <span style={{ color: SENSORY }}>sensory</span>,{" "}
-          <span style={{ color: WORKSPACE }}>workspace</span>, and <span style={{ color: MOTOR }}>motor</span> stretches — blocks of adjacent
+          <span style={{ color: WORKSPACE }}>workspace</span>, and <span style={{ color: MOTOR }}>motor</span>{" "}stretches — blocks of adjacent
           layers that share one geometry. Switch the model: the layer count changes from {MODELS[0].layers} to {MODELS[2].layers}, but the block
           boundaries stay pinned at roughly the same relative depth (~{Math.round(SENS_END * 100)}% and ~{Math.round(MOTOR_START * 100)}%).
         </p>

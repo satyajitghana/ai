@@ -99,9 +99,9 @@ export function CostCrossover() {
         </label>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The API bill grows with every input. PAW pays once to <span style={{ color: INDIGO }}>compile</span> the
+          The API bill grows with every input. PAW pays once to <span style={{ color: INDIGO }}>compile</span>{" "}the
           function, then each application is nearly free — so the lines cross within the first handful of calls and the
-          gap only widens. That&apos;s the shift from <span className="text-foreground">per-input problem solver</span> to{" "}
+          gap only widens. That&apos;s the shift from <span className="text-foreground">per-input problem solver</span>{" "}to{" "}
           <span className="text-foreground">tool builder</span>.
         </p>
       </div>

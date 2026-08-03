@@ -282,9 +282,9 @@ export function SyncVsAsync() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          In <span className="text-foreground">sync</span> the learner can only step once the{" "}
-          <span className="text-foreground">slowest</span> rollout in the batch lands, so it sits idle across most of the
-          window and the fast actors wait too — GPUs starve. In <span className="text-foreground">async</span> the actors
+          In <span className="text-foreground">sync</span>{" "}the learner can only step once the{" "}
+          <span className="text-foreground">slowest</span>{" "}rollout in the batch lands, so it sits idle across most of the
+          window and the fast actors wait too — GPUs starve. In <span className="text-foreground">async</span>{" "}the actors
           stream trajectories into a buffer and the learner trains back-to-back on whatever is ready, so both fleets stay
           busy. The bill is <span style={{ color: ROLLOUT }}>off-policy staleness</span>: the learner is training on
           weights a few versions old, which needs importance-sampling and a bounded mismatch to stay stable.

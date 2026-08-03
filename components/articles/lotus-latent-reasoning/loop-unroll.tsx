@@ -213,10 +213,10 @@ export function LoopUnroll() {
         )}
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Rolled up, LOTUS is <span className="text-foreground">one</span> block with a loop-back edge. Unrolled, it is an
-          effective <span style={{ color: ACCENT }}>R-deep network</span> of the <span className="text-foreground">same</span>{" "}
-          weights — depth without new parameters — with the input latents <span className="font-mono">E</span> fed back into
-          every pass (the <span className="font-mono">E + h⁽ᵗ⁻¹⁾</span> residual, dashed). That is what lets a 3B backbone
+          Rolled up, LOTUS is <span className="text-foreground">one</span>{" "}block with a loop-back edge. Unrolled, it is an
+          effective <span style={{ color: ACCENT }}>R-deep network</span>{" "}of the <span className="text-foreground">same</span>{" "}
+          weights — depth without new parameters — with the input latents <span className="font-mono">E</span>{" "}fed back into
+          every pass (the <span className="font-mono">E + h⁽ᵗ⁻¹⁾</span>{" "}residual, dashed). That is what lets a 3B backbone
           reason at a depth its parameter count alone would not buy.
         </p>
       </div>
