@@ -189,7 +189,7 @@ export function ChannelAgnostic() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The <span className="text-foreground">same weights</span> read every montage — a 4-electrode headband up to a
+          The <span className="text-foreground">same weights</span>{" "}read every montage — a 4-electrode headband up to a
           256-channel cap — because an electrode is just a token at position (x, y, z, t): its 3D scalp coordinate plus a
           coarse time index, fed to attention as a <span style={{ color: ACCENT }}>4D rotary encoding</span>. Nothing in the
           model is tied to a fixed channel list. Drop a region and the decoder fills those coordinates from the electrodes it

@@ -126,7 +126,7 @@ export function HarnessLeverage() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Two different stories on two axes. On <span className="text-foreground">cost</span> every model
+          Two different stories on two axes. On <span className="text-foreground">cost</span>{" "}every model
           wins — 32% to 61% cheaper — so efficiency is a property of the harness, not the model. On{" "}
           <span style={{ color: ACCENT }}>quality</span>, the gain climbs the diagonal with baseline
           strength: Palmyra X6 and Sonnet 4.6 lead (+0.079, +0.073), while Qwen 3.6 actually regresses

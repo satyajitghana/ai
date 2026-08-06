@@ -99,8 +99,8 @@ export function ThroughputScaling() {
           <div className="mb-1 flex items-center justify-between font-mono text-[10px] text-muted-foreground">
             <span>context length (drag)</span>
             <span>
-              Soofi <span style={{ color: SOOFI }}>{s.toFixed(2)}k</span> vs dense <span style={{ color: DENSE }}>{d.toFixed(2)}k</span> ·{" "}
-              <span className="text-foreground">{ratio.toFixed(1)}×</span> at {ctx}K
+              Soofi <span style={{ color: SOOFI }}>{s.toFixed(2)}k</span>{" "}vs dense <span style={{ color: DENSE }}>{d.toFixed(2)}k</span> ·{" "}
+              <span className="text-foreground">{ratio.toFixed(1)}×</span>{" "}at {ctx}K
             </span>
           </div>
           <Range min={0} max={CTX.length - 1} value={i} onChange={(e) => setI(Number(e.target.value))} className="w-full cursor-pointer " accent="oklch(0.62 0.20 320)" />
@@ -109,10 +109,10 @@ export function ThroughputScaling() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The dense 14B line falls off a cliff as context grows — each decoded token re-reads a{" "}
           <a href="/articles/how-llm-inference-works" className="text-foreground underline decoration-foreground/30 underline-offset-2">KV cache</a>{" "}
-          that grows with sequence length. Soofi keeps only <span className="text-foreground">6 of 52 layers</span> as
+          that grows with sequence length. Soofi keeps only <span className="text-foreground">6 of 52 layers</span>{" "}as
           attention (~6&nbsp;KB/token, 11–53× smaller than the dense baselines) while 23 Mamba-2 layers carry a{" "}
           <span style={{ color: SOOFI }}>fixed-size recurrent state</span>, so its throughput stays nearly flat and is
-          a reported <span className="text-foreground">9.2×</span> the dense 14B at 40K. Qwen3.5, the other hybrid,
+          a reported <span className="text-foreground">9.2×</span>{" "}the dense 14B at 40K. Qwen3.5, the other hybrid,
           decays more gently than dense but still trails Soofi.
         </p>
       </div>

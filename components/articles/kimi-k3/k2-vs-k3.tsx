@@ -120,9 +120,9 @@ export function K2vsK3() {
         )}
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
-          K3 is not just a bigger K2. The <span className="text-foreground">scaled up</span> tab shows the brute-force
+          K3 is not just a bigger K2. The <span className="text-foreground">scaled up</span>{" "}tab shows the brute-force
           half — 2.7× the parameters, 3.2× the active compute, 2.3× the expert pool, an 8× longer training context. The{" "}
-          <span className="text-foreground">restructured</span> tab is where the 2.5× efficiency actually comes from:
+          <span className="text-foreground">restructured</span>{" "}tab is where the 2.5× efficiency actually comes from:
           swapping a pure-MLA stack for a 3:1 hybrid of KDA and Gated MLA, running routed experts in a half-width latent
           space, replacing SwiGLU with a bounded SiTU-GLU, and training vision in from the start. The hidden dimension
           never moved — K3 grew in <em>depth</em>, <em>width of the expert pool</em>, and <em>sequence</em>, not in the

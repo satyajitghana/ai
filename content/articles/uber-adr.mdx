@@ -1,0 +1,98 @@
+---
+title: "ADR: the agent that watches your agents"
+description: "Uber's ADR is not Architecture Decision Records — it's Agentic Detection and Response, an enterprise security framework for AI coding agents. A two-tier detector routes cheap triage on everything and expensive reasoning on the ambiguous few, and the expensive tier is a literal Claude Code CLI subprocess wielding MCP tools to fetch a suspicious tool's own source before it renders a verdict. Ten months in production, 7,200+ hosts, 1.000 precision on a 302-task enterprise benchmark, and an honest accounting of what didn't make the open-source release."
+date: 2026-08-03
+interest: 4
+helpful: 4
+tags:
+  - security
+  - agents
+  - mcp
+  - llm
+  - explainer
+draft: false
+featured: false
+cover: /articles/uber-adr/fig1.png
+---
+
+import { TwoTierPipeline } from "@/components/articles/uber-adr/two-tier-pipeline"
+import { DetectorScatter } from "@/components/articles/uber-adr/detector-scatter"
+
+The first thing to get out of the way: [Uber's ADR](https://github.com/uber/ADR) has nothing to do with Architecture Decision Records. **ADR = Agentic Detection and Response** — an enterprise security framework for the AI coding agents your engineers already run. The tagline says it plainly: "ADR secures enterprise AI agents through observability, security benchmarking, and threat detection." It's infra, not a model — though it ships an LLM-based detector and a red-team benchmark, and it's been running inside Uber for **over ten months**, watching **7,200+ unique hosts** and **10,000+ agent sessions a day**.
+
+The reason it exists is a gap that's easy to miss if you haven't operated one of these agents at scale: your existing security tooling watches file writes and process spawns. It has no idea *why* a file got written. An AI coding agent with shell access, file access, and a dozen MCP servers plugged in is a new kind of actor on your endpoints, and the thing that makes its actions dangerous or benign — the reasoning that led to the tool call — is exactly the part a traditional EDR agent can't see.
+
+## The threat model
+
+Three problems, named directly in [the paper](https://arxiv.org/abs/2605.17380) (Chenning Li, Pan Hu, Justin Xu, et al., accepted MLSys 2026 Industry Track):
+
+1. **Limited observability** — "existing Endpoint Detection and Response (EDR) tools see file writes but not the agent reasoning, prompts, or causal chains linking intent to execution."
+2. **Insufficient robustness** — static, rule-based defenses don't generalize across attack techniques.
+3. **High detection cost** — running an LLM as a judge on every one of 10,000+ daily sessions is expensive if you do it naively.
+
+The concrete shape of the threat is **indirect prompt injection through a tool a developer already trusts.** Uber emulated the industry's Agent Flayer incident (Zenity Labs, 2025) to validate ADR against it, and the attack graph is worth internalizing because it's the whole genre in five steps: a malicious email creates a Jira ticket with hidden instructions; a developer's Cursor session, connected to Jira through an MCP server, fetches that ticket as ordinary context; the hidden instructions coerce the agent into reading a local secrets file; and the agent — still just doing what its context told it — makes an outbound HTTP call that exfiltrates the credentials. Nobody typed a malicious command. The attacker never touched the developer's machine. The whole thing rides in on a support ticket.
+
+<Figure
+  src="/articles/uber-adr/fig2.png"
+  alt="Attack graph of the Agent Flayer incident: a malicious actor triggers Jira ticket creation via email (step 1); Cursor, inside a user's PC connected to internal resources, fetches the ticket using a Jira MCP tool (step 2); the ticket content is an indirect prompt injection (step 3); Cursor reads local secrets files (step 4); secrets are exfiltrated through an outbound HTTP call back to the malicious actor (step 5)."
+  caption="The Agent Flayer pattern, emulated internally: an indirect prompt injection riding in through a routine MCP integration, ending in credential exfiltration (Uber, 2026, Figure 9)."
+/>
+
+Uber also ran an internal capture-the-flag exercise that names the second broad category: a custom shell tool integrated into the assistant, then a deceptive prompt instructing the agent to run `curl | python3` "under the guise of sandbox testing." Same underlying issue — the agent's own tool surface, or a malicious MCP server sitting on it, is the attack surface. ADR-Bench, the benchmark this whole thing gets scored against, formalizes that: it's built on **133 MCP servers** (78 benign, 25 deliberately backdoored, the rest environment-emulation), and one of the backdoored ones — a credential-harvesting tool called `location_harvester` — is registered under a spoofed identity, `weather_forecast_service`, specifically to test whether a detector falls for supply-chain impersonation. That's the taxonomy: prompt injection through trusted tool output, malicious or impersonating MCP servers, and an agent that ends up exfiltrating something it was never asked to touch.
+
+## Why you can't just run an LLM judge on everything
+
+The naive fix — point a capable model at every agent session and ask "is this suspicious?" — doesn't survive contact with the volume. At 10,000+ sessions a day, an LLM call per session that does real reasoning (reads code, checks policy, thinks about intent) is expensive and slow enough that latency alone rules it out for most of the traffic, almost all of which is a developer editing files and running tests.
+
+ADR's answer is a **two-tier pipeline**, and the design is unapologetically borrowed from how a human security team already works: a triage analyst does a fast first pass on everything, and only escalates the ambiguous cases to someone senior enough to actually investigate.
+
+<Figure
+  src="/articles/uber-adr/fig1.png"
+  alt="ADR system architecture diagram. Left: the ADR Sensor collects user-agent activities. Center: the ADR Online Detector, a pipeline of Triage LLM (labeled 'high recall, low cost') feeding a Signal into Reasoning Agents (labeled 'high precision with contextual enrichment'), which raise an Alert to a Human who can investigate and modify. The Reasoning Agents pull Enterprise Context from a box containing Policy Store, Source Codes, and a Threat Intel Repository, reached by calling MCP servers. Bottom left: the ADR Offline Explorer, showing a Red-teaming Agent and Evaluator Agents running in a Sandboxed Emulation Instance, plus a Threat Intelligence Agent that writes New Detection Guidance back into the Threat Intel Repository."
+  caption="The full ADR architecture: an online two-tier detector on the right of the sensor, and an offline red-teaming loop underneath that keeps the threat-intel repository current (Uber, 2026, Figure 3)."
+/>
+
+**Tier 1** is a cheap, single-call triage model (`gpt-4o` by default) reading the full session transcript, tuned for high recall with an explicit escalate-on-ambiguity bias — anything that isn't clearly benign defaults to suspicious rather than being waved through. If triage says benign, the pipeline returns immediately. That early return, not a second model being smarter, is the entire cost-control story.
+
+**Tier 2** only runs on the sessions Tier 1 flagged, and it is not an API call. Reading the released code (`Detection/guardrail/adr_agent/adr_baseline.py`) turns up something more interesting than a bigger judge model: it shells out to the **Claude Code CLI as a subprocess** — literally `subprocess.run(["claude", "--model", "claude-sonnet-4-6", "--mcp-config", ".mcp.json", ...])` — and gives that CLI session live MCP tool access to three purpose-built servers: one that fetches a flagged tool's actual source code, one that looks up known techniques for the suspected tactic, and one that checks policy violations. The reasoning agent doesn't just re-read the transcript harder. It *investigates* — it can go pull the suspicious MCP tool's own source before it commits to a verdict, the same way a human analyst would open the code instead of trusting the tool's name. Output is forced JSON (`is_threat`, `confidence`, `explanation`), with a documented retry path for the case where Claude itself flags the detector's own prompt as a possible injection attempt.
+
+Step through both paths on the two real scenarios above — an ordinary edit-test-commit session, and the Agent Flayer emulation — and watch what each tier actually sees, calls, and costs:
+
+<TwoTierPipeline />
+
+The numbers back the design up directly. In Uber's own ablation, the triage layer alone resolves **40.7% of tasks** at **$0.017/task, 2.3s** latency; the escalated path costs **$0.029/task, 29.7s** — about 13x more expensive per task, which is the honest price of running an LLM twice, with tool calls, inside a detection loop. Removing the triage layer entirely and sending everything to the reasoning agent *does* raise recall (0.667 → 0.805) and F1 (0.800 → 0.868), but it also introduces false positives (precision drops to 0.943) and costs 29% more — a clean demonstration that the two-tier split isn't just an engineering shortcut, it's load-bearing for precision too. And in a second ablation that validates the "fetch the tool's own source" mechanism specifically: pull the source-code MCP server away from the reasoning agent and F1 falls from 0.800 to 0.676 — the single largest drop of any component removed, bigger than losing threat-intel lookup (0.800 → 0.716) or policy verification (0.800 → 0.806, barely a dent). The part of the mechanism that sounds like the interesting flex — an agent reading a tool's own code before judging it — is also, empirically, the part doing the most work.
+
+## The benchmark, and where the baselines fall apart
+
+**ADR-Bench** is 302 tasks (42 malicious, 260 benign) derived from real enterprise telemetry, spanning 17 named attack techniques across 5 tactics and those 133 MCP servers. The class imbalance — 13.9% attack rate — is the point: an academic benchmark that's roughly half attacks doesn't tell you how a detector behaves against the traffic mix a real enterprise actually has, which is overwhelmingly benign. ADR is also evaluated on **AgentDojo**, a public, mostly-balanced prompt-injection benchmark (93 tasks), giving two very different stress tests of the same detector.
+
+<DetectorScatter />
+
+The pattern that falls out is the honest headline: on AgentDojo, the baselines (ALRPHFS, GuardAgent, LlamaFirewall) look reasonable — ALRPHFS even gets within striking distance of ADR's precision. Move to ADR-Bench's enterprise-realistic imbalance and every baseline collapses to 30–40 false positives out of 260 benign tasks. That's not a rounding difference — at real traffic volume, that false-positive rate is what "unsuitable for production" cashes out to: a human review queue that drowns. ADR holds **1.000 precision, 0.667 recall, 0.800 F1, zero false positives** on ADR-Bench, and **0.927 precision, 1.000 recall, 0.962 F1** on AgentDojo — complementary strengths the paper is upfront about: precision-first where class imbalance is severe, recall-first where missing a prompt-injection attack is the costlier failure.
+
+## What happened in production
+
+The credential-exposure numbers are where this stops being a benchmark story. Deployed across Uber's MacBook fleet (Intel and ARM), ADR has "sustained reliable detection... uncovering hundreds of credential exposures across 26 categories," which fed a shift-left prevention layer — a regex-and-entropy pre-prompt hook running in Cursor and Claude Code — that hit **97.2% precision**: 206 true positives correctly caught, only 6 false positives, across 212 unique credentials seen in hundreds of thousands of sessions. Worth noting in passing: that prevention layer is explicitly *not* LLM-based. "Simple non-LLM checks work well for known attacks with static patterns... but fail for attacks requiring reasoning about tool semantics, causal context, and enterprise policies" — which is exactly the job Tier 2 exists to do instead.
+
+One production detail is genuinely candid: of the sessions ADR's Tier 1/Tier 2 routed to a human review queue, only 34% were confirmed malicious true positives. Another 17% were true positives that turned out non-malicious — internal red-team and pentest activity that looked identical to an attack until a human checked. The paper doesn't paper over this: it explicitly flags the need to model *user personas* and intent, because a security team doing its job on purpose looks, from telemetry alone, a lot like an attacker.
+
+## What's honest and what's missing
+
+A few things worth stating plainly before treating any of this as settled:
+
+- **Every production number is self-reported.** The 7,200 hosts, 10,000+ sessions/day, and 97.2% precision figures come from Uber's own paper — there's no third-party audit. A tweet from an Uber engineer separately claims 50,000+ sessions/day, a larger and more recent figure than the paper's own — treat that as informal color, not a citable number.
+- **The baseline comparisons in Table 2 aren't independently re-runnable.** ALRPHFS and GuardAgent's code was stripped from this repo for licensing reasons; the paper's own comparison numbers are reproduced as-is, documented candidly in `docs/BASELINE_REPLICATION.md`, but you can't regenerate them yourself.
+- **The open-source release is the detection half of a four-part system.** Per the architecture, ADR Explorer (pre-deployment red-teaming) and ADR Prevention (blocking unsafe actions in real time) are both explicitly excluded — "not included in the current open-source release. Stay tuned." What's shipped is the Sensor, the benchmark, and the dual-agent detector baseline — real, but not the complete production stack Uber runs internally.
+- **The reasoning tier is unusually coupled to one vendor's CLI.** Shelling out to `claude --dangerously-skip-permissions` as a subprocess is a legitimate way to get a tool-using agent for free, and it's the most narratively interesting part of the design — but it's also a portability limitation worth naming as exactly that.
+- **An LLM in the detection path is not free**, and ADR doesn't pretend otherwise: $0.024/task blended average cost and 18.5s average latency on ADR-Bench, with the escalated path alone running $0.029 and nearly 30 seconds. That's the real, ongoing bill for the precision this design buys.
+- **ADR-Bench is Uber's own benchmark**, built from Uber's own telemetry and scored by Uber. It's a genuinely useful stress test — the class-imbalance framing is a real and underused idea — but it isn't a neutral third party's yardstick, and the paper is explicit that the benchmark's attack rate doesn't mirror real production incidence.
+
+None of that erases the result: a two-tier detector that costs cents and seconds on the common case, escalates to an agent that can go read a suspicious tool's own source before it decides, and has been running against real attacks in production for the better part of a year.
+
+## The take
+
+ADR is worth reading past its confusing name because it's a concrete answer to a question [Lilian Weng's harness framing](/articles/agent-harness) leaves open: if the harness — the loop, the tools, the context policy — is where an agent's real capability lives, then the harness is also exactly where you'd go looking for an attack, and exactly where a defense has to watch. ADR watches the causal chain a traditional EDR tool can't see, and its own reasoning tier is built the same way the agents it's watching are: a model with tool access, investigating rather than just classifying. The cost/precision tradeoff it makes explicit — cheap triage on the routine 40.7%, an expensive investigating agent on what's left — is the same lesson [Antares](/articles/antares) makes from the opposite direction, with a much smaller model doing a narrower security job: the interesting engineering in agentic security right now is less about a bigger judge model and more about routing the right amount of reasoning at the right moment.
+
+---
+
+*Sources: [uber/ADR](https://github.com/uber/ADR) (Apache 2.0; the vendored AgentDojo benchmark under `Detection/benchmark/agentdojo/` is MIT); the paper, ["ADR: An Agentic Detection System for Enterprise Agentic AI Security"](https://arxiv.org/abs/2605.17380) (Chenning Li, Pan Hu, Justin Xu, Baris Ozbas, Olivia Liu, Caroline Van, Manxue Li, Wei Zhou, Mohammad Alizadeh, Pengyu Zhang, KK Sriramadhesikan, Ming Zhang; MLSys 2026 Industry Track). Figures reproduced from the paper for commentary, cropped from the arXiv PDF committed at `docs/adr-paper.pdf` in the repo and flattened onto white. The interactive pipeline trace and benchmark scatter are my own, built from the paper's own reported numbers — not measured traces.*

@@ -128,7 +128,7 @@ export function AdaptiveDepth() {
           One checkpoint, three regimes: the Low tier answers in ~2.4k tokens at{" "}
           <span className="text-foreground">82.3%</span>, the High tier spends ~20.8k tokens for{" "}
           <span className="text-foreground">93.2%</span>. The prompt alone routes the depth. The honest cost: training all
-          three jointly is <span className="text-foreground">negative transfer</span> — the High tier here (93.2%) sits
+          three jointly is <span className="text-foreground">negative transfer</span>{" "}— the High tier here (93.2%) sits
           below the dedicated second-stage model&rsquo;s 94.1%. You buy flexibility with a little peak accuracy.
         </p>
       </div>

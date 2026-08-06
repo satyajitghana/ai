@@ -186,7 +186,7 @@ export function ScaledDotProduct() {
           />
         </div>
         <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-          top weight <span className="text-foreground">{(Math.max(...weights) * 100).toFixed(0)}%</span> on v
+          top weight <span className="text-foreground">{(Math.max(...weights) * 100).toFixed(0)}%</span>{" "}on v
           {weights.indexOf(Math.max(...weights))}
         </div>
       </div>
@@ -200,10 +200,10 @@ export function ScaledDotProduct() {
       />
 
       <p className="mt-3 text-sm leading-6 text-muted-foreground">
-        The query scores every key by dot product, divided by <span className="text-foreground">√dₖ</span> so the
+        The query scores every key by dot product, divided by <span className="text-foreground">√dₖ</span>{" "}so the
         logits do not explode as the head dimension grows and push softmax into a one-hot corner. Softmax turns those
         scores into weights that sum to 1; the output is the weight-blended value vector. Flip the{" "}
-        <span style={{ color: WARM }}>head</span> and the same seven tokens get a different weighting — that is all
+        <span style={{ color: WARM }}>head</span>{" "}and the same seven tokens get a different weighting — that is all
         multi-head attention is: several of these running in parallel on different projections, concatenated.
       </p>
     </FigureCard>

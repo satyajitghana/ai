@@ -170,7 +170,7 @@ export function UnembedReadout() {
       <p className="border-t px-4 py-3 text-sm leading-6 text-muted-foreground">
         Unembedding is a dot product: each vocabulary token owns one row of{" "}
         <code className="font-mono text-[0.85em]">W_U</code>, and its logit is that row against the transported vector.
-        Softmax ranks them; the lens <span style={{ color: ACC }}>readout</span> is the top of the list — the token
+        Softmax ranks them; the lens <span style={{ color: ACC }}>readout</span>{" "}is the top of the list — the token
         whose direction <code className="font-mono text-[0.85em]">J·h</code> aligns with. The superscript rank you see
         on a real slice page is exactly this position in the sorted vocabulary. Rotate the vector and the readout hands
         off from one concept to its neighbour.

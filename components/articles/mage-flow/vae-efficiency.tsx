@@ -57,7 +57,7 @@ export function VaeEfficiency() {
           ))}
         </div>
         <div className="mt-2 text-center font-mono text-[11px] text-muted-foreground">
-          {d.label}: <span className="tabular-nums" style={{ color: ACCENT }}>~{d.flux}× fewer</span> at matched reconstruction
+          {d.label}: <span className="tabular-nums" style={{ color: ACCENT }}>~{d.flux}× fewer</span>{" "}at matched reconstruction
         </div>
 
         <div className="mt-4 grid grid-cols-2 gap-2 font-mono">

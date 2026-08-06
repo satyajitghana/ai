@@ -162,7 +162,7 @@ export function BlockDiffusion() {
           A plain AR model emits one token per forward pass — the sequential axis is the whole
           sequence. TwoTower makes the sequential axis the <span className="text-foreground">blocks</span>,
           and denoises all {BLK} tokens of a block together in a handful of steps. Fewer sequential
-          steps for the same text is where the <span className="text-foreground">2.42×</span> throughput
+          steps for the same text is where the <span className="text-foreground">2.42×</span>{" "}throughput
           comes from.
         </p>
       </div>

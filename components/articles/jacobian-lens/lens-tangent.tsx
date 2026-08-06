@@ -190,12 +190,12 @@ export function LensTangent() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The <span style={{ color: TRUE_C }}>blue curve</span> is the true, nonlinear map from one activation
-          coordinate to a token&rsquo;s final logit. The <span style={{ color: LENS_C }}>amber line</span> is the lens:
+          The <span style={{ color: TRUE_C }}>blue curve</span>{" "}is the true, nonlinear map from one activation
+          coordinate to a token&rsquo;s final logit. The <span style={{ color: LENS_C }}>amber line</span>{" "}is the lens:
           a single derivative, drawn as a tangent. In{" "}
-          <span style={{ color: LENS_C }}>corpus-average</span> mode the tangent is fixed at one operating point (what
+          <span style={{ color: LENS_C }}>corpus-average</span>{" "}mode the tangent is fixed at one operating point (what
           the real J-lens does — one Jacobian averaged over the corpus), so the error grows as the probe moves away.
-          Switch to <span style={{ color: LENS_C }}>local</span> mode and the tangent re-touches the curve at the
+          Switch to <span style={{ color: LENS_C }}>local</span>{" "}mode and the tangent re-touches the curve at the
           probe: exact at the point, still only a local picture. A Jacobian is a good lens near where it is taken and a
           worse one far from it.
         </p>

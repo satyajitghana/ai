@@ -121,10 +121,10 @@ export function ThroughputScaling() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The two curves are the whole trade. Pack in more users and{" "}
-          <span style={{ color: AGG }}>aggregate</span> throughput climbs toward a ceiling — that&apos;s the win. But each
-          user&apos;s <span style={{ color: PER }}>own</span> stream slows, because they now share every forward pass. The
+          <span style={{ color: AGG }}>aggregate</span>{" "}throughput climbs toward a ceiling — that&apos;s the win. But each
+          user&apos;s <span style={{ color: PER }}>own</span>{" "}stream slows, because they now share every forward pass. The
           dots are committed spark-bench runs (concurrency 1/8/16); the 64-user point is a{" "}
-          <span className="text-foreground">reported</span> run past the committed sweep.
+          <span className="text-foreground">reported</span>{" "}run past the committed sweep.
         </p>
       </div>
     </figure>

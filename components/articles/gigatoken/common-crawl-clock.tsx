@@ -83,7 +83,7 @@ export function CommonCrawlClock() {
           </div>
         </div>
         <div className="mt-2 text-center font-mono text-[11px] text-muted-foreground">
-          same job, <span className="tabular-nums text-foreground">{Math.round(hf / gt)}×</span> less wall-clock on {cpu.label}
+          same job, <span className="tabular-nums text-foreground">{Math.round(hf / gt)}×</span>{" "}less wall-clock on {cpu.label}
         </div>
 
         <div className="mt-4">

@@ -138,9 +138,9 @@ export function EffortCurve() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Both curves climb toward the same ceiling — but Inkling gets there{" "}
           <span className="text-foreground">sooner</span>. Read the tie line: at whatever score the effort knob
-          lands on, the reference model needs roughly <span style={{ color: REF }}>three times</span> the tokens
+          lands on, the reference model needs roughly <span style={{ color: REF }}>three times</span>{" "}the tokens
           to match it. Turn effort down and you trade a little accuracy for a lot fewer tokens; turn it up and you
-          approach the <span style={{ color: INK }}>~63.8%</span> Terminal-Bench-2.1 plateau. The ~1/3-token figure
+          approach the <span style={{ color: INK }}>~63.8%</span>{" "}Terminal-Bench-2.1 plateau. The ~1/3-token figure
           is Thinking Machines&apos; own measurement.
         </p>
       </div>

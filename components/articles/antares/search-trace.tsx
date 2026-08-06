@@ -68,7 +68,7 @@ export function SearchTrace() {
       <div className="p-3 sm:p-4">
         <div className="space-y-2 rounded-lg border bg-background p-3 font-mono text-[11px] leading-relaxed">
           <div className="text-muted-foreground">
-            <span style={{ color: VULN }}>CWE-78</span> — Improper Neutralization of Special Elements used in an OS Command
+            <span style={{ color: VULN }}>CWE-78</span>{" "}— Improper Neutralization of Special Elements used in an OS Command
           </div>
           {shown.map((s, i) => (
             <div key={i} className={i === step ? "" : "opacity-60"}>
@@ -121,7 +121,7 @@ export function SearchTrace() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Note the fourth step: it checks a second candidate, sees <code className="font-mono text-xs">shlex.quote</code>,
-          and <span style={{ color: ACCENT }}>rules it out</span> instead of over-reporting. That
+          and <span style={{ color: ACCENT }}>rules it out</span>{" "}instead of over-reporting. That
           &ldquo;search, read, revise, backtrack&rdquo; behavior is the whole trick — and it&rsquo;s
           learned, not a property of scale.
         </p>

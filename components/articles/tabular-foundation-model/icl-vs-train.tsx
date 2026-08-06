@@ -92,7 +92,7 @@ export function IclVsTrain() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The difference is the <span className="text-foreground">shape of the work</span>, not a quality claim. A boosted
-          tree must <em>fit</em> your table — a sequential loop of rounds — before it predicts; TabFM folds the table in as
+          tree must <em>fit</em>{" "}your table — a sequential loop of rounds — before it predicts; TabFM folds the table in as
           context and answers in a single pass, no per-dataset training. Which one predicts <span className="text-foreground">better</span>
           {" "}is a separate question, and the honest answer lives in the Elo chart below, where the comparison is
           ensemble-vs-ensemble.

@@ -132,8 +132,8 @@ export function WeightClassScatter() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Switch to <span style={{ color: ACCENT }}>active params</span> and the point is hard to miss: at{" "}
-          <span className="text-foreground">8B active</span> Laguna S 2.1 clears open models activating 5–7× as
+          Switch to <span style={{ color: ACCENT }}>active params</span>{" "}and the point is hard to miss: at{" "}
+          <span className="text-foreground">8B active</span>{" "}Laguna S 2.1 clears open models activating 5–7× as
           many parameters, and lands within a dozen points of a closed frontier whose models won&rsquo;t even say
           how big they are. Raw score isn&rsquo;t the frontier; score-per-parameter is the claim.
         </p>

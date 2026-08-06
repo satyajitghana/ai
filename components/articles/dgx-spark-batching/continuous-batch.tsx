@@ -215,10 +215,10 @@ export function ContinuousBatch() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Every step, the server sweeps up all <span style={{ color: ACCENT }}>active</span> streams and runs{" "}
-          <span className="text-foreground">one</span> fused forward pass — appending a single token to each stream&apos;s{" "}
+          Every step, the server sweeps up all <span style={{ color: ACCENT }}>active</span>{" "}streams and runs{" "}
+          <span className="text-foreground">one</span>{" "}fused forward pass — appending a single token to each stream&apos;s{" "}
           <span style={{ color: KV }}>own KV cache</span>. Because a lone decode barely uses the GPU, sharing the pass
-          across many streams multiplies <span style={{ color: ACCENT }}>aggregate</span> throughput while each user&apos;s
+          across many streams multiplies <span style={{ color: ACCENT }}>aggregate</span>{" "}throughput while each user&apos;s
           own rate drifts down. Streams that finish free their KV blocks; queued ones slot in — the batch churns without
           the GPU ever waiting.
         </p>

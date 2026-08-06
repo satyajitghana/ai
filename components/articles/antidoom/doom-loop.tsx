@@ -224,7 +224,7 @@ export function DoomLoop() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           In the <span className="text-foreground">base model</span>, each repeat feeds
           the same span back into context, so the loop token{" "}
-          <span style={{ color: LOOP }}>&ldquo;Wait&rdquo;</span> climbs from ~41% to ~98%.
+          <span style={{ color: LOOP }}>&ldquo;Wait&rdquo;</span>{" "}climbs from ~41% to ~98%.
           The distribution collapses onto one token, and greedy decoding has nowhere else
           to go. <span className="text-foreground">After FTPO</span>, that final position is
           retrained: &ldquo;Wait&rdquo; is held down and probability is spread across

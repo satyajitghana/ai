@@ -237,11 +237,11 @@ export function KimiDeltaAttention() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           KDA is a gated delta-rule linear attention. Each token makes the fixed-size state{" "}
-          <span className="font-mono" style={{ color: ACCENT }}>S</span> selectively <em>erase</em> prior
-          content (gated decay) and <em>write</em> the new key/value delta, so information flows across
-          arbitrarily long sequences at <span className="text-foreground">constant</span> state size — while
+          <span className="font-mono" style={{ color: ACCENT }}>S</span>{" "}selectively <em>erase</em>{" "}prior
+          content (gated decay) and <em>write</em>{" "}the new key/value delta, so information flows across
+          arbitrarily long sequences at <span className="text-foreground">constant</span>{" "}state size — while
           softmax attention&apos;s KV cache grows one entry per token. That is what buys up to{" "}
-          <span className="text-foreground">6.3&times; faster decode</span> at 1M-token context.
+          <span className="text-foreground">6.3&times; faster decode</span>{" "}at 1M-token context.
         </p>
       </div>
     </figure>

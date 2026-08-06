@@ -172,10 +172,10 @@ export function ScaleBank() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Of a <span className="text-foreground">1.6T-parameter</span> model, only about{" "}
-          <span style={{ color: ACC }}>48B</span> run for any given token — the router lights a sparse handful of experts (~3% of the pool),
+          Of a <span className="text-foreground">1.6T-parameter</span>{" "}model, only about{" "}
+          <span style={{ color: ACC }}>48B</span>{" "}run for any given token — the router lights a sparse handful of experts (~3% of the pool),
           which is what makes a model this large cheap enough to serve. The{" "}
-          <span style={{ color: NGRAM }}>135B N-gram Embedding</span> sits <em>outside</em> that pool: it expands parameters along
+          <span style={{ color: NGRAM }}>135B N-gram Embedding</span>{" "}sits <em>outside</em>{" "}that pool: it expands parameters along
           sparse dimensions orthogonal to the MoE, adding capacity through a token-n-gram lookup rather than more experts. Step the token and
           both stores light a different sparse subset.
         </p>

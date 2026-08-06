@@ -191,7 +191,7 @@ export function KVCache() {
             })}
           </svg>
           <div className="mt-1 font-mono text-[10px] text-muted-foreground">
-            ≈ <span className="text-foreground tabular-nums">{reqsPer80}</span> concurrent requests fit on one 80GB GPU
+            ≈ <span className="text-foreground tabular-nums">{reqsPer80}</span>{" "}concurrent requests fit on one 80GB GPU
           </div>
 
           <p className="mt-2 text-sm leading-6 text-muted-foreground">

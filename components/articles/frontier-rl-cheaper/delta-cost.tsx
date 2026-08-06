@@ -179,8 +179,8 @@ export function DeltaCost() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Shipping the <span style={{ color: FULL }}>full checkpoint every step</span> is the mega-cluster premise: traffic grows
-          linearly and only a co-located RDMA fabric keeps up. Send a <span style={{ color: DELTA }}>~{delta.toFixed(0)}% delta</span> instead —
+          Shipping the <span style={{ color: FULL }}>full checkpoint every step</span>{" "}is the mega-cluster premise: traffic grows
+          linearly and only a co-located RDMA fabric keeps up. Send a <span style={{ color: DELTA }}>~{delta.toFixed(0)}% delta</span>{" "}instead —
           with a full checkpoint every {N} steps to reset the chain — and the same {W_STEPS} steps across {regions} region{regions > 1 ? "s" : ""} move{" "}
           <span className="text-foreground">{reduction.toFixed(0)}% less</span>. Drag the delta toward 100% and the two curves
           meet: at that point you are back to shipping the whole model, and the co-located cluster is the only thing that can absorb it.

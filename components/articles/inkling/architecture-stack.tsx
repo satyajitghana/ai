@@ -215,14 +215,14 @@ export function ArchitectureStack() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Two sparsities stack. Down the depth, five <span style={{ color: INK }}>sliding-window</span> layers (cheap,
-          local) pass for every one <span style={{ color: GLOB }}>global</span> layer (exact, full-range) — a 5:1
+          Two sparsities stack. Down the depth, five <span style={{ color: INK }}>sliding-window</span>{" "}layers (cheap,
+          local) pass for every one <span style={{ color: GLOB }}>global</span>{" "}layer (exact, full-range) — a 5:1
           hybrid that keeps 1M-token attention affordable, the same
           local/global idea as <a className="underline decoration-foreground/30 underline-offset-4" href="/articles/minimax-sparse-attention">MiniMax MSA</a> and{" "}
           <a className="underline decoration-foreground/30 underline-offset-4" href="/articles/mimo-v2-flash">MiMo-V2-Flash</a>. Inside each
           layer, the <a className="underline decoration-foreground/30 underline-offset-4" href="/articles/mixture-of-experts-from-scratch">mixture-of-experts</a> FFN
           routes the token to just 6 of 256 experts, with 2{" "}
-          <span style={{ color: SHARE }}>shared</span> experts always on — so only 41B of 975B parameters do work per
+          <span style={{ color: SHARE }}>shared</span>{" "}experts always on — so only 41B of 975B parameters do work per
           token.
         </p>
       </div>

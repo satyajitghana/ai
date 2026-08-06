@@ -143,9 +143,9 @@ export function KalmanTrack() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Raise <span className="text-foreground">R</span> and the filter trusts its
+          Raise <span className="text-foreground">R</span>{" "}and the filter trusts its
           prediction over the sensor — the estimate smooths out but lags. Raise{" "}
-          <span className="text-foreground">Q</span> and it trusts fresh measurements more —
+          <span className="text-foreground">Q</span>{" "}and it trusts fresh measurements more —
           it snaps to the data but gets jittery. The Kalman gain is exactly this ratio,
           computed optimally each step from the covariances, and the band is the filter&rsquo;s
           own honest estimate of how unsure it is.

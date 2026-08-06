@@ -187,7 +187,7 @@ export function RoutingReplay() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Off, the two engines route the same token to <span style={{ color: WARN }}>different experts</span> — the
+          Off, the two engines route the same token to <span style={{ color: WARN }}>different experts</span>{" "}— the
           per-token ratio compares different active parameters and stops meaning &ldquo;a small policy change,&rdquo; so
           the first-order approximation collapses. On, replay pins the training engine to the{" "}
           <span style={{ color: ACCENT }}>rollout&rsquo;s experts</span>, and the token is optimized like a dense one.

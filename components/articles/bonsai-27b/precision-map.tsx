@@ -114,12 +114,12 @@ export function PrecisionMap() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           {mode === "bonsai" ? (
-            <>Bonsai runs the low-bit representation through <span className="text-foreground">every block</span> —
+            <>Bonsai runs the low-bit representation through <span className="text-foreground">every block</span>{" "}—
             embeddings, attention, MLPs and the LM head — with a 4-bit vision tower alongside. Nothing is left at
             FP16, which is what lets the whole model reach 3.9 GB.</>
           ) : (
             <>Typical PTQ keeps the sensitive parts — embeddings, attention, the LM head ({highCount} of 4 blocks
-            here) — at <span className="text-foreground">FP16</span> and only squeezes the MLPs, so the footprint
+            here) — at <span className="text-foreground">FP16</span>{" "}and only squeezes the MLPs, so the footprint
             only partly shrinks. The hard part Bonsai solves is quantizing the parts everyone else protects.</>
           )}{" "}
           Compare with the mixed-precision approach of{" "}

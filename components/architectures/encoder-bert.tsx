@@ -149,7 +149,7 @@ export function EncoderBert() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           BERT is a Transformer <em>encoder</em>: with no causal mask, every position attends to the whole
-          sequence at once, so the hidden state for <code>[MASK]</code> is built from context on <em>both</em> sides.
+          sequence at once, so the hidden state for <code>[MASK]</code> is built from context on <em>both</em>{" "}sides.
           The MLM head then reads that position and predicts the missing word.
         </p>
       </div>

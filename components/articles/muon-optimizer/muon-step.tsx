@@ -129,7 +129,7 @@ export function MuonStep() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           A raw momentum step on a 2D matrix is <span style={{ color: RAW }}>lopsided</span>: singular value σ₁ dwarfs σ₂, so
           the weights lurch far along one direction and hardly move along the other. Muon keeps the singular <em>directions</em>{" "}
-          but sets every singular value to <span style={{ color: MUON }}>1</span> — the ellipse becomes a circle, and the step
+          but sets every singular value to <span style={{ color: MUON }}>1</span>{" "}— the ellipse becomes a circle, and the step
           reaches equally in all directions. Same information, spectrally normalized so no single direction dominates the update.
         </p>
       </div>

@@ -157,7 +157,7 @@ export function AttentionScaling() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            gap widens with <span className="text-foreground">length</span> and <span className="text-foreground">resolution</span>
+            gap widens with <span className="text-foreground">length</span>{" "}and <span className="text-foreground">resolution</span>
           </div>
         </div>
 
@@ -167,10 +167,10 @@ export function AttentionScaling() {
         </label>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The VAE hands the transformer only <span className="text-foreground">{(n / 1000).toFixed(1)}k</span> tokens for a{" "}
-          {t}s {res} clip — but a full-softmax DiT still pays <span style={{ color: GRAY }}>O(N²)</span> on them at every
+          The VAE hands the transformer only <span className="text-foreground">{(n / 1000).toFixed(1)}k</span>{" "}tokens for a{" "}
+          {t}s {res} clip — but a full-softmax DiT still pays <span style={{ color: GRAY }}>O(N²)</span>{" "}on them at every
           layer, so its cost curls upward as the clip grows. SANA keeps three of every four layers{" "}
-          <span style={{ color: GREEN }}>linear</span>, so its curve stays low and the speedup <span className="text-foreground">grows</span> with
+          <span style={{ color: GREEN }}>linear</span>, so its curve stays low and the speedup <span className="text-foreground">grows</span>{" "}with
           length and resolution — exactly where video hurts most.
         </p>
       </div>

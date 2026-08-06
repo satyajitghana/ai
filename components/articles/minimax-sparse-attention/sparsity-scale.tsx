@@ -119,11 +119,11 @@ export function SparsityAtScale() {
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
-          The fraction attended falls to <span style={{ color: SEL }}>0.2% at 1M</span> — but MSA is not 500× faster.
-          The measured win is <span className="text-foreground">14.2× prefill / 7.6× decode</span> at 1M, because the
-          Index Branch still <em>scores every block</em> (a small linear cost) and block-sparse memory access is less
+          The fraction attended falls to <span style={{ color: SEL }}>0.2% at 1M</span>{" "}— but MSA is not 500× faster.
+          The measured win is <span className="text-foreground">14.2× prefill / 7.6× decode</span>{" "}at 1M, because the
+          Index Branch still <em>scores every block</em>{" "}(a small linear cost) and block-sparse memory access is less
           regular than dense. The gap between the theoretical 28.4× FLOP reduction and the wall-clock number is exactly
-          that overhead — and the whole advantage is a <span className="text-foreground">long-context</span> phenomenon:
+          that overhead — and the whole advantage is a <span className="text-foreground">long-context</span>{" "}phenomenon:
           at 32k it&apos;s barely 1.6×.
         </p>
       </div>

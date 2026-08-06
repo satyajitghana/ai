@@ -158,7 +158,7 @@ export function MoeLayer() {
         </svg>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Only the <span style={{ color: GATE.active }}>top-2 routed experts</span> (plus an
+          Only the <span style={{ color: GATE.active }}>top-2 routed experts</span>{" "}(plus an
           <span style={{ color: GATE.shared }}> always-on shared expert</span>) fire for any given token, so a layer
           can hold a huge pile of parameters while each token pays the compute of just a few small FFNs.
         </p>

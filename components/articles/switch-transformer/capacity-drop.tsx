@@ -158,9 +158,9 @@ export function CapacityDrop() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Each expert gets exactly <span className="text-foreground">{cap}</span> slots (buffer = tokens/experts ×
+          Each expert gets exactly <span className="text-foreground">{cap}</span>{" "}slots (buffer = tokens/experts ×
           capacity factor). Under a skewed load the busy expert overflows and those tokens are{" "}
-          <span style={{ color: DROP }}>dropped</span> — they pass straight through the residual, unprocessed. Raise the
+          <span style={{ color: DROP }}>dropped</span>{" "}— they pass straight through the residual, unprocessed. Raise the
           capacity factor and drops fall, but the emptier buffers waste compute and memory. That tension is why the
           load-balancing loss matters: flatten the routing and a small buffer suffices.
         </p>

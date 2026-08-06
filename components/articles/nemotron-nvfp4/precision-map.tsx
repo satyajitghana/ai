@@ -235,15 +235,15 @@ export function PrecisionMap() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Only the <span style={{ color: FP4 }}>expert weight-GEMMs</span> — the bulk of the compute — actually run in
+          Only the <span style={{ color: FP4 }}>expert weight-GEMMs</span>{" "}— the bulk of the compute — actually run in
           NVFP4. Six of the seven stages shown stay <span style={{ color: HI }}>higher precision</span>: the format is
           most fragile at the network&apos;s edges (embeddings, the last ~16 layers, the MTP head) and on the small,
           sensitive projections.{" "}
           {bwd ? (
             <>
               In the backward pass the FP4 GEMMs lean on all three stabilizers: 2D block-quantized weights, a{" "}
-              <span style={{ color: FP4 }}>random Hadamard transform</span> that smears outliers before the wgrad
-              quantization, and <span style={{ color: FP4 }}>stochastic rounding</span> so gradients aren&apos;t
+              <span style={{ color: FP4 }}>random Hadamard transform</span>{" "}that smears outliers before the wgrad
+              quantization, and <span style={{ color: FP4 }}>stochastic rounding</span>{" "}so gradients aren&apos;t
               systematically truncated to zero.
             </>
           ) : (

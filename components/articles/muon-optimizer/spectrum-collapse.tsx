@@ -149,9 +149,9 @@ export function SpectrumCollapse() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Step 0 is the raw momentum matrix: five singular values spanning{" "}
-          <span className="text-foreground">33×</span> (κ = 33.3). Each Newton-Schulz step applies the quintic{" "}
-          <span className="text-foreground">φ</span> to every value at once — no SVD, just matrix multiplies. Five steps later
-          they are bunched in a band around <span style={{ color: MUON }}>1</span> (κ ≈ 1.5). That flat spectrum <em>is</em> the
+          <span className="text-foreground">33×</span>{" "}(κ = 33.3). Each Newton-Schulz step applies the quintic{" "}
+          <span className="text-foreground">φ</span>{" "}to every value at once — no SVD, just matrix multiplies. Five steps later
+          they are bunched in a band around <span style={{ color: MUON }}>1</span>{" "}(κ ≈ 1.5). That flat spectrum <em>is</em>{" "}the
           orthogonalized update U Vᵀ: every direction carries the same weight, so the dominant singular direction no longer
           swallows the step. The tuned coefficients trade exact convergence to 1 for a steep slope at 0 — small values shoot up
           fast, which is why five cheap steps suffice.

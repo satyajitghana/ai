@@ -1,0 +1,184 @@
+---
+title: "Sol-Attn: deciding which attention blocks to skip while you're already streaming them"
+description: "Video diffusion transformers spend most of their inference budget on attention. Sol-Attn is training-free sparse attention that folds routing into the online-softmax pass a flash-attention kernel already runs — thresholding block scores at μ + βσ instead of top-k, and reusing the scores of skipped blocks to approximate their contribution instead of dropping them. 2.1× on generation, 2.3× on editing, and it ships inside a five-technique inference engine."
+date: 2026-08-03
+interest: 5
+helpful: 4
+tags:
+  - diffusion
+  - attention
+  - sparse-attention
+  - inference
+  - video
+  - explainer
+cover: /articles/sol-attn/fig1.png
+---
+
+import { RoutingThreshold } from "@/components/articles/sol-attn/routing-threshold"
+import { OnlineSoftmaxStream } from "@/components/articles/sol-attn/online-softmax-stream"
+import { EngineStack } from "@/components/articles/sol-attn/engine-stack"
+
+Video generation has an attention problem that language models mostly don't. A few seconds of video at a useful
+resolution is a very long token sequence, attention is quadratic in it, and diffusion runs the whole stack dozens
+of times per clip. So attention stops being *a* cost and becomes *the* cost.
+
+[Sol-Attn](https://arxiv.org/abs/2607.24027) — "Sparsifying online attention", from the SANA team at NVIDIA and
+collaborators — is a training-free way to skip most of that work. The idea I like is not that it sparsifies
+attention; everyone does that. It is *where* the decision happens.
+
+## The problem with picking blocks
+
+Training-free sparse attention works block-wise: score each block of keys with something cheap (a proxy), keep
+the promising ones, skip the rest. The question is how you pick, and the paper's Figure 1 shows why the two
+standard answers both misbehave — on two different attention-logit distributions, one peaked and one nearly flat.
+
+<Figure
+  src="/articles/sol-attn/fig1.png"
+  alt="Four-column comparison on two rows of attention logits. Row 1 is a peaked distribution, row 2 nearly flat. Columns: Original logits; Top-k selection, which yields 70.3% sparsity on both rows; Top-p cumulative-probability selection, which yields 96.88% on the peaked row but only 21.9% on the flat row; and Ours, which yields 75.0% and 67.2% respectively, selecting blocks above a mean-plus-beta-sigma threshold shown against a density curve on the right."
+  caption="Top-k gives the same 70.3% sparsity regardless of the distribution; top-p swings from 96.88% to 21.9%; thresholding at μ + βσ adapts but stays controlled at 75.0% and 67.2% (Li et al., 2026, Figure 1)."
+/>
+
+Read the sparsity numbers across the rows:
+
+- **Top-k** keeps a fixed fraction, so it reports **70.3% on both rows**. It cannot tell a peaked distribution
+  from a flat one. On the peaked row it is leaving free sparsity on the table; on the flat row it is throwing
+  away blocks that mattered.
+- **Top-p** keeps blocks until their cumulative proxy mass hits a target, which is adaptive but wildly so:
+  **96.88%** sparsity on the peaked row and **21.9%** on the flat one. Budgets swing by a factor of four
+  between distributions, which is miserable for a kernel that wants predictable work per tile.
+- **Sol-Attn** thresholds at **μ + βσ** — the mean of the block scores plus β standard deviations. It adapts
+  (75.0% vs 67.2%) but stays in a controlled band.
+
+That statistical threshold is the whole trick, and its virtue is *computability*. A mean and a variance can be
+maintained as a running summary while you stream blocks. A top-k ranking cannot: you have to see every score,
+materialize them, and sort. Which brings us to where the decision gets made.
+
+<RoutingThreshold />
+
+## Folding the decision into online softmax
+
+Flash-attention-style kernels already stream. They walk key/value tiles, keep a running maximum and a running
+sum, and rescale as they go — that is what makes softmax computable without ever holding the full attention
+matrix. Conventional sparse attention bolts a *separate* pass in front of this: score all blocks, build a proxy
+map in memory, rank it, then run the sparse kernel on the survivors.
+
+Sol-Attn puts the decision inside the loop that was already running.
+
+<Figure
+  src="/articles/sol-attn/fig2.png"
+  alt="Kernel loop diagram. A grid loop iterates over query tiles. For each, an outer loop labelled Approx and Routing mean-pools the key tiles to produce proxy scores, compares them against a per-tile threshold to produce a binary mask, and routes the selected tiles onward. An inner loop labelled Exact Sparse then computes full attention on the selected key tiles while unselected tiles are marked Skip."
+  caption="The two-level structure: an outer loop mean-pools keys into proxy scores and thresholds them into a routing mask, and an inner loop computes exact attention only on the tiles that survived (Li et al., 2026, Figure 2)."
+/>
+
+The outer loop computes proxy scores from mean-pooled keys and compares them against that tile's threshold,
+producing a `1/1/0`-style mask. The inner loop then runs exact attention on the surviving tiles and skips the
+rest. Because the threshold is a statistic rather than a rank, no proxy map is ever materialized — the budget
+comes out dynamic *and* controllable, which is the combination neither top-k nor top-p manages.
+
+<OnlineSoftmaxStream />
+
+## Not dropping, approximating
+
+The second idea is smaller and does more work than it looks. Standard block-sparse attention treats an
+unselected block as if it contributed nothing. Under aggressive sparsity that assumption is exactly where the
+quality goes.
+
+Sol-Attn has already computed a proxy score for every block, including the losers, since that is how it decided.
+So instead of discarding them it **reuses those scores to approximate the skipped blocks' contribution** — a
+correction term that costs nothing extra, because the information was a by-product of routing. Routing, sparse
+computation and approximation correction all happen in a single online-softmax pass.
+
+That is why the accuracy curve degrades gracefully rather than falling off a cliff: the tail is attenuated, not
+deleted.
+
+## What it actually buys
+
+The paper reports **2.1× end-to-end for video generation** and **2.3× for video editing**. The more useful chart
+is the cumulative breakdown, because it shows what is attributable to what:
+
+<Figure
+  src="/articles/sol-attn/fig3.png"
+  alt="Two horizontal bar charts of end-to-end latency. HunyuanVideo: baseline 866.9 seconds, plus kernel fusion 781.0 seconds at 1.11 times, plus diffusion step cache 328.4 seconds at 2.64 times, plus Sol-Attn 170.6 seconds at 5.08 times. Wan2.1-14B: baseline 563.8 seconds, plus kernel fusion 464.9 seconds at 1.21 times, plus diffusion step cache 217.6 seconds at 2.59 times, plus Sol-Attn 161.8 seconds at 3.48 times."
+  caption="Cumulative speedups: the 5.08× and 3.48× totals stack kernel fusion and step caching before Sol-Attn is switched on (Li et al., 2026, Figure 3)."
+/>
+
+Those headline multiples are **cumulative**, so it is worth doing the subtraction. On HunyuanVideo, Sol-Attn takes
+328.4 s down to 170.6 s — a **1.92× marginal** gain on top of the other two techniques. On Wan2.1-14B it takes
+217.6 s to 161.8 s, a **1.34× marginal** gain. Real, and the largest single contributor in the Hunyuan case, but
+not 5.08×. Anyone quoting the total as an attention result is quoting three techniques.
+
+## The engine around it
+
+Sol-Attn does not ship alone. It is one of five composable techniques in the
+[`sol-engine` branch](https://github.com/NVlabs/Sana/tree/sol-engine) of NVlabs/Sana (Apache-2.0), described as
+"an efficiency-oriented inference codebase for high-resolution video diffusion, built on SGLang's
+`multimodal_gen` runtime".
+
+<EngineStack />
+
+The five: **caching** (reuse or skip denoising-step outputs, TeaCache/EasyCache-style), **quantization**
+(TransformerEngine NVFP4 4-bit, applied step-selectively), **kernel fusion** (memory-bound DiT ops — norm,
+activation, precision conversion), **sparse attention** (Sol-Attn), and **token pruning** (dropping low-salience
+video tokens during refinement steps). Reported end-to-end speedups, all on GB200 with warmup excluded:
+
+| Model | Speedup |
+|---|---|
+| Wan2.2 TI2V-5B | ~2.89× |
+| SANA-Video (2B) | ~2.77× |
+| LingBot-Video (30B) | ~2.60× |
+| LTX-2.3 (22B) | ~2.38× |
+| Cosmos3-Super (64B) | ~2.27× |
+| Wan2.2-A14B (14B MoE) | ~2.17× |
+
+The consistency across 2B to 64B, dense and MoE, is the interesting part — these are mostly memory-movement and
+redundancy wins, so they do not evaporate as models grow.
+
+There is also an **agent-native workflow**: the repo is set up so a coding agent (Codex or Claude Code) does
+environment setup, weight fetching and inference, troubleshooting as it goes. Worth noting on a site whose own
+content is written this way — treating "an agent will be the one running this" as a first-class install path is
+still rare.
+
+## Where this sits
+
+The same lab has been attacking this cost from the other end. [SANA-Video 2.0](/articles/sana-video2) makes
+attention cheap *architecturally* — linear attention for three of every four layers, a deep-compression VAE to
+shrink the token count before attention ever runs. That requires training the model that way. Sol-Attn is the
+training-free counterpart: take a model somebody already trained and skip work at inference. SANA-Video is
+literally the second row of the engine's own benchmark table, so both ends compose.
+
+Against the site's other sparse-attention coverage — [MiniMax's approach](/articles/minimax-sparse-attention) —
+the contrast is that most sparse attention is *trained*, with the model learning to live within a sparsity
+pattern. Sol-Attn assumes no cooperation from the model at all. And where
+[MrFlow](/articles/mrflow-diffusion-acceleration) attacks diffusion cost along the *step* axis, Sol-Attn attacks
+the per-step cost; the engine's caching module is doing the step-axis job alongside it.
+
+<Callout type="warning">
+**Caveats.** (1) Every number here is **self-reported**, on a paper posted 2026-07-27 with no third-party
+replication. (2) The engine's speedups are **GB200, warmup-excluded** — best-case hardware, and warmup is a real
+cost you pay once. (3) The headline 5.08× is **cumulative across three techniques**; Sol-Attn's marginal
+contribution is 1.92× and 1.34× on the two models shown. (4) The paper claims quality is preserved but I have
+not seen an independent quality evaluation, and "preserved" is doing real work in a domain where the failure
+mode is subtle temporal artifacts rather than a metric drop. (5) `sol-engine` is a **branch**, not a release.
+</Callout>
+
+## The take
+
+The mechanism is the part worth keeping. Routing decisions in sparse attention are usually treated as a
+preprocessing step — score, rank, select, then compute. Sol-Attn's claim is that the ranking was never necessary:
+a statistical threshold gets you an adaptive budget from a running summary, which means the decision can live
+inside the streaming loop the kernel already runs, which means the proxy map never has to exist. And once you
+are computing proxy scores anyway, throwing them away for the skipped blocks is wasteful — reusing them as an
+approximation is close to free.
+
+Both ideas come from asking where the information already is, rather than adding machinery. That tends to be the
+sign of a good systems result.
+
+---
+
+*Sources: [Sol-Attn: Accelerating Video Generation Inference via On-the-Fly Attention Sparsification](https://arxiv.org/abs/2607.24027)
+(Haopeng Li, Yitong Li, Junsong Chen, Tian Ye, Haozhe Liu, Jincheng Yu, Duomin Wang, Ruihua Zhang, Zeke Xie,
+Enze Xie, Song Han; arXiv 2607.24027, 2026-07-27) for the method and Figures 1–3, and the
+[`sol-engine` branch](https://github.com/NVlabs/Sana/tree/sol-engine) of NVlabs/Sana for the engine, the five
+techniques and the per-model speedup table. All figures are the paper's own, served locally. Marginal-speedup
+arithmetic is mine, derived from the latencies in Figure 3. The interactives are mine and illustrate the
+mechanism; they are not measurements.*

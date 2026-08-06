@@ -181,9 +181,9 @@ export function FlashTiling() {
       />
 
       <p className="mt-3 text-sm leading-6 text-muted-foreground">
-        FlashAttention changes <em>where</em> the arithmetic happens, not <em>what</em> it computes — the output is
+        FlashAttention changes <em>where</em>{" "}the arithmetic happens, not <em>what</em>{" "}it computes — the output is
         bit-for-bit the same softmax attention. By tiling and keeping an online softmax (running max{" "}
-        <span style={{ color: IO }}>m</span> and running sum <span style={{ color: IO }}>l</span>), it never writes the
+        <span style={{ color: IO }}>m</span>{" "}and running sum <span style={{ color: IO }}>l</span>), it never writes the
         N×N matrix to HBM; it reads Q, K, V in tiles and writes back only the output. That turns the memory traffic from
         Θ(N²) toward Θ(N²d²/M) with SRAM size M — the reason a long-context forward pass stopped being memory-bound.
         FlashAttention-2 and -3 push the same idea with better GPU work-partitioning and FP8 on Hopper.

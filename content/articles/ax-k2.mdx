@@ -1,0 +1,319 @@
+---
+title: "A.X-K2: a sparse-attention upgrade that costs nothing, trained natively in FP8"
+description: "SK Telecom's A.X-K2 is a 688B-A33B MoE that bolts a DeepSeek-style top-k indexer onto gated MLA — Sparse Gated Attention — and publishes the ablation: LongBench moves from 62.80 to 62.99, not down. It is also trained natively in FP8 from step one, never rounded after the fact. The honest gap: BrowseComp at 9.3, worst of eight compared models."
+date: 2026-08-03
+interest: 5
+helpful: 5
+tags:
+  - llm
+  - mixture-of-experts
+  - attention
+  - sparse-attention
+  - quantization
+  - fp8
+  - long-context
+cover: /articles/ax-k2/fig1.png
+---
+
+import { SGAPath } from "@/components/articles/ax-k2/sga-path"
+import { MoEScale } from "@/components/articles/ax-k2/moe-scale"
+import { PrecisionLadder } from "@/components/articles/ax-k2/precision-ladder"
+
+SK Telecom's **A.X-K2** is a 688B-parameter, 33B-active Mixture-of-Experts model, trained from scratch as
+part of Korea's Sovereign AI foundation-model project and shipped under Apache 2.0. It is the successor to
+A.X-K1, and the tech report ([SKT, 2026](https://github.com/SKT-AI/A.X-K2/blob/main/A_X_K2_Tech_Report.pdf))
+is unusually specific about what changed: a full architecture table, a full FP8 training recipe, full RL
+hyperparameters, and — the detail worth building an article around — an ablation that reports the *quality
+cost* of its own efficiency trick, and the cost is close to zero.
+
+Two things carry this piece. First, **Sparse Gated Attention (SGA)**: a lightweight top-k indexer bolted
+onto gated Multi-head Latent Attention, where SKT states the LongBench score before and after adding
+sparsity — 62.80 to 62.99 — rather than only the speedup. Second, A.X-K2 is **trained natively in FP8**,
+forward and backward, from the first optimizer step. Not quantized after the fact. Those two facts turn
+out to be connected: the same architectural choices that make SGA cheap (GatedNorm suppressing outlier
+activations) are the choices that make FP8 training survivable at this scale.
+
+## What the weights say
+
+Total tokens: about 8.5T (8.2T pre-training, the remainder post-training) — fewer than A.X-K1's roughly
+10T, and SKT is direct about why that's the headline, not the parameter count: *"despite training on
+fewer tokens than A.X K1 (∼10T), A.X K2 shows substantial improvements across the board — over 30
+percentage points on some benchmarks — reflecting substantial gains in token efficiency."* The
+architecture, read straight off `config.json` and Table 1 of the report:
+
+| | |
+|---|---|
+| Total / active parameters | **688B / 33B** |
+| Layers | **61** (1 dense, 60 MoE) |
+| Hidden size | 7,168 · 64 attention heads (Q = KV) |
+| Routed / shared experts | **256 / 1**, 8 active + 1 shared per token |
+| Expert routing | sigmoid score, `noaux_tc`, 8 groups, group top-k 4, routing scale 2.5 |
+| Attention | MLA + head-specific output gate + QK-norm, plus a top-*k* sparse indexer (k = 2,048) |
+| KV-lora / Q-lora rank | 512 / 1,536 |
+| Context | 128K native (ABF), 256K via YaRN (factor 2.0), zero-shot to 512K (factor 4.0) |
+| Vocabulary | 163,840 (unchanged from A.X-K1), 5 languages |
+| Training precision | native **FP8** (MXFP8, E4M3, block 32) forward + backward |
+| Checkpoint | block-scaled FP8 (E4M3, 128×128), ~646 GB on disk |
+
+Relative to A.X-K1 (519B-A33B), the entire parameter growth is in expert count: 192 to 256, chosen because
+it's a power of two and a multiple of 128 for sharding, targeting a compute-derived total-parameter budget
+under a fixed 70-day, 512-GPU schedule. Active parameters didn't move. That's a scale-up in *capacity*, not
+in per-token compute — worth holding onto before the next section.
+
+## Sparse Gated Attention
+
+Start from what A.X-K1 already had: Multi-head Latent Attention (MLA) with a **head-specific output
+gate** — a learned, input-dependent gate applied to the attention output before the `Wo` projection,
+present in every layer throughout pretraining, not something bolted on for long context. The report's
+framing for why the gate matters: it "introduces non-linearity into the attention output, mitigates
+attention sinks, and improves loss convergence." Attention sinks are the few uninformative token positions
+(often the first token) that vanilla softmax attention dumps disproportionate probability mass onto — a
+gate that suppresses that mass gives every downstream consumer of the attention output a cleaner signal.
+
+**SGA** is the second half of the name: a lightweight indexer, adopted from DeepSeek-AI's sparse-attention
+design, that scores every cached key and keeps only the **top 2,048 tokens per query** — selected at
+individual-token granularity, not in fixed blocks. (That's a genuine design fork from
+[MiniMax Sparse Attention](/articles/minimax-sparse-attention), which scores and selects in 128-token
+blocks specifically so memory access stays contiguous. A.X-K2 trades that contiguity for finer-grained
+selection.) MLA then runs exactly over the selected set, `KV[I_topk]`, instead of the full cache. Here is
+the paper's own architecture figure for the resulting block:
+
+<Figure
+  src="/articles/ax-k2/fig1.png"
+  alt="A.X K2 transformer block diagram. Hidden states enter GatedNorm, which feeds two parallel paths: an Indexer that scores and ranks key-value candidates followed by a Selector that keeps the top-k indices, and a Multi-head Latent Attention module that attends only the selected KV cache. A head-specific Output Gate computes a sigmoid gate from the latent query, which multiplies elementwise with the MLA output before the Wo output projection and residual addition."
+  caption="The A.X K2 transformer block with the SGA sublayer — indexer, selector, gated MLA, and the output projection (SK Telecom, 2026)."
+/>
+
+Read it as a data path: GatedNorm output splits into the Indexer→Selector pair (which decides *what* MLA
+gets to read) and the Output Gate (which decides how much of what MLA computes gets through). The
+mechanism I built to walk through the dynamics — how the fixed 2,048-token budget shrinks as a fraction of
+a growing context, and what changes when the Selector is switched off entirely:
+
+<SGAPath />
+
+The report calls the gate and the indexer **mutually reinforcing**, and the causal story runs one
+direction: because the output gate already suppresses attention-sink mass throughout pretraining, the
+attention distribution the indexer is trained to imitate is better-calibrated before the indexer ever sees
+it — so its top-*k* budget goes to genuinely relevant positions instead of partly being spent re-discovering
+which tokens are sinks. The indexer itself is trained with a KL-divergence loss against the (already
+gated) attention distribution, introduced in a dedicated Stage 3C after the model is natively trained to
+128K context.
+
+The number that makes this worth an article: on LongBench, A.X-K2 scores **62.80 before** the sparse
+adaptation and **62.99 after** — sparsity made it very slightly *better*, not worse. A lab publishing the
+comparison that shows its own efficiency trick is nearly free — rather than only the speedup — is worth
+crediting on its own. And the adaptation recipe has a second, smaller honest claim attached: unlike
+DeepSeek-V3.2 and GLM-5, which warm the indexer up against the *dense* (full) attention distribution
+before switching on sparse selection, SKT trains the indexer against the **sparse** top-k selection from
+the outset — a "sparse warmup" — because it's cheaper (sparse attention is less compute per step than
+dense) and, in their experiments, cost no measurable downstream quality relative to the dense-warmup
+alternative used elsewhere.
+
+The efficiency payoff shows up exactly where you'd expect — long-context serving. Reading the report's own
+inference sweep at 120K input tokens (concurrency 32, dp8/ep8): total-token throughput goes from roughly
+9,100 tok/s for A.X-K1 to roughly 12,200 for A.X-K2 with a bf16 KV cache, and roughly 14,600 with an FP8 KV
+cache — with per-token latency and time-to-first-token moving the same direction, each a few tens of
+percent lower for K2 than K1 at that length. (Approximate, read off the report's chart, not a published
+table — but the direction and rough magnitude are unambiguous.)
+
+One more piece worth naming here because it recurs in the next section: **GatedNorm** replaces A.X-K1's
+dual-normalization scheme entirely — a single input-dependent gate applied right after RMSNorm, instead of
+stacking normalization layers around attention and the MLP the way A.X-K1 (and Gemma-style designs) did.
+SKT ran the ablation at 20B-A3B scale and found GatedNorm alone matches the loss curve of the full
+dual-norm design; stacking a second post-MLP norm on top added nothing. The reason GatedNorm matters
+beyond training stability: it suppresses **massive activations** — the small number of hidden units that
+run orders of magnitude larger than the rest and persist across layers — which is exactly the failure mode
+that wrecks narrow low-precision formats. Which is where the second half of this piece starts.
+
+## The scale, next to what else is disclosed
+
+<MoEScale />
+
+A.X-K2 sits in the middle of this range by total parameters and at the small end by active parameters.
+[Kimi K3](/articles/kimi-k3) — 2.8T total, 104B active — took the opposite bet on the same axis: where A.X-K2
+grew total capacity 519B → 688B while holding active compute flat at 33B (a pure expert-count expansion,
+192 → 256), K3 tripled its active parameters alongside its total, spending its extra headroom on a bigger
+per-token forward pass rather than more parked capacity. Both are legitimate ways to spend a training
+budget; they're just different bets about where the marginal FLOP is worth spending.
+
+## Trained natively in FP8
+
+Everything above assumes a working low-precision model. A.X-K2 gets there by training natively in FP8 from
+the start rather than quantizing a full-precision model afterward — MXFP8, E4M3, block size 32, forward
+*and* backward pass, with FP32 master weights and BF16 optimizer state as the only higher-precision parts
+of the recipe. I made the same argument at a different precision two weeks ago in
+[Neutrino-1](/articles/neutrino-1): quantization is a decision you make before training starts, not a knob
+you turn on a finished checkpoint. Neutrino-1 showed the cliff that decision avoids — ternary weights
+rounded post-hoc land at 24.2–24.7 on 5-shot MMLU, against a 25.0 chance line, while the same ternary
+format trained in from scratch reaches 72.1. A.X-K2 is the same principle, replayed at FP8 instead of
+ternary, at 688B instead of 8B.
+
+The practical consequence: A.X-K2 has no BF16 form to compare itself against, because none was ever
+trained. Its FP8 checkpoint *is* the master weights, not a rounded-down copy of something else. Serving it
+in NVFP4 — a further post-hoc step, applied only to expert weights (W4A4) — is a much smaller step down
+than Neutrino-1's ternary rounding, because the base it's stepping down from was already trained
+natively in a narrow format:
+
+<PrecisionLadder />
+
+The report's own robustness table backs this up on eleven benchmarks: NVFP4 tracks FP8 within about a
+point on most of them — CLIcK 84.21 → 84.06, MMLU 82.27 → 82.00, KoBEST-BoolQ 96.72 → 96.01 — with GSM8K
+(−2.50) and MATH (−2.42) as the honest outliers, and HumanEval and KoBEST-COPA actually improving slightly.
+Compare that spread to Neutrino-1's cliff and the shape of the difference is the whole argument: rounding
+*into* a format a model never trained in collapses to chance; stepping *further down* from a format it was
+already native in costs a couple of points at most.
+
+<Figure
+  src="/articles/ax-k2/fig3.png"
+  alt="Two line charts of RL reward against training step. Left: training collapses under a trainer-rollout precision mismatch — BF16 trainer climbs steadily to about 0.55 reward, while MXFP8 trainer and MXFP8-with-TIS-correction both plateau around 0.3 and the TIS variant eventually collapses toward 0.15. Right: when trainer and rollout precision are matched in blockwise FP8, the FP8 curve tracks the BF16 curve closely all the way to about 0.5 reward with no collapse."
+  caption="FP8 training stability depends on trainer-rollout quantization consistency — applying token-level correction (TIS) does not prevent the collapse a precision mismatch causes (SK Telecom, 2026)."
+/>
+
+This same commitment shows up again, more sharply, inside RL post-training — and it's the cleanest evidence
+in the whole report that "native FP8" is an infrastructure discipline, not just a training-time flag. RL
+needs the trainer (Transformer Engine, on Blackwell) and the rollout engine (vLLM) to agree numerically. But
+Blackwell defaults to MXFP8 while vLLM's mature MoE FP8 path targets the older *blockwise* FP8 recipe built
+for Hopper — so if you leave each side on its native default, they diverge. Figure 7 above shows what that
+divergence does: a trainer running MXFP8 against a blockwise-FP8 rollout looks fine early, then the reward
+curve stalls and drifts down. SKT's own diagnosis is the sentence worth keeping: *"Applying TIS does not
+prevent this collapse, indicating that token-level intervention alone cannot remove the underlying
+trainer–rollout precision mismatch."* Truncated Importance Sampling is a standard token-level correction for
+exactly this kind of train/inference distribution drift, and it doesn't work here — the fix has to be
+architectural (a patched Transformer Engine branch that forces blockwise FP8 on Blackwell, matching vLLM's
+format end to end), not a loss-side patch. That's a small, honest, specific admission: a common trick from
+the RL toolbox failed, and they said so instead of quietly switching methods without comment.
+
+One more low-precision data point, smaller but concrete: on Rebellions' ATOM-Max NPU, A.X-K2 reports
+**107% performance-per-watt** relative to a comparable NVIDIA L40S GPU — a real deployment-hardware number,
+not a simulation.
+
+## The benchmarks
+
+<Figure
+  src="/articles/ax-k2/fig2.png"
+  alt="Five grouped bar charts comparing A.X K2 against Qwen3.5-397B, DeepSeek-V4 Flash, GLM-5.1 and Kimi-K2.6 on AIME26, Apex, KMMLU-Pro, CLIcK, and tau-squared-Bench Telecom. A.X K2, in dark blue, leads on all five: 97.1 on AIME26, 45.8 on Apex, 80.5 on KMMLU-Pro, 91.6 on CLIcK, and 98.0 on tau-squared-Bench Telecom."
+  caption="A.X K2 against four open-weight peers on math, Korean-language, and agentic tool-use benchmarks, thinking mode (SK Telecom, 2026)."
+/>
+
+A.X-K2 leads this five-model, five-benchmark slice outright, and the gap on **Apex** is the most striking:
+45.8 against a next-best of 28.1 (DeepSeek-V4 Flash) — more than double the third-place score. Beyond
+what's in that chart, SKT reports two non-benchmark math results worth noting because they aren't
+self-scored evals: **35/42 on IMO 2025** (the gold-medal threshold is 35, with a perfect 7/7 on each of the
+first five problems), and correct proofs for all eight KMO26 second-round problems, using an iterative
+proof-refinement method borrowed from DeepSeekMath-V2's approach.
+
+Long-context quality holds up on RULER, staying above 92 out to 128K and only easing to 86.6 at the full
+256K:
+
+| Context | 4K | 8K | 16K | 32K | 64K | 128K | 256K | Overall |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| RULER | 97.5 | 97.2 | 97.5 | 96.5 | 94.3 | 92.7 | 86.6 | **94.6** |
+
+Needle-in-a-haystack retrieval is a clean 100 at every position tested at both 256K (YaRN factor 2) and a
+zero-shot 512K (YaRN factor 4) — including after NVFP4 quantization, which is the same "the base format
+survives further compression" story as the precision ladder above, applied to retrieval instead of MMLU.
+
+## Where it's honest about losing
+
+Every number above is self-reported by SK Telecom, on their own harness, with no independent reproduction
+I could find. The eval protocol is disciplined — all baseline open-weight models run through OpenRouter
+fixed to the model's own publisher, `xhigh` reasoning effort, pass@1 averaged over multiple generations
+(8 for math) rather than single-shot — but it's still one lab grading a comparison it designed. The clearest
+weak spot, and SKT names the reason itself:
+
+<BenchBars
+  title="BrowseComp, ≤10 searches (%)"
+  unit=""
+  bars={[
+    { label: "GLM-5.1", value: 29.1 },
+    { label: "Qwen3.5", value: 26.9 },
+    { label: "Kimi-K2.6", value: 21.5 },
+    { label: "DeepSeek-V4 Flash", value: 16.8 },
+    { label: "MiniMax M2.7", value: 14.2 },
+    { label: "Nemotron 3 Ultra", value: 13.4 },
+    { label: "A.X K2", value: 9.3, highlight: true },
+  ]}
+/>
+
+9.3 is worst of all seven models with a reported score — GLM-5.1 leads at 29.1, and even the next-worst
+(Nemotron 3 Ultra at 13.4) beats A.X-K2 by 44%. The model card's own explanation: *"Agentic performance is
+moderate — A.X K2 trails the strongest compared models on BrowseComp — reflecting limited agentic RL during
+post-training."* That's the right way to publish a weak number — attribute it to a specific, checkable
+cause (the RL data mixture allocates only 18% of SFT tokens and a modest RL slice to agentic tool use,
+against much heavier agentic investment in a model like [Kimi K3](/articles/kimi-k3)) rather than burying
+it. One methodology caveat the report itself surfaces: A.X-K2's only tool on this benchmark was Brave
+Search's API, capped at ≤10 searches per problem — a real constraint, not full open browsing — and the
+report doesn't state whether every compared model ran under the same cap. That could shift the absolute
+number somewhat; it's very unlikely to explain a 3× gap to the next-worst model.
+
+BrowseComp isn't the only place A.X-K2 comes second. On **GPQA Diamond** it's mid-pack, and the surprise is
+which model beats it on a Korean-language benchmark:
+
+<BenchBars
+  title="GPQA Diamond (%)"
+  unit=""
+  bars={[
+    { label: "Kimi-K2.6", value: 91.1 },
+    { label: "DeepSeek-V4 Flash", value: 89.4 },
+    { label: "Qwen3.5", value: 89.3 },
+    { label: "MiniMax M2.7", value: 87.4 },
+    { label: "GLM-5.1", value: 86.8 },
+    { label: "Nemotron 3 Ultra", value: 86.7 },
+    { label: "A.X K2", value: 85.6, highlight: true },
+  ]}
+/>
+
+<BenchBars
+  title="KoBALT — Korean (%)"
+  unit=""
+  bars={[
+    { label: "DeepSeek-V4 Flash", value: 75.3 },
+    { label: "A.X K2", value: 73.0, highlight: true },
+    { label: "GLM-5.1", value: 72.0 },
+    { label: "Qwen3.5", value: 69.9 },
+    { label: "Kimi-K2.6", value: 66.0 },
+    { label: "Nemotron 3 Ultra", value: 59.1 },
+    { label: "MiniMax M2.7", value: 51.4 },
+  ]}
+/>
+
+DeepSeek-V4 Flash — not a Korean-focused lab — beats SK Telecom's own Korean-sovereign model on a Korean
+benchmark, by 2.3 points. A.X-K2 still wins the *other* two Korean benchmarks in the comparison (KMMLU-Pro,
+CLIcK), so this is one loss inside a category it otherwise leads, not a category-wide miss — but it's
+exactly the kind of specific, checkable number a self-reported table should surface rather than smooth
+over. Rounding out the mid-pack results: LiveCodeBench v6 at 84.0 (DeepSeek-V4 Flash leads at 89.4), SciCode
+at 41.0 (near the bottom of the field; Kimi-K2.6 leads at 53.5), and IFBench at 75.9 (DeepSeek-V4 Flash
+leads at 81.2). None of these are collapses — they're a model that wins decisively on math and most of
+Korean, and trails on strict-instruction-following, code-execution benchmarks, and — sharply — on
+open-web agentic search.
+
+Two more limitations the model card states plainly, worth repeating because they're easy to omit: A.X-K2
+is text-only (no native multimodality, listed as future work), and SKT explicitly did not run a dedicated
+quantitative bias or fairness evaluation.
+
+## The take
+
+Two disclosures make A.X-K2 worth writing about on their own, independent of where it lands on any single
+leaderboard. It's one of the only sparse-attention releases I've seen that reports the ablation showing its
+sparsity is nearly free (62.80 → 62.99 on LongBench) instead of only the speedup — crediting the reader
+with the question "what did this cost?" instead of hoping nobody asks. And it's trained natively in FP8
+end to end, with the RL infrastructure section going out of its way to show a standard fix (TIS) failing
+against a real precision mismatch rather than quietly working around it off-page. Set against
+[Neutrino-1](/articles/neutrino-1)'s ternary cliff and [MiniMax Sparse Attention](/articles/minimax-sparse-attention)'s
+block-granularity bet, A.X-K2 reads as the same 2026 pattern — quantization and sparsity are training-time
+commitments now, not deployment-time knobs — applied at a scale and with a level of self-disclosure that
+makes the whole argument checkable, including the parts (BrowseComp, KoBALT) where the honest answer is
+that it lost.
+
+---
+
+*Sources: the [A.X K2 Technical Report](https://github.com/SKT-AI/A.X-K2/blob/main/A_X_K2_Tech_Report.pdf)
+(SK Telecom, dated 2026-07-28 — architecture, training recipe, RL infrastructure, evaluation tables) and the
+[model card and config](https://huggingface.co/skt/A.X-K2). Figures 1 and 3 here are the report's Figures 2
+and 7, reproduced for commentary; the benchmark comparison figure is the report's Figure 1. All benchmark
+numbers are SK Telecom's own, on their own harness, with no independent reproduction found. The
+inference-efficiency numbers in the Sparse Gated Attention section are approximate, read off the report's
+chart rather than a published table. Interactive diagrams are mine. Related: [Neutrino-1](/articles/neutrino-1)
+on training-native vs. post-hoc quantization, [Kimi K3](/articles/kimi-k3) on the other end of the MoE
+sparsity-ratio spectrum, and [MiniMax Sparse Attention](/articles/minimax-sparse-attention) on block- vs.
+token-granularity top-k selection.*

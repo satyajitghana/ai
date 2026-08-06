@@ -86,7 +86,7 @@ export function PretokenPipeline() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The trick isn&rsquo;t more threads — HF tokenizers and tiktoken already run multithreaded Rust. It&rsquo;s
-          killing the <span style={{ color: SLOW }}>regex</span> that dominates the pass and turning repeated words
+          killing the <span style={{ color: SLOW }}>regex</span>{" "}that dominates the pass and turning repeated words
           into <span style={{ color: ACCENT }}>lookups</span>.
         </p>
       </div>

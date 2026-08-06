@@ -142,8 +142,8 @@ export function MaskedDiffusionLm() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Unlike a left-to-right autoregressive model that commits one token at a time, a masked-diffusion LM starts from
-          an all-<code>[M]</code> sequence and, under <em>bidirectional</em> attention, unmasks a few tokens each step and
-          re-predicts the rest &mdash; refining the whole sentence in parallel over <em>T</em> steps.
+          an all-<code>[M]</code> sequence and, under <em>bidirectional</em>{" "}attention, unmasks a few tokens each step and
+          re-predicts the rest &mdash; refining the whole sentence in parallel over <em>T</em>{" "}steps.
         </p>
       </div>
     </figure>

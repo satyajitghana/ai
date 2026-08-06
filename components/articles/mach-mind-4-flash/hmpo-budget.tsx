@@ -173,7 +173,7 @@ export function HmpoBudget() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            budget <span style={{ color: ACCENT }}>{b}</span> tokens · {group.filter((g) => g.ok).length}/10 correct
+            budget <span style={{ color: ACCENT }}>{b}</span>{" "}tokens · {group.filter((g) => g.ok).length}/10 correct
           </div>
         </div>
 
@@ -189,10 +189,10 @@ export function HmpoBudget() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The budget <span style={{ color: ACCENT }}>b</span> is just the median length of the group's{" "}
-          <span style={{ color: GREEN }}>correct</span> rollouts — no threshold to tune. Reward decays from 1 toward λ as a
-          correct trace grows, then falls off a cliff to <span className="text-foreground">0</span> the moment it runs over
-          budget, and an <span style={{ color: RED }}>incorrect</span> trace earns 0 at any length (correctness first, length
+          The budget <span style={{ color: ACCENT }}>b</span>{" "}is just the median length of the group's{" "}
+          <span style={{ color: GREEN }}>correct</span>{" "}rollouts — no threshold to tune. Reward decays from 1 toward λ as a
+          correct trace grows, then falls off a cliff to <span className="text-foreground">0</span>{" "}the moment it runs over
+          budget, and an <span style={{ color: RED }}>incorrect</span>{" "}trace earns 0 at any length (correctness first, length
           second). Push training progress and the whole distribution slides left, so <span style={{ color: ACCENT }}>b</span>{" "}
           self-tightens as the model learns to be concise.
         </p>

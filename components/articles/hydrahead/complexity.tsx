@@ -119,7 +119,7 @@ export function Complexity() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          At {ctxK}K tokens, full attention costs <span className="text-foreground">{faX}×</span> what
+          At {ctxK}K tokens, full attention costs <span className="text-foreground">{faX}×</span>{" "}what
           linear does — the quadratic term runs away exactly when you need long context most.
           HydraHead stays close to the linear curve because only a few heads pay the FA price.
         </p>

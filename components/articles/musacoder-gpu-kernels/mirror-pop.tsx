@@ -125,11 +125,11 @@ export function MirrorPop() {
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
-          On the <span className="text-foreground">drifted, cancelling</span> response every token is far off-policy, but the
-          positive and negative log-ratios average to <span className="text-foreground">≈0</span> — so the vanilla filter
-          judges it on-policy and <span style={{ color: POS }}>keeps</span> a sequence it should drop. MirrorPop takes the mean
-          of the <em>absolute</em> log-ratios, which each token can only push up, so the same response reads as strongly
-          off-policy and gets <span style={{ color: ACC }}>masked</span> out of the gradient. It is the single component whose
+          On the <span className="text-foreground">drifted, cancelling</span>{" "}response every token is far off-policy, but the
+          positive and negative log-ratios average to <span className="text-foreground">≈0</span>{" "}— so the vanilla filter
+          judges it on-policy and <span style={{ color: POS }}>keeps</span>{" "}a sequence it should drop. MirrorPop takes the mean
+          of the <em>absolute</em>{" "}log-ratios, which each token can only push up, so the same response reads as strongly
+          off-policy and gets <span style={{ color: ACC }}>masked</span>{" "}out of the gradient. It is the single component whose
           removal costs the most in the ablation (Pass@8 93.2 → 86.0).
         </p>
       </div>

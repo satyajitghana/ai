@@ -187,11 +187,11 @@ export function GeneratorAction() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Same law, two generators. Pick a <span style={{ color: ROT }}>rank-2 skew</span> generator and G(n)
+          Same law, two generators. Pick a <span style={{ color: ROT }}>rank-2 skew</span>{" "}generator and G(n)
           is a rotation: the vector sweeps a norm-preserving circle and the relative score factor is a clean{" "}
-          <span style={{ color: ROT }}>cosine</span> of the offset — that is exactly RoPE. Pick a{" "}
-          <span style={{ color: ADD }}>rank-1 nilpotent</span> generator and G(n) = I + nωA is a shear that
-          translates the feature and injects a <span style={{ color: ADD }}>linear-in-offset bias</span> into the
+          <span style={{ color: ROT }}>cosine</span>{" "}of the offset — that is exactly RoPE. Pick a{" "}
+          <span style={{ color: ADD }}>rank-1 nilpotent</span>{" "}generator and G(n) = I + nωA is a shear that
+          translates the feature and injects a <span style={{ color: ADD }}>linear-in-offset bias</span>{" "}into the
           logit — that is exactly ALiBi. Both obey the same relative law, so attention depends only on m = j − i.
         </p>
       </div>

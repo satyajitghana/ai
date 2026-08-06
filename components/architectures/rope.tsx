@@ -109,8 +109,8 @@ export function Rope() {
         </svg>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          RoPE encodes a position by <em>rotating</em> each pair of feature dimensions by an angle proportional to
-          that position. Because a dot product only cares about the angle <em>between</em> two vectors, attention
+          RoPE encodes a position by <em>rotating</em>{" "}each pair of feature dimensions by an angle proportional to
+          that position. Because a dot product only cares about the angle <em>between</em>{" "}two vectors, attention
           ends up reading the relative distance <code>(m &minus; n)</code> for free.
         </p>
       </div>

@@ -213,15 +213,15 @@ export function MopdFusion() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           {mode === "mopd" ? (
             <>
-              Each sample is <span className="text-foreground">routed to one frozen teacher</span> and the student is pulled toward
-              it with a token-level reverse-KL on its <span className="text-foreground">own</span> rollouts. Every domain gets its
+              Each sample is <span className="text-foreground">routed to one frozen teacher</span>{" "}and the student is pulled toward
+              it with a token-level reverse-KL on its <span className="text-foreground">own</span>{" "}rollouts. Every domain gets its
               own clean gradient, so all three capabilities climb together — the weakest one never gets starved.
             </>
           ) : (
             <>
-              Summing every domain's reward into <span className="text-foreground">one objective</span> makes the gradients collide.
+              Summing every domain's reward into <span className="text-foreground">one objective</span>{" "}makes the gradients collide.
               Watch the bars: as training proceeds, a gain on one capability shows up as a{" "}
-              <span className="text-foreground">regression on another</span> — the paper's <em>see-saw degradation</em>. The
+              <span className="text-foreground">regression on another</span>{" "}— the paper's <em>see-saw degradation</em>. The
               weakest capability stays stuck.
             </>
           )}

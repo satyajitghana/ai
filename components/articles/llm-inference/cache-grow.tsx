@@ -190,8 +190,8 @@ export function CacheGrow() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Prefill writes <span className="text-foreground">N</span> entries in one pass;
-          each decode step adds exactly <span className="text-foreground">one</span> and
+          Prefill writes <span className="text-foreground">N</span>{" "}entries in one pass;
+          each decode step adds exactly <span className="text-foreground">one</span>{" "}and
           recomputes nothing. The cache — and the memory it costs — grows linearly with the
           sequence, which is why long contexts crowd out batch size.
         </p>
