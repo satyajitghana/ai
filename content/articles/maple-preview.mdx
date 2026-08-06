@@ -1,0 +1,210 @@
+---
+title: "Maple-Preview: a 20B reasoning model where 97% of the weights are −1, 0, or +1"
+description: "DeepGrove's Maple-Preview claims ternary weights, a 5.31 GB checkpoint and 218 tok/s on a Mac mini M4. The ternary claim is true and you can verify it from the published bytes — every row of every projection matrix holds exactly three distinct values with a per-row scale. The 5.31 GB claim reconciles too, at 1.65 bits per weight. What you actually download from Hugging Face is 40.43 GB of bf16, and the shipped code does no quantization at all."
+date: 2026-08-06
+interest: 5
+helpful: 4
+tags:
+  - llm
+  - quantization
+  - mixture-of-experts
+  - on-device
+  - open-weights
+  - explainer
+cover: /articles/maple-preview/fig1.png
+---
+
+import { TernaryProbe } from "@/components/articles/maple-preview/ternary-probe"
+import { BitBudget } from "@/components/articles/maple-preview/bit-budget"
+
+Most quantization is something you do *to* a model after it is trained. You take bf16 weights, find a
+rounding scheme that hurts least, and accept the damage. **[Maple-Preview](https://huggingface.co/deepgrove/maple-preview)**,
+released by DeepGrove on 2026-08-04 under MIT, is the other thing: a 20B-A1.49B mixture-of-experts
+reasoning model where the weights were *trained* to be ternary, so nearly every parameter in the
+network is one of exactly three values — &minus;1, 0, or +1, scaled.
+
+The headline numbers are a 5.31 GB checkpoint and 218 tokens/sec on a Mac mini M4. Both are the kind
+of claim worth checking rather than repeating, and this time both check out — with one significant
+asterisk about what the released repository actually contains.
+
+## The claim, verified from the bytes
+
+You do not need to download 40 GB to test "is it ternary." A safetensors file begins with a header
+giving every tensor's dtype, shape and byte offsets, so two small range requests buy you the layout,
+and one more pulls a single row out of the middle of a shard. Count the distinct values in that row.
+A normal bf16 weight row of 2048 elements has on the order of two thousand distinct values. A ternary
+one has three.
+
+<TernaryProbe />
+
+Every row measured came back with exactly three values, perfectly symmetric — `−s`, `0`, `+s` — with
+`s` changing from row to row. That is ternary with a **per-output-channel scale**, the BitNet
+b1.58 shape. About 38–43% of the weights in each row are exactly zero, which is what absmean
+ternarization does to a roughly Gaussian weight distribution: everything inside the rounding
+threshold collapses to nothing.
+
+What stays in full precision is as interesting as what doesn't. **96.9% of parameters are ternary**;
+the exceptions are the two embedding tables, the norms, and — pointedly — the MoE routers. A router
+chooses 8 experts out of 256 based on the *margin* between logits. Crushing that margin to three
+levels would scramble which expert fires long before it degraded any individual expert's arithmetic,
+so the router is the one 12M-parameter tensor per layer that stays sharp.
+
+## The 5.31 GB claim reconciles, and the leftover is the vocabulary
+
+A ternary weight carries $\log_2 3 \approx 1.585$ bits of information, so that is the floor for any
+lossless packing. Working from the actual parameter census — 19.58B ternary, 0.64B full precision —
+the arithmetic lands where it should.
+
+<BitBudget />
+
+5.31 GB implies **1.65 bits per ternary weight**: just above the entropy floor, comfortably below
+naive 2-bit, and about where you land packing five trits into a byte ($3^5 = 243$ fits in 256) plus
+the per-row scales. The claim is not merely plausible, it is consistent with the measured parameter
+split to within a few percent.
+
+The second-order effect is the one I did not expect. Once you have crushed 97% of the model to under
+two bits, the **un-quantized embedding tables are about a quarter of the entire file** — 1.27 GB of
+5.31 GB, for a 151,936-token vocabulary at 2048 wide, twice over (input and output are untied). At
+this compression ratio the interesting problem stops being the weights and starts being the
+vocabulary. Anyone chasing the next factor of two on-device has to go after the embeddings.
+
+<Callout type="warn">
+**What you download is not the 5.31 GB artifact.** The Hugging Face repository ships nine shards
+totalling **40.43 GB** — the ternary values stored one-per-bf16, unpacked. The 5.31 GB figure
+describes a packed checkpoint that is not in the repository. The README is upfront that the Apple
+Silicon result "uses a separate on-device runtime," and I would extend that caveat: the packed
+format and the kernels that make 218 tok/s possible are both part of that unreleased runtime. What
+is public is the weights and a reference implementation.
+</Callout>
+
+## The shipped code does no quantization
+
+This is worth stating plainly because `config.json` looks like it says otherwise. It contains
+`"quantize": true` — and nothing in the released code reads it. `MapleConfig.__init__` in
+`configuration_maple.py` does not declare a `quantize` parameter, so the flag lands in `**kwargs` and
+is stored and ignored. The only occurrence of the word in 1,052 lines of Python is a comment in
+`fa3.py`.
+
+The forward pass confirms it. `MapleMLP.forward` is a plain dense matmul on the dequantized bf16
+tensors:
+
+```python
+def forward(self, x):
+    gate_weight, up_weight, down_weight = self.gate_proj.weight, self.up_proj.weight, self.down_proj.weight
+    return torch.nn.functional.linear(
+        self.act_fn(torch.clamp(torch.nn.functional.linear(x, gate_weight), max=7.0))
+        * torch.clamp(torch.nn.functional.linear(x, up_weight), min=-7.0, max=7.0),
+        down_weight,
+    )
+```
+
+There is no packing, no unpacking, no ternary kernel. Run this and you get a correct model that
+occupies 40 GB and runs at ordinary dense-MoE speed, with none of the benefit that motivated the
+architecture.
+
+The clamps are the tell that quantization-aware training happened somewhere else. `clamp(gate,
+max=7.0)` and `clamp(up, min=-7.0, max=7.0)` bound the activations going into the down-projection.
+Activation clamping is a standard QAT ingredient — you cannot quantize weights aggressively if the
+activations they multiply are free to blow up — and its presence in the inference path is a residue
+of the training recipe, kept because removing it would change the model's behaviour.
+
+## The architecture around the quantization
+
+The config describes a design clearly built for a memory-bound device rather than a datacenter.
+
+| | |
+|---|---|
+| layers | 24 |
+| hidden | 2048 · head_dim 128 · 16 heads · 4 KV heads |
+| experts | 256, top-8, **no shared expert**, `moe_intermediate_size` 512 |
+| attention | 3:1 sliding-window (512) to global |
+| position | `partial_rotary_factor` 0.5, `nope_on_global_attention: true` |
+| context | 131,072 |
+| vocabulary | 151,936 (Qwen tokenizer) |
+
+The `layer_types` array spells the attention pattern out exactly: `s s s G` repeated six times, with
+global attention at layers 3, 7, 11, 15, 19 and 23. Only a quarter of the layers hold a full-length
+KV cache; the rest are capped at a 512-token window. For a 131K context on a Mac mini that is not a
+refinement, it is the difference between fitting and not fitting.
+
+Two details are worth pulling out. **`nope_on_global_attention: true`** means the global layers get
+no positional encoding at all — the sliding layers carry position through RoPE (at half the head
+dimension, per `partial_rotary_factor: 0.5`) and the global layers are left to infer order from what
+the local ones already encoded. The same trick appears in [Kimi K3](/articles/kimi-k3)'s attention
+stack, and the argument for it is that removing RoPE from the layers that see the whole sequence is
+what lets length extrapolation work.
+
+And **there is no shared expert** — `num_shared_experts: 0`. Most recent MoE designs keep one or two
+always-on experts to absorb generic computation. Maple routes everything, which is consistent with
+the rest of the design: a shared expert is a dense tensor every token pays for, and this model is
+built to minimize exactly that.
+
+## What the benchmarks say, and what the chart leaves out
+
+<Figure
+  src="/articles/maple-preview/fig2.png"
+  alt="Benchmark table comparing Maple-Preview and Maple-Preview Flash against Qwen3.5 35B-A3B, GLM 4.7 Flash, Ternary Bonsai 27B, Qwen3 30B-A3B, Qwen3.5 9B, GPT-OSS 20B and LFM2 24B-A2B on LCBv6, AIME 2026, HMMT 2026 and GPQA-D, with total and active parameter counts."
+  caption="Reasoning benchmarks using the dense output head, with total and active parameter counts (DeepGrove, Maple-Preview model card, 2026)."
+/>
+
+Maple-Preview averages **78.7** across LiveCodeBench v6, AIME 2026, HMMT 2026 and GPQA-Diamond, at
+1.49B active parameters. That beats GPT-OSS 20B (76.3), Qwen3 30B-A3B (76.6), Qwen3.5 9B (76.3),
+GLM 4.7 Flash (77.4) and the other ternary entry, Ternary Bonsai 27B (77.1).
+
+It does not beat **Qwen3.5 35B-A3B at 82.9**, and the gap is not evenly distributed. On LiveCodeBench
+Maple actually leads (75.1 vs 74.6); on AIME and HMMT it trails by a few points; on GPQA-Diamond it
+trails by **10.7 points** (73.5 vs 84.2) and is beaten even by Qwen3.5 9B (81.7). That shape —
+competitive on code and competition math, weak on GPQA — is the signature of a model with strong
+reasoning and thinner world knowledge, which is exactly what you would predict from a 1.49B active
+budget where the knowledge has to survive ternarization.
+
+<Figure
+  src="/articles/maple-preview/fig1.png"
+  alt="Speed-quality frontier scatter plot: average performance against decode throughput in tokens per second on a Mac mini M4, with Maple-Preview and Maple-Preview Flash at roughly 170 and 220 tokens per second near 78 average, far right of GPT-OSS-20B, Ternary Bonsai 27B, Gemma 4, and the LFM2 family."
+  caption="Decode throughput against average benchmark score on a Mac mini M4 (DeepGrove, Maple-Preview model card, 2026)."
+/>
+
+The frontier chart is the release's strongest visual and its most selective one. Maple sits alone in
+the top right, roughly 3.5× the throughput of the nearest model at comparable quality. But notice who
+is *not* plotted: **Qwen3.5 35B-A3B and GLM 4.7 Flash, the two models that beat or match Maple on the
+score table, do not appear on the speed chart at all.** In fairness that is close to the point — a
+35B model in bf16 does not fit on a Mac mini, which is the whole argument for building this way — but
+"a new point on the Pareto frontier" is being claimed against a field that excludes the strongest
+competitor rather than measuring it. The honest version of the claim is narrower and still
+interesting: *among models that fit and run fast on consumer hardware*, nothing else is close.
+
+## Credit where the card gives it
+
+DeepGrove's own limitations section is short and unusually candid for a launch:
+
+> This preview received minimal post-training for agentic tasks and only small-scale general
+> reinforcement learning.
+
+and, in the evaluation section, "this preview is focused primarily on raw reasoning and, as such, may
+underperform on agentic benchmarks." That is a lab telling you which axis it did not optimize before
+anyone can discover it. It also explains the naming — this is `maple-preview`, not `maple`, and the
+card says extended training is coming.
+
+## The take
+
+The interesting claim here is not the benchmark row, it is that **quantization-aware training at
+1.58 bits now produces a model that competes with bf16 models several times its active size**. That
+claim survives inspection: the weights really are ternary, the compression really does land near the
+entropy bound, and the resulting artifact really is small enough to matter on a laptop. Ternary
+training has been a research thread for a couple of years, mostly at scales small enough to dismiss.
+A 20B model scoring 78.7 average is harder to wave away.
+
+What is missing is the half that makes the numbers real. The packed checkpoint, the ternary kernels
+and the Apple Silicon runtime are all unreleased, and the reference implementation in the repository
+reproduces the model's *outputs* but none of its *economics*. Right now you can verify that
+DeepGrove trained what they said they trained. You cannot yet run it the way they ran it.
+
+---
+
+*Sources: the [Maple-Preview model card](https://huggingface.co/deepgrove/maple-preview) — README,
+`config.json`, `configuration_maple.py`, `modeling_maple.py`, `model.safetensors.index.json` and the
+safetensors headers — as of 2026-08-06. Both figures are DeepGrove's own, downloaded and flattened
+onto white. The per-row ternary measurements and the parameter census were taken with HTTP range
+requests against the published shards; no checkpoint was downloaded in full and no benchmark was
+re-run. Benchmark numbers are DeepGrove's as printed on their table, with no third-party
+replication. Both interactives are mine.*
