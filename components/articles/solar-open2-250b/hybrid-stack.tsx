@@ -240,7 +240,7 @@ export function HybridStack() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            caching layers <span style={{ color: ACCENT }}>{litCells}</span> of {TOTAL_LAYERS}
+            caching layers <span style={{ color: ACCENT }}>{litCells}</span>{" "}of {TOTAL_LAYERS}
           </div>
         </div>
 
@@ -272,8 +272,8 @@ export function HybridStack() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Every block runs <span className="text-foreground">one softmax layer then three linear ones</span>, twelve times over. Only the{" "}
-          <span style={{ color: ACCENT }}>softmax</span> layers keep a KV cache that grows with the sequence; the linear (KDA) layers fold the past into a
-          fixed-size recurrent state, so long-context memory rides on just <span className="text-foreground">12 of 48</span> layers — about a quarter of an
+          <span style={{ color: ACCENT }}>softmax</span>{" "}layers keep a KV cache that grows with the sequence; the linear (KDA) layers fold the past into a
+          fixed-size recurrent state, so long-context memory rides on just <span className="text-foreground">12 of 48</span>{" "}layers — about a quarter of an
           all-softmax stack. (fp16 KV; linear-state memory is a small constant left out here.)
         </p>
       </div>

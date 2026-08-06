@@ -169,7 +169,7 @@ export function ScienceGap() {
           ) : (
             <>
               On specialized science the picture inverts: Intern-S2 opens gaps of{" "}
-              <span style={{ color: ACCENT }}>30–50 points</span> on multi-omics, molecular reasoning
+              <span style={{ color: ACCENT }}>30–50 points</span>{" "}on multi-omics, molecular reasoning
               and material generation — routinely 4× the nearest frontier model. MolecularIQ is the
               honest exception, where GPT-5.5 still leads.
             </>

@@ -106,8 +106,8 @@ export function DiscoverySharpening() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Coverage saturates near <span style={{ color: COVER }}>96.7%</span> by step ~800 — RL has found essentially every
-          pattern it will ever use (the <span className="text-foreground">discovery</span> phase). Yet first-try accuracy
+          Coverage saturates near <span style={{ color: COVER }}>96.7%</span>{" "}by step ~800 — RL has found essentially every
+          pattern it will ever use (the <span className="text-foreground">discovery</span>{" "}phase). Yet first-try accuracy
           keeps climbing well past that point (<span className="text-foreground">sharpening</span>): the model is not
           learning new tricks, it is getting reliable at the ones it already has. This is the paper&rsquo;s evidence that
           zero RL sharpens a policy inside a boundary set by pretraining rather than expanding it.

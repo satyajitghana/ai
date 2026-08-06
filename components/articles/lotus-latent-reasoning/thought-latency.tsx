@@ -141,7 +141,7 @@ export function ThoughtLatency() {
           Explicit CoT&apos;s thought phase grows with how much it writes — swap the compact math chain for a verbose
           natural-language rationale and it balloons from 338.8 to 963.6 ms. LOTUS barely moves (133.0 → 140.8 ms): the trace
           is always R = 6 parallel passes, so the same mechanism buys a{" "}
-          <span style={{ color: ACCENT }}>2.5×</span> speedup on math and a <span style={{ color: ACCENT }}>6.9×</span> speedup
+          <span style={{ color: ACCENT }}>2.5×</span>{" "}speedup on math and a <span style={{ color: ACCENT }}>6.9×</span>{" "}speedup
           on natural language. (Query-prefill and answer phases are near-identical across methods; only the thought phase moves.)
         </p>
       </div>

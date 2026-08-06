@@ -214,7 +214,7 @@ export function StageStepper() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            total <span className="text-foreground">{TOTAL}u</span> vs native <span className="text-foreground">{NATIVE}u</span> · ≈ {SPEEDUP.toFixed(1)}×
+            total <span className="text-foreground">{TOTAL}u</span>{" "}vs native <span className="text-foreground">{NATIVE}u</span> · ≈ {SPEEDUP.toFixed(1)}×
           </div>
         </div>
 
@@ -226,8 +226,8 @@ export function StageStepper() {
           ) : (
             <>
               Almost all of the diffusion FLOPs sit in <span style={{ color: LATENT }}>step 1</span>, run at low
-              resolution. The resolution climb happens in <span style={{ color: PIXEL }}>pixel space</span> for the price
-              of one SR forward pass, and only a <span className="text-foreground">single</span> high-resolution
+              resolution. The resolution climb happens in <span style={{ color: PIXEL }}>pixel space</span>{" "}for the price
+              of one SR forward pass, and only a <span className="text-foreground">single</span>{" "}high-resolution
               diffusion step touches the full-size image. Same 20-step budget, a fraction of the cost.
             </>
           )}

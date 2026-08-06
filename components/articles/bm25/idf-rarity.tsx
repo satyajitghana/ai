@@ -149,8 +149,8 @@ export function IdfRarity() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          A term in <span className="text-foreground">one</span> document out of {N} is almost the whole story
-          (IDF ≈ {idf(1).toFixed(1)}); a term in <span className="text-foreground">every</span> document tells you
+          A term in <span className="text-foreground">one</span>{" "}document out of {N} is almost the whole story
+          (IDF ≈ {idf(1).toFixed(1)}); a term in <span className="text-foreground">every</span>{" "}document tells you
           nothing (IDF → 0). Matching a rare identifier — a name, an error code, a ticker — outweighs matching a
           hundred common words. And "the", sitting in nearly every document on the right, down-weights itself: BM25
           needs no stopword list because rarity is baked into the score.

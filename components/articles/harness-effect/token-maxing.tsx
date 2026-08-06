@@ -121,9 +121,9 @@ export function TokenMaxing() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Drag right. The per-token <span className="text-muted-foreground">price</span> keeps falling —
+          Drag right. The per-token <span className="text-muted-foreground">price</span>{" "}keeps falling —
           the number everyone quotes when they say inference is getting cheaper. But{" "}
-          <span style={{ color: ACCENT }}>tokens per task</span> climb faster, so the product of the two,{" "}
+          <span style={{ color: ACCENT }}>tokens per task</span>{" "}climb faster, so the product of the two,{" "}
           <span style={{ color: ACCENT }}>total spend</span>, rises the whole way. That is token maxing:
           the falling headline price masks a rising bill.
         </p>

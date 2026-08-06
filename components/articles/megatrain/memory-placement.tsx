@@ -175,9 +175,9 @@ export function MemoryPlacement() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           A single H200&rsquo;s HBM caps a GPU-centric run at roughly{" "}
-          <span className="text-foreground">{maxGpuCentric}B</span> parameters. Move the
+          <span className="text-foreground">{maxGpuCentric}B</span>{" "}parameters. Move the
           persistent state to the 1.5 TB host and keep only a streamed layer on the device,
-          and the same card trains past <span className="text-foreground">120B</span> — at
+          and the same card trains past <span className="text-foreground">120B</span>{" "}— at
           full precision, no quantization. The catch is what you trade for it: every layer&rsquo;s
           weights now cross PCIe twice per step, which is exactly the bottleneck the
           double-buffered pipeline exists to hide.

@@ -130,12 +130,12 @@ export function PostTraining() {
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
-          Most labs train one RL policy and ship it. K3 trains <span className="text-foreground">nine</span> — one per
+          Most labs train one RL policy and ship it. K3 trains <span className="text-foreground">nine</span>{" "}— one per
           (domain × reasoning-effort) cell — then uses{" "}
-          <span style={{ color: ACCENT }}>Multi-Teacher On-Policy Distillation</span> to fold them back into a single
+          <span style={{ color: ACCENT }}>Multi-Teacher On-Policy Distillation</span>{" "}to fold them back into a single
           model, with the matching expert supervising each sampled effort level. The effort axis is trained by a
           per-problem token budget: exceed <em>τ</em> × the budget and the task reward is overridden to &minus;1, then{" "}
-          <em>τ</em> is annealed down to produce the high- and low-effort variants from the max-effort one. That is why
+          <em>τ</em>{" "}is annealed down to produce the high- and low-effort variants from the max-effort one. That is why
           one checkpoint can be told to think cheaply or expensively and behave coherently at both ends.
         </p>
       </div>

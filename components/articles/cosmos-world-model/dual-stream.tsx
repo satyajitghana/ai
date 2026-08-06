@@ -167,20 +167,20 @@ export function DualStream() {
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
             {stage === "reason" ? (
-              <>the <span style={{ color: REASON }}>reasoner</span> plans, causal over its own keys</>
+              <>the <span style={{ color: REASON }}>reasoner</span>{" "}plans, causal over its own keys</>
             ) : attend ? (
-              <>the <span style={{ color: GEN }}>generator query</span> reads <span style={{ color: REASON }}>K_AR</span> + <span style={{ color: GEN }}>K_DM</span></>
+              <>the <span style={{ color: GEN }}>generator query</span>{" "}reads <span style={{ color: REASON }}>K_AR</span> + <span style={{ color: GEN }}>K_DM</span></>
             ) : (
-              <>the <span style={{ color: GEN }}>generator</span> emits the next frames</>
+              <>the <span style={{ color: GEN }}>generator</span>{" "}emits the next frames</>
             )}
           </div>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Two towers, one sequence. The <span style={{ color: REASON }}>Reasoner</span> is autoregressive and attends
-          only <span className="text-foreground">causally over its own keys</span> — it does the planning. The{" "}
-          <span style={{ color: GEN }}>Generator</span> is a diffusion model, and its query fans out over the{" "}
-          <span className="text-foreground">concatenation [ K_AR ; K_DM ]</span> — so it can read the reasoner&apos;s
+          Two towers, one sequence. The <span style={{ color: REASON }}>Reasoner</span>{" "}is autoregressive and attends
+          only <span className="text-foreground">causally over its own keys</span>{" "}— it does the planning. The{" "}
+          <span style={{ color: GEN }}>Generator</span>{" "}is a diffusion model, and its query fans out over the{" "}
+          <span className="text-foreground">concatenation [ K_AR ; K_DM ]</span>{" "}— so it can read the reasoner&apos;s
           keys and values directly. That single cross-stream read is how a plan turns into pixels: reasoning is fused
           into generation inside one attention operation, not bolted on afterward.
         </p>

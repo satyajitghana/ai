@@ -45,7 +45,7 @@ export default function Page() {
       {/* Hero */}
       <section>
         <p className="font-mono text-xs text-muted-foreground">
-          <span className="text-foreground/70">$</span> whoami
+          <span className="text-foreground/70">$</span>{" "}whoami
         </p>
         <h1 className="font-heading mt-3 text-4xl font-bold tracking-tight text-balance sm:text-5xl">
           {profile.name}
@@ -87,7 +87,7 @@ export default function Page() {
       {/* Agent notice — the dual-native thesis, stated on the front door */}
       <section className="mt-6 rounded-md border p-4">
         <p className="font-mono text-xs leading-6 text-muted-foreground">
-          <span className="text-foreground">🤖 agents:</span> this site is
+          <span className="text-foreground">🤖 agents:</span>{" "}this site is
           machine-readable. start at{" "}
           <a
             href="/llms.txt"

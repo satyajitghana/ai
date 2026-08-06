@@ -183,9 +183,9 @@ export function DistillNetwork() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The selected teacher&apos;s distribution supervises the student&apos;s{" "}
-          <span className="text-foreground">own tokens</span> (on-policy), with the loss focused on the
+          <span className="text-foreground">own tokens</span>{" "}(on-policy), with the loss focused on the
           salient, capability-bearing tokens. Six specialists collapse into{" "}
-          <span className="text-foreground">one deployable 35B</span> — none of the teachers ships.
+          <span className="text-foreground">one deployable 35B</span>{" "}— none of the teachers ships.
         </p>
       </div>
     </figure>

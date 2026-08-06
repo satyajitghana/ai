@@ -1,0 +1,247 @@
+---
+title: "AngelSpec: specialize the drafter, share the verification budget"
+description: "Tencent's production speculative-decoding system trains a different drafter per workload — MTP for chat, a block-diffusion drafter (DFly) for code and math — then treats the target model's verification depth as a shared batch resource (D-cut), reallocating it by confidence instead of by request. On live Hunyuan traffic D-cut adds up to 15.7% throughput at concurrency 64 for a 2.8% acceptance-length cost, measured on H20, not flagship H100."
+date: 2026-08-03
+interest: 4
+helpful: 4
+tags:
+  - inference
+  - speculative-decoding
+  - llm
+  - systems
+  - explainer
+draft: false
+cover: /articles/angelspec/fig1.png
+---
+
+import { AcceptanceLadder } from "@/components/articles/angelspec/acceptance-ladder"
+import { DCutBudget } from "@/components/articles/angelspec/d-cut-budget"
+
+Speculative decoding's basic trade is well covered on this site already: a cheap draft model
+proposes tokens, the target model verifies them all in one pass, and the target only ever emits
+what it would have sampled anyway. [EAGLE-3](/articles/eagle-3-speculative-decoding) fixed the
+draft model's own scaling law; [DSpark](/articles/deepseek-dspark) paired a semi-autoregressive
+drafter with a load-aware verifier. [AngelSpec](https://arxiv.org/abs/2607.25852) (Liu, Cen, Shi,
+et al., Tencent) is a different kind of paper: it is not one new trick, it is what a production
+team building on top of that whole lineage — [multi-token prediction](/articles/multi-token-prediction),
+DFlash, DFlare, DSpark, EAGLE-3's Training-Time Test — actually ships for
+[Hunyuan Hy3](/articles/hunyuan-hy3). Two ideas carry the paper. First: don't train one universal
+drafter, train a different architecture for each workload's entropy. Second: don't give every
+request a fixed verification budget, treat verification depth as a resource the whole batch shares.
+
+<Callout type="note">
+I am reading this as **engineering**, not a new algorithm. DFly extends DFlash's target-conditioning
+and DFlare's layer fusion; the Training-Time Test principle is EAGLE-3's. AngelSpec's own
+contribution is combining them into one training framework, specializing them per workload, and
+running the combination on real serving traffic. That last part is the rare thing here — most
+speculative-decoding papers stop at static benchmarks.
+</Callout>
+
+## One drafter doesn't fit both workloads
+
+Chat is high-entropy and open-ended; the next few tokens are genuinely hard to guess. Code and math
+are the opposite — once you're two lines into a `for` loop or three steps into an algebraic
+simplification, a lot of what comes next is close to deterministic. A single drafter trained on a
+uniform mixture of both has to compromise. AngelSpec's answer is to stop compromising: train an
+autoregressive multi-token-prediction (MTP) drafter on conversation-heavy data for chat, and a
+block-parallel diffusion drafter — **DFly** — strengthened with code and math data, for everything
+else.
+
+## MTP: fix position 2 and 3, not position 1
+
+The MTP drafter reuses one physical Transformer block recurrently at increasing logical depth,
+each depth predicting one more token ahead. The problem EAGLE-3 already diagnosed for feature
+prediction shows up again here for direct token prediction: depth 1 is trained against a clean
+prefix, but at inference depth 2 has to condition on depth 1's own (possibly wrong) output — a
+distribution it never saw in training. AngelSpec's fix is the same principle EAGLE-3 calls
+Training-Time Test: unroll the drafter over its own predictions during training, so what it
+practices on matches what it sees at inference.
+
+The loss stack that gets it there is a genuine progression, not a single choice: hard-label
+cross-entropy, then forward-KL, then an adaptively-blended KL/total-variation objective ("LK
+loss"), finally switching to an end-to-end objective that directly optimizes expected accepted
+length —
+
+$$
+\mathcal{L}_{e2e} = 1 - \frac{1}{|I| D} \sum_{i \in I} \sum_{m=0}^{D-1} \prod_{k=0}^{m} \alpha_{i,k}
+$$
+
+— a product, not a sum, because one rejection anywhere in the prefix invalidates every position
+after it. Training directly on raw total variation from a cold start is worse than plain KL (the TV
+gradient is too weak far from alignment); the paper's own ablation shows the cold-start-then-switch
+recipe is necessary, not decorative.
+
+The payoff shows up exactly where the theory predicts: the first drafted token barely moves,
+positions two and three — the ones with no defense against drift before TTT — improve the most.
+
+<AcceptanceLadder />
+
+## DFly: a hybrid backbone, then a cheap causal patch
+
+DFly starts from DFlash's move (feed every draft layer the same shared cross-layer-projected
+target context) and adds DFlare's move (a layer-specific weighted fusion of target features),
+combined rather than chosen between:
+
+$$
+g^{(i)}_t = \text{RMSNorm}\big(c_t + f^{(i)}_t\big)
+$$
+
+$c_t$ is DFlash's shared basis, $f^{(i)}_t$ is DFlare's depth-dependent refinement — the hybrid adds
+only $D \times T$ scalar fusion weights over DFlash alone, precomputable once training finishes.
+
+<Figure
+  src="/articles/angelspec/fig1.png"
+  alt="Diagram of DFly: a frozen target-model stack feeds hidden states from multiple depths into a hybrid target-conditioning module (an FC layer plus per-layer fusion weights), which conditions a stack of draft-model transformer blocks; a hidden-correction module turns the block's parallel outputs into a causal chain of tokens."
+  caption="DFly's hybrid target-conditioning backbone (DFlash's shared basis + DFlare's layer-specific fusion) feeding a hidden-correction head that makes the block-parallel output causal (Liu et al., 2026, Figure 2)."
+/>
+
+Block-parallel diffusion drafts $B$ tokens in one shot, which is where the latency amortization
+comes from — but a one-shot draft has no mechanism to make token $t{+}2$ aware that token $t{+}1$
+was just chosen. DFly's **hidden-correction head** patches that in afterward, cheaply: a small
+SwiGLU pass folds the previous position's embedding into each hidden state before the LM head runs,
+turning independent marginals into a causal chain
+
+$$
+q\big(X_{t+1:t+B} \mid x_{\le t}\big) = \prod_{i} q_i\big(x_{t+i} \mid x_{\le t}, x_{t+1:t+i-1}\big)
+$$
+
+while the expensive backbone stays fully parallel — only this small head runs sequentially. Tested
+against a Markov-style low-rank correction (DSpark's approach), hidden-correction wins on both
+accepted length and, notably, on the break-even latency it needs to beat MTP — the more accurate
+head is also the cheaper one to run.
+
+## The numbers
+
+On Hy3-A21B, cumulative ablation (backbone → AR head → domain data) takes mean accepted length from
+3.77 to 4.75; against the other drafters on the same target:
+
+<BenchBars
+  title="mean accepted length — Hy3-A21B, temp 1, no-thinking"
+  unit=""
+  bars={[
+    { label: "DFly", value: 4.79, highlight: true },
+    { label: "DFlash", value: 3.69 },
+    { label: "MTP", value: 3.00 },
+  ]}
+/>
+
+That's +59.7% over MTP and +29.8% over DFlash on this target — the paper is upfront that DSpark
+isn't in this row (it's only benchmarked against Hy3 as MTP/DFlash/DFly; DSpark's own comparison
+runs on Qwen3-8B, where it still wins MT-Bench, consistent with AngelSpec's own framing that DFly
+targets code and math, not chat). Production throughput on Hy3-295B-A21B, 8×TP, tells the
+concurrency story:
+
+<BenchBars
+  title="throughput speedup vs. autoregressive — concurrency 32"
+  unit="×"
+  bars={[
+    { label: "DFly-8", value: 2.4, highlight: true },
+    { label: "DFlash-8", value: 2.15 },
+    { label: "MTP-3", value: 1.86 },
+  ]}
+/>
+
+DFly wins the average speedup at every tested concurrency, 4 through 64. The more interesting
+detail is what happens at the high end: at concurrency 64, DFlash's own speedup actually **drops**
+below MTP-3's (1.89× vs 2.08×), while DFly stays ahead at 2.11×. DFly isn't just faster — it's the
+one that degrades least gracefully into the regime where the GPU is already saturated with
+verification work.
+
+## D-cut: verification depth is a shared resource, not a per-request setting
+
+Here's the fact that makes D-cut make sense: median target-model verification (`execute_model`)
+latency runs 19.77–64.16ms; drafting and sampling (`sample_tokens`) runs 0.89–4.49ms. Verification
+dominates decode-step cost by roughly an order of magnitude. So the thing worth optimizing at serving
+time isn't the drafter — it's how much of that expensive verification you spend, and where.
+
+<Figure
+  src="/articles/angelspec/fig2.png"
+  alt="Four-panel pipeline diagram: (1) DFly drafting produces confidence-scored candidate tokens per request; (2) a runtime cost table is profiled at startup across batch sizes and keep ratios; (3) all draft tokens across the batch are flattened, sorted by confidence, and pruned at a chosen ratio; (4) the target model dynamically verifies only the surviving tokens per request."
+  caption="D-cut's pipeline: profile a runtime cost table once, then every step rank all draft tokens in the batch by confidence and keep only the top slice the cost model says pays off (Liu et al., 2026, Figure 3)."
+/>
+
+The mechanism is a genuine reallocation, not a threshold. Per request $i$, expected progress from
+keeping $n_i$ drafted positions is estimated from the drafter's own prefix-confidence product,
+$\hat A_i(n_i) = \sum_{k=0}^{n_i} s_{i,k}$. D-cut doesn't pick $n_i$ per request — it flattens every
+position across the **whole batch**, ranks by that same confidence score, and takes a global top-K:
+
+$$
+K_\rho(B) = \max\big(B,\ \lceil \rho\, B (D{+}1) \rceil\big)
+$$
+
+restricted to four ratios, $\rho \in \{0.25, 0.5, 0.75, 1.0\}$, chosen each step by a pre-profiled
+runtime latency table that picks whichever $\rho$ maximizes projected throughput, not just kept
+length. It only ever discards drafts — verification stays exact, so the target distribution is
+untouched.
+
+<DCutBudget />
+
+## Live traffic: the validation that actually matters
+
+Static benchmarks are where DFly's story ends for most papers in this space. AngelSpec adds one
+more figure, replaying real Hunyuan production traffic on 8×H20 at concurrency 2 through 64 — and
+this is the evidence that made me want to write the piece up.
+
+<Figure
+  src="/articles/angelspec/fig3.png"
+  alt="Two line charts from live Hunyuan traffic. Left: aggregate throughput versus per-user decode speed, DFly-8 plus D-cut sitting above plain DFly-8 across the curve, both above autoregressive decoding. Right: aggregate throughput versus concurrency 2 to 64, with DFly-8 flattening past concurrency 48 while DFly-8 plus D-cut keeps rising, annotated with percentage gains at each concurrency up to plus 15.7 percent at concurrency 64."
+  caption="D-cut on live Hunyuan production traffic: DFly saturates past concurrency 48, D-cut keeps converting load into throughput — +9.2% at c56, +15.7% at c64 (Liu et al., 2026, Figure 4)."
+/>
+
+DFly alone saturates past concurrency 48 (~848–860 tok/s, flat). D-cut keeps rising: +3.0% at c48,
++9.2% at c56, **+15.7% at c64**. At matched per-user decode speed (~15.3 tok/s), D-cut sustains 981
+tok/s at c64 versus DFly's 858 tok/s at c56 — 14% more aggregate throughput at the same latency.
+Against plain autoregressive decoding, DFly's own speedup peaks at 1.33× (c24–c40) and then falls
+back to 1.25× at c64; D-cut keeps climbing to 1.45× at c56 and 1.44× at c64. All of that for a
+pruning cost of just **1.5%** average reduction in accepted length (2.50 → 2.46), rising to only
+**2.8%** even at the most contended concurrency tested (2.50 → 2.43).
+
+<Callout type="tip">
+Read the caption on the paper's own Figure 4 carefully — it says the comparison **understates
+D-cut**: "DFly uses full-and-piecewise CUDA graph capture and D-cut piecewise capture only." D-cut is
+running with a documented implementation disadvantage relative to DFly and still wins. That is an
+unusually candid thing for a paper to put in its own headline figure's caption.
+</Callout>
+
+## What's honest here, and what isn't new
+
+Two disclosures matter more than most papers in this space bother to make. All production numbers
+— throughput Tables 7–8, the live-traffic Figure 4 — run on **NVIDIA H20**, the export-compliant
+part, not a flagship H100 or B200. The paper doesn't claim these numbers generalize to other
+accelerators; it just tells you what it actually ran on. And the "this comparison understates
+D-cut" line above is the second: a paper flagging that its own reported advantage is a conservative
+lower bound is rarer than papers that quietly let an asymmetric comparison flatter them.
+
+What isn't new: DFly is DFlash plus DFlare plus a hidden-correction head borrowed from TreeFlash's
+idea; MTP's training recipe leans on EAGLE-3's Training-Time Test and an external LK-loss paper;
+D-cut's "verification as a shared resource" framing groups itself explicitly with DSpark as the
+other method doing this, rather than claiming to invent the idea. None of that is a knock — production
+systems earn their keep by combining existing pieces well, not by mandating a new algorithm — but
+it means the honest read of AngelSpec is "well-executed systems integration with real production
+validation," not "a new speculative-decoding algorithm."
+
+A few more gaps worth knowing before you cite this: DSpark is compared on Qwen3-8B, not on the
+paper's own Hy3-A21B target — so the strongest same-class competitor is missing from the main Hy3
+table. The released DFly is mode-specific (Table 6: no-think and high-think drafters don't transfer
+across each other), which roughly doubles the drafters you maintain for a model family serving both
+modes. And every reported baseline number — including DFlash and DSpark's — was retrained and
+measured by the authors inside their own stack; there's no independent third party re-running any of
+it.
+
+## The take
+
+The interesting move in AngelSpec isn't a new speculative-decoding trick — it's refusing to ship one
+universal answer. Chat and code/math have different entropy profiles, so they get different
+drafters. Verification cost and drafter confidence vary across requests and load, so verification
+depth becomes a batch-level resource instead of a fixed setting. Neither idea is exotic on its own;
+what makes the paper worth reading is that both survive contact with real Hunyuan traffic on
+honestly-disclosed hardware, with the one place it could have inflated its own result — the CUDA-graph
+asymmetry — disclosed instead of hidden.
+
+---
+
+*Source: [AngelSpec: Towards Real-World High Performance Inference with Speculative Decoding](https://arxiv.org/abs/2607.25852)
+(Hong Liu, Rui Cen, Junhan Shi, Guangshuo Qin, Jiebin Zhang, Tianyu Liu, Runzhi Fan, Guoliang Zhao,
+Ruobing Xie, Kai Zhang, Song Liu, Guanghua Yu, Jianchen Zhu — Tencent), arXiv:2607.25852. Figures 2,
+3, and 4 are reproduced from the paper for commentary; the interactives are mine, built on the
+paper's own reported numbers and formulas.*

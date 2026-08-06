@@ -171,13 +171,13 @@ export function CrossLayer() {
             </button>
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            <span style={{ color: mode === "cli" ? ACC : IDX }}>{passes}</span> index passes for {L} layers
+            <span style={{ color: mode === "cli" ? ACC : IDX }}>{passes}</span>{" "}index passes for {L} layers
             {mode === "cli" ? " · 2× fewer" : ""}
           </div>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Selecting which tokens to read costs an <span style={{ color: IDX }}>index pass</span> per layer. Because attention saliency
+          Selecting which tokens to read costs an <span style={{ color: IDX }}>index pass</span>{" "}per layer. Because attention saliency
           barely moves between adjacent layers, LongCat reuses one selection across a group — <span className="text-foreground">one index every 2 layers</span>,
           halving the indexer work, taught by cross-layer distillation during training. The same trick collapses the 3-step
           Multi-Token-Prediction draft into a single shared pass for speculative decoding. (Note: the SGLang deployment drops the separate

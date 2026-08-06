@@ -130,11 +130,11 @@ export function EsftSelect() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Healing trains <em>only</em> residual deltas on the{" "}
-          <span style={{ color: SEL }}>{COUNT}</span> highest routing-frequency experts shown here (the real run selects{" "}
-          <span className="text-foreground">833 of 10,240</span> by top-p 0.2) — <span className="text-foreground">2.62B</span>{" "}
+          Healing trains <em>only</em>{" "}residual deltas on the{" "}
+          <span style={{ color: SEL }}>{COUNT}</span>{" "}highest routing-frequency experts shown here (the real run selects{" "}
+          <span className="text-foreground">833 of 10,240</span>{" "}by top-p 0.2) — <span className="text-foreground">2.62B</span>{" "}
           of 35B params, router and everything else frozen. The deltas ship as one 5.2 GB artifact you patch on or off at load
-          time; toggle them <span className="text-foreground">off</span> and the exact stock model returns. On heals a
+          time; toggle them <span className="text-foreground">off</span>{" "}and the exact stock model returns. On heals a
           significant loss into a statistical tie — a repair, not a win. The point estimate stays negative.
         </p>
       </div>

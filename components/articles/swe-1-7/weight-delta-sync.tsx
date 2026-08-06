@@ -245,11 +245,11 @@ export function WeightDeltaSync() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Only the <span style={{ color: TRAINER }}>trainer</span> needs one high-bandwidth cluster; the{" "}
-          <span style={{ color: CLUSTER }}>rollout engines</span> are stateless given the current weights, so they run on
+          Only the <span style={{ color: TRAINER }}>trainer</span>{" "}needs one high-bandwidth cluster; the{" "}
+          <span style={{ color: CLUSTER }}>rollout engines</span>{" "}are stateless given the current weights, so they run on
           whatever compute is available across three continents. The trick that makes it cheap is the{" "}
-          <span className="text-foreground">compressed weight delta</span> through object storage: a{" "}
-          <span className="text-foreground">&gt;99% smaller</span> transfer than a full broadcast, so weights stay fresh
+          <span className="text-foreground">compressed weight delta</span>{" "}through object storage: a{" "}
+          <span className="text-foreground">&gt;99% smaller</span>{" "}transfer than a full broadcast, so weights stay fresh
           and trajectory staleness stays low — the same knob the async loop is trying to keep small.
         </p>
       </div>

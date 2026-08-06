@@ -1,0 +1,394 @@
+---
+title: "kimi-k3-in-c: 2.78 trillion parameters, one CPU, 8 GB of RAM"
+description: "A single-author C99 engine — no BLAS, no framework, no GPU — reimplements Kimi K3 inference from the checkpoint's own bytes: 2.78T parameters, a 1.56 TB checkpoint, a 176 KB binary, and a measured 8.24 GB peak RSS. The same run at 224 GB is 1.7x faster and produces byte-identical output — memory is a dial here, not a floor."
+date: 2026-08-03
+interest: 5
+helpful: 4
+tags:
+  - llm
+  - inference
+  - quantization
+  - kimi
+  - systems
+  - c
+  - explainer
+draft: false
+featured: true
+cover: /articles/kimi-k3-in-c/fig1.png
+---
+
+import { MemoryDial } from "@/components/articles/kimi-k3-in-c/memory-dial"
+import { BytesPerToken } from "@/components/articles/kimi-k3-in-c/bytes-per-token"
+import { Mxfp4Decode } from "@/components/articles/kimi-k3-in-c/mxfp4-decode"
+
+```console
+$ ./bin/k3 ~/k3model --trunk ~/k3trunk --preset laptop \
+           --tok ~/k3model --prompt "The capital of France is" --gen 8 --incremental
+
+--- generated text ---
+ Paris.",
++            "The Eiffel
+----------------------
+8 tokens in 261.5 s, 32.69 s/token average
+PEAK RSS for the whole run: 8.24 GB
+```
+
+That is [Kimi K3](/articles/kimi-k3) — 2.78 trillion parameters, 1.56 terabytes on disk —
+answering a question correctly from a laptop-sized memory budget, on one CPU, with zero GPUs. The
+engine that did it is [kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c): 4,779 lines of
+portable C99, a single author, Apache-2.0. It is slow — 32.69 seconds for that one token — and it is a
+base model, so `" Paris."` is a continuation of a sentence, not a chat reply. Neither of those facts
+changes what the run demonstrates: a frontier-scale mixture-of-experts model, read and multiplied
+straight off an NVMe drive, fits in memory most people already own.
+
+I went through the source rather than just the README — `src/core/k3_ops.c`, `src/cache/k3_cache.c`,
+`src/io/k3_st.c` — because the interesting claims in a project like this live in code comments, not
+marketing copy, and this codebase's comments are unusually good. This piece is about what they say.
+
+<Figure
+  src="/articles/kimi-k3-in-c/fig1.png"
+  alt="A resident-in-RAM band totalling 8.24 GB — tokenizer, the 93-layer MoE stack, LM head, and three small caches (KDA state, MLA KV, expert LRU) — sitting above a memory boundary, below which the pinned trunk, a ring slot, and the 1.45 TB expert pool stay on NVMe and are bypassed through O_DIRECT rather than the page cache."
+  caption="The whole engine in one diagram: what stays resident, what streams, and what never leaves disk (FareedKhan-dev, kimi-k3-in-c, 2026)."
+/>
+
+## The four reductions
+
+Every parameter at bfloat16 is **5,560 GB**. That number is where the project starts and it is not
+close to fitting anywhere. Four decisions, each one shipped in the checkpoint or written into this
+engine, bring it down to a measured **8.24 GB** — a 675&times; reduction, with no weight dropped and no
+approximation:
+
+1. The routed experts already ship at **half a byte** — MXFP4 — multiplied straight out of their packed
+   form, never expanded to floats first.
+2. **KDA** gives 69 of the 93 layers a recurrent state that does not grow with context.
+3. **MLA** caches one 576-wide latent per position instead of ninety-six heads of key and value.
+4. The dense **trunk streams** a layer at a time instead of sitting resident, which turns the last
+   floor into a dial.
+
+The first three are architectural decisions Moonshot made when training Kimi K3; I covered why they
+exist — the routing, the gating math, the attention-residual stack — in
+[the K3 architecture piece](/articles/kimi-k3). What is new here is the fourth one, which belongs
+entirely to this engine, and the fact that all four survive being reimplemented from scratch in C and
+checked against the released weights.
+
+<Figure
+  src="/articles/kimi-k3-in-c/fig2.png"
+  alt="A four-step waterfall chart on a log scale: 5,560 GB at bfloat16, down to 1,560 GB as the checkpoint ships (experts already at 4 bits), down to 113 GB once only 16 of 896 experts per layer must be reachable, down to 8.24 GB measured once the trunk streams instead of staying resident."
+  caption="The same ledger, drawn to scale — each bar is 10x smaller than the last (FareedKhan-dev, kimi-k3-in-c, 2026)."
+/>
+
+## Reduction one: the experts already ship at half a byte
+
+The routed experts are not quantised by this engine — they arrive from Moonshot already in **MXFP4**,
+a microscaling 4-bit float. Every weight is a 4-bit code indexing a 16-entry table, and every 32
+consecutive weights share one 8-bit exponent. One routed expert is exactly 33,030,144 parameters. At
+half a byte plus a shared scale, that is **17,547,264 bytes** — 17.55 MB. Dequantised to fp32 first, the
+same expert is 132 MB.
+
+A token touches 16 experts in each of 92 MoE layers — 1,472 experts. Multiply that out and the
+difference stops being an abstraction:
+
+- Dequantise everything first: **194 GB** of pure format conversion, per token, before one multiply
+  happens.
+- Read the nibbles directly: **25.83 GB**.
+
+The comment above the kernel that does this is the best sentence in the codebase: *"This is not an
+optimisation; it is what makes streaming experts possible at all."* And the mechanism is worth sitting
+with, because it inverts an intuition every ML engineer carries: quantisation is supposed to trade
+compute time for memory. Here it does the opposite. A matrix-vector product is memory bound — the
+arithmetic is cheap, the wait is for bytes to arrive — so reading 7.5&times; fewer bytes makes the
+packed kernel **faster** than dequantise-then-multiply, not slower.
+
+```c
+/* y[rows] = W[rows][in] . x[in], with W read straight out of packed MXFP4 and never
+ * materialised as floats. This is not an optimisation; it is what makes streaming
+ * experts possible at all. */
+void k3_matmul_mxfp4(float *y, const float *x, const unsigned char *packed,
+                     const unsigned char *scales, int in, int rows, int group)
+{
+    ...
+    for (int r = 0; r < rows; r++) {
+        for (int g = 0; g < ngrp; g++) {
+            const unsigned char sb = sr[g];
+            if (sb == 255) continue;              /* NaN scale: contribute nothing */
+            /* expand the group of 32 to floats, dot product, then apply ONE scale */
+            ...
+            acc += sub * (double)K3_E8M0[sb];
+        }
+        y[r] = (float)acc;
+    }
+}
+```
+
+The reason the inner loop is fast is a small lookup table: `K3_E2M1_PAIR[256][2]` maps a whole byte to
+both of its decoded values, so the loop does one 8-byte load instead of masking and shifting each
+nibble out separately. Groups of 32 elements are exactly 16 packed bytes, which is why the group size
+was chosen there — and the scale factors out of the inner sum entirely, applied once per group instead
+of once per weight.
+
+<Mxfp4Decode />
+
+<BytesPerToken />
+
+## A floating-point contract, not a convention
+
+Kimi K3's headline claim is stronger than "it runs small": *"the same model runs in 8 GB and in 224 GB
+and produces byte-identical output at every budget between."* Not close. Identical. That does not
+happen by accident in floating point, because addition is not associative — `(a + b) + c` and
+`a + (b + c)` round differently once you are past a handful of terms, and this engine sums thousands of
+them per output, across a scalar path, an OpenMP path, and an AVX2 path, at any thread count.
+
+`k3_matmul` fixes the order rather than trusting the compiler with it:
+
+```c
+void k3_matmul(float *y, const float *x, const float *W, int in, int out)
+{
+    for (int o = 0; o < out; o++) {
+        const float *row = W + (size_t)o * in;
+        double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+        int i = 0;
+        for (; i + 3 < in; i += 4) {
+            a0 += (double)row[i    ] * (double)x[i    ];
+            a1 += (double)row[i + 1] * (double)x[i + 1];
+            a2 += (double)row[i + 2] * (double)x[i + 2];
+            a3 += (double)row[i + 3] * (double)x[i + 3];
+        }
+        double acc = (a0 + a1) + (a2 + a3);
+        for (; i < in; i++) acc += (double)row[i] * (double)x[i];
+        y[o] = (float)acc;
+    }
+}
+```
+
+Four accumulators, partitioned by `i % 4`, reduced as `(a0 + a1) + (a2 + a3)` — written out by hand
+rather than left for the compiler to vectorise however it likes, because *that specific split is the
+summation order the AVX2 path must reproduce exactly*. A `__m256d` register holds four doubles; loading
+four elements per iteration places element `i` in lane `i % 4`, the same partition as the scalar
+accumulators, and reducing with the same parenthesisation gets the same bits back. Two more details
+carry the guarantee: the accumulators are **double**, because a float accumulator loses precision the
+comparisons can see at hidden size 7168; and the AVX2 code uses a separate multiply and add, never a
+fused multiply-add, because `-ffp-contract=off` means the scalar path rounds twice and an FMA rounds
+once — a hardware capability that would otherwise quietly change the output. `k3_matmul_bf16` mirrors
+the same layout for the bf16 trunk, so all three paths — scalar, OpenMP, AVX2 — agree to the bit. And
+because output rows never depend on each other, threading the outer loop changes nothing about the
+arithmetic either: every row is still summed by exactly one thread in exactly this order, so the result
+is identical at any thread count.
+
+That determinism is also honest about its one exception. `k3_matmul_mxfp4` is *not* bit-identical to
+dequantise-then-multiply, and the comment says so without hedging: it sums each group of 32 under its
+own accumulator and applies that group's scale before combining groups, while a plain matmul sums the
+whole row under one accumulator — a different order. But the bound on that difference is derived, not
+asserted. Every individual product inside a group is **exact** in double: an E2M1 value carries 3
+mantissa bits, `x` carries 24, the product needs 27 of the 53 bits double has to spend, so only the
+additions round at all. Reassociating exact terms moves the result by about one unit in the last place
+of a double — roughly `1e-16` relative. The test gate requires agreement to `1e-6`. The margin between
+what the reordering actually costs and what the test demands is nine orders of magnitude. A codebase
+that states plainly where it is *not* exact, and then bounds how far off, is doing something most
+numerical code does not bother to do.
+
+## KDA in the code
+
+I wrote about [KDA's decay as a half-life](/articles/kda-half-life) from the technical report alone,
+and had to *infer* that the forget gate is parameterised in log-alpha space — the report gives the
+mechanism but not the exact functional form, so I flagged the parameterisation as unverified. This C
+source confirms it outright. `k3_kda_decay` computes the gate per head, then folds it per channel:
+
+```c
+void k3_kda_decay(float *g, float *alpha, const float *z, const float *A_log,
+                  const float *dt_bias, int H, int D, float lb)
+{
+    for (int h = 0; h < H; h++) {
+        /* PER HEAD. The checkpoint stores head_dim floats but only the first H are
+         * nonzero. Indexing this per channel is a silent, fatal error. */
+        const float a = expf(A_log[h]);
+        for (int d = 0; d < D; d++) {
+            const int i = h * D + d;
+            const float u  = a * (z[i] + dt_bias[i]);
+            const float gi = lb * sigmoidf_(u);   /* in (lb, 0] */
+            g[i] = gi;
+            alpha[i] = expf(gi);                  /* in (e^lb, 1] */
+        }
+    }
+}
+```
+
+`gi = lb * sigmoid(u)` is log-alpha directly, and `alpha[i] = expf(gi)` is exactly the exponential I
+had to guess at from the outside. With the checkpoint's `gate_lower_bound` of &minus;5, alpha lands in
+`(e^-5, 1]`, about `(0.0067, 1]` — a per-channel retention factor, with a per-*head* base rate (`A_log`
+is indexed by `h`, not by the channel index `i`) modulating it. An independent reimplementation
+confirming an inference from the outside is a satisfying result on its own, and it is the reason these
+two pieces belong read together.
+
+The comment on `A_log` is worth pausing on for a second reason: it is one of five *invariants* the
+codebase states up front as places a plausible-looking implementation silently produces the wrong
+model — no crash, no NaN, just a different function that still writes fluent English. `A_log` being
+per-head rather than per-channel is invariant one.
+
+The recurrence itself is the delta rule, in four stages that the comments number:
+
+```c
+void k3_kda_step(float *S, float *o, const float *q, const float *k,
+                 const float *v, const float *alpha, float beta, int dk, int dv)
+{
+    /* 1. channel-wise decay: scale ROW i of S by alpha[i] */
+    for (int i = 0; i < dk; i++) { ... }
+
+    /* 2. read the state along k: u = S^T k */
+    ...
+
+    /* 3. rank-one delta write. (v - u) is the prediction error: this is what makes
+     *    it a DELTA rule rather than plain accumulation. */
+    for (int i = 0; i < dk; i++) {
+        const float ki = k[i];
+        float *row = S + (size_t)i * dv;
+        for (int j = 0; j < dv; j++) row[j] += ki * beta * (v[j] - u[j]);
+    }
+
+    /* 4. output from the ALREADY UPDATED state: o = S^T q */
+    ...
+}
+```
+
+Decay the state, read from it along the key, write back the *error* between the value and what the
+state already predicted — not the value itself — then read the output from the state that write just
+produced. That third stage is what turns a running sum into a rule that corrects itself: writing `v`
+directly would just accumulate; writing `v - u` writes only what the state did not already know. Step 4
+reading from the post-write state, not the pre-write one, is the second place a plausible-looking bug
+hides with no visible symptom.
+
+## The cache the project exists for
+
+The dense trunk is 108.81 GB and every layer of it runs on every token — nothing to skip there, so it
+streams from a packed file with a pinned prefix and one rotating ring slot. The routed experts are the
+opposite kind of problem: 1.45 TB of the 1.56 TB checkpoint, and only 1,472 of the 82,432 experts fire
+per token. The header comment on the cache that handles them does not undersell its importance: *"This
+is the part the project exists for."*
+
+Left uncached, one decode step reads 25.83 GB of experts. At the roughly 1.2 GB/s a commodity NVMe
+device sustains on cold random reads of that size, that alone is about **21 seconds per token** from
+storage. The cache holds those experts in the same MXFP4 bytes the matmul consumes directly — caching
+dequantised floats would cut the number of experts that fit by 7.5&times; for nothing, since nothing
+downstream ever wants the expanded form.
+
+The replacement policy is LRU with pinning, and the victim search is a plain linear scan, on purpose:
+
+```c
+/* Least recently used unpinned slot. Linear, deliberately: a few hundred comparisons
+ * against a 17.55 MB read is not where the time goes. */
+static int pick_victim(K3Cache *c) { ... }
+```
+
+A few hundred integer comparisons next to a 17.55 MB disk read is not a place worth a heap. And the
+cache keeps a request histogram — 82,432 counters, 330 KB — purely so a hot set can be identified and
+pinned, because, as the comment puts it, *"which experts are hot is not knowable in advance"*: without
+measuring it, pinning is guesswork.
+
+### The bug the code confesses to
+
+The slot table has three states, not two, and the comment explains why with a candour I have rarely
+seen in a repository:
+
+```c
+/*     >= 0             holds that key
+ *     K3_SLOT_EMPTY    holds nothing, free to take
+ *     K3_SLOT_INFLIGHT reserved by a batch prefetch whose read has not finished
+ *
+ * The third state exists because of a real bug. The batch prefetch marks a slot empty
+ * before reading into it ... But the empty test below is a FAST PATH that returns
+ * immediately, ahead of the pinned check and the LRU scan -- so the next expert in the
+ * same batch was handed the SAME slot, several parallel reads wrote into one buffer, and
+ * the MoE multiplied garbage. It cost one wrong token (65 instead of 2494) on the real
+ * model and nothing at all in the fixtures, because no fixture exercises the streaming
+ * cache. */
+```
+
+Read that last clause again. The bug was invisible to the entire test suite, because the fixtures test
+kernels and the fault lived in the cache. It surfaced as **exactly one token** — `65` where the model
+should have emitted `2494` — in a run that otherwise produced fluent, plausible text. That is the
+failure mode that should worry anyone building inference infrastructure: not a crash, not a NaN, but one
+silently wrong token inside an output that reads perfectly well.
+
+<BytesPerToken />
+
+That component reuses the measured, steady-state numbers, and they are less flattering to the cache
+than a quick simulation suggested. K3's training process uses a technique called Quantile Balancing
+specifically to keep expert usage flat across the pool — good for training, and exactly what defeats an
+LRU cache, which needs a hot subset to be worth anything. Below about 36 GB of cache arena, the bytes
+read per token do not move at all, a fact the engine's own measurements caught and reported rather than
+smoothing over: a full-recompute trace predicted a 36% hit rate at 8 GB; steady-state incremental
+decode measured 0%.
+
+## Why the trunk stays at 16 bits
+
+There is an obvious asymmetry in all of the above. The experts are 4-bit. The trunk — 108.81 GB of it —
+is bfloat16, and the engine has no bit-width knob for it at all. If quantisation is what made the
+experts streamable, why not quantise the part that has to stay resident?
+
+Because they measured it. A sensitivity study over 31 real attention tensors, quantised symmetrically
+per row, gives **about 1% mean relative weight error at int8 and about 17% at int4** — a ratio of
+roughly 18 that holds across every tensor type. The worst individual rows at int4 reach 45%, 56% and
+**65%**. So the trunk's precision is not an oversight or a to-do; it is a decision with a number behind
+it, and the absent knob is the decision being enforced rather than left to a flag.
+
+<Callout type="note">
+The study is honest about its own limit: it measures **weight error**, not output quality. No downstream
+logit or token comparison was run at int4, so the cost is bounded rather than observed. That is a
+narrower claim than "int4 would break the model", and the repo makes the narrower one.
+</Callout>
+
+A second measurement worth stealing: on their hardware, `O_DIRECT` cold reads run at 3.2 GB/s and are
+*faster* than buffered ones. The repo flags this as **"the opposite of the usual expectation, and it is
+why the engine opens the trunk `O_DIRECT`"**. When you are streaming a terabyte past a model, the page
+cache is not helping you — it is another copy.
+
+## The memory dial
+
+Put the streaming trunk and the streaming cache together and memory stops being a wall and becomes a
+knob. The engine ran the identical prompt through twelve cgroup-enforced budgets, from 8 GB to 224 GB,
+with `MemorySwapMax=0` so an over-budget rung fails outright instead of quietly swapping:
+
+<MemoryDial />
+
+Every one of those twelve runs produced the same token ids. Not similar — identical, at a budget span
+of 28&times;. Going from 8 GB to 224 GB buys 1.70&times; the speed, and the paper trail behind that
+number is worth respecting: three back-to-back runs of one identical configuration on a quiet machine
+spanned 33% just from device timing noise, so the engine's own docs treat anything under that as
+unproven. The 28&times;-memory-for-1.70&times;-speed result clears the noise floor with room to spare;
+a great many of the smaller steps in between do not, and the source says so rather than reporting every
+row as significant.
+
+One more result from the same measurement campaign is worth stating because it runs against instinct:
+at a fixed 128 GB total, giving memory to the trunk before the expert cache is 1.69&times; faster, even
+though the winning split reads *79% more* expert bytes from disk than the losing one. Optimising the
+number that looks obviously important — cache hit rate — actively picks the slower configuration,
+because the trunk is re-read in full on every single token while the experts are only ever sampled.
+
+## What this is not
+
+This is a hobby project, version 0.1.0, one author, Linux x86-64 only. 32.69 seconds per token is not
+usable for anything interactive, and the project does not claim otherwise — the README's own words are
+"slow, and answering correctly." Every measurement in this piece is the author's own, taken on one
+workstation; nothing here is independently replicated the way a benchmark suite would be. What sets it
+apart from most projects making similar claims is that it ships the receipts: raw TSVs and JSON traces
+under `docs/data/`, a replicated-noise-floor study that argues against several of its own smaller
+results, and a fixture ladder that gates every kernel against a PyTorch reference before the released
+checkpoint is ever touched.
+
+None of that makes this a serving solution — nobody should run a chatbot on it. What it demonstrates is
+narrower and, I think, more interesting: that a 2.78 trillion parameter model can be read, multiplied,
+and audited on hardware someone already owns, by one person, in under 5,000 lines of a language
+older than most of the engineers who trained the model. That is a pedagogical and archival result, not
+a production one, and it is worth having regardless.
+
+---
+
+*This engine is a C implementation of [Kimi K3](/articles/kimi-k3) — see that piece for why K3 uses
+KDA, MLA, and Stable LatentMoE in the first place. Its MXFP4 kernel is the concrete, memory-bound case
+behind the general argument in [how LLM inference actually works](/articles/how-llm-inference-works):
+decode is bound by bytes moved, not by arithmetic, which is exactly why reading fewer bytes wins even
+when it means reading them in an awkward packed format. And its confirmation of KDA's log-alpha gate
+closes a loop from [the half-life piece](/articles/kda-half-life) I published the same day. If you're
+comparing this to training-time low-precision work like [Neutrino-1](/articles/neutrino-1), the
+distinction is the direction: that piece is about training a model to tolerate ternary weights from
+the first gradient step. This one is about multiplying weights a much larger model already shipped in
+4-bit form, without ever training anything.*

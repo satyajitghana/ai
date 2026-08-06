@@ -97,7 +97,7 @@ export function PromptBudget() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The point isn&rsquo;t the grid — it&rsquo;s that &ldquo;how much you can draw&rdquo; is gated by
           &ldquo;how long an instruction the model will still follow.&rdquo; Push the ceiling from ~1k to{" "}
-          <span style={{ color: ACCENT }}>4.5k tokens</span> and a single pass can hold nine unrelated
+          <span style={{ color: ACCENT }}>4.5k tokens</span>{" "}and a single pass can hold nine unrelated
           infographics without them bleeding into each other.
         </p>
       </div>

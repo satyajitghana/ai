@@ -200,7 +200,7 @@ export function PagedKv() {
           />
         </label>
         <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-          reserved <span className="text-foreground">{reserved}</span> blk · wasted{" "}
+          reserved <span className="text-foreground">{reserved}</span>{" "}blk · wasted{" "}
           <span style={{ color: wasted > 0 ? WARM : ATT }}>{wasted}</span>
         </div>
       </div>
@@ -217,10 +217,10 @@ export function PagedKv() {
 
       <p className="mt-3 text-sm leading-6 text-muted-foreground">
         Before paging, a serving engine reserved one contiguous buffer per request, sized to the maximum output length —
-        so a short generation left most of its reservation <span style={{ color: WARM }}>wasted</span> (internal
+        so a short generation left most of its reservation <span style={{ color: WARM }}>wasted</span>{" "}(internal
         fragmentation), and two requests could not share anything. <span style={{ color: ATT }}>PagedAttention</span>{" "}
         breaks the cache into fixed blocks and a block table, so memory is handed out one block at a time and a common
-        prompt prefix maps to the <span style={{ color: GLOBAL }}>same physical blocks</span> via copy-on-write. This is
+        prompt prefix maps to the <span style={{ color: GLOBAL }}>same physical blocks</span>{" "}via copy-on-write. This is
         the memory manager, not the math — the same attention runs on top, but a GPU now fits many more concurrent
         sequences.
       </p>

@@ -133,7 +133,7 @@ export function StylometryHeatmap() {
                 <>
                   Hover a cell for the pair. Closest across labs:{" "}
                   <span className="text-foreground">{styloModels[surprise.a].disp}</span> ~{" "}
-                  <span className="text-foreground">{styloModels[surprise.b].disp}</span> at{" "}
+                  <span className="text-foreground">{styloModels[surprise.b].disp}</span>{" "}at{" "}
                   <span className="tabular-nums">{surprise.v.toFixed(3)} bits</span>.
                 </>
               ) : (
@@ -146,7 +146,7 @@ export function StylometryHeatmap() {
         <p className="mt-3 text-xs leading-5 text-muted-foreground">
           Prose only — each model answered eight fixed prompts; cells are the symmetric KL divergence
           between their character-trigram distributions (lower = writes more alike). Same-lab families
-          cluster; the interesting cells are the low-divergence ones <em>across</em> labs. Data and method
+          cluster; the interesting cells are the low-divergence ones <em>across</em>{" "}labs. Data and method
           from{" "}
           <a href={STYLO_SOURCE_URL} className="underline decoration-foreground/30 underline-offset-4 hover:text-foreground">
             Typebulb&apos;s &ldquo;You&apos;re relatively right!&rdquo;

@@ -164,8 +164,8 @@ export function UnifiedDecoder() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Nothing here is a bolted-on adapter head. The backbone emits{" "}
-          <span style={{ color: SPEECH }}>speech</span> and{" "}
-          <span style={{ color: AUDIO }}>audio</span> tokens from the same softmax it uses for{" "}
+          <span style={{ color: SPEECH }}>speech</span>{" "}and{" "}
+          <span style={{ color: AUDIO }}>audio</span>{" "}tokens from the same softmax it uses for{" "}
           <span className="text-foreground">text</span>, in one autoregressive stream — so a
           spoken-in / spoken-out turn is just a sequence that happens to switch token types
           partway through. That uniformity is what lets Audex keep its text brain while gaining

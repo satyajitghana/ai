@@ -122,7 +122,7 @@ export function ScalingEfficiency() {
             target capability <span style={{ color: ACCENT }}>{cap}</span>
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            K3 reaches it at <span style={{ color: ACCENT }}>{ratio.toFixed(1)}×</span> less training compute than K2
+            K3 reaches it at <span style={{ color: ACCENT }}>{ratio.toFixed(1)}×</span>{" "}less training compute than K2
           </div>
         </div>
 
@@ -132,8 +132,8 @@ export function ScalingEfficiency() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Same axes, two models: at any capability you pick, the <span style={{ color: ACCENT }}>K3</span> curve gets there
-          well to the left of <span className="text-foreground">K2</span> — about <span style={{ color: ACCENT }}>2.5×</span>{" "}
+          Same axes, two models: at any capability you pick, the <span style={{ color: ACCENT }}>K3</span>{" "}curve gets there
+          well to the left of <span className="text-foreground">K2</span>{" "}— about <span style={{ color: ACCENT }}>2.5×</span>{" "}
           less training compute. That is the whole point of the architecture and recipe changes: not a bigger number on a
           spec sheet, but more capability per FLOP spent.
         </p>

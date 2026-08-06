@@ -167,10 +167,10 @@ export function FinalToken() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           FTPO touches one position. It drives the{" "}
-          <span style={{ color: REJ }}>rejected</span> loop token down and lifts several{" "}
-          <span style={{ color: CHO }}>chosen</span> alternatives up — so it spreads the
+          <span style={{ color: REJ }}>rejected</span>{" "}loop token down and lifts several{" "}
+          <span style={{ color: CHO }}>chosen</span>{" "}alternatives up — so it spreads the
           escape probability instead of swapping one overtrained token for another. The{" "}
-          <span className="text-foreground">rest of the vocabulary</span> is pinned near the
+          <span className="text-foreground">rest of the vocabulary</span>{" "}is pinned near the
           reference by a logit-space, softmax-free penalty, which is what keeps the model&rsquo;s
           math and coding ability from drifting while the loop is removed.
         </p>

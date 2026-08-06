@@ -172,7 +172,7 @@ export function TransformerBlock() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Each block refines the token stream twice &mdash; self-attention lets positions mix, the MLP thinks
-          per-token &mdash; and both sub-layers are wrapped in a <em>normalize &rarr; transform &rarr; add</em> residual,
+          per-token &mdash; and both sub-layers are wrapped in a <em>normalize &rarr; transform &rarr; add</em>{" "}residual,
           so the original signal (and its gradient) flows straight up through all N stacked layers.
         </p>
       </div>

@@ -147,10 +147,10 @@ export function DepthReindex() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           On <span className="text-foreground">raw layers</span>, a 12-layer GPT-2 and a 64-layer Qwen split into stages at wildly different
-          absolute depths, and the boundaries scatter. <span className="text-foreground">Reindex</span> every model onto a common 0&ndash;100%
+          absolute depths, and the boundaries scatter. <span className="text-foreground">Reindex</span>{" "}every model onto a common 0&ndash;100%
           axis and the same three regions snap onto the two guides &mdash; the explorer&rsquo;s{" "}
           <span style={{ color: SENSORY }}>sensory</span>&nbsp;/&nbsp;<span style={{ color: WORKSPACE }}>workspace</span>&nbsp;/&nbsp;
-          <span style={{ color: MOTOR }}>motor</span> layout, at nearly the same fraction of depth across unrelated families. That shared
+          <span style={{ color: MOTOR }}>motor</span>{" "}layout, at nearly the same fraction of depth across unrelated families. That shared
           relative layout is what the CKA matrix picks up as a 45&deg; band.
         </p>
       </div>

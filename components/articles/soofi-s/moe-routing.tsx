@@ -123,7 +123,7 @@ export function MoeRouting() {
         {/* controls */}
         <div className="mt-1 flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[10px] text-muted-foreground">
           <span>
-            active per token: <span style={{ color: CHOSEN }}>{KTOP}</span> routed + <span style={{ color: SHARED }}>{NSHARED}</span> shared of {NROUTED}
+            active per token: <span style={{ color: CHOSEN }}>{KTOP}</span>{" "}routed + <span style={{ color: SHARED }}>{NSHARED}</span>{" "}shared of {NROUTED}
           </span>
           <span className="ml-auto text-foreground">~3.2B / 31.6B params (~10%)</span>
         </div>
@@ -134,9 +134,9 @@ export function MoeRouting() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          A learned, sigmoid-gated router sends each token to its top-<span className="text-foreground">6</span> of{" "}
-          <span style={{ color: ROUTED }}>128</span> routed experts; <span style={{ color: SHARED }}>2 shared</span>{" "}
-          experts run for every token. Drag to reroute — the <span style={{ color: CHOSEN }}>chosen set</span> changes
+          A learned, sigmoid-gated router sends each token to its top-<span className="text-foreground">6</span>{" "}of{" "}
+          <span style={{ color: ROUTED }}>128</span>{" "}routed experts; <span style={{ color: SHARED }}>2 shared</span>{" "}
+          experts run for every token. Drag to reroute — the <span style={{ color: CHOSEN }}>chosen set</span>{" "}changes
           token to token, but the count stays fixed. Summed over all 23 MoE layers, that is how a{" "}
           <span className="text-foreground">31.6B</span>-parameter model activates only ~<span className="text-foreground">3.2B</span>{" "}
           per token: the capacity of a 30B network at roughly the inference cost of a 3B one.

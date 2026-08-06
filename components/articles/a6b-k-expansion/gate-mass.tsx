@@ -199,7 +199,7 @@ export function GateMass() {
           The router scores all 256 experts, keeps the top-<span className="text-foreground">{k}</span>, and{" "}
           <em>renormalizes the selected gates to sum to 1</em>. So raising k does not just append experts — it shrinks every
           existing expert&apos;s weight and hands the difference to the newcomers. At k=32 the added{" "}
-          <span style={{ color: TAIL }}>ranks 9-32</span> carry <span style={{ color: TAIL }}>54%</span> of the mass, yet the
+          <span style={{ color: TAIL }}>ranks 9-32</span>{" "}carry <span style={{ color: TAIL }}>54%</span>{" "}of the mass, yet the
           model was never trained to co-activate them. Zero new weights are added — only compute. Accuracy falls at every step.
         </p>
       </div>

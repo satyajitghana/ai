@@ -53,7 +53,7 @@ export default function ModelsPage() {
         model answered the same eight prompts, and the cells are the symmetric KL divergence
         between their character-trigram distributions — a fingerprint of style, from the words
         alone. Same-lab families cluster; the telling cells are the close ones{" "}
-        <em>across</em> labs (shared training data leaves a stylistic trace). Reproduced from{" "}
+        <em>across</em>{" "}labs (shared training data leaves a stylistic trace). Reproduced from{" "}
         <a href="https://typebulb.com/u/lab/you-re-relatively-right/full" className="underline decoration-foreground/30 underline-offset-4 hover:text-foreground">
           Typebulb&apos;s heat map
         </a>

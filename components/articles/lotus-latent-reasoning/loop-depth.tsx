@@ -155,10 +155,10 @@ export function LoopDepth() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Depth is the knob. Trained too shallow, the loop simply <span className="text-foreground">cannot fit</span> multi-step
+          Depth is the knob. Trained too shallow, the loop simply <span className="text-foreground">cannot fit</span>{" "}multi-step
           arithmetic — R = 2 lands at 14.6%. Give it R = 6 and accuracy reaches{" "}
           <span style={{ color: ACCENT }}>70.0%</span>. But depth is not free test-time compute: take the R = 6 model and run
-          it deeper and accuracy <span className="text-foreground">dips</span> (R = 7 → 69.3%) — LOTUS reasons best at the depth
+          it deeper and accuracy <span className="text-foreground">dips</span>{" "}(R = 7 → 69.3%) — LOTUS reasons best at the depth
           it was trained for, not beyond.
         </p>
       </div>

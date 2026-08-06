@@ -127,9 +127,9 @@ export function OneBackbone() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Nothing in the network changes between these six. The same <span style={{ color: ON }}>Cosmos backbone</span>{" "}
           becomes a vision-language model, an image or audio-visual generator, a policy, or a{" "}
-          <span className="text-foreground">forward / inverse dynamics</span> model purely by choosing which modalities
-          enter and which it&apos;s asked to produce. A <em>forward</em> dynamics model predicts the next video given a
-          past and an action; an <em>inverse</em> one recovers the action that connects two frames — both fall out of
+          <span className="text-foreground">forward / inverse dynamics</span>{" "}model purely by choosing which modalities
+          enter and which it&apos;s asked to produce. A <em>forward</em>{" "}dynamics model predicts the next video given a
+          past and an action; an <em>inverse</em>{" "}one recovers the action that connects two frames — both fall out of
           one omnimodal world model.
         </p>
       </div>

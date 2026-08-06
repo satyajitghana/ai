@@ -109,7 +109,7 @@ export function MolRouter() {
           That sliver on the right is the entire specialization. The base is frozen and it is not
           Mind Lab&rsquo;s — it is GLM-5.2 — so everything Macaron adds rides in four 1B adapters, about half a percent
           of the artifact. This is the opposite trade from Mixture-of-Experts: MoE routes every{" "}
-          <em>token</em> through experts baked in during pretraining, while MoL routes each{" "}
+          <em>token</em>{" "}through experts baked in during pretraining, while MoL routes each{" "}
           <em>request</em>{" "}once, at the adapter level, on top of somebody else&rsquo;s frozen base. Ongoing
           reasoning and tool calls stay inside the chosen specialist; finished work is handed between them as
           summaries rather than shared state.

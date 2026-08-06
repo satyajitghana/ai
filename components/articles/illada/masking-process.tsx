@@ -118,11 +118,11 @@ export function MaskingProcess() {
           The &ldquo;noise&rdquo; here is masking, not Gaussian — an absorbing-state
           diffusion over discrete tokens. The model sees the corrupted sequence and
           predicts the originals, but the loss only counts the{" "}
-          <span className="text-foreground">{nMasked}</span> masked positions, scaled by{" "}
-          <span className="text-foreground">1/t = {weight.toFixed(2)}</span> so heavily-
+          <span className="text-foreground">{nMasked}</span>{" "}masked positions, scaled by{" "}
+          <span className="text-foreground">1/t = {weight.toFixed(2)}</span>{" "}so heavily-
           and lightly-masked samples both pull their weight. Averaged over all t, this is
           an upper bound on the negative log-likelihood — the same objective iLLaDA keeps
-          through pre-training <em>and</em> fine-tuning.
+          through pre-training <em>and</em>{" "}fine-tuning.
         </p>
       </div>
     </figure>

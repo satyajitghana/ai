@@ -98,7 +98,7 @@ export function TaperSchedule() {
 
         {/* readout */}
         <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-[11px] text-muted-foreground">
-          <span>total MLP params <span className="text-foreground">{relTotal}×</span> — held fixed</span>
+          <span>total MLP params <span className="text-foreground">{relTotal}×</span>{" "}— held fixed</span>
           <span>early : late width <span className="text-foreground">{s === 0 ? "1.0 : 1.0" : `${ratio} : 1`}</span></span>
         </div>
 

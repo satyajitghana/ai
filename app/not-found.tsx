@@ -22,7 +22,7 @@ export default function NotFound() {
     <PageShell>
       <div className="font-mono text-sm">
         <p className="text-muted-foreground">
-          <span className="text-foreground/70">$</span> cat $REQUESTED_PATH
+          <span className="text-foreground/70">$</span>{" "}cat $REQUESTED_PATH
         </p>
         <p className="mt-3">
           <span className="text-muted-foreground">cat: </span>

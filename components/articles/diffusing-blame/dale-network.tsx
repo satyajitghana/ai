@@ -179,16 +179,16 @@ export function DaleNetwork() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           {dale ? (
             <>
-              Under Dale&apos;s principle, neuron <span className="text-foreground">S{sel}</span> is committed:{" "}
+              Under Dale&apos;s principle, neuron <span className="text-foreground">S{sel}</span>{" "}is committed:{" "}
               <span style={{ color: selType > 0 ? EXC : INH }}>{selType > 0 ? "excitatory" : "inhibitory"}</span>, so{" "}
-              <span className="text-foreground">all {NT}</span> of its outgoing weights carry the same sign. The net keeps
+              <span className="text-foreground">all {NT}</span>{" "}of its outgoing weights carry the same sign. The net keeps
               separate E and I populations; a unit can never send a + edge to one target and a − edge to another.
             </>
           ) : (
             <>
               In a standard net, each weight is free to take either sign. Neuron <span className="text-foreground">S{sel}</span>{" "}
-              sends <span style={{ color: EXC }}>{plusCount} excitatory</span> and{" "}
-              <span style={{ color: INH }}>{minusCount} inhibitory</span> synapses at once — a single unit acts with both
+              sends <span style={{ color: EXC }}>{plusCount} excitatory</span>{" "}and{" "}
+              <span style={{ color: INH }}>{minusCount} inhibitory</span>{" "}synapses at once — a single unit acts with both
               signs. Biology forbids this; the sign is a property of the neuron, not the synapse.
             </>
           )}

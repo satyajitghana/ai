@@ -190,13 +190,13 @@ export function DataFlywheel() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Stage 1, the raw rollout, has essentially <span className="text-foreground">no passing trajectories</span> — a dead
-          gradient. Stage 2 injects <span style={{ color: PASS }}>process-level hints</span> that recover near-misses,
+          Stage 1, the raw rollout, has essentially <span className="text-foreground">no passing trajectories</span>{" "}— a dead
+          gradient. Stage 2 injects <span style={{ color: PASS }}>process-level hints</span>{" "}that recover near-misses,
           lifting the pass rate from ~0% to about 20%. But hint-conditioned trajectories would teach the model to expect
           hints it will never get at test time, so stage 3 <span className="text-foreground">replays the same tasks
-          hint-free</span> and keeps only the ones that still recover (the crossed-out cells are hint-dependent and
+          hint-free</span>{" "}and keeps only the ones that still recover (the crossed-out cells are hint-dependent and
           discarded — no leakage). Stage 4’s process-score filter then drops exploitative or unstable trajectories. What
-          survives is a small set of <span style={{ color: PASS }}>verified patches</span> that look like ordinary,
+          survives is a small set of <span style={{ color: PASS }}>verified patches</span>{" "}that look like ordinary,
           hint-free work.
         </p>
       </div>

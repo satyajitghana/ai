@@ -170,8 +170,8 @@ export function ControlledSwap() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Only the middle box changes. Flip it from the{" "}
-          <span className="text-foreground">frozen production loop</span> to the{" "}
-          <span style={{ color: ACCENT }}>Writer Harness</span> and, with the six models held
+          <span className="text-foreground">frozen production loop</span>{" "}to the{" "}
+          <span style={{ color: ACCENT }}>Writer Harness</span>{" "}and, with the six models held
           constant, cost drops 41%, wall-clock 44%, and tokens 38% — while task-completion quality
           holds at parity (0.78 → 0.81). The lever is the orchestration layer, not the model.
         </p>

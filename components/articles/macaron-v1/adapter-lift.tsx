@@ -118,7 +118,7 @@ export function AdapterLift() {
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
           Read the coloured segment as the adapter contribution. Most of it is a real but modest{" "}
           <span className="text-foreground">3 to 6 points</span>, and on{" "}
-          <span className="text-foreground">T3-Bench</span> and{" "}
+          <span className="text-foreground">T3-Bench</span>{" "}and{" "}
           <span className="text-foreground">SWE Atlas QnA</span>{" "}it is inside noise at +0.2 and +0.6. Then there
           is UI4ABench: <span style={{ color: ACCENT }}>+20.7</span>{" "}on Venti and{" "}
           <span style={{ color: ACCENT }}>+25.4</span>{" "}on Tall. That is the clearest evidence the method does

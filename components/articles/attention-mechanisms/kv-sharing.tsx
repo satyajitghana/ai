@@ -207,10 +207,10 @@ export function KvSharing() {
 
       <p className="mt-3 text-sm leading-6 text-muted-foreground">
         The KV cache — one key and value vector per head, per token, per layer — is what makes long-context decoding
-        memory-bound. <span className="text-foreground">GQA</span> lets several query heads share one KV head, so the
-        cache shrinks by the group factor with barely any quality loss; <span className="text-foreground">MQA</span> is
-        the limit of one KV head. <span style={{ color: IO }}>MLA</span> takes a different route: cache a single{" "}
-        <em>compressed latent</em> per token (DeepSeek-V2 caches <span className="text-foreground">(9/2)·d_h</span>, ≈
+        memory-bound. <span className="text-foreground">GQA</span>{" "}lets several query heads share one KV head, so the
+        cache shrinks by the group factor with barely any quality loss; <span className="text-foreground">MQA</span>{" "}is
+        the limit of one KV head. <span style={{ color: IO }}>MLA</span>{" "}takes a different route: cache a single{" "}
+        <em>compressed latent</em>{" "}per token (DeepSeek-V2 caches <span className="text-foreground">(9/2)·d_h</span>, ≈
         2.25 KV groups' worth) and reconstruct all the heads on the fly — matching or beating MHA quality. Its headline
         93.3% cache cut is measured against DeepSeek 67B, itself a GQA model, not against full MHA.
       </p>

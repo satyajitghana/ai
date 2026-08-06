@@ -87,7 +87,7 @@ export function LoopedDepth() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Both columns do <span style={{ color: ACCENT }}>{effective} layers</span> of computation. The looped
+          Both columns do <span style={{ color: ACCENT }}>{effective} layers</span>{" "}of computation. The looped
           one stores only {L} layers&rsquo; worth of weights and runs them {k} times; the standard one pays for
           all {effective} in parameters. Nanbeige ships <span style={{ color: ACCENT }}>×2</span>{" "}&mdash; the
           report finds it keeps ~75% of a standard Transformer&rsquo;s token efficiency while adding real capacity, and

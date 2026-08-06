@@ -107,7 +107,7 @@ export function PrefixReuseDrift() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Reuse is nearly free for a <span style={{ color: OK }}>step or two</span> — the loss moves a
+          Reuse is nearly free for a <span style={{ color: OK }}>step or two</span>{" "}— the loss moves a
           tenth of a percent — but by step four the cached prompt state has drifted far from what the
           updated parameters would produce, so it needs a <span style={{ color: BAD }}>recapture</span>.
           The systems question is never &ldquo;does response-only replay produce gradients&rdquo; but

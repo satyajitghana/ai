@@ -181,12 +181,12 @@ export function ApproxGap() {
             first-order approximation: {state}
           </span>
           <span className="text-muted-foreground">
-            dropped O(δ²) mass · gap = <span style={{ color: stateColor }}>{gap.toFixed(2)}</span> ({(relErr * 100).toFixed(1)}%)
+            dropped O(δ²) mass · gap = <span style={{ color: stateColor }}>{gap.toFixed(2)}</span>{" "}({(relErr * 100).toFixed(1)}%)
           </span>
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The surrogate keeps only the <span className="text-foreground">linear</span> term of the product. When every
+          The surrogate keeps only the <span className="text-foreground">linear</span>{" "}term of the product. When every
           ratio hugs 1, the two agree ({" "}
           <span style={{ color: ACCENT }}>≈</span>) and improving the cheap token objective improves the true reward.
           Widen either gap and the neglected second-order terms pile up — the surrogate stops tracking the objective (

@@ -184,7 +184,7 @@ export function MoeRouting() {
             ))}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
-            active params <span style={{ color: ACCENT }}>{dense ? "~1.57T (all experts)" : "~49.5B"}</span> of 1.57T ·{" "}
+            active params <span style={{ color: ACCENT }}>{dense ? "~1.57T (all experts)" : "~49.5B"}</span>{" "}of 1.57T ·{" "}
             <span className="text-foreground">{dense ? "1x" : "32x"} sparsity</span>
           </div>
         </div>
@@ -195,11 +195,11 @@ export function MoeRouting() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Every token takes the <span style={{ color: ACCENT }}>shared</span> expert plus its{" "}
-          <span className="text-foreground">top-2</span> routed picks — {activeTotal} of 129 experts, so a 1.57T-parameter
-          layer stack activates only about <span className="text-foreground">49.5B</span> parameters per token. The shared
+          Every token takes the <span style={{ color: ACCENT }}>shared</span>{" "}expert plus its{" "}
+          <span className="text-foreground">top-2</span>{" "}routed picks — {activeTotal} of 129 experts, so a 1.57T-parameter
+          layer stack activates only about <span className="text-foreground">49.5B</span>{" "}parameters per token. The shared
           expert never turns off (it carries the common computation), while the routed pair swings token to token — that
-          split is why the sparsity is <span className="text-foreground">32x</span> without starving the always-needed work.
+          split is why the sparsity is <span className="text-foreground">32x</span>{" "}without starving the always-needed work.
         </p>
       </div>
     </figure>

@@ -160,7 +160,7 @@ export function DecodeStream() {
 
         <p className="text-sm leading-6 text-muted-foreground">
           Vanilla decoding emits exactly one token per target forward. Speculative decoding emits{" "}
-          <span className="text-foreground">g</span> — and because the acceptance rule is exact, the text is identical either way. DSpark&rsquo;s job is to push the mean g up (better drafting) and spend forwards only where they pay off (smarter verification).
+          <span className="text-foreground">g</span>{" "}— and because the acceptance rule is exact, the text is identical either way. DSpark&rsquo;s job is to push the mean g up (better drafting) and spend forwards only where they pay off (smarter verification).
         </p>
       </div>
     </figure>

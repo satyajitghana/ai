@@ -74,7 +74,7 @@ export function TinyText() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The claim is a <span style={{ color: ACCENT }}>10px</span> floor — legible LaTeX subscripts,
+          The claim is a <span style={{ color: ACCENT }}>10px</span>{" "}floor — legible LaTeX subscripts,
           theorem numbers, and newspaper body copy. That&rsquo;s where most generators still turn text
           into texture, so it&rsquo;s the right thing to be sceptical of and the right thing to test.
         </p>

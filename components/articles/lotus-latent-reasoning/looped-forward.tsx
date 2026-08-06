@@ -180,7 +180,7 @@ export function LoopedForward() {
         {/* controls */}
         <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2">
           <div className="font-mono text-[11px] text-muted-foreground">
-            iteration <span style={{ color: ACCENT }}>t = {t}</span> of R = {R}
+            iteration <span style={{ color: ACCENT }}>t = {t}</span>{" "}of R = {R}
           </div>
           <div className="ml-auto font-mono text-[10px] text-muted-foreground">
             forward passes so far: <span style={{ color: ACCENT }}>{t}</span> · positions per pass:{" "}
@@ -194,10 +194,10 @@ export function LoopedForward() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The reasoning trace is not decoded token-by-token. All <span className="text-foreground">{K}×25 = 150</span> latent
-          positions are refined <span style={{ color: ACCENT }}>together</span> on every pass, and the whole thought phase is
-          just <span style={{ color: ACCENT }}>R = {R}</span> loops of the same weights. At the final iteration the base LM head
-          reads each position out to its <span style={{ color: GOLD }}>gold CoT-step token</span> — that readout is exactly what
+          The reasoning trace is not decoded token-by-token. All <span className="text-foreground">{K}×25 = 150</span>{" "}latent
+          positions are refined <span style={{ color: ACCENT }}>together</span>{" "}on every pass, and the whole thought phase is
+          just <span style={{ color: ACCENT }}>R = {R}</span>{" "}loops of the same weights. At the final iteration the base LM head
+          reads each position out to its <span style={{ color: GOLD }}>gold CoT-step token</span>{" "}— that readout is exactly what
           the step loss supervises.
         </p>
       </div>

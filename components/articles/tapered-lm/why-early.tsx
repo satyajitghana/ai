@@ -110,7 +110,7 @@ export function WhyEarly() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Later layers largely <span className="text-foreground">refine</span> rather than transform —
+          Later layers largely <span className="text-foreground">refine</span>{" "}rather than transform —
           they nudge the residual stream where early layers rewrite it. Uniform allocation ignores that
           and spends equal capacity everywhere. Tapering pours width into the layers doing the heavy
           lifting, which is why the same parameter budget buys a better model.
