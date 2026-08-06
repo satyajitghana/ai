@@ -1,0 +1,249 @@
+---
+title: "Intern-S2-Mobius: a 35B model that separates memory from reasoning"
+description: "Intern-S2-Mobius is a 35B model continual-pretrained from Qwen3.5-35B on a new architecture, Mobius-v0: forty decoder layers cycle through just four shared mixture-of-experts memory banks instead of each owning one, cutting reasoning traces up to 5.0x and average inference throughput up to 4.6x against a matched Transformer baseline. It ships on Hugging Face and ModelScope under Apache-2.0 with real, ungated bf16 weights — but the only reported comparison is against its own base model, not the frontier."
+date: 2026-08-06
+interest: 4
+helpful: 3
+tags:
+  - llm
+  - mixture-of-experts
+  - architecture
+  - linear-attention
+  - explainer
+draft: false
+cover: /articles/intern-s2-mobius/fig1.png
+---
+
+import { MemoryMap } from "@/components/articles/intern-s2-mobius/memory-map"
+import { TraceCompression } from "@/components/articles/intern-s2-mobius/trace-compression"
+
+[Intern-S2](/articles/intern-s2) was Shanghai AI Lab's case for specialization: a 397B model that
+learns straight off the raw page of a scientific paper. **Intern-S2-Mobius** is a different
+experiment entirely, and much smaller — 35B parameters, continual-pretrained from Qwen3.5-35B, and
+the point isn't science. It's architecture. The model card's claim is that you can pull a
+transformer apart into two pieces — a store of learned knowledge and the computation that queries
+it — and get a real efficiency win from doing so: reasoning traces up to 5.0&times; shorter,
+average throughput up to 4.6&times; higher, at matched or better scores than the plain Transformer
+it's compared against.
+
+That comparison is the thing to hold onto while reading this. Mobius isn't benchmarked against
+GPT-5.5, Gemini, or even other 35B-class open models — every number on its card is Mobius versus
+its own base model, Qwen3.5-35B, continual-pretrained the same way. It's an ablation, not a
+leaderboard entry. That makes it a cleaner test of what the architecture buys, and a much weaker
+basis for "should I use this instead of X."
+
+## What it is
+
+- **35B parameters**, bf16, five safetensors shards on Hugging Face totalling about 73 GB — not
+  gated, apache-2.0, actually downloadable.
+- **`image-text-to-text`**: a vision tower (27 layers, 1152-wide, patch 16 — the same depth and
+  width as the SigLIP-So400M family of encoders used across a lot of current VLMs) feeds a text
+  backbone with a 256K-token context window.
+- **Continual-pretrained from Qwen3.5-35B**, then SFT and RL, on a new architecture the card calls
+  **Mobius-v0**, "realized by Xtuner and LMDeploy."
+- Deploys single-GPU on LMDeploy, vLLM, or Transformers, with an `mtp` speculative-decoding mode
+  (`qwen3_5_mtp`) recommended in the quickstart.
+
+The README links InternLM's [ArchSpace](https://github.com/InternLM/archspace) — a public
+architecture-experimentation program that turns community proposals into trained, evaluated,
+published results — as a related project. It doesn't say Mobius came out of that pipeline, so I'm
+not claiming it did; it's worth knowing the program exists, because it's the same lab publicly
+running exactly this kind of experiment at scale.
+
+## What "Mobius" names
+
+Not a routing scheme, not a training recipe — an architecture. The card's own framing:
+
+> Instead of binding knowledge storage and reasoning computation layer by layer as in conventional
+> Transformer models, Mobius organizes knowledge into a globally shared **Memory** and lets
+> multiple **Reasoners** iteratively query and refine hidden states against this shared repository.
+
+Two capabilities follow from that split, per the card: **Backward Residual Connection** (a deep
+layer can reach knowledge a shallow layer used, not just what forward propagation handed it), and
+**Dynamic Latent Reasoning** (deliberation gets internalized into hidden states instead of written
+out as visible chain-of-thought tokens). Both are described in prose. The released code lets you
+check what's literally true of the shipped model versus what's evocative marketing language for
+the same idea — and it turns out you can, because InternLM shipped the modeling file along with
+the weights.
+
+## Forty layers, four memory banks
+
+Here's what `modeling_interns2_mobius.py` actually does. `config.json` sets `num_blocks: 4`. The
+model builds exactly four `InternS2MobiusMetaMoeBlock` objects — each one a router plus 2560
+routed experts — and holds them in one list, `meta_mlp`. Every one of the 40 decoder layers keeps
+its own attention and layernorms, but for its routed-expert lookup it computes
+`block_idx = layer_idx % num_blocks` and reads from `meta_mlp[block_idx]`. Layers 0, 4, 8 … 36 all
+route into the *same physical weight tensors* — not four separately-trained-but-similar banks, one
+set of parameters, referenced by ten different layers.
+
+<MemoryMap />
+
+A standard MoE transformer ties knowledge to depth: layer *k* owns bank *k*, and whatever it
+learned lives only there. Mobius reuses the same four banks across the whole stack instead, so a
+layer near the input and a layer near the output can draw on the identical knowledge subspace.
+That's the concrete mechanism behind "Backward Residual Connection" — not a literal skip connection
+running backward through the network, but a shared address space that any depth can query. It's
+also a real parameter-efficiency trade: with four banks instead of forty, the routed-expert weight
+mass is
+
+$$
+\theta_{\text{experts}} \approx N_{\text{blocks}} \times N_{\text{experts}} \times
+\big(2\,d_{\text{ffn}}\,d_{\text{model}} + d_{\text{model}}\,d_{\text{ffn}}\big)
+= 4 \times 2560 \times 3{,}145{,}728 \approx 32.2\text{B params},
+$$
+
+roughly 90% of the model's total, and roughly consistent with the ~36.5B implied by the 73 GB of
+bf16 weights on disk. Per token, only one bank is queried per layer and only 8 of its 2560 experts
+fire — call it ~28M active FFN parameters per layer (8 routed experts plus the always-on per-layer
+shared expert), times 40 layers. That's a back-of-envelope estimate from `config.json`, not a
+number the card states; unlike [Intern-S2-Preview-397B's](/articles/intern-s2) plain top-8-of-512
+math, Mobius's shared-bank routing makes a clean "active parameters" headline harder to state, and
+InternLM doesn't attempt one.
+
+One more thing falls out of matching two arrays in the same config: `layer_types` cycles
+linear-attention, linear-attention, linear-attention, full-attention every four layers
+(`full_attention_interval: 4`), the same period as the memory-bank assignment. Bank 3 is *always*
+the one full-attention layer in its group of four; banks 0–2 are always linear attention — a Gated
+DeltaNet variant, the same family covered in [KDA's half-life](/articles/kda-half-life) for Kimi
+K3's linear attention. That alignment isn't asserted anywhere in the README. It's just what the two
+config arrays do when you line them up.
+
+Whether "iteratively query and refine" is literally true of inference is a fair question to ask of
+any of this. The released `InternS2MobiusTextModel.forward()` is a single straight-through pass
+over 40 layers — no runtime loop, no repeated pass over the same weights within one layer. What
+does repeat, ten times, is the pattern: attend, then query one of four shared memory banks, at
+increasing depth. If that reads like an unrolled recurrence rather than free-form iteration, that's
+a fair description — it's a coarser, more surgical form of weight sharing than a fully [looped
+transformer](/articles/looped-models-done-right), which ties whole layers (attention included)
+across depth, or [LOTUS](/articles/lotus-latent-reasoning), which loops the same weights over a
+fixed latent region multiple passes per token. Mobius ties only the expert banks, once each, spread
+across depth rather than iterated in place.
+
+## The benchmarks
+
+Everything on the card is Mobius vs. Qwen3.5-35B — its own continual-pretraining source, not a
+frontier model. On general reasoning:
+
+<BenchBars
+  title="General tasks · average score"
+  unit=""
+  bars={[
+    { label: "Intern-S2-Mobius-35B", value: 67.88, highlight: true },
+    { label: "Qwen3.5-35B (base)", value: 65.05 },
+  ]}
+/>
+
+The average hides a mixed picture. Mobius leads on MMLU Pro (89.05 vs 85.31), IMO Bench (81.25 vs
+77.50), HMMT 2026 (85.51 vs 78.50), AIME 2026, GPQA Diamond, AMO, and SimpleQA. It loses on two:
+UGD hard (73.02 vs Qwen's 78.02) and HLE (19.11 vs 22.40) — worth stating plainly, since the card's
+own bullet points don't mention either.
+
+Scientific tasks show the wider gap, and it's the same shape as the S2-Preview-397B story at a
+different scale:
+
+<BenchBars
+  title="Scientific tasks · average score"
+  unit=""
+  bars={[
+    { label: "Intern-S2-Mobius-35B", value: 52.14, highlight: true },
+    { label: "Qwen3.5-35B (base)", value: 18.20 },
+  ]}
+/>
+
+Biology-Instructions carries that average almost alone: 51.40 vs 3.77, a 13.6&times; gap. Mol-Instructions
+(45.73 vs 21.70) and MolecularIQ (59.29 vs 29.13) are more modest but still roughly double. I'd read
+this less as "Mobius learned multi-omics" and more as evidence that whatever mix of continual
+pretraining and RL Shanghai AI Lab runs across the Intern-S2 family leans hard on scientific data —
+consistent with, though far less extreme than, [Intern-S2-Preview-397B's](/articles/intern-s2) own
+scientific dominance.
+
+<Figure
+  src="/articles/intern-s2-mobius/fig3.png"
+  alt="Benchmark table comparing Intern-S2-Mobius-35B against Qwen3.5-35B on general tasks (MMLU Pro, GPQA Diamond, IMO Bench, AIME 2026, HMMT 2026, UGD hard, AMO, SimpleQA, HLE) and scientific tasks (Biology-Instructions, Mol-Instructions, MolecularIQ), with the higher score in each row bolded."
+  caption="The full comparison table — Mobius vs. its own base model, no external frontier models included (Intern-S2-Mobius model card, 2026)."
+/>
+
+## Shorter traces, faster serving
+
+The headline claim is "nearly 4x speedup reported in the technical report" — a report the model
+card references but never links or cites; there's no arXiv listing for Mobius as of this writing. What the card does show directly is Fig. 1: request throughput at batch sizes 16 through
+256, averaged across six reasoning benchmarks, with Mobius **2.9&times; faster at batch 16 and
+4.6&times; faster at batch 256**.
+
+<Figure
+  src="/articles/intern-s2-mobius/fig1.png"
+  alt="Line charts of request throughput versus batch size (16 to 256) for Mobius and a Transformer baseline, averaged and broken out per benchmark: MMLU Pro, GPQA Diamond, IMO Bench, AIME 2026, and HMMT 2026. The average panel shows Mobius 2.9x faster at batch 16 growing to 4.6x faster at batch 256."
+  caption="Request throughput, Mobius vs. Transformer baseline, by batch size (Intern-S2-Mobius model card, Fig. 1, 2026)."
+/>
+
+Zoom into the five subplots behind that average and the story isn't uniform. MMLU Pro and GPQA
+Diamond show a wide, cleanly growing gap in Mobius's favor — that's most of what drags the average
+up. The three math-competition benchmarks look nothing like it. On **AIME 2026 and HMMT 2026 the
+lines cross, and the Transformer baseline is the faster of the two at three of the five batch sizes
+plotted** — including 2⁷, where AIME's gap is widest in the baseline's favour. IMO Bench does stay
+in Mobius's favour at every point, but by a margin closer to 1.1&times; than to anything in the
+headline. The 2.9&ndash;4.6&times; number describes the boxed average panel. It doesn't describe
+every benchmark that average is built from, and the chart says so plainly if you look past the box.
+
+Most of the throughput gain traces back to shorter output, not cheaper per-token compute — Fig. 2
+gives average trace length directly, and the "Nx shorter" figures on it are exact, not
+chart-estimated:
+
+<TraceCompression />
+
+<Figure
+  src="/articles/intern-s2-mobius/fig2.png"
+  alt="Bar charts of average reasoning-trace length in tokens, Mobius vs. Transformer baseline, averaged and per benchmark: MMLU Pro (4.6x shorter), GPQA Diamond (5.0x shorter), IMO Bench (1.4x shorter), AIME 2026 (1.5x shorter), HMMT 2026 (1.2x shorter), average 1.5x shorter."
+  caption="Average output length: Mobius vs. Transformer baseline, per benchmark (Intern-S2-Mobius model card, Fig. 2, 2026)."
+/>
+
+The same pattern repeats: GPQA Diamond and MMLU Pro compress the most and are also where the
+throughput gap is widest and cleanest; the math-competition benchmarks compress the least and are
+where the throughput lines cross. Shorter traces plus fewer live tokens in the KV cache is a
+coherent story for why throughput goes up — it just doesn't go up evenly.
+
+<Callout type="warn">
+Card gaps worth naming plainly. There's no linked technical report or arXiv paper — "reported in
+the technical report" points at a document I could not find. No active-parameter figure is given
+(fair, given the shared-bank routing makes one less simple to state than usual). Every benchmark
+comparison is against Qwen3.5-35B specifically, not against any external model, so there's no
+frontier read and no read against comparably-sized open peers either. And one of the card's own
+figures — the reasoning-trace case study — labels its Mobius column **"Intern-Spin-35B"** instead
+of Intern-S2-Mobius-35B, an internal-codename leftover that suggests the card was assembled in a
+hurry.
+</Callout>
+
+## Licence, and whether you can run it
+
+Apache-2.0, same family as [Intern-S2-Preview-397B](/articles/intern-s2). The weights are real:
+five bf16 safetensors shards on Hugging Face (`internlm/Intern-S2-Mobius`), about 73 GB total, not
+gated, mirrored on ModelScope. That's a workstation-class footprint next to the 397B model's
+frontier-hardware requirement — LMDeploy's quickstart serves it on a single GPU (`--tp 1`), MTP
+speculative decoding recommended for the throughput numbers above.
+
+## What I make of it
+
+- **The mechanism is real and it's in the code, not just the prose.** `block_idx = layer_idx %
+  num_blocks` is a two-line change with a genuinely different parameter-sharing shape than a
+  standard MoE — four memory banks instead of forty, each queried by ten layers spread across
+  depth. That's checkable, and it checks out.
+- **"Dynamic Latent Reasoning" oversells what the inference code shows.** There's no runtime loop —
+  it's a single forward pass with a repeating depth-wise pattern, which is a more modest and more
+  precise thing than "iterative refinement" suggests.
+- **The efficiency win is real but uneven, and it tracks trace compression.** Where output collapses
+  — GPQA Diamond 5.0&times; shorter, MMLU Pro 4.6&times; — throughput climbs cleanly. Where it barely
+  moves — HMMT 1.2&times;, IMO Bench 1.4&times;, AIME 1.5&times; — the throughput advantage narrows to
+  nothing or inverts. That is a coherent mechanism rather than a mystery: the speedup is mostly
+  fewer tokens, not cheaper tokens. It also means the gain should be expected to shrink on any task
+  where the model still needs to think at length.
+- **This is an ablation, not a leaderboard entry.** Every comparison on the card is Mobius against
+  its own untouched base model. That's the right comparison for isolating what the architecture
+  buys. It's the wrong comparison for deciding whether to run Mobius instead of anything else.
+
+---
+
+*Sources: the [Intern-S2-Mobius model card](https://huggingface.co/internlm/Intern-S2-Mobius)
+(README, `config.json`, `configuration_interns2_mobius.py`, `modeling_interns2_mobius.py`) and the
+[Intern-S2-Preview-397B model card](https://huggingface.co/internlm/Intern-S2-Preview-397B), both
+InternLM / Shanghai AI Lab. Benchmark numbers and figures are quoted as reported on the Mobius
+model card; no independent technical report or arXiv paper could be located.*
