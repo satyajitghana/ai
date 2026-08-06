@@ -1,0 +1,264 @@
+---
+title: "TencentDB Agent Memory: the four-tier pyramid is really a cache-stability hierarchy"
+description: "Tencent's open-source agent memory system layers conversations into L0–L3 and looks, at first, like every other summarization hierarchy. Reading the source, the layers are sorted by volatility rather than abstraction: only the tiers that rarely change are allowed into the cached system prompt, and everything that moves is demoted to a tool call. That is a token-economics decision wearing a knowledge-management costume — plus a transparent OpenAI/Anthropic proxy, real RRF retrieval, an ACL with a documented privacy fix, and one benchmark number with nothing behind it."
+date: 2026-08-06
+interest: 4
+helpful: 4
+tags:
+  - agents
+  - memory
+  - context-management
+  - open-source
+  - retrieval
+  - explainer
+cover: /articles/tencentdb-agent-memory/fig2.png
+---
+
+import { InjectionPolicy } from "@/components/articles/tencentdb-agent-memory/injection-policy"
+import { RecallCaps } from "@/components/articles/tencentdb-agent-memory/recall-caps"
+
+[TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) is Tencent Cloud's
+open-source memory layer for coding agents — MIT, TypeScript, about 148,000 lines across three
+services, with adapters for OpenClaw, Hermes, Claude Code and CodeBuddy. The pitch is the one every
+agent-memory product makes: stop re-explaining your project to every new session.
+
+The pitch is not the interesting part. The interesting part is a decision buried in a source comment,
+which reframes the whole design and is worth stealing whether or not you ever run this software.
+
+## The pyramid everyone builds
+
+Start with what the README shows you. Conversations are captured raw and refined by an async
+pipeline into four levels:
+
+<Figure
+  src="/articles/tencentdb-agent-memory/fig2.png"
+  alt="Four-tier memory pyramid: L0 Raw Log preserving raw conversations and event streams, L1 Atomic Memory extracting facts, preferences, constraints and states, L2 Scene Block clustered by project or workflow scenario, and L3 Persona holding stable profiles of user preferences and service styles."
+  caption="The L0–L3 memory hierarchy: raw dialogue distilled into structured facts, then scene awareness, then a stable profile (TencentDB Agent Memory, project README, 2026)."
+/>
+
+So far this is the standard picture, and on its own it does not tell you much — "summarize old things
+into shorter things" describes most memory systems ever built. The obvious reading is that the
+pyramid is about *abstraction*: L1 is more general than L0, L3 more general than L2.
+
+Read the code and a different axis appears.
+
+## Sorted by volatility, not abstraction
+
+`MemoryProxy/src/injection/injectors/tdai-profile-memory-injector.ts` opens with a comment
+explaining how each tier reaches the model, and the three answers are all different:
+
+- **L3 persona** — injected in full. "稳定且通常较短" — stable and usually short.
+- **L2 scenarios** — **only the scene-navigation index** goes in: a list of paths plus a one-line
+  summary each. The stated reason is that L2 full text "经常上千 chars × N 个" — often thousands of
+  characters times N blocks. The agent reads the full scene through a tool once it has decided the
+  scene matters.
+- **L0 and L1** — not injected at all on this path. The comment is blunt: "不再自动召回" — no longer
+  auto-recalled. They are exposed as read-only search tools.
+
+The proxy README gives the reason in one clause, and it is the whole thesis of the system:
+
+> injects Skills, Knowledge and Memory L2/L3 into the system prompt on demand; L0/L1 are exposed as
+> read-only tools for the model to query proactively, **avoiding upstream KV-cache invalidation**.
+
+<InjectionPolicy />
+
+That is a token-economics argument, not a knowledge-management one. Anything you put in the system
+prompt that differs from last turn breaks the provider's prompt cache and makes you re-pay for the
+entire prefix — so the question "which tier goes where" is really "which tier is stable enough to
+sit in a cached prefix." Sorted that way, the pyramid falls out for a completely different reason
+than the abstraction story suggests. L3 is at the top not because it is the most abstract but
+because it is the most *stable*. L0 is at the bottom because it grows every single turn.
+
+The discipline shows up again in the deployment guide, which is where you can tell someone has run
+this in production:
+
+> For multi-node deployments you must use `storage.backend=cos` and explicitly set
+> `injection.externalGatewayUrl`, otherwise each instance caches independently and causes upstream
+> KV-cache misses.
+
+Treating a prompt-cache miss as a documented operational failure mode — in an *installation* doc — is
+not something most agent-memory projects think to do. It rhymes with what [the harness
+effect](/articles/harness-effect) argued from the other direction: the orchestration layer, not the
+model, sets the bill.
+
+<Callout type="note">
+The same repository makes the opposite choice on its other integration path. `MemoryCore`'s
+`auto-recall` hook — used by the OpenClaw plugin — *does* automatically retrieve L1 and inject it
+into context before the agent runs. So the product ships two integration surfaces with two different
+injection policies, and only the proxy one is cache-preserving. Neither doc mentions the divergence.
+If you are evaluating this, which path you take changes the token behaviour substantially.
+</Callout>
+
+## The retrieval underneath is real
+
+It would be easy to ship "hybrid search" as a marketing phrase. This is not that. `auto-recall.ts`
+runs FTS5 BM25 for the keyword side and cosine similarity over a vector store for the dense side,
+then merges the two rank lists with reciprocal rank fusion, with the constant spelled out and
+attributed:
+
+```typescript
+// RRF merge: k=60 is a standard constant from the RRF paper
+const RRF_K = 60;
+```
+
+Scoring a record at rank *r* as $1/(k + r)$ and summing across lists is the standard formulation, and
+k = 60 is the value from Cormack et al. If the backing store can do dense-plus-sparse-plus-RRF
+server-side it short-circuits to one API call; on the SQLite path it runs both sides in parallel and
+fuses client-side. There is a graceful degradation if FTS5 is unavailable — the keyword list comes
+back empty and RRF operates on the dense side alone.
+
+This is the same fusion idea this site's own search uses, and it is the right default: BM25 finds the
+document that says the exact identifier you typed, embeddings find the one that means what you meant,
+and RRF combines them without needing calibrated scores from either.
+
+## What actually bounds an injection
+
+The README says results are "further capped by item count, character budget, and timeout limits to
+prevent memory from overwhelming the context window." Checking the shipped defaults in
+`MemoryCore/src/config.ts`, that is two-thirds true.
+
+<RecallCaps />
+
+`maxResults` defaults to 5, `scoreThreshold` to 0.3, `timeoutMs` to 5000 — all binding. But
+`maxCharsPerMemory` and `maxTotalRecallChars` both default to **0**, and the budgeting function
+short-circuits when they are:
+
+```typescript
+if (!maxCharsPerMemory && !maxTotalRecallChars) {
+  return lines;
+}
+```
+
+So the character budget exists, is properly implemented with truncation markers and drop counts, and
+ships turned off. Five results still bounds things, but five results of unbounded length is a
+different guarantee than the sentence implies — and a single sprawling L1 memory is exactly the case
+a character budget exists to catch. It is a one-line config fix, not a design flaw, but you have to
+know to make it.
+
+A smaller drift in the same file: `l1IdleTimeoutSeconds` is documented in its own doc comment as
+"default: 30" and initialized to `600`. Twenty times the documented value.
+
+## The guide it injects into your agent
+
+One more thing the code shows that no doc mentions. Alongside the memories, MemoryCore injects a
+usage guide telling the model how to retrieve more — and it is hardcoded **in Chinese**, in a
+repository whose README, install guide and contributing guide are all bilingual:
+
+```text
+### ⚠️ 调用次数限制
+每轮对话中，tdai_memory_search 和 tdai_conversation_search 合计最多调用 3 次。
+```
+
+*"Per conversation turn, `tdai_memory_search` and `tdai_conversation_search` may be called at most
+3 times combined."* The guide goes on to instruct the model that if three searches turn up nothing,
+the information is not in memory and it should answer from what it has rather than keep searching.
+
+Two observations. The **3-call ceiling is a good idea** — an agent that can search its own memory
+without limit will, and each miss costs a round trip. Naming the budget in the prompt and telling the
+model what to do when it is exhausted is more thoughtful than most retrieval integrations manage.
+And the **language is a real deployment consideration**: a fixed Chinese-language instruction block
+enters the context of every agent this wraps, including English ones. Models handle it, but it
+consumes tokens in a tokenizer that is not optimized for it and it sets the instruction language for
+that portion of the prompt.
+
+## Permissions, checked against the code
+
+The visibility model is the part I expected to be thinnest and it is the most carefully built. The
+README promises `private` means private "not even team admins," and `permission-checker.ts` backs it
+with a dated comment explaining the choice:
+
+```typescript
+case "private":
+  // 私密语义（2026-07 变更）：严格私密，只有 owner_user_id 能访问。
+  // 团队 admin 也不放行 —— 因为第 2 步 owner 判定已优先返回 ALLOW，
+  // 走到这里说明当前 user 不是 owner，即使是 admin 也一律拒绝。
+  return { allowed: false, reason: "visibility_restricted" };
+```
+
+A July 2026 semantics change, the reasoning preserved in the source, and the consequences enumerated
+underneath it — including that admin `list-accessible` calls must not return other people's private
+assets. That is a team that had the "should admins see everything?" argument and wrote down how it
+ended.
+
+One gap worth naming, because the README's framing does not survive it. `restricted` is described as
+"precise access via User / Role / Agent ACLs," and for ordinary members that is exactly what the code
+does — an explicit ACL match is the only way in. But the check is gated on `membership.role !==
+"admin"`, so **team admins skip the ACL entirely** and fall through to role defaults. Defensible —
+someone has to administer the thing — but "strict ACL whitelist" is true for members and not for
+admins, and the docs do not say so.
+
+## The architecture, briefly
+
+<Figure
+  src="/articles/tencentdb-agent-memory/fig1.png"
+  alt="System diagram: conversations, workflow executions, documents and codebases feed a Memory Processing block producing L0 Conversation, L1 Atom, L2 Scenario and L3 Persona plus Skills, Wiki and CodeGraph; these become Memory Assets, managed by Memory Hub for binding, access control and versioning, then assembled per-identity for a new task."
+  caption="How the pieces fit: four asset types produced by different pipelines, unified as Memory Assets, then bound to agents through the Hub (TencentDB Agent Memory, project README, 2026)."
+/>
+
+Three services. **MemoryCore** owns storage and the L0→L3 pipeline. **MemoryKnowledge** builds the
+Wiki and CodeGraph assets. **MemoryProxy** is the clever piece: a transparent LLM proxy that forwards
+OpenAI `/v1/chat/completions` and Anthropic `/v1/messages` verbatim, doing session setup, injection
+and write-back on the way past. Point your coding agent's base URL at it and you get team memory
+"without changing a single line of code."
+
+That is a genuine integration strategy rather than a shortcut. It also means the proxy sits in the
+path of every request and every response, holding your model credentials, which is a trust decision
+worth making deliberately rather than by following a quickstart.
+
+The unification is the real product claim: Chat Memory, Skills, Wiki and CodeGraph are all registered
+as **Memory Assets** with owner, version, status, visibility and agent bindings, retrieved through
+one permission-scoped surface. The README's comparison table puts it well — RAG answers "what can be
+found?", and this also answers "who can use it, which version is valid, and which agent should
+receive it." Whether that ontology is worth its complexity depends entirely on whether you have a
+team; for one person with one agent it is overhead.
+
+## The number
+
+There is exactly one benchmark in the repository, and it is in the README:
+
+| Benchmark | Without | With | Relative |
+|---|---|---|---|
+| PersonaMem | 48% | 76% | +59% |
+
+That is the entire evaluation. No harness, no model named, no agent configuration, no seed count, no
+link to a run. I searched the repository for any other mention of PersonaMem and found two — the same
+table in the Chinese README. So there is no reproduction script here, and the claim is first-party
+and unreplicated.
+
+To be fair on two counts: a memory layer improving a *memory* benchmark is not a surprising result,
+and the repository's own Notes section is refreshingly frank about what is unfinished — CodeGraph
+"currently prioritizes public HTTPS repositories," the Hub supports manual binding while "fully
+automated memory routing is still under iteration," and Team Memory is labelled Beta. A project that
+tells you which parts are not done yet has earned some patience about the parts it has not measured.
+
+The provenance is also handled properly. The acknowledgements credit
+[CodeGraph](https://github.com/colbymchenry/codegraph) for code the CodeGraph module "uses," Nous
+Research's Hermes Agent for part of the Skill management code, and Karpathy's LLM-wiki gist for the
+Wiki design — specific about what was borrowed rather than a generic thank-you list.
+
+## The take
+
+Most agent-memory projects are a retrieval index with an ontology bolted on, and the ontology is
+where the marketing lives. This one has a real idea underneath it, and the idea is not the pyramid.
+It is that **memory has to be sorted by how often it changes, because the cost of memory is not
+storage, it is the prompt prefix you invalidate by updating it.** Once you see the four tiers as a
+cache-stability ordering rather than an abstraction ordering, the delivery mechanism for each one
+stops being arbitrary: stable things get injected, semi-stable things get injected as an index,
+volatile things become tools with a call budget.
+
+That principle is portable to any agent you are building, with or without this software. What comes
+with the software is a competent hybrid retriever, a genuinely careful permission model, a
+transparent proxy that is a real integration story and a real trust decision, one unreplicated
+benchmark number, two integration paths that disagree about injection policy, and a character budget
+you should turn on before you rely on it.
+
+---
+
+*Sources: the [TencentDB-Agent-Memory repository](https://github.com/TencentCloud/TencentDB-Agent-Memory)
+at its 2026-08-06 state — `README.md`, `INSTALL.md`, `MemoryProxy/README.md`, and the TypeScript in
+`MemoryCore/src/config.ts`, `MemoryCore/src/core/hooks/auto-recall.ts`,
+`MemoryCore/src/metadata/service/permission-checker.ts` and
+`MemoryProxy/src/injection/injectors/`. Both figures are the project's own, flattened onto white;
+the pyramid is its English-language variant. Chinese source comments are quoted verbatim with my
+translations. The PersonaMem figure is the project's own and is not independently replicated. Both
+interactives are mine.*
