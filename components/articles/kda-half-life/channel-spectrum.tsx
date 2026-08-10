@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mlog, mlog10, mpow } from "@/lib/dmath"
 
 // Why per-channel decay is the interesting part. A single alpha gives one
 // memory horizon. KDA learns alpha per channel, so one head carries a whole
@@ -17,13 +18,13 @@ const COOL = "oklch(0.55 0.13 220)"
 // A representative spread of retention factors, fast to slow.
 const CHANNELS = [0.6, 0.85, 0.95, 0.99, 0.997, 0.9995, 0.99993, 0.999995, 0.9999993]
 
-const halfLife = (a: number) => Math.log(0.5) / Math.log(a)
+const halfLife = (a: number) => mlog(0.5) / mlog(a)
 
 const LOG_MIN = 0 // 10^0 = 1 token
 const LOG_MAX = 6 // 10^6 = 1M tokens
 
 function pos(n: number): number {
-  const l = Math.log10(Math.max(n, 1))
+  const l = mlog10(Math.max(n, 1))
   return Math.min(100, Math.max(0, ((l - LOG_MIN) / (LOG_MAX - LOG_MIN)) * 100))
 }
 
@@ -41,7 +42,7 @@ export function ChannelSpectrum() {
   const [ctxK, setCtxK] = useState(128) // context length in thousands of tokens
   const ctx = ctxK * 1000
 
-  const survive = (a: number) => Math.pow(a, ctx)
+  const survive = (a: number) => mpow(a, ctx)
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">

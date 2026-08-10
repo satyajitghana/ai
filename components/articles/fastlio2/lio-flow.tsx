@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { mcos, mhypot, msin } from "@/lib/dmath"
 
 // The FAST-LIO2 cycle as a loop, one stage at a time — what each step does and why it has
 // to be there. The loop runs at LiDAR rate; the IMU drives the predict between scans.
@@ -82,7 +83,7 @@ const NH = 30 // node height
 
 const n = STAGES.length
 const angle = (i: number) => -Math.PI / 2 + (i * 2 * Math.PI) / n // start at top, clockwise
-const nodePos = (i: number) => ({ x: CX + RX * Math.cos(angle(i)), y: CY + RY * Math.sin(angle(i)) })
+const nodePos = (i: number) => ({ x: CX + RX * mcos(angle(i)), y: CY + RY * msin(angle(i)) })
 
 // curved connector from node i to node i+1, bowing outward along the ring
 function edge(i: number) {
@@ -93,7 +94,7 @@ function edge(i: number) {
   // push control point radially outward from centre
   const dx = mx - CX
   const dy = my - CY
-  const len = Math.hypot(dx, dy) || 1
+  const len = mhypot(dx, dy) || 1
   const push = 26
   const cx = mx + (dx / len) * push
   const cy = my + (dy / len) * push

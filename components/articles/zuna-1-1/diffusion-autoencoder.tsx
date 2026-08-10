@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { msin } from "@/lib/dmath"
 
 // The ZUNA 1.1 core: a transformer encoder–decoder diffusion autoencoder.
 // 0.125s EEG segments (32 samples @256Hz) become continuous-valued tokens; the
@@ -28,13 +29,13 @@ const TASKS: Record<Task, string> = {
 
 // deterministic pseudo-noise so SSR and client render identically
 const hash = (i: number, s: number) => {
-  const v = Math.sin(i * 127.1 + s * 8.17) * 43758.5453
+  const v = msin(i * 127.1 + s * 8.17) * 43758.5453
   return (v - Math.floor(v)) * 2 - 1
 }
 const clean = (u: number) =>
-  0.5 * Math.sin(2 * Math.PI * 3 * u + 0.6) +
-  0.26 * Math.sin(2 * Math.PI * 7 * u + 1.2) +
-  0.12 * Math.sin(2 * Math.PI * 12 * u)
+  0.5 * msin(2 * Math.PI * 3 * u + 0.6) +
+  0.26 * msin(2 * Math.PI * 7 * u + 1.2) +
+  0.12 * msin(2 * Math.PI * 12 * u)
 
 const clamp = (v: number, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v))
 
@@ -96,7 +97,7 @@ export function DiffusionAutoencoder() {
       let d = ""
       for (let k = 0; k <= 16; k++) {
         const xx = bx + 6 + (k / 16) * (w - 12)
-        const base = 3.2 * Math.sin(k * 0.7 + r * 1.9)
+        const base = 3.2 * msin(k * 0.7 + r * 1.9)
         let v = base
         if (target && !output) {
           if (task === "denoise") v = base + 3.6 * hash(k + r, seed)

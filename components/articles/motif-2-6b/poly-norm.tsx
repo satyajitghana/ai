@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mtanh } from "@/lib/dmath"
 
 // PolyNorm, Motif's activation. Instead of a fixed nonlinearity (GELU, SwiGLU),
 // the feed-forward network passes its input through a normalized polynomial of
@@ -29,7 +30,7 @@ const r2 = (n: number) => Math.round(n * 100) / 100
 const sx = (x: number) => r2(padL + ((x + XR) / (2 * XR)) * plotW)
 
 const gelu = (x: number) =>
-  0.5 * x * (1 + Math.tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
+  0.5 * x * (1 + mtanh(0.7978845608 * (x + 0.044715 * x * x * x)))
 
 export function PolyNorm() {
   const [a1, setA1] = useState(1)

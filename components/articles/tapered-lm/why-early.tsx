@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, mexp } from "@/lib/dmath"
 
 // The evidence behind the design. If you measure how much each layer actually
 // changes the residual stream — the representational "work" it does — the early
@@ -15,9 +16,9 @@ import { Range } from "@/components/articles/ui/range"
 const L = 12
 
 // illustrative "representation change per layer": large early, small late
-const change = Array.from({ length: L }, (_, l) => 0.15 + 0.85 * Math.exp(-l / 3.5))
+const change = Array.from({ length: L }, (_, l) => 0.15 + 0.85 * mexp(-l / 3.5))
 // tapered width allocation (cosine), same shape family
-const width = Array.from({ length: L }, (_, l) => 0.35 + 0.65 * (0.5 * (1 + Math.cos((Math.PI * l) / (L - 1)))))
+const width = Array.from({ length: L }, (_, l) => 0.35 + 0.65 * (0.5 * (1 + mcos((Math.PI * l) / (L - 1)))))
 
 const BAR = "oklch(0.7 0.04 260)"
 const LINE = "oklch(0.72 0.15 285)"

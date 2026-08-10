@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mcos } from "@/lib/dmath"
 
 // The idea in one control. Every layer's MLP hidden width is drawn as a bar. At
 // taper 0 the model is the usual uniform stack — every layer identical. Drag the
@@ -14,7 +15,7 @@ const L = 12
 // cosine taper: f(l) runs 1 (layer 0) -> 0 (layer L-1); (2f-1) has ~zero mean over
 // the stack, so scaling width by (1 + s*(2f-1)) preserves the total width budget.
 function widths(s: number) {
-  const f = (l: number) => 0.5 * (1 + Math.cos((Math.PI * l) / (L - 1)))
+  const f = (l: number) => 0.5 * (1 + mcos((Math.PI * l) / (L - 1)))
   return Array.from({ length: L }, (_, l) => 1 + s * (2 * f(l) - 1))
 }
 

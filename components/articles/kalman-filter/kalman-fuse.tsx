@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mexp } from "@/lib/dmath"
 
 // The update step is just multiplying two Gaussians. The prediction is a Gaussian
 // over the state; the measurement is a Gaussian over what you observed; their
@@ -38,7 +39,7 @@ export function KalmanFuse() {
 
   const xs = (x: number) => pad + (x / 100) * (W - 2 * pad)
   const dens = (x: number, mu: number, s: number) =>
-    Math.exp((-(x - mu) * (x - mu)) / (2 * s * s)) / (s * Math.sqrt(2 * Math.PI))
+    mexp((-(x - mu) * (x - mu)) / (2 * s * s)) / (s * Math.sqrt(2 * Math.PI))
   const peak = Math.max(dens(muPost, muPost, sPost), dens(MU_PRED, MU_PRED, sp), dens(Z, Z, sz))
   const ys = (d: number) => axisY - (d / peak) * (axisY - pad)
   const curve = (mu: number, s: number) => {

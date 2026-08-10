@@ -4,6 +4,7 @@ import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, msin } from "@/lib/dmath"
 
 // Sparse Gated Attention (SGA), drawn as a data path. GatedNorm feeds two
 // things that were previously separate stabilizers in A.X K1: an Indexer +
@@ -35,7 +36,7 @@ const LENS = [
 ] as const
 
 function score(i: number) {
-  return (Math.sin((i + 1) * 1.7) * 0.6 + Math.cos((i + 1) * 0.6) * 0.4 + 1) / 2
+  return (msin((i + 1) * 1.7) * 0.6 + mcos((i + 1) * 0.6) * 0.4 + 1) / 2
 }
 
 // geometry (viewBox units)

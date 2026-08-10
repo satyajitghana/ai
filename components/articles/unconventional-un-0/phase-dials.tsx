@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 import { Range } from "@/components/articles/ui/range"
+import { matan2, mcos, mhypot, msin } from "@/lib/dmath"
 
 const COLS = 6
 const ROWS = 4
@@ -49,17 +50,17 @@ export function PhaseDials() {
       let sx = 0
       let sy = 0
       for (let i = 0; i < N; i++) {
-        sx += Math.cos(th[i])
-        sy += Math.sin(th[i])
+        sx += mcos(th[i])
+        sy += msin(th[i])
       }
       sx /= N
       sy /= N
-      const r = Math.hypot(sx, sy)
-      const psi = Math.atan2(sy, sx)
+      const r = mhypot(sx, sy)
+      const psi = matan2(sy, sx)
       const K = kRef.current
       const next = new Array(N)
       for (let i = 0; i < N; i++) {
-        next[i] = th[i] + dt * (OMEGA[i] + K * r * Math.sin(psi - th[i]))
+        next[i] = th[i] + dt * (OMEGA[i] + K * r * msin(psi - th[i]))
       }
       phases.current = next
       force((c) => c + 1)
@@ -73,10 +74,10 @@ export function PhaseDials() {
   let sx = 0
   let sy = 0
   for (let i = 0; i < N; i++) {
-    sx += Math.cos(th[i])
-    sy += Math.sin(th[i])
+    sx += mcos(th[i])
+    sy += msin(th[i])
   }
-  const r = Math.hypot(sx / N, sy / N)
+  const r = mhypot(sx / N, sy / N)
 
   const W = COLS * CELL
   const H = ROWS * CELL
@@ -100,12 +101,12 @@ export function PhaseDials() {
             const row = Math.floor(i / COLS)
             const cx = col * CELL + CELL / 2
             const cy = row * CELL + CELL / 2
-            const tipX = cx + Math.cos(p) * RD
-            const tipY = cy + Math.sin(p) * RD
+            const tipX = cx + mcos(p) * RD
+            const tipY = cy + msin(p) * RD
             // trailing arc: a few points behind the hand along the rim
             const trail = Array.from({ length: 6 }, (_, s) => {
               const a = p - (s / 5) * 1.1
-              return `${rnd(cx + Math.cos(a) * RD)},${rnd(cy + Math.sin(a) * RD)}`
+              return `${rnd(cx + mcos(a) * RD)},${rnd(cy + msin(a) * RD)}`
             }).join(" ")
             const col2 = `oklch(0.7 0.14 ${phaseHue(p).toFixed(0)})`
             return (

@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mexp, mlog, mpow } from "@/lib/dmath"
 
 // What the single new exponent k actually buys. The Skaling law is
 //
@@ -36,22 +37,22 @@ const D_HI = 1e13
 
 // marginal value of data: |dL / d ln D| = k * beta * (B/D^b) * R^(k-1)
 function marginal(N: number, D: number, k: number): number {
-  const rN = A / Math.pow(N, AL)
-  const rD = B / Math.pow(D, BE)
-  return k * BE * rD * Math.pow(rN + rD, k - 1)
+  const rN = A / mpow(N, AL)
+  const rD = B / mpow(D, BE)
+  return k * BE * rD * mpow(rN + rD, k - 1)
 }
 
 export function CouplingKnob() {
   const [k, setK] = useState(K_FIT)
 
   const NPTS = 64
-  const at = (i: number) => Math.exp(Math.log(D_LO) + (i / NPTS) * (Math.log(D_HI) - Math.log(D_LO)))
+  const at = (i: number) => mexp(mlog(D_LO) + (i / NPTS) * (mlog(D_HI) - mlog(D_LO)))
 
   const all = SIZES.flatMap((s) => Array.from({ length: NPTS + 1 }, (_, i) => marginal(s.N, at(i), k)))
   const vmax = Math.max(...all)
   const vmin = Math.min(...all)
   const y = (v: number) =>
-    100 - ((Math.log(v) - Math.log(vmin)) / (Math.log(vmax) - Math.log(vmin) || 1)) * 92 - 4
+    100 - ((mlog(v) - mlog(vmin)) / (mlog(vmax) - mlog(vmin) || 1)) * 92 - 4
 
   const curve = (N: number) =>
     Array.from({ length: NPTS + 1 }, (_, i) => `${(i / NPTS) * 100},${y(marginal(N, at(i), k))}`).join(" ")

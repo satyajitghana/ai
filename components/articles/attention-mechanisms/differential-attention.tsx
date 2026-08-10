@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { ATT, FigureCard, Legend, WARM } from "./shared"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, mexp, msin } from "@/lib/dmath"
 
 // Differential attention (Ye / Microsoft 2024). A query computes TWO softmax maps and
 // returns their difference:  (softmax(Q₁K₁ᵀ/√d) − λ·softmax(Q₂K₂ᵀ/√d))·V.
@@ -17,14 +18,14 @@ const SIGNAL = new Set([3, 11]) // the genuinely relevant keys
 
 function noise(k: number) {
   // broadband, correlated across both maps (the common-mode part)
-  return 0.35 + 0.3 * (Math.sin(k * 1.7) * 0.5 + Math.cos(k * 0.9 + 1) * 0.5 + 1) / 2
+  return 0.35 + 0.3 * (msin(k * 1.7) * 0.5 + mcos(k * 0.9 + 1) * 0.5 + 1) / 2
 }
 function signal(k: number) {
   return SIGNAL.has(k) ? 2.6 : 0
 }
 function softmax(xs: number[]) {
   const m = Math.max(...xs)
-  const ex = xs.map((x) => Math.exp(x - m))
+  const ex = xs.map((x) => mexp(x - m))
   const s = ex.reduce((a, b) => a + b, 0)
   return ex.map((e) => e / s)
 }

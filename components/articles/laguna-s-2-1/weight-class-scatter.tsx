@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mlog } from "@/lib/dmath"
 
 // The whole pitch in one plot: Terminal-Bench 2.1 score against model size on a
 // log axis. Laguna S 2.1 (118B total / 8B active) sits at 70.2 — above open
@@ -54,7 +55,7 @@ export function WeightClassScatter() {
   const ylo = 15
   const yhi = 95
 
-  const sx = (v: number) => r2(padL + ((Math.log(v) - Math.log(xlo)) / (Math.log(xhi) - Math.log(xlo))) * (W - padL - padR))
+  const sx = (v: number) => r2(padL + ((mlog(v) - mlog(xlo)) / (mlog(xhi) - mlog(xlo))) * (W - padL - padR))
   const sy = (v: number) => r2(padT + (1 - (v - ylo) / (yhi - ylo)) * (H - padT - padB))
 
   const ticks = useMemo(() => {

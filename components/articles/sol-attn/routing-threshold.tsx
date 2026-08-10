@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, mexp, msin } from "@/lib/dmath"
 
 // The routing question every block-sparse method answers differently: given one
 // row of block-proxy logits, which key blocks survive? Top-k always keeps exactly
@@ -26,10 +27,10 @@ function rawScore(preset: 0 | 1, i: number) {
   const t = i / (N - 1)
   if (preset === 0) {
     // peaked / spiky row
-    return 0.5 + 0.95 * Math.sin(t * 12.4 + 0.7) * Math.cos(t * 3.3) + 0.35 * Math.sin(t * 21 + 1.1)
+    return 0.5 + 0.95 * msin(t * 12.4 + 0.7) * mcos(t * 3.3) + 0.35 * msin(t * 21 + 1.1)
   }
   // diffuse / flat row
-  return 0.95 + 0.22 * Math.sin(t * 6.8) + 0.12 * Math.cos(t * 14 + 0.5)
+  return 0.95 + 0.22 * msin(t * 6.8) + 0.12 * mcos(t * 14 + 0.5)
 }
 
 type Mode = "topk" | "topp" | "thresh"
@@ -40,7 +41,7 @@ function selectTopK(scores: number[], k: number) {
 }
 
 function selectTopP(scores: number[], p: number) {
-  const exp = scores.map((s) => Math.exp(s))
+  const exp = scores.map((s) => mexp(s))
   const sum = exp.reduce((a, b) => a + b, 0)
   const ranked = scores.map((_, i) => ({ i, prob: exp[i] / sum })).sort((a, b) => b.prob - a.prob)
   const sel = new Set<number>()

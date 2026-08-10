@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mcos, msin } from "@/lib/dmath"
 
 // FLUX 3's pitch is one backbone that jointly learns from images, video, audio and
 // action — not four models stitched together. Mechanically that means one attention
@@ -60,7 +61,7 @@ const laneCenter = LANES.map((_, li) => {
 const r2 = (n: number) => Number(n.toFixed(2))
 
 function weight(qm: number, g: number): number {
-  const w = (Math.sin(g * 1.3 + qm * 2) * 0.5 + Math.cos(g * 0.7 + qm * 1.1) * 0.5 + 1) / 2
+  const w = (msin(g * 1.3 + qm * 2) * 0.5 + mcos(g * 0.7 + qm * 1.1) * 0.5 + 1) / 2
   return w
 }
 

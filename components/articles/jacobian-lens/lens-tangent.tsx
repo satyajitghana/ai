@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mtanh } from "@/lib/dmath"
 
 // The Jacobian lens is a *derivative*. A Jacobian is the local linear map that
 // turns a small change in an activation into the resulting change in the output.
@@ -39,12 +40,12 @@ const N = 121 // fixed sample count for the curve — bounded
 // approximate it.
 function f(x: number): number {
   const u = 1.05 * (x - 0.35)
-  return 1.9 * Math.tanh(u) + 0.14 * x
+  return 1.9 * mtanh(u) + 0.14 * x
 }
 // derivative — the scalar Jacobian at x
 function fp(x: number): number {
   const u = 1.05 * (x - 0.35)
-  const t = Math.tanh(u)
+  const t = mtanh(u)
   return 1.9 * 1.05 * (1 - t * t) + 0.14
 }
 

@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
 import { cn } from "@/lib/utils"
+import { mpow } from "@/lib/dmath"
 
 // Applying the paper to a back-of-envelope I published four days ago. In the
 // LTC/GDN piece I estimated how much of LTCAttention's 0.062-nat gain a
@@ -33,11 +34,11 @@ const LAWS: Law[] = [
 ]
 
 function grads(l: Law) {
-  const rN = l.A / Math.pow(N, l.al)
-  const rD = l.B / Math.pow(D, l.be)
+  const rN = l.A / mpow(N, l.al)
+  const rD = l.B / mpow(D, l.be)
   const R = rN + rD
-  const f = l.k * Math.pow(R, l.k - 1)
-  return { L: Math.pow(R, l.k) + l.E, gN: f * l.al * rN, gD: f * l.be * rD }
+  const f = l.k * mpow(R, l.k - 1)
+  return { L: mpow(R, l.k) + l.E, gN: f * l.al * rN, gD: f * l.be * rD }
 }
 
 export function EstimateSpread() {

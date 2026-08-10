@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { msin } from "@/lib/dmath"
 
 // Hy3 forward-pass walk-through. One decoder block, plus the shared MTP draft head.
 // Four stages, each a different view of the same 295B-A21B MoE layer:
@@ -27,7 +28,7 @@ const STAGES: { id: Stage; label: string; sub: string }[] = [
 
 // Deterministic router score in [0,1) — no Math.random, so SSR === client.
 function routerScore(e: number) {
-  const s = Math.sin((e + 1) * 12.9898) * 43758.5453
+  const s = msin((e + 1) * 12.9898) * 43758.5453
   return s - Math.floor(s)
 }
 // Fixed top-8 experts of 192 (bounded sort, pure).

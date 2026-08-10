@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mlog10 } from "@/lib/dmath"
 
 // The refresh knob. Capturing a 2M-token prompt state is the dominant cost, so
 // LongStraw reuses one capture across several optimizer steps — but after each
@@ -38,7 +39,7 @@ export function PrefixReuseDrift() {
         <div className="flex items-end gap-2" style={{ height: 120 }}>
           {STEPS.map((s, i) => {
             // log scale so 0.04% and 22% both read
-            const h = Math.max(4, (Math.log10(LOSS[i] + 0.01) - Math.log10(0.01)) / (Math.log10(30) - Math.log10(0.01)) * 100)
+            const h = Math.max(4, (mlog10(LOSS[i] + 0.01) - mlog10(0.01)) / (mlog10(30) - mlog10(0.01)) * 100)
             const on = i === idx
             return (
               <button

@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { msin } from "@/lib/dmath"
 
 // The paper's central formulation, drawn as a scene. The sequence-level IS weight
 // πθ(y|x)/µθold(y|x) = ∏ₜ(1+δₜ) is the object we truly want to optimize, but its
@@ -19,7 +20,7 @@ const WARN = "oklch(0.66 0.17 35)" // warm — the "breaks down" state
 const N = 10
 
 // deterministic per-token base magnitude in [0.45, 1.0]
-const base = (t: number) => 0.45 + 0.55 * Math.abs(Math.sin(t * 0.8 + 0.7))
+const base = (t: number) => 0.45 + 0.55 * Math.abs(msin(t * 0.8 + 0.7))
 
 // scene geometry (viewBox units)
 const W = 760

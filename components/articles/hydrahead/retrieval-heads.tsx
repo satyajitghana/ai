@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { mexp } from "@/lib/dmath"
 
 // The interpretability finding that motivates head-wise hybridization, drawn as a
 // diagram. Heads in the SAME layer, reading the SAME input, do different jobs — so
@@ -20,8 +21,8 @@ type Head = { name: string; kind: string; fa: boolean; weights: number[] }
 
 function build(): Head[] {
   const q = N - 1
-  const local = Array.from({ length: N }, (_, i) => Math.exp(-((q - i) ** 2) / 6))
-  const retrieval = Array.from({ length: N }, (_, i) => (i === NEEDLE ? 1 : 0.04 * Math.exp(-((q - i) ** 2) / 40)))
+  const local = Array.from({ length: N }, (_, i) => mexp(-((q - i) ** 2) / 6))
+  const retrieval = Array.from({ length: N }, (_, i) => (i === NEEDLE ? 1 : 0.04 * mexp(-((q - i) ** 2) / 40)))
   const induction = Array.from({ length: N }, (_, i) => (i === 11 ? 0.9 : i === 12 ? 0.5 : 0.03))
   const diffuse = Array.from({ length: N }, () => 0.5 + 0.001)
   const norm = (w: number[]) => {
