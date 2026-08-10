@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { cn } from "@/lib/utils"
+import { mlog10 } from "@/lib/dmath"
 
 // The context-length "ladder": four real, named numbers, each measuring a
 // DIFFERENT thing (a benchmark-verified retrieval length, a training-context
@@ -65,7 +66,7 @@ const ROWS: Row[] = [
 
 const CTX_LOG_MIN = 5.0 // 100K
 const CTX_LOG_MAX = 7.0 // 10M
-const ctxPct = (v: number) => ((Math.log10(v) - CTX_LOG_MIN) / (CTX_LOG_MAX - CTX_LOG_MIN)) * 100
+const ctxPct = (v: number) => ((mlog10(v) - CTX_LOG_MIN) / (CTX_LOG_MAX - CTX_LOG_MIN)) * 100
 
 const PARAM_MAX = 2.78e12 // Kimi K3, linear reference
 const paramPct = (v: number) => (v / PARAM_MAX) * 100

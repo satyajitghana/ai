@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils"
+import { mlog10, mpow } from "@/lib/dmath"
 
 // Horizontal benchmark bar chart for explainers. Data comes from MDX:
 //   <BenchBars title="SWE-Bench Pro" unit="%" bars={[{label, value, highlight}]} />
@@ -12,7 +13,7 @@ import { cn } from "@/lib/utils"
 function niceScale(maxValue: number, targetTicks = 4): { top: number; ticks: number[] } {
   if (maxValue <= 0) return { top: 1, ticks: [0, 1] }
   const rawStep = maxValue / targetTicks
-  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)))
+  const mag = mpow(10, Math.floor(mlog10(rawStep)))
   const norm = rawStep / mag
   const niceStep = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag
   const top = Math.ceil(maxValue / niceStep) * niceStep

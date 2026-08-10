@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mexp, mlog } from "@/lib/dmath"
 
 // Why RL entropy collapses, and how top-p "sampling distribution replay" holds it.
 //
@@ -25,18 +26,18 @@ const K = 0.55 // η·|Â| — update scale
 const MAX = 6
 const TOP_P = 0.9
 const NAMES = ["A", "B", "C"]
-const LN3 = Math.log(3)
+const LN3 = mlog(3)
 
 function softmax(x: number[]) {
   const m = Math.max(...x)
-  const e = x.map((v) => Math.exp(v - m))
+  const e = x.map((v) => mexp(v - m))
   const s = e.reduce((a, b) => a + b, 0)
   return e.map((v) => v / s)
 }
 
 function entropy(p: number[]) {
   let h = 0
-  for (const pi of p) if (pi > 0) h -= pi * Math.log(pi)
+  for (const pi of p) if (pi > 0) h -= pi * mlog(pi)
   return h
 }
 

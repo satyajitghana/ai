@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mcos, msin } from "@/lib/dmath"
 
 // Gated MLA's whole move: a per-channel gate, derived from the token itself,
 // multiplied into the MLA output before the output projection. Four preset
@@ -17,11 +18,11 @@ const N_CHANNELS = 12
 const TOKENS = ["token 1", "token 2", "token 3", "token 4"]
 
 function rawMag(c: number): number {
-  return 0.42 + 0.5 * Math.abs(Math.sin((c + 1) * 0.74))
+  return 0.42 + 0.5 * Math.abs(msin((c + 1) * 0.74))
 }
 function gateValue(tok: number, c: number): number {
-  const s = Math.sin((c + 1) * (tok * 1.3 + 0.9) + tok * 2.1)
-  const t = Math.cos((c + 1) * (0.42 + tok * 0.21))
+  const s = msin((c + 1) * (tok * 1.3 + 0.9) + tok * 2.1)
+  const t = mcos((c + 1) * (0.42 + tok * 0.21))
   return Math.min(1, Math.max(0.05, (s * 0.5 + t * 0.5 + 1) / 2))
 }
 

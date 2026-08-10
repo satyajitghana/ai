@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { msin } from "@/lib/dmath"
 
 // The core argument, made visible: two ways to answer "which labels apply to
 // this document?" for the same input. The decoder path has to GENERATE its
@@ -127,7 +128,7 @@ export function ForwardPassVsDecode() {
                   className="h-4 w-1.5 rounded-[1px]"
                   style={{
                     background: "oklch(0.72 0.15 195)",
-                    opacity: 0.3 + 0.6 * Math.abs(Math.sin(i * 0.9 + 0.4)),
+                    opacity: 0.3 + 0.6 * Math.abs(msin(i * 0.9 + 0.4)),
                   }}
                 />
               ))}

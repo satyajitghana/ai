@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { ArrowCounterClockwiseIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { mcos, mpow, msin } from "@/lib/dmath"
 
 // The iterated EKF update, as point-to-plane registration. The current pose
 // estimate is wrong, so the deskewed scan (red) floats off the map surface
@@ -27,15 +28,15 @@ const CY = 55
 const DECAY = 0.42
 
 function transformed(k: number) {
-  const f = Math.pow(DECAY, k) // remaining error fraction after k iters
+  const f = mpow(DECAY, k) // remaining error fraction after k iters
   const th = E0.th * f
   const tx = E0.tx * f
   const ty = E0.ty * f
   return TRUE.map(([x, y]) => {
     const dx = x - CX
     const dy = y - CY
-    const rx = CX + (dx * Math.cos(th) - dy * Math.sin(th)) + tx
-    const ry = CY + (dx * Math.sin(th) + dy * Math.cos(th)) + ty
+    const rx = CX + (dx * mcos(th) - dy * msin(th)) + tx
+    const ry = CY + (dx * msin(th) + dy * mcos(th)) + ty
     return [rx, ry] as [number, number]
   })
 }

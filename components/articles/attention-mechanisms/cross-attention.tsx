@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { ATT, FigureCard, GLOBAL, Legend, LOCAL, Segmented } from "./shared"
 import { Range } from "@/components/articles/ui/range"
+import { mexp, msin } from "@/lib/dmath"
 
 // Self vs cross attention, as two token strips. In self-attention a target query
 // reads the target sequence (causally, in a decoder). In cross-attention the same
@@ -16,13 +17,13 @@ const TGT = ["The", "black", "cat", "sleeps", "here", "."]
 
 function softmax(xs: number[]) {
   const m = Math.max(...xs)
-  const ex = xs.map((x) => Math.exp(x - m))
+  const ex = xs.map((x) => mexp(x - m))
   const s = ex.reduce((a, b) => a + b, 0)
   return ex.map((e) => e / s)
 }
 // deterministic alignment score between target position i and a source position j
 function align(i: number, j: number) {
-  return 3.0 * Math.exp(-0.5 * ((i - j) * 0.9) ** 2) + 0.4 * Math.sin(i + j)
+  return 3.0 * mexp(-0.5 * ((i - j) * 0.9) ** 2) + 0.4 * msin(i + j)
 }
 
 type Mode = "cross" | "self"

@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mexp, mpow } from "@/lib/dmath"
 
 // Token maxing. Drag the horizon: as an agentic task runs longer / wider,
 // tokens per task climb steeply while the per-token price keeps falling — yet
@@ -16,8 +17,8 @@ const r2 = (n: number) => Math.round(n * 100) / 100
 const KMAX = 24
 const TOK_MAX = 62000
 
-const tokensAt = (u: number) => 2000 + 58000 * Math.pow(u, 1.8)
-const priceAt = (u: number) => 10 * Math.exp(-1.4 * u) // $ / MTok
+const tokensAt = (u: number) => 2000 + 58000 * mpow(u, 1.8)
+const priceAt = (u: number) => 10 * mexp(-1.4 * u) // $ / MTok
 const spendAt = (u: number) => (tokensAt(u) / 1e6) * priceAt(u) // $ / task
 
 const W = 760

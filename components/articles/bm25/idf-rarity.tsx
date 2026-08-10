@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mexp, mlog } from "@/lib/dmath"
 
 // The IDF term made visible — the piece of BM25 that had no diagram. IDF weights a
 // term by how *rare* it is across the corpus:
@@ -27,12 +28,12 @@ const padB = 40
 const plotW = W - padL - padR
 const plotH = H - padT - padB
 
-const idf = (n: number) => Math.log(1 + (N - n + 0.5) / (n + 0.5))
+const idf = (n: number) => mlog(1 + (N - n + 0.5) / (n + 0.5))
 const YMAX = Math.ceil(idf(1)) // ~7 for N=1000
 
 const r2 = (x: number) => Math.round(x * 100) / 100
 // log-scaled x: n = 1 → left edge, n = N → right edge
-const px = (n: number) => r2(padL + (Math.log(n) / Math.log(N)) * plotW)
+const px = (n: number) => r2(padL + (mlog(n) / mlog(N)) * plotW)
 const py = (v: number) => r2(padT + (1 - Math.min(v, YMAX) / YMAX) * plotH)
 
 // illustrative corpus terms: from a rare error code to the ubiquitous "the"
@@ -45,7 +46,7 @@ const TERMS = [
 ]
 
 // slider position p in [0,1] maps to n = N^p (so the slider feels log-uniform)
-const pToN = (p: number) => Math.max(1, Math.min(N, Math.round(Math.exp(p * Math.log(N)))))
+const pToN = (p: number) => Math.max(1, Math.min(N, Math.round(mexp(p * mlog(N)))))
 
 export function IdfRarity() {
   const [p, setP] = useState(0.28)
@@ -55,7 +56,7 @@ export function IdfRarity() {
 
   const curve = Array.from({ length: 121 }, (_, i) => {
     const t = i / 120
-    const nn = Math.exp(t * Math.log(N))
+    const nn = mexp(t * mlog(N))
     return `${px(nn)},${py(idf(nn))}`
   }).join(" ")
   const area = `${px(1)},${py(0)} ${curve} ${px(N)},${py(0)}`

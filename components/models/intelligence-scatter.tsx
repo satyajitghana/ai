@@ -4,6 +4,7 @@ import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { blendedPrice, type ModelRecord, type Origin } from "@/data/models"
+import { mlog } from "@/lib/dmath"
 
 // The flagship comparison: Intelligence Index (y) against a chosen x-axis —
 // blended price (log), output speed, latency, or context (log). Points are
@@ -69,7 +70,7 @@ export function IntelligenceScatter({ models }: { models: ModelRecord[] }) {
 
   const tx = (v: number, lo: number, hi: number) =>
     axis.log
-      ? (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo) || 1)
+      ? (mlog(v) - mlog(lo)) / (mlog(hi) - mlog(lo) || 1)
       : (v - lo) / (hi - lo || 1)
 
   const bounds = useMemo(() => {

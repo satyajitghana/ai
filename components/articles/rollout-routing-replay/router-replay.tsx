@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mexp, mlog } from "@/lib/dmath"
 
 // The core R3 mechanism at a single MoE layer (M=8 experts, top-K=2).
 //
@@ -56,7 +57,7 @@ function topK(logits: number[]): number[] {
 // softmax gating over a selected set S, using the given logits
 function gatingOver(logits: number[], S: number[]): Map<number, number> {
   const m = Math.max(...S.map((i) => logits[i]))
-  const exps = S.map((i) => Math.exp(logits[i] - m))
+  const exps = S.map((i) => mexp(logits[i] - m))
   const Z = exps.reduce((a, b) => a + b, 0)
   const g = new Map<number, number>()
   S.forEach((i, k) => g.set(i, exps[k] / Z))
@@ -83,7 +84,7 @@ const barH = (l: number) => 4 + (Math.max(l, 0) / LMAX) * 26
 // map w_t onto a log axis [0.25 … 4] → [0,1]
 const WLO = 0.25
 const WHI = 4
-const wPos = (w: number) => (Math.log(Math.min(Math.max(w, WLO), WHI)) - Math.log(WLO)) / (Math.log(WHI) - Math.log(WLO))
+const wPos = (w: number) => (mlog(Math.min(Math.max(w, WLO), WHI)) - mlog(WLO)) / (mlog(WHI) - mlog(WLO))
 
 export function RouterReplay() {
   const [tok, setTok] = useState(1) // default: token B — a mismatch, R3 off
@@ -96,7 +97,7 @@ export function RouterReplay() {
 
   const lpInfer = logProb(t.infer, Sinfer)
   const lpTrain = logProb(t.train, Strain) // softmax always over TRAINING logits
-  const w = Math.exp(lpTrain - lpInfer)
+  const w = mexp(lpTrain - lpInfer)
   const extreme = w > 2 || w < 0.5
 
   const inSet = (S: number[], i: number) => S.includes(i)

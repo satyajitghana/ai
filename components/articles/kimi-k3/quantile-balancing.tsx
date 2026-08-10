@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, msin } from "@/lib/dmath"
 
 // Quantile Balancing. Standard sparse MoE keeps experts busy with an auxiliary
 // load-balancing loss and a sensitive coefficient. Kimi K3 instead sets, per expert,
@@ -22,7 +23,7 @@ const R2 = (n: number): number => Math.round(n * 100) / 100
 
 // deterministic score distribution for one expert (no Math.random)
 function score(i: number): number {
-  const v = 0.5 + 0.28 * Math.sin(i * 0.7 + 0.5) + 0.14 * Math.sin(i * 1.9) + 0.08 * Math.cos(i * 0.31)
+  const v = 0.5 + 0.28 * msin(i * 0.7 + 0.5) + 0.14 * msin(i * 1.9) + 0.08 * mcos(i * 0.31)
   return Math.min(0.98, Math.max(0.04, v))
 }
 const SCORES = Array.from({ length: NB }, (_, i) => score(i))
@@ -34,7 +35,7 @@ function quantile(p: number): number {
 
 // deterministic per-expert load under an aux-loss regime (uneven)
 function auxLoad(e: number, q: number): number {
-  const v = q * (1 + 1.05 * Math.sin(e * 1.3 + 1.1) + 0.25 * Math.cos(e * 0.7))
+  const v = q * (1 + 1.05 * msin(e * 1.3 + 1.1) + 0.25 * mcos(e * 0.7))
   return Math.min(0.96, Math.max(0.03, v))
 }
 

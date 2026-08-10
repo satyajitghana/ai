@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, msin } from "@/lib/dmath"
 
 // MiniMax Sparse Attention — the core move, drawn as a real diagram. For a given query,
 // a lightweight Index Branch scores every past KV *block*; the Main Branch then attends
@@ -19,8 +20,8 @@ const BLK = 128
 const K = 4 // shown; real config selects 16 blocks
 
 function rel(group: number, b: number) {
-  const s = Math.sin((b + 1) * (group === 0 ? 1.7 : 2.9) + group * 2.1)
-  const t = Math.cos((b + 1) * (group === 0 ? 0.6 : 0.35))
+  const s = msin((b + 1) * (group === 0 ? 1.7 : 2.9) + group * 2.1)
+  const t = mcos((b + 1) * (group === 0 ? 0.6 : 0.35))
   return Math.min(1, Math.max(0, (s * 0.6 + t * 0.4 + 1) / 2))
 }
 

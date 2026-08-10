@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, mexp, msin } from "@/lib/dmath"
 
 // The second half of the lens: unembed( J·h ). After the Jacobian transports an
 // activation into the final-layer basis, the model's own unembedding decodes it.
@@ -35,13 +36,13 @@ const ANGLES = Array.from({ length: K }, (_, i) => (i / K) * 2 * Math.PI - Math.
 export function UnembedReadout() {
   const [deg, setDeg] = useState(24)
   const th = (deg * Math.PI) / 180
-  const vx = Math.cos(th)
-  const vy = Math.sin(th)
+  const vx = mcos(th)
+  const vy = msin(th)
 
   // logit_i = w_i · v  (both unit-ish; dot product = cosine here)
-  const logits = ANGLES.map((a) => Math.cos(a) * vx + Math.sin(a) * vy)
+  const logits = ANGLES.map((a) => mcos(a) * vx + msin(a) * vy)
   const mx = Math.max(...logits)
-  const exps = logits.map((l) => Math.exp((l - mx) / TEMP))
+  const exps = logits.map((l) => mexp((l - mx) / TEMP))
   const Z = exps.reduce((s, e) => s + e, 0)
   const probs = exps.map((e) => e / Z)
 
@@ -74,8 +75,8 @@ export function UnembedReadout() {
         >
           <circle cx={CX} cy={CY} r={R} fill="none" stroke="var(--border)" strokeDasharray="2 4" />
           {ANGLES.map((a, i) => {
-            const ex = Math.cos(a)
-            const ey = Math.sin(a)
+            const ex = mcos(a)
+            const ey = msin(a)
             const on = i === top1
             return (
               <g key={i}>

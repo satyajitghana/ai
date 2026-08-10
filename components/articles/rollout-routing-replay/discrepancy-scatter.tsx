@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mexp, mlog } from "@/lib/dmath"
 
 // What the routing mismatch does to the whole token distribution.
 //
@@ -36,8 +37,8 @@ function h(i: number, seed: number): number {
   x = (x ^ (x << 5)) >>> 0
   return x / 4294967296
 }
-const logit = (p: number) => Math.log(p / (1 - p))
-const sig = (z: number) => 1 / (1 + Math.exp(-z))
+const logit = (p: number) => mlog(p / (1 - p))
+const sig = (z: number) => 1 / (1 + mexp(-z))
 
 // geometry
 const VW = 520

@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mlog10 } from "@/lib/dmath"
 
 // Third-stage RL trains one model in three tiers, each with its own system prompt
 // and token budget, so a single checkpoint can reason at three depths on demand.
@@ -38,7 +39,7 @@ const BAR_H = 34
 const LO = 1000
 const HI = 131072
 const plotW = W - ML - MR
-const l10 = (t: number) => Math.log10(t)
+const l10 = (t: number) => mlog10(t)
 const xOf = (t: number) => ML + ((l10(Math.max(t, LO)) - l10(LO)) / (l10(HI) - l10(LO))) * plotW
 const TICKS = [
   { t: 4000, label: "4k" },

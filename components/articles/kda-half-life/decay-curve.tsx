@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mlog, mlog10, mpow } from "@/lib/dmath"
 
 // The whole point in one widget: a KDA channel's retention factor alpha sets a
 // half-life in tokens, by exactly the same algebra that gives a radioactive
@@ -32,8 +33,8 @@ export function DecayCurve() {
   // Slider walks log(1 - alpha) so the interesting region near 1 is reachable.
   // idx 0 -> alpha 0.5, idx 400 -> alpha 0.99999
   const alpha = r2Alpha(alphaIdx)
-  const halfLife = Math.log(0.5) / Math.log(alpha)
-  const lambda = -Math.log(alpha)
+  const halfLife = mlog(0.5) / mlog(alpha)
+  const lambda = -mlog(alpha)
 
   // x axis spans ~3 half-lives so the shape is always readable
   const nMax = Math.max(8, Math.ceil(halfLife * 3))
@@ -45,7 +46,7 @@ export function DecayCurve() {
   const STEPS = 120
   for (let i = 0; i <= STEPS; i++) {
     const n = (i / STEPS) * nMax
-    pts.push(`${sx(n)},${sy(Math.pow(alpha, n))}`)
+    pts.push(`${sx(n)},${sy(mpow(alpha, n))}`)
   }
 
   return (
@@ -144,17 +145,17 @@ export function DecayCurve() {
 // --- slider <-> alpha mapping (log in (1 - alpha)) --------------------------
 // idx 0 => 1-alpha = 0.5 ; idx 400 => 1-alpha = 1e-5
 function r2Alpha(idx: number): number {
-  const logHi = Math.log10(0.5)
-  const logLo = Math.log10(1e-5)
+  const logHi = mlog10(0.5)
+  const logLo = mlog10(1e-5)
   const t = idx / 400
-  const gap = Math.pow(10, logHi + (logLo - logHi) * t)
+  const gap = mpow(10, logHi + (logLo - logHi) * t)
   return 1 - gap
 }
 
 function idxForAlpha(a: number): number {
-  const logHi = Math.log10(0.5)
-  const logLo = Math.log10(1e-5)
-  const t = (Math.log10(1 - a) - logHi) / (logLo - logHi)
+  const logHi = mlog10(0.5)
+  const logLo = mlog10(1e-5)
+  const t = (mlog10(1 - a) - logHi) / (logLo - logHi)
   return Math.round(t * 400)
 }
 

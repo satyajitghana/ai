@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mcos, msin } from "@/lib/dmath"
 
 // Switch Transformer routing, drawn as a diagram. A router scores every expert for
 // each token; classic MoE (Shazeer et al. 2017) sends each token to its top-2 experts,
@@ -18,8 +19,8 @@ const NE = 4 // experts
 
 // deterministic router score in [0,1] — no Math.random / Date.now
 function score(t: number, e: number) {
-  const s = Math.sin((t + 1) * 1.3 + (e + 1) * 2.1)
-  const c = Math.cos((t + 1) * 0.7 - (e + 1) * 1.1)
+  const s = msin((t + 1) * 1.3 + (e + 1) * 2.1)
+  const c = mcos((t + 1) * 0.7 - (e + 1) * 1.1)
   return (s * 0.6 + c * 0.4 + 1) / 2
 }
 

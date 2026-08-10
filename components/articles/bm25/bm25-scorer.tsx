@@ -4,6 +4,7 @@ import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mlog } from "@/lib/dmath"
 
 // A real BM25 engine, running in your browser. Edit the query, drag k1 and b, and
 // every document is re-scored live with the exact Lucene BM25 formula:
@@ -29,7 +30,7 @@ const N = DOCS.length
 const AVGDL = DOCS.reduce((a, d) => a + d.length, 0) / N
 const DF: Record<string, number> = {}
 for (const d of DOCS) for (const t of new Set(d)) DF[t] = (DF[t] ?? 0) + 1
-const idf = (t: string) => Math.log(1 + (N - (DF[t] ?? 0) + 0.5) / ((DF[t] ?? 0) + 0.5))
+const idf = (t: string) => mlog(1 + (N - (DF[t] ?? 0) + 0.5) / ((DF[t] ?? 0) + 0.5))
 
 const ACCENT = "oklch(0.72 0.15 195)"
 
