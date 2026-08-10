@@ -97,7 +97,7 @@ export function SearchCost() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Every population-based harness search — ADAS, AFlow, GEPA, and the roughly a dozen others
           RHI cites — pays for a sampled population of size m: m fresh agent executions plus{" "}
-          <code>C(m,2)</code> pairwise judgments per iteration, Θ(m²). RHI replaces the population
+          <code>C(m,2)</code>{" "}pairwise judgments per iteration, Θ(m²). RHI replaces the population
           with a point mass on the harness&apos;s own immediately-previous version: exactly one new
           execution and one comparison, Θ(1), independent of m. Drag m up and the flat RHI line stops
           looking like a simplification and starts looking like the whole point.

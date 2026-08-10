@@ -125,7 +125,7 @@ export function BytesPerToken() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The first cut is reduction one and it never moves: reading packed nibbles instead of dequantising first
           drops 194 GB to 25.83 GB before the cache does anything. The second cut is the cache, and it is honest
-          about its limits — drag below <span className="text-foreground">~36 GB</span> of arena and the bar does
+          about its limits — drag below <span className="text-foreground">~36 GB</span>{" "}of arena and the bar does
           not move at all, because Kimi K3&apos;s router is trained to flatten expert usage, which leaves the cache
           nothing hot to hold.
         </p>
