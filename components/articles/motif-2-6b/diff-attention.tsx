@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mexp } from "@/lib/dmath"
 
 // Differential Attention (Ye et al.), the mechanism at the heart of Motif 2.6B.
 // A head computes TWO softmax attention maps and returns their difference:
@@ -24,7 +25,7 @@ const scores2 = TOKENS.map((_, i) => (SIGNAL_IX.has(i) ? 0.2 : 1.6))
 
 function softmax(s: number[]): number[] {
   const m = Math.max(...s)
-  const e = s.map((v) => Math.exp(v - m))
+  const e = s.map((v) => mexp(v - m))
   const z = e.reduce((a, b) => a + b, 0)
   return e.map((v) => v / z)
 }

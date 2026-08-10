@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { mcos, mexp, mlog } from "@/lib/dmath"
 
 // The noisy-top-k router, drawn as one composed scene: a token node feeds a router
 // node, whose per-expert scores are the bar chart. Walked through five observable
@@ -61,7 +62,7 @@ function gaussian() {
   let v = 0
   while (u === 0) u = Math.random()
   while (v === 0) v = Math.random()
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)
+  return Math.sqrt(-2 * mlog(u)) * mcos(2 * Math.PI * v)
 }
 
 // ── scene geometry (viewBox units) ─────────────────────────────────────────
@@ -85,7 +86,7 @@ export function MoeRouter() {
     const order = [...noisy.keys()].sort((a, b) => noisy[b] - noisy[a])
     const topSet = new Set(order.slice(0, K))
     const maxTop = Math.max(...[...topSet].map((i) => noisy[i]))
-    const exps = noisy.map((v, i) => (topSet.has(i) ? Math.exp(v - maxTop) : 0))
+    const exps = noisy.map((v, i) => (topSet.has(i) ? mexp(v - maxTop) : 0))
     const sum = exps.reduce((a, b) => a + b, 0)
     const gates = exps.map((e) => e / sum)
     const ordered = [...topSet].sort((a, b) => gates[b] - gates[a])

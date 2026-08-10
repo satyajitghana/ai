@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mlog2 } from "@/lib/dmath"
 
 // Where Maple-Preview's claimed 5.31 GB checkpoint comes from, and why the file
 // you actually download from Hugging Face is 40.43 GB.
@@ -16,7 +17,7 @@ import { Range } from "@/components/articles/ui/range"
 const TERN_P = 19_579_011_072
 const FULL_P = 635_019_264
 const CLAIMED_GB = 5.31
-const ENTROPY = Math.log2(3) // 1.58496
+const ENTROPY = mlog2(3) // 1.58496
 
 const ACC = "oklch(0.60 0.15 255)"
 const MUT = "oklch(0.62 0.03 250)"

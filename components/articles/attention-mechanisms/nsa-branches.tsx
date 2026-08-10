@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { ATT, FigureCard, IDX, IO, Legend, LOCAL } from "./shared"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, mexp, msin } from "@/lib/dmath"
 
 // Native Sparse Attention (DeepSeek, Yuan 2025). For each query, three branches read
 // the past in parallel over the SAME KV, then a learned gate blends them:
@@ -37,10 +38,10 @@ const LANES = [
 ] as const
 
 function blockScore(q: number, b: number) {
-  return (Math.sin((b + 1) * 1.7 + q * 0.5) * 0.6 + Math.cos((b + 1) * 0.6 + q * 0.3) * 0.4 + 1) / 2
+  return (msin((b + 1) * 1.7 + q * 0.5) * 0.6 + mcos((b + 1) * 0.6 + q * 0.3) * 0.4 + 1) / 2
 }
 // deterministic gate: three independent sigmoids of mock query features
-const sig = (x: number) => 1 / (1 + Math.exp(-x))
+const sig = (x: number) => 1 / (1 + mexp(-x))
 
 export function NsaBranches() {
   const [q, setQ] = useState(N - 1)
@@ -51,9 +52,9 @@ export function NsaBranches() {
   const winStart = Math.max(0, q - WIN + 1)
 
   const g = {
-    cmp: sig(0.9 * Math.sin(q * 0.4) + 0.3),
-    slc: sig(1.2 * Math.cos(q * 0.5) + 0.8),
-    win: sig(0.8 * Math.sin(q * 0.7 + 1) + 0.5),
+    cmp: sig(0.9 * msin(q * 0.4) + 0.3),
+    slc: sig(1.2 * mcos(q * 0.5) + 0.8),
+    win: sig(0.8 * msin(q * 0.7 + 1) + 0.5),
   }
   const gSum = g.cmp + g.slc + g.win
 

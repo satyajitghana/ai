@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mexp } from "@/lib/dmath"
 
 // MoA's quality is bought with compute. Depth L and width n set the model-call budget —
 // n proposers per layer across L layers, plus the final aggregator — while quality climbs
@@ -16,8 +17,8 @@ const ACCENT = "oklch(0.72 0.15 195)"
 
 function quality(L: number, n: number) {
   // base single-model ~57; gains saturate in depth and width
-  const widthGain = 10 * (1 - Math.exp(-(n - 1) / 2.2))
-  const depthGain = 8 * (1 - Math.exp(-L / 1.6))
+  const widthGain = 10 * (1 - mexp(-(n - 1) / 2.2))
+  const depthGain = 8 * (1 - mexp(-L / 1.6))
   return Math.min(72, 57 + widthGain + depthGain * (n > 1 ? 1 : 0))
 }
 

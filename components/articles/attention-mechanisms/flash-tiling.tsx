@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { ATT, FigureCard, IDX, IO, Legend, PlayPause, useReducedMotion, useTicker, WARM } from "./shared"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, mexp, msin } from "@/lib/dmath"
 
 // FlashAttention (Dao 2022) — the exact same attention function, computed IO-aware.
 // The N×N score matrix is split into tiles. A Q-tile stays in fast SRAM while K/V tiles
@@ -25,7 +26,7 @@ const tileX = (j: number) => GX + j * TW
 const tileY = (i: number) => GY + i * TH
 
 function score(i: number, j: number) {
-  return 2.2 * Math.sin((i + 1) * 1.3 + (j + 1) * 0.9) * Math.cos((j + 1) * 0.4 + i)
+  return 2.2 * msin((i + 1) * 1.3 + (j + 1) * 0.9) * mcos((j + 1) * 0.4 + i)
 }
 
 export function FlashTiling() {
@@ -40,7 +41,7 @@ export function FlashTiling() {
   let m = -Infinity
   for (let jj = 0; jj <= j; jj++) m = Math.max(m, score(i, jj))
   let l = 0
-  for (let jj = 0; jj <= j; jj++) l += Math.exp(score(i, jj) - m)
+  for (let jj = 0; jj <= j; jj++) l += mexp(score(i, jj) - m)
   const progress = (j + 1) / TC
 
   return (

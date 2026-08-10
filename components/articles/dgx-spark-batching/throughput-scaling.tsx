@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mlog2 } from "@/lib/dmath"
 
 // The scaling law of continuous batching, on one tok/s axis. As you pack more
 // concurrent users into the batch, AGGREGATE decode throughput climbs and saturates,
@@ -33,7 +34,7 @@ const NMAX = 64
 const YMAX = 800
 
 // log2 x-scale so 1,2,4,8,16,32,64 space evenly
-const xOf = (n: number) => PL + (Math.log2(n) / Math.log2(NMAX)) * (W - PL - PR)
+const xOf = (n: number) => PL + (mlog2(n) / mlog2(NMAX)) * (W - PL - PR)
 const yOf = (v: number) => PT + (1 - v / YMAX) * (H - PT - PB)
 
 const aggPath = Array.from({ length: 129 }, (_, k) => {

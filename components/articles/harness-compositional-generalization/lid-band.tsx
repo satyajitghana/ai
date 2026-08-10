@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mlog2 } from "@/lib/dmath"
 
 // The central claim, made draggable: train the harness on SHORT tasks, then
 // evaluate on tasks 1–32x longer. A base Transformer sees the whole long task
@@ -24,9 +25,9 @@ export function LidBand() {
   // base Transformer: one call sees the whole task; the fraction beyond 1x is OOD
   const inDistFrac = 1 / mult
   // eval reward decays as more of the context leaves the trained length regime
-  const rBase = 0.88 / (1 + 0.62 * Math.log2(mult))
+  const rBase = 0.88 / (1 + 0.62 * mlog2(mult))
   // RLM: task is chopped into `mult` in-distribution sub-calls; eval ~ tracks train
-  const rRlm = 0.86 - 0.012 * Math.log2(mult)
+  const rRlm = 0.86 - 0.012 * mlog2(mult)
   const lift = rRlm / rBase
 
   const cells = Math.min(mult, 32)

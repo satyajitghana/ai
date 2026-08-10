@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mexp } from "@/lib/dmath"
 
 // MirrorPop: sequence-level off-policy masking, drawn token by token. In async RL the
 // rollout policy drifts from the training policy, so each token has an importance ratio
@@ -39,7 +40,7 @@ export function MirrorPop() {
   const L = lr.length
   const meanSigned = lr.reduce((a, b) => a + b, 0) / L // vanilla statistic
   const meanAbs = lr.reduce((a, b) => a + Math.abs(b), 0) / L // MirrorPop statistic
-  const geoMirror = Math.exp(meanAbs)
+  const geoMirror = mexp(meanAbs)
 
   const vanillaKeeps = Math.abs(meanSigned) <= delta
   const mirrorKeeps = meanAbs <= delta

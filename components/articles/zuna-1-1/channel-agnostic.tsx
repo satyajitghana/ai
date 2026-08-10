@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, mhypot, msin } from "@/lib/dmath"
 
 // ZUNA 1.1 is channel-agnostic: every electrode is just a token carrying a 4D
 // rotary position (x, y, z, t) — its 3D scalp coordinate plus a coarse time
@@ -38,7 +39,7 @@ function hdCap(): El[] {
   for (const [r, count] of rings) {
     for (let i = 0; i < count; i++) {
       const a = -Math.PI / 2 + (i / count) * Math.PI * 2
-      out.push({ id: `e${n++}`, x: +(r * Math.cos(a)).toFixed(3), y: +(r * Math.sin(a)).toFixed(3) })
+      out.push({ id: `e${n++}`, x: +(r * mcos(a)).toFixed(3), y: +(r * msin(a)).toFixed(3) })
     }
   }
   return out
@@ -83,7 +84,7 @@ export function ChannelAgnostic() {
   if (stage === "reconstructed") {
     for (const d of els.filter((e) => drop.has(e.id))) {
       const near = [...kept]
-        .sort((a, b) => Math.hypot(a.x - d.x, a.y - d.y) - Math.hypot(b.x - d.x, b.y - d.y))
+        .sort((a, b) => mhypot(a.x - d.x, a.y - d.y) - mhypot(b.x - d.x, b.y - d.y))
         .slice(0, 2)
       for (const k of near) links.push({ from: k, to: d })
     }
@@ -92,7 +93,7 @@ export function ChannelAgnostic() {
   const bow = (x1: number, y1: number, x2: number, y2: number) => {
     const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
     const dx = x2 - x1, dy = y2 - y1
-    const len = Math.hypot(dx, dy) || 1
+    const len = mhypot(dx, dy) || 1
     const bx = mx + (-dy / len) * len * 0.16
     const by = my + (dx / len) * len * 0.16
     return `M ${x1} ${y1} Q ${bx} ${by} ${x2} ${y2}`

@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { msin } from "@/lib/dmath"
 
 // KAT-Coder-V2.5 — the SWE data-scaling flywheel. On hard repository tasks the raw
 // rollout pass rate is near zero, so there is nothing to learn from. The fix is a
@@ -24,7 +25,7 @@ const COLS = 8
 const ROWS = 3
 
 // deterministic latent "recoverability" per trajectory, spread across [0,1]
-const rec = (i: number) => (Math.sin(i * 2.399 + 0.7) + 1) / 2
+const rec = (i: number) => (msin(i * 2.399 + 0.7) + 1) / 2
 
 type Stage = "rollout" | "hint-boost" | "replay" | "filter"
 const STAGES: Stage[] = ["rollout", "hint-boost", "replay", "filter"]

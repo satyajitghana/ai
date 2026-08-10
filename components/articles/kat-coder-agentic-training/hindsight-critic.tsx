@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { msin } from "@/lib/dmath"
 
 // KAT-Coder-V2.5 — asymmetric actor–critic PPO with hindsight-augmented value
 // estimation. In a long-horizon agentic trajectory the reward is sparse (it lands
@@ -23,7 +24,7 @@ const NT = 12 // turns shown
 // stylized value + uncertainty over the trajectory (deterministic, bounded)
 const vAt = (t: number) => {
   const x = t / (NT - 1)
-  return Math.min(0.98, Math.max(0.05, 0.18 + 0.66 * x + 0.05 * Math.sin(t * 1.3)))
+  return Math.min(0.98, Math.max(0.05, 0.18 + 0.66 * x + 0.05 * msin(t * 1.3)))
 }
 const uOff = (t: number) => 0.07 + 0.32 * (1 - t / (NT - 1)) // no hindsight: guess from present
 const uOn = 0.045 // hindsight: outcome is (partly) observed

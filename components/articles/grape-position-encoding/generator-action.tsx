@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, msin } from "@/lib/dmath"
 
 // GRAPE's one idea, drawn as a diagram. A position n acts on a query/key vector
 // through a single group action G(n) = exp(n ω L). Which *kind* of generator L you
@@ -49,15 +50,15 @@ export function GeneratorAction() {
   const accent = mode === "mult" ? ROT : ADD
 
   // base query endpoint
-  const q0x = OX + R * Math.cos(THETA0)
-  const q0y = OY - R * Math.sin(THETA0)
+  const q0x = OX + R * mcos(THETA0)
+  const q0y = OY - R * msin(THETA0)
 
   // transformed endpoint under G(n)
   let gx: number, gy: number
   if (mode === "mult") {
     const a = THETA0 + n * OMEGA_S
-    gx = OX + R * Math.cos(a)
-    gy = OY - R * Math.sin(a)
+    gx = OX + R * mcos(a)
+    gy = OY - R * msin(a)
   } else {
     gx = q0x + n * DX // shear along +x
     gy = q0y
@@ -67,7 +68,7 @@ export function GeneratorAction() {
   const fx = (m: number) => SX + (m / N) * SW
   const fy = (v: number) => SY0 + (1 - (v - YMIN) / (YMAX - YMIN)) * SH
   // rotation factor uses the same swept angle so it lines up with the plane
-  const rot = (m: number) => Math.cos(m * OMEGA_S)
+  const rot = (m: number) => mcos(m * OMEGA_S)
   const add = (m: number) => -(m * BIAS_STEP)
   const curveF = (m: number) => (mode === "mult" ? rot(m) : add(m))
 
@@ -79,8 +80,8 @@ export function GeneratorAction() {
   const arcR = R + 16
   const largeArc = n * OMEGA_S > Math.PI ? 1 : 0
   const arcPath =
-    `M ${OX + arcR * Math.cos(THETA0)} ${OY - arcR * Math.sin(THETA0)} ` +
-    `A ${arcR} ${arcR} 0 ${largeArc} 0 ${OX + arcR * Math.cos(arcEnd)} ${OY - arcR * Math.sin(arcEnd)}`
+    `M ${OX + arcR * mcos(THETA0)} ${OY - arcR * msin(THETA0)} ` +
+    `A ${arcR} ${arcR} 0 ${largeArc} 0 ${OX + arcR * mcos(arcEnd)} ${OY - arcR * msin(arcEnd)}`
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">

@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mpow } from "@/lib/dmath"
 
 // Why SANA-Video 2.0 is fast, made draggable. Two levers compound. First the
 // high-compression VAE (stride 8x32x32) collapses a clip into a modest token
@@ -27,7 +28,7 @@ const LF_PER_S = 3 // ~24fps / temporal-stride 8
 const P = 1.709
 const K = 10.26
 const sCost = (n: number) => n * n
-const hCost = (n: number) => K * Math.pow(n, P)
+const hCost = (n: number) => K * mpow(n, P)
 const tokens = (t: number, res: Res) => TPF[res] * LF_PER_S * t
 
 const TMIN = 5

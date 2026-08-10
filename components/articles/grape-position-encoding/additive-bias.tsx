@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mexp, mlog } from "@/lib/dmath"
 
 // The additive family, drawn as its signature: a monotonic distance penalty on the
 // attention logit. Every Additive-GRAPE scheme adds a term (j − i)·ω·slope to the
@@ -34,7 +35,7 @@ export function AdditiveBias() {
 
   // content-gated slope from a softplus-like gate (deterministic, bounded)
   const g = gate / 100
-  const slopeGated = 0.006 + 0.085 * Math.log(1 + Math.exp(3 * (g - 0.5))) / Math.log(1 + Math.exp(1.5))
+  const slopeGated = 0.006 + 0.085 * mlog(1 + mexp(3 * (g - 0.5))) / mlog(1 + mexp(1.5))
 
   const linePts = (slope: number) =>
     Array.from({ length: DMAX + 1 }, (_, d) => `${dx(d)},${by(Math.max(-slope * d, BMIN))}`).join(" ")

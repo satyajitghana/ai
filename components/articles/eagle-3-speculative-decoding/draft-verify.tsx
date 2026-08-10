@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mpow } from "@/lib/dmath"
 
 // Why speculative decoding speeds anything up. A cheap draft model proposes a
 // chain of k tokens; the big target model verifies all of them in ONE forward
@@ -21,7 +22,7 @@ export function DraftVerify() {
 
   // expected accepted prefix length among the k drafted tokens
   const accepted =
-    alpha === 1 ? k : (alpha * (1 - Math.pow(alpha, k))) / (1 - alpha)
+    alpha === 1 ? k : (alpha * (1 - mpow(alpha, k))) / (1 - alpha)
   const tau = accepted + 1 // + the target's guaranteed bonus token
   // one verify cycle = one target forward pass, so tokens-per-pass ≈ speedup
   const speedup = tau
@@ -38,7 +39,7 @@ export function DraftVerify() {
         </div>
         <div className="flex flex-wrap gap-1">
           {Array.from({ length: k }, (_, i) => {
-            const p = Math.pow(alpha, i + 1)
+            const p = mpow(alpha, i + 1)
             return (
               <span
                 key={i}

@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mlog10, mpow } from "@/lib/dmath"
 
 // The RL story, drawn twice over. Left/top: aggregate held-out eval reward rose
 // LOG-LINEARLY across 30M+ rollouts, from 0.264 (SFT init) to 0.356 (released) —
@@ -27,7 +28,7 @@ const PT = 22
 const CHART_B = 236 // chart bottom
 const COT_Y = 300 // chain-of-thought strip top
 
-const lg = (v: number) => Math.log10(v)
+const lg = (v: number) => mlog10(v)
 const frac = (r: number) => (lg(r) - lg(R_MIN)) / (lg(R_MAX) - lg(R_MIN))
 const xAt = (r: number) => PL + frac(r) * (W - PL - PR)
 const rewardAt = (r: number) => RW0 + (RW1 - RW0) * frac(r)
@@ -48,7 +49,7 @@ const COT_MAXW = W - PR - 150
 
 export function RlScaling() {
   const [t, setT] = useState(0.6) // slider fraction along log-x
-  const r = R_MIN * Math.pow(R_MAX / R_MIN, t)
+  const r = R_MIN * mpow(R_MAX / R_MIN, t)
   const reward = rewardAt(r)
   const cot = cotAt(t)
   const cotW = (cot / COT_HI) * COT_MAXW

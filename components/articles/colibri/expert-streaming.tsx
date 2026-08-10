@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, msin } from "@/lib/dmath"
 
 // Colibri's three-tier memory, drawn as a real scene. A 744B MoE routes each token
 // to only a few experts per layer. Colibri keeps the int4 dense core RESIDENT in RAM,
@@ -28,10 +29,10 @@ const LAYERS = 75 // real MoE layers (for the full-token extrapolation)
 
 // deterministic score: persistent popularity (base) + per-token wobble. No RNG.
 function base(e: number) {
-  return Math.cos(e * 0.55) * 0.8 + Math.sin(e * 0.17) * 0.3
+  return mcos(e * 0.55) * 0.8 + msin(e * 0.17) * 0.3
 }
 function score(t: number, e: number) {
-  return base(e) + Math.sin(e * 1.7 + t * 0.9) * 0.5
+  return base(e) + msin(e * 1.7 + t * 0.9) * 0.5
 }
 function routeAt(t: number) {
   return Array.from({ length: N }, (_, e) => e)

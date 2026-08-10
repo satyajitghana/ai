@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mlog, mlog10, mpow } from "@/lib/dmath"
 
 // HeteroP's actual payoff: pick a model scale (width/depth, tied to the
 // paper's real 56x-activated-parameter sweep, 20M -> 1.12B), and read the
@@ -30,12 +31,12 @@ const LOG_MIN = -5 // 1e-5
 const LOG_MAX = -2 // 1e-2
 
 // activated params (millions) at slider position t in [0,1]: 20 * 56^t
-const paramsAt = (t: number) => 20 * Math.pow(56, t)
-const layersAt = (t: number) => 4 * Math.pow(8, t)
+const paramsAt = (t: number) => 20 * mpow(56, t)
+const layersAt = (t: number) => 4 * mpow(8, t)
 
 const HETERO_LOG_OPT = -3 // 1e-3, fixed
 const SP_LOG_OPT_0 = -4 // 1e-4 at t=0
-const SP_LOG_OPT_1 = Math.log10(6e-4) // ~-3.222 at t=1
+const SP_LOG_OPT_1 = mlog10(6e-4) // ~-3.222 at t=1
 const spLogOpt = (t: number) => SP_LOG_OPT_0 + t * (SP_LOG_OPT_1 - SP_LOG_OPT_0)
 
 function lossAt(logLR: number, logOpt: number, k: number, rightK: number) {
@@ -46,7 +47,7 @@ function lossAt(logLR: number, logOpt: number, k: number, rightK: number) {
 
 const PRESETS = [
   { label: "proxy", t: 0 },
-  { label: "mid", t: Math.log(8) / Math.log(56) },
+  { label: "mid", t: mlog(8) / mlog(56) },
   { label: "largest", t: 1 },
 ]
 
@@ -97,7 +98,7 @@ export function HeteroPDrift() {
           viewBox={`0 0 ${W} ${H}`}
           className="w-full"
           role="img"
-          aria-label={`At ${paramsLabel} activated parameters, HeteroP's optimal learning rate stays near 1 times 10 to the minus 3, while standard parameterization's optimum has drifted to about ${Math.pow(10, spOpt).toExponential(1)} and is starting to diverge at high learning rates.`}
+          aria-label={`At ${paramsLabel} activated parameters, HeteroP's optimal learning rate stays near 1 times 10 to the minus 3, while standard parameterization's optimum has drifted to about ${mpow(10, spOpt).toExponential(1)} and is starting to diverge at high learning rates.`}
         >
           {/* gridlines + LR ticks */}
           {[-5, -4, -3, -2].map((lg) => (
@@ -154,7 +155,7 @@ export function HeteroPDrift() {
           <div className="rounded-lg border bg-muted/20 px-3 py-2">
             <div className="text-[10px] text-muted-foreground">SP optimal LR</div>
             <div className="mt-0.5 text-lg tabular-nums" style={{ color: SP }}>
-              ~{Math.pow(10, spOpt).toExponential(1)}
+              ~{mpow(10, spOpt).toExponential(1)}
             </div>
           </div>
         </div>

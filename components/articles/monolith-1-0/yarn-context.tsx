@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { mlog10 } from "@/lib/dmath"
 
 // Monolith 1.0's context extension, drawn as a growing window. Pretrained at 4,096
 // tokens, then stretched in two YaRN stages (RoPE base 5e6): 4K -> 65,536 -> 1,048,576,
@@ -25,9 +26,9 @@ const BAR_Y = 128
 const BAR_H = 54
 
 const r2 = (n: number) => Math.round(n * 100) / 100
-const LMIN = Math.log10(4096)
-const LMAX = Math.log10(1048576)
-const xForLen = (len: number) => r2(AX0 + ((Math.log10(len) - LMIN) / (LMAX - LMIN)) * (AX1 - AX0))
+const LMIN = mlog10(4096)
+const LMAX = mlog10(1048576)
+const xForLen = (len: number) => r2(AX0 + ((mlog10(len) - LMIN) / (LMAX - LMIN)) * (AX1 - AX0))
 
 const TICKS = [4096, 16384, 65536, 262144, 1048576]
 const tickLabel = (n: number) => (n >= 1048576 ? "1M" : `${Math.round(n / 1024)}K`)

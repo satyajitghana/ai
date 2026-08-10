@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mpow, msin } from "@/lib/dmath"
 
 // MOPD — Multi-Teacher On-Policy Distillation, drawn as a real diagram. After the base
 // model is SFT'd and split into domain RL experts, MOPD fuses them into ONE student.
@@ -48,13 +49,13 @@ function caps(mode: Mode, p: number): number[] {
   if (mode === "mopd") {
     // all three domains climb together — no domain is starved of gradient.
     const off = [0.0, -0.015, -0.03]
-    return DOMAINS.map((_, i) => clamp(0.62 + 0.34 * Math.pow(p, 0.6) + off[i]))
+    return DOMAINS.map((_, i) => clamp(0.62 + 0.34 * mpow(p, 0.6) + off[i]))
   }
   // mixed reward: a slowly rising mean, but the domains oscillate out of phase —
   // whenever one peaks another troughs. The weakest capability stays weak.
   const base = 0.66 + 0.13 * p
   const osc = 0.17
-  return [0, 2.094, 4.189].map((ph) => clamp(base + osc * Math.sin(p * 6.2 + ph)))
+  return [0, 2.094, 4.189].map((ph) => clamp(base + osc * msin(p * 6.2 + ph)))
 }
 
 export function MopdFusion() {

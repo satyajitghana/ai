@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mexp } from "@/lib/dmath"
 
 // Controllable effort, drawn as a curve. Inkling varies how many tokens it spends
 // per query via the system message + a per-token cost, trading accuracy for
@@ -26,8 +27,8 @@ const PT = 26
 const PB = 48
 const YMAX = 70
 
-const accInk = (t: number) => P * (1 - Math.exp(-t / TAU))
-const accNem = (t: number) => P * (1 - Math.exp(-t / (3 * TAU)))
+const accInk = (t: number) => P * (1 - mexp(-t / TAU))
+const accNem = (t: number) => P * (1 - mexp(-t / (3 * TAU)))
 
 const xAt = (t: number) => PL + (t / TMAX) * (W - PL - PR)
 const yAt = (a: number) => PT + (1 - a / YMAX) * (H - PT - PB)

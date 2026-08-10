@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mlog } from "@/lib/dmath"
 
 // Same total compute budget, spent in a different place. A step-factored generator
 // (diffusion, AR) pays almost nothing extra to train, then pays NFE forward passes
@@ -35,7 +36,7 @@ const xmTotal = TRAIN_BASE * (1 + K_EXTRA) + 1 * N_SAMPLES // does not depend on
 // the very bottom pixel row. Log-scale the y-axis so both lines stay legible;
 // the x-axis (NFE) stays linear, matching the slider one-to-one.
 const yMax = diffTotal(MAX_NFE)
-const logc = (c: number) => Math.log(c + 1)
+const logc = (c: number) => mlog(c + 1)
 const logMax = logc(yMax)
 
 export function ComputeBudget() {

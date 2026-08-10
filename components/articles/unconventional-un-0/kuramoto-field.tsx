@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { matan2, mcos, mhypot, msin } from "@/lib/dmath"
 
 // A 2D field of locally-coupled Kuramoto oscillators, rendered as a phase map
 // (hue = phase). Each cell pulls toward its four neighbours; raise the coupling
@@ -97,7 +98,7 @@ function seedPhases(mode: "noise" | "spiral", seed: number): Float32Array {
     for (let x = 0; x < GRID; x++) {
       p[y * GRID + x] =
         mode === "spiral"
-          ? Math.atan2(y - c, x - c) + 0.06 * Math.hypot(x - c, y - c)
+          ? matan2(y - c, x - c) + 0.06 * mhypot(x - c, y - c)
           : rand() * 2 * Math.PI
     }
   }
@@ -126,7 +127,7 @@ export function KuramotoField() {
       const c = (GRID - 1) / 2
       for (let y = 0; y < GRID; y++)
         for (let x = 0; x < GRID; x++)
-          o[y * GRID + x] = 1.0 + 0.9 * (Math.hypot(x - c, y - c) / c - 0.5)
+          o[y * GRID + x] = 1.0 + 0.9 * (mhypot(x - c, y - c) / c - 0.5)
       return o
     })()
   )
@@ -181,7 +182,7 @@ export function KuramotoField() {
             const lf = th[y * GRID + ((x - 1 + GRID) % GRID)]
             const rt = th[y * GRID + ((x + 1) % GRID)]
             const coupling =
-              Math.sin(up - c) + Math.sin(dn - c) + Math.sin(lf - c) + Math.sin(rt - c)
+              msin(up - c) + msin(dn - c) + msin(lf - c) + msin(rt - c)
             next[i] = c + dt * (om[i] + (K / 4) * coupling)
           }
         }
@@ -201,13 +202,13 @@ export function KuramotoField() {
         img.data[o + 1] = cg
         img.data[o + 2] = cb
         img.data[o + 3] = 255
-        sx += Math.cos(ph)
-        sy += Math.sin(ph)
+        sx += mcos(ph)
+        sy += msin(ph)
       }
       octx.putImageData(img, 0, 0)
       ctx.drawImage(off, 0, 0, canvas.width, canvas.height)
 
-      if (playing) setR(Math.hypot(sx, sy) / (GRID * GRID))
+      if (playing) setR(mhypot(sx, sy) / (GRID * GRID))
       raf = requestAnimationFrame(draw)
     }
     raf = requestAnimationFrame(draw)

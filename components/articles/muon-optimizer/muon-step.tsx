@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mcos, msin } from "@/lib/dmath"
 
 // The geometric "why" of Muon, on a 2D weight matrix.
 // A momentum update M = U diag(sigma1, sigma2) V^T maps the unit ball of
@@ -33,7 +34,7 @@ const rad = (d: number) => (d * Math.PI) / 180
 
 function axis(sigma: number, deg: number) {
   const a = rad(deg)
-  return { x: CX + sigma * R * Math.cos(a), y: CY + sigma * R * Math.sin(a) }
+  return { x: CX + sigma * R * mcos(a), y: CY + sigma * R * msin(a) }
 }
 
 export function MuonStep() {
