@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mhypot } from "@/lib/dmath"
 
 // A flow model learns a velocity field v_θ(x,t) that transports a NOISE sample
 // (t=0) into a DATA sample (t=1); generation is just integrating that ODE. FLUX's
@@ -41,7 +42,7 @@ function control(p0: Pt, p1: Pt, curved: boolean, bend: number): Pt {
   if (!curved) return [mx, my]
   const dx = p1[0] - p0[0]
   const dy = p1[1] - p0[1]
-  const len = Math.hypot(dx, dy) || 1
+  const len = mhypot(dx, dy) || 1
   const nx = -dy / len
   const ny = dx / len
   return [mx + nx * BEND * bend, my + ny * BEND * bend]
@@ -87,7 +88,7 @@ export function FlowSteps() {
     const c = control(s.p0, s.p1, curved, s.bend)
     const euler = eulerPath(s.p0, c, s.p1, K)
     const end = euler[euler.length - 1]
-    const err = Math.hypot(end[0] - s.p1[0], end[1] - s.p1[1])
+    const err = mhypot(end[0] - s.p1[0], end[1] - s.p1[1])
     return { s, c, euler, end, err }
   })
   const meanErr = paths.reduce((a, p) => a + p.err, 0) / paths.length

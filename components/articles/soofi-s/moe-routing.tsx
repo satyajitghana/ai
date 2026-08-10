@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, msin } from "@/lib/dmath"
 
 // A granular MoE layer in Soofi S: 128 routed experts, of which a learned sigmoid-gated
 // router activates 6 per token, plus 2 shared experts that are always on. Across the
@@ -21,7 +22,7 @@ const ROWS = NROUTED / COLS // 8
 
 // Deterministic per-token expert scores — no randomness.
 function score(token: number, e: number) {
-  const s = Math.sin((e + 1) * 0.7 + token * 1.3) + Math.cos((e + 1) * 0.31 - token * 0.5)
+  const s = msin((e + 1) * 0.7 + token * 1.3) + mcos((e + 1) * 0.31 - token * 0.5)
   return s
 }
 

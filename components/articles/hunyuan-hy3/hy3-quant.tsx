@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mlog2 } from "@/lib/dmath"
 
 // GGUF quant explorer for the community Hy3-1M-GGUF build.
 // Sizes are the ones reported on the model card (GB, on-disk weights). Pick a RAM
@@ -40,7 +41,7 @@ const MAXGB = 640 // axis top
 
 // Illustrative quality from bits/weight, mapped to [0.2, 1].
 function quality(bits: number) {
-  const q = (Math.log2(bits) - Math.log2(1.5)) / (Math.log2(16) - Math.log2(1.5))
+  const q = (mlog2(bits) - mlog2(1.5)) / (mlog2(16) - mlog2(1.5))
   return Math.max(0.2, Math.min(1, 0.2 + 0.8 * q))
 }
 

@@ -16,6 +16,7 @@ import {
   useReducedMotion,
   useTicker,
 } from "./shared"
+import { mcos, msin } from "@/lib/dmath"
 
 // The shared AttentionMask primitive: a query × key matrix where a movable query
 // cursor lights exactly the keys it is allowed to read under a chosen mask
@@ -61,8 +62,8 @@ const NOTE: Record<Pattern, string> = {
 
 // deterministic content score for block-selection (no randomness at render time)
 function blockScore(q: number, b: number) {
-  const s = Math.sin((b + 1) * 1.9 + q * 0.6)
-  const t = Math.cos((b + 1) * 0.5 + q * 0.33)
+  const s = msin((b + 1) * 1.9 + q * 0.6)
+  const t = mcos((b + 1) * 0.5 + q * 0.33)
   return (s * 0.6 + t * 0.4 + 1) / 2
 }
 

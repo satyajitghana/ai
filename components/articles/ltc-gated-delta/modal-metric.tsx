@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mexp, mlog } from "@/lib/dmath"
 
 // What LTCAttention actually does to an attention score. Each KV head carries
 // M orthonormal directions u_m (QR of a learned matrix) and one time constant
@@ -34,7 +35,7 @@ export function ModalMetric() {
 
   // tau_m = tau_min / sigmoid(r_m + delta), delta is the x0-conditioned shift
   const taus = MODES.map((m) => {
-    const s = 1 / (1 + Math.exp(-(logit(m.base) + drive)))
+    const s = 1 / (1 + mexp(-(logit(m.base) + drive)))
     return TAU_MIN / s
   })
 
@@ -42,7 +43,7 @@ export function ModalMetric() {
   const curve = (tau: number) =>
     Array.from({ length: N + 1 }, (_, i) => {
       const d = (i / N) * MAX_D
-      return `${(i / N) * 100},${(1 - Math.exp(-d / tau)) * 100}`
+      return `${(i / N) * 100},${(1 - mexp(-d / tau)) * 100}`
     }).join(" ")
 
   return (
@@ -81,7 +82,7 @@ export function ModalMetric() {
               </div>
               <div className="mt-1 font-mono text-sm tabular-nums text-foreground">τ = {taus[i].toFixed(0)}</div>
               <div className="font-mono text-[9px] text-muted-foreground">
-                half-life {(Math.log(2) * taus[i]).toFixed(0)} tokens
+                half-life {(mlog(2) * taus[i]).toFixed(0)} tokens
               </div>
             </div>
           ))}
@@ -119,5 +120,5 @@ export function ModalMetric() {
 }
 
 function logit(p: number): number {
-  return Math.log(p / (1 - p))
+  return mlog(p / (1 - p))
 }

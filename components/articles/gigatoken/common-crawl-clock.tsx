@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mlog10, mpow } from "@/lib/dmath"
 
 // Make the speedup visceral. The README notes that at EPYC rates you could
 // tokenize all of Common Crawl — ~130 trillion tokens, "the entire internet" —
@@ -20,7 +21,7 @@ const CPUS = {
 
 const CC = 130e12 // Common Crawl, ~130 trillion tokens
 const LO = 9 // 1e9 tokens
-const HI = Math.log10(CC) // ~14.11
+const HI = mlog10(CC) // ~14.11
 
 function human(sec: number): string {
   if (sec < 90) return `${sec.toFixed(1)} s`
@@ -40,7 +41,7 @@ export function CommonCrawlClock() {
   const [exp, setExp] = useState(HI)
   const [ck, setCk] = useState<keyof typeof CPUS>("epyc")
   const cpu = CPUS[ck]
-  const n = Math.pow(10, exp)
+  const n = mpow(10, exp)
 
   const gt = n / cpu.gt
   const hf = n / cpu.hf

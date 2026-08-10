@@ -4,6 +4,7 @@ import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos } from "@/lib/dmath"
 
 // HMPO — Hybrid Median-length Policy Optimization, drawn as a real diagram. For each
 // query the policy samples a group of G rollouts. HMPO sets the length budget b to the
@@ -53,7 +54,7 @@ const yOf = (r: number) => Y_BOT - r * (Y_BOT - Y_TOP)
 
 function rewardIfCorrect(n: number, b: number, lambda: number) {
   if (n >= b) return 0
-  return Math.min(1, Math.cos((Math.PI * n) / (2 * b)) + lambda)
+  return Math.min(1, mcos((Math.PI * n) / (2 * b)) + lambda)
 }
 
 export function HmpoBudget() {

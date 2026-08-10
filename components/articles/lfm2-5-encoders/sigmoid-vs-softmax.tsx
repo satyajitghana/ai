@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
 import { cn } from "@/lib/utils"
+import { mexp } from "@/lib/dmath"
 
 // Multi-label classification needs a HEAD that can say "yes" to more than one
 // label at once, or to none at all. Sigmoid gives each label its own
@@ -27,14 +28,14 @@ const DEFAULT_LOGITS: Record<Label, number> = {
 }
 
 function sigmoid(z: number) {
-  return 1 / (1 + Math.exp(-z))
+  return 1 / (1 + mexp(-z))
 }
 
 export function SigmoidVsSoftmax() {
   const [logits, setLogits] = useState<Record<Label, number>>(DEFAULT_LOGITS)
 
   const sigmoids = LABELS.map((l) => sigmoid(logits[l]))
-  const exps = LABELS.map((l) => Math.exp(logits[l]))
+  const exps = LABELS.map((l) => mexp(logits[l]))
   const expSum = exps.reduce((a, b) => a + b, 0)
   const softmaxes = exps.map((e) => e / expSum)
   const winnerIdx = softmaxes.indexOf(Math.max(...softmaxes))

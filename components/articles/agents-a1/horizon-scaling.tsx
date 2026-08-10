@@ -1,5 +1,7 @@
 "use client"
 
+import { mlog10 } from "@/lib/dmath"
+
 // The thesis in one chart: "scaling the horizon, not the parameters." Each model is
 // placed by total parameters (log x) and a representative agentic score (y = average of
 // five headline benchmarks: BrowseComp, Seal-0, GAIA, IFBench, FrontierScience-Olympiad).
@@ -30,9 +32,9 @@ export function HorizonScaling() {
   const padR = 24
   const padT = 28
   const padB = 52
-  const x0 = Math.log10(20)
-  const x1 = Math.log10(2500)
-  const sx = (p: number) => padL + ((Math.log10(p) - x0) / (x1 - x0)) * (W - padL - padR)
+  const x0 = mlog10(20)
+  const x1 = mlog10(2500)
+  const sx = (p: number) => padL + ((mlog10(p) - x0) / (x1 - x0)) * (W - padL - padR)
   const y0 = 50
   const y1 = 85
   const sy = (v: number) => padT + (1 - (v - y0) / (y1 - y0)) * (H - padT - padB)

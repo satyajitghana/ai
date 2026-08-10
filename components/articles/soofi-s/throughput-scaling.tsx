@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mlog10 } from "@/lib/dmath"
 
 // Soofi S's whole thesis, as a chart. Decoding is memory-bandwidth bound: every
 // generated token must re-read the weights AND the attention cache of every sequence
@@ -33,7 +34,7 @@ const PB = 44
 
 const YMIN = 0.06
 const YMAX = 5.5
-const ly = (v: number) => Math.log10(v)
+const ly = (v: number) => mlog10(v)
 const x = (i: number) => PL + (i / (CTX.length - 1)) * (W - PL - PR)
 const y = (v: number) => PT + (1 - (ly(v) - ly(YMIN)) / (ly(YMAX) - ly(YMIN))) * (H - PT - PB)
 

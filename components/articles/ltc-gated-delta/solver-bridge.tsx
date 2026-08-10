@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mexp, mlog } from "@/lib/dmath"
 
 // The bridge between the two literatures, derived from LTC's own Algorithm 1.
 // The fused solver step is
@@ -21,13 +22,13 @@ import { Range } from "@/components/articles/ui/range"
 const PADE = "oklch(0.68 0.13 85)"
 const EXPO = "oklch(0.60 0.15 255)"
 
-const halfLife = (a: number) => Math.log(0.5) / Math.log(a)
+const halfLife = (a: number) => mlog(0.5) / mlog(a)
 
 export function SolverBridge() {
   const [z, setZ] = useState(0.05) // z = dt / tau_sys
 
   const aPade = 1 / (1 + z)
-  const aExp = Math.exp(-z)
+  const aExp = mexp(-z)
   const relErr = ((aPade - aExp) / aExp) * 100
 
   const N = 70
@@ -82,7 +83,7 @@ export function SolverBridge() {
           </div>
           <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-28 w-full" role="img" aria-label="Two nearly identical decay curves: the Pade approximant one over one plus z, and the exponential e to the minus z, diverging only as z grows past about 0.3">
             <polyline points={curve((x) => 1 / (1 + x))} fill="none" stroke={PADE} strokeWidth="1.6" vectorEffect="non-scaling-stroke" />
-            <polyline points={curve((x) => Math.exp(-x))} fill="none" stroke={EXPO} strokeWidth="1.6" vectorEffect="non-scaling-stroke" strokeDasharray="4 3" />
+            <polyline points={curve((x) => mexp(-x))} fill="none" stroke={EXPO} strokeWidth="1.6" vectorEffect="non-scaling-stroke" strokeDasharray="4 3" />
             <line x1={(z / zmax) * 100} y1="0" x2={(z / zmax) * 100} y2="100" stroke="currentColor" strokeWidth="0.4" opacity="0.35" />
           </svg>
           <div className="flex justify-between font-mono text-[9px] text-muted-foreground">

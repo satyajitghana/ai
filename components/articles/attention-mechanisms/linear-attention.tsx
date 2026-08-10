@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { ATT, FigureCard, IDX, IO, Legend, PlayPause, useReducedMotion, useTicker, WARM } from "./shared"
 import { Range } from "@/components/articles/ui/range"
+import { msin } from "@/lib/dmath"
 
 // Linear attention (Katharopoulos 2020), drawn as the cost contrast that is the whole
 // point. Softmax attention materialises an N×N score matrix — it grows quadratically as
@@ -28,10 +29,10 @@ const SC = 30
 
 function phi(k: number, a: number) {
   // a positive feature map (elu+1-ish), deterministic
-  return Math.max(0.05, 0.6 + 0.6 * Math.sin((k + 1) * 0.8 + a * 1.3))
+  return Math.max(0.05, 0.6 + 0.6 * msin((k + 1) * 0.8 + a * 1.3))
 }
 function val(k: number, b: number) {
-  return 0.5 + 0.5 * Math.sin((k + 1) * 0.5 + b * 1.9)
+  return 0.5 + 0.5 * msin((k + 1) * 0.5 + b * 1.9)
 }
 
 export function LinearAttention() {

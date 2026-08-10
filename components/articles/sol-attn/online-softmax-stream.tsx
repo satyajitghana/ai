@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, msin } from "@/lib/dmath"
 
 // The part that makes Sol-Attn a single kernel instead of a routing stage plus an
 // attention stage: block-proxy scores are consumed AS THEY STREAM, not gathered
@@ -24,7 +25,7 @@ const APPROX_RECOVERY = 0.82 // illustrative: fraction of a dropped block's mass
 
 function rawScore(i: number) {
   const t = i / (N - 1)
-  return 0.55 + 0.9 * Math.sin(t * 9.5 + 0.5) * Math.cos(t * 2.6) + 0.3 * Math.sin(t * 15 + 1.2)
+  return 0.55 + 0.9 * msin(t * 9.5 + 0.5) * mcos(t * 2.6) + 0.3 * msin(t * 15 + 1.2)
 }
 
 const SCORES = Array.from({ length: N }, (_, i) => rawScore(i))

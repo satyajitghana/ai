@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mhypot } from "@/lib/dmath"
 
 // Quantize-then-refine — the other half of a fast ANN search. The graph walk
 // (see NavGraph) decides *which* vectors to score; quantization decides how
@@ -47,7 +48,7 @@ function mulberry32(a: number) {
 }
 
 type Pt = [number, number]
-const dist = (a: Pt, b: Pt) => Math.hypot(a[0] - b[0], a[1] - b[1])
+const dist = (a: Pt, b: Pt) => mhypot(a[0] - b[0], a[1] - b[1])
 
 function buildPoints(): Pt[] {
   const rnd = mulberry32(SEED)

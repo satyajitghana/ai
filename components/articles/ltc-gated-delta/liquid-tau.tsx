@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mexp, mlog } from "@/lib/dmath"
 
 // The one equation that defines a Liquid Time-constant Network. Hasani et al.
 // (arXiv 2006.04439) Eq. 1 is a linear first-order ODE whose decay rate is
@@ -26,19 +27,19 @@ export function LiquidTau() {
 
   const tauSys = TAU / (1 + TAU * f)
   const tauMin = TAU / (1 + TAU * W)
-  const alpha = Math.exp(-1 / tauSys) // one-step retention, dt = 1
-  const half = Math.log(0.5) / Math.log(alpha)
+  const alpha = mexp(-1 / tauSys) // one-step retention, dt = 1
+  const half = mlog(0.5) / mlog(alpha)
 
   // log-scale position of a tau within [tauMin, TAU]
   const pos = (t: number) =>
-    ((Math.log(t) - Math.log(tauMin)) / (Math.log(TAU) - Math.log(tauMin))) * 100
+    ((mlog(t) - mlog(tauMin)) / (mlog(TAU) - mlog(tauMin))) * 100
 
   // decay curve x(t) = exp(-t / tauSys) sampled for the sparkline
   const N = 60
   const span = TAU * 2
   const pts = Array.from({ length: N + 1 }, (_, i) => {
     const t = (i / N) * span
-    return `${(i / N) * 100},${(1 - Math.exp(-t / tauSys)) * 100}`
+    return `${(i / N) * 100},${(1 - mexp(-t / tauSys)) * 100}`
   }).join(" ")
 
   return (

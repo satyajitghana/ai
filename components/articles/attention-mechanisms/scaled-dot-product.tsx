@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { ATT, FigureCard, IDX, Legend, Segmented, WARM } from "./shared"
+import { mcos, mexp, msin } from "@/lib/dmath"
 
 // Scaled dot-product attention, computed for one query in front of you:
 //   score_j = (q · k_j) / √d_k   →   w = softmax(score)   →   out = Σ_j w_j v_j
@@ -21,19 +22,19 @@ const HEADS = 3
 function rawScore(head: number, j: number) {
   return (
     2.4 *
-    Math.sin((j + 1) * (0.7 + head * 0.5) + head * 1.3) *
-    Math.cos((j + 1) * 0.3 + head)
+    msin((j + 1) * (0.7 + head * 0.5) + head * 1.3) *
+    mcos((j + 1) * 0.3 + head)
   )
 }
 function valueVec(j: number) {
   return Array.from({ length: DV }, (_, f) =>
-    Math.min(1, Math.max(0.12, 0.5 + 0.5 * Math.sin((j + 1) * 1.1 + f * 2.1)))
+    Math.min(1, Math.max(0.12, 0.5 + 0.5 * msin((j + 1) * 1.1 + f * 2.1)))
   )
 }
 
 function softmax(xs: number[]) {
   const m = Math.max(...xs)
-  const ex = xs.map((x) => Math.exp(x - m))
+  const ex = xs.map((x) => mexp(x - m))
   const s = ex.reduce((a, b) => a + b, 0)
   return ex.map((e) => e / s)
 }

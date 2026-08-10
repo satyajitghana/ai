@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mpow } from "@/lib/dmath"
 
 // D-cut: verification depth as a SHARED batch resource. Each request i has a
 // per-position confidence product s(i,k) = Pr(first k drafted tokens all
@@ -36,7 +37,7 @@ const RATIOS = [0.25, 0.5, 0.75, 1.0]
 
 function conf(reqIdx: number, k: number) {
   const r = REQS[reqIdx]
-  return r.base * Math.pow(r.rate, k) // k = 0..D1-1
+  return r.base * mpow(r.rate, k) // k = 0..D1-1
 }
 
 type Mode = "global" | "fixed"

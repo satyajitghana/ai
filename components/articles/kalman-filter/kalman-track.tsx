@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, mlog, msin } from "@/lib/dmath"
 
 // A constant-velocity Kalman filter tracking a noisy 1-D signal, live. The true
 // value (faint) is observed only through scattered noisy measurements; the filter
@@ -24,12 +25,12 @@ function makeData() {
   }
   const gauss = () => {
     const u = Math.max(rand(), 1e-9)
-    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rand())
+    return Math.sqrt(-2 * mlog(u)) * mcos(2 * Math.PI * rand())
   }
   const truth: number[] = []
   const meas: number[] = []
   for (let t = 0; t < NS; t++) {
-    const tv = 50 + 28 * Math.sin(t * 0.11) + 8 * Math.sin(t * 0.31)
+    const tv = 50 + 28 * msin(t * 0.11) + 8 * msin(t * 0.31)
     truth.push(tv)
     meas.push(tv + gauss() * MEAS_STD)
   }

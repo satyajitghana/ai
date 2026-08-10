@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mcos, msin } from "@/lib/dmath"
 
 // LongCat Sparse Attention (LSA), drawn against MiniMax's MSA as the reference point.
 // Both make attention sparse by scoring the past KV and reading only a chosen subset.
@@ -26,13 +27,13 @@ const FINE = 3 // LSA: fine tokens kept per recalled block
 
 // deterministic block-level saliency for a given query position
 function blockScore(q: number, b: number) {
-  const s = Math.sin((b + 1) * 1.9 + q * 0.7)
-  const t = Math.cos((b + 1) * 0.5 + q * 0.3)
+  const s = msin((b + 1) * 1.9 + q * 0.7)
+  const t = mcos((b + 1) * 0.5 + q * 0.3)
   return Math.min(1, Math.max(0, (s * 0.6 + t * 0.4 + 1) / 2))
 }
 // deterministic token-level saliency inside a block
 function tokenScore(q: number, b: number, t: number) {
-  const s = Math.sin((t + 1) * 2.3 + (b + 1) * 1.1 + q * 0.4)
+  const s = msin((t + 1) * 2.3 + (b + 1) * 1.1 + q * 0.4)
   return Math.min(1, Math.max(0, (s + 1) / 2))
 }
 

@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mexp, mlog, mpow } from "@/lib/dmath"
 
 // Scaling efficiency, as a chart. K3's architecture + recipe convert compute into
 // capability ~2.5x more efficiently than K2: it reaches the same capability at about
@@ -27,7 +28,7 @@ const C0_K3 = -0.25 - 0.39794 // shift left by log10(2.5) -> 2.5x less compute
 
 const xPix = (L: number) => PL + ((L - LOG_MIN) / (LOG_MAX - LOG_MIN)) * (PR - PL)
 const yPix = (cap: number) => PB - (cap / 100) * (PB - PT)
-const capAt = (L: number, c0: number) => Math.max(0, Math.min(100, 100 * (1 - Math.exp(-KK * (L - c0)))))
+const capAt = (L: number, c0: number) => Math.max(0, Math.min(100, 100 * (1 - mexp(-KK * (L - c0)))))
 
 function curve(c0: number): string {
   const steps = 72
@@ -47,10 +48,10 @@ const Y_TICKS = [50, 70, 90]
 export function ScalingEfficiency() {
   const [cap, setCap] = useState(80)
 
-  const ln = Math.log(1 - cap / 100) // negative
+  const ln = mlog(1 - cap / 100) // negative
   const LK2 = C0_K2 - ln / KK
   const LK3 = C0_K3 - ln / KK
-  const ratio = Math.pow(10, LK2 - LK3)
+  const ratio = mpow(10, LK2 - LK3)
   const r2 = (n: number): number => Math.round(n * 100) / 100
   const xk2 = r2(xPix(Math.min(LOG_MAX, LK2)))
   const xk3 = r2(xPix(Math.min(LOG_MAX, LK3)))
@@ -79,7 +80,7 @@ export function ScalingEfficiency() {
             <g key={`x${L}`}>
               <line x1={xPix(L)} y1={PT} x2={xPix(L)} y2={PB} stroke="var(--border)" strokeWidth={1} strokeOpacity={0.4} />
               <text x={xPix(L)} y={PB + 16} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9}>
-                {Math.round(Math.pow(10, L))}×
+                {Math.round(mpow(10, L))}×
               </text>
             </g>
           ))}

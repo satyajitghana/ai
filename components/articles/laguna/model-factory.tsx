@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { PauseIcon, PlayIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { cn } from "@/lib/utils"
+import { mcos, msin } from "@/lib/dmath"
 
 // The Model Factory as a flywheel — drawn as an actual cyclic diagram. Poolside's claim
 // isn't a single architecture trick; it's that model development is an *industrial
@@ -54,8 +55,8 @@ const ANG = [-90, 0, 90, 180] // data top · train right · eval bottom · infer
 
 const rad = (d: number) => (d * Math.PI) / 180
 const ell = (deg: number, rx: number, ry: number): [number, number] => [
-  CX + rx * Math.cos(rad(deg)),
-  CY + ry * Math.sin(rad(deg)),
+  CX + rx * mcos(rad(deg)),
+  CY + ry * msin(rad(deg)),
 ]
 
 export function ModelFactory() {

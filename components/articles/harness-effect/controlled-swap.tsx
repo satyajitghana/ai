@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { mpow } from "@/lib/dmath"
 
 // The controlled swap. Hold the MODEL constant; change only the orchestration
 // layer — a frozen conventional production loop vs the Writer Agent Harness —
@@ -59,7 +60,7 @@ function useAnimatedNumber(target: number, ms = 480) {
     const step = (ts: number) => {
       if (!startTs) startTs = ts
       const p = Math.min(1, (ts - startTs) / ms)
-      const e = 1 - Math.pow(1 - p, 3)
+      const e = 1 - mpow(1 - p, 3)
       setVal(from + (target - from) * e)
       if (p < 1) raf = requestAnimationFrame(step)
       else fromRef.current = target

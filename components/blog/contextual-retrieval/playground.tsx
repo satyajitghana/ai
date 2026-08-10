@@ -1,6 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
+import { mlog } from "@/lib/dmath"
 
 // A client-side Contextual Retrieval playground. Everything runs in the browser:
 // BM25, a TF-IDF cosine "semantic" score (a stand-in for a real embedding model),
@@ -54,7 +55,7 @@ function bm25Scores(docs: string[][], query: string[], k1 = 1.5, b = 0.75): numb
   for (const d of docs) for (const t of new Set(d)) df.set(t, (df.get(t) ?? 0) + 1)
   const idf = (t: string) => {
     const n = df.get(t) ?? 0
-    return Math.log(1 + (N - n + 0.5) / (n + 0.5))
+    return mlog(1 + (N - n + 0.5) / (n + 0.5))
   }
   return docs.map((d) => {
     const tf = new Map<string, number>()
@@ -77,7 +78,7 @@ function cosineScores(docs: string[][], query: string[]): number[] {
     const tf = new Map<string, number>()
     for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1)
     const v = new Map<string, number>()
-    for (const [t, c] of tf) v.set(t, (c / toks.length) * (Math.log((1 + N) / (1 + (df.get(t) ?? 0))) + 1))
+    for (const [t, c] of tf) v.set(t, (c / toks.length) * (mlog((1 + N) / (1 + (df.get(t) ?? 0))) + 1))
     let norm = 0
     for (const x of v.values()) norm += x * x
     norm = Math.sqrt(norm) || 1

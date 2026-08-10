@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
 import { cn } from "@/lib/utils"
+import { msin } from "@/lib/dmath"
 
 // Why a continuous DDPM can't get the same free lunch. MD4's forward process decides,
 // per voxel, whether to mask it — a fixed voxel is simply excluded from that decision,
@@ -21,8 +22,8 @@ type Mode = "md4" | "ddpm"
 const ACCENT = "oklch(0.66 0.16 200)"
 const WARN = "oklch(0.64 0.18 25)"
 
-const bOfT = (t: number) => Math.sin((Math.PI / 2) * t)
-const pMaskOfT = (t: number) => Math.sin((Math.PI / 2) * t)
+const bOfT = (t: number) => msin((Math.PI / 2) * t)
+const pMaskOfT = (t: number) => msin((Math.PI / 2) * t)
 
 export function ScheduleMismatch() {
   const [mode, setMode] = useState<Mode>("md4")

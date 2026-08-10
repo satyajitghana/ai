@@ -4,6 +4,7 @@ import { memo, useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mexp } from "@/lib/dmath"
 
 // A single model's J-lens CKA matrix: cell (i,j) = how similarly layers i and j
 // arrange the 4,096 probe-token steering directions. Bright blocks along the
@@ -59,7 +60,7 @@ function viridis(t: number): string {
 
 // structure-faithful CKA between two relative depths a,b ∈ [0,1]
 function cka(a: number, b: number): number {
-  const prox = Math.exp(-(((a - b) / 0.085) ** 2)) // sharp diagonal
+  const prox = mexp(-(((a - b) / 0.085) ** 2)) // sharp diagonal
   const same = stageOf(a) === stageOf(b) ? 0.14 : 0 // within-stage block
   return Math.min(1, Math.max(0, 0.46 + 0.44 * prox + same))
 }

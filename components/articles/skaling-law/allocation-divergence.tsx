@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { mlog10, mpow } from "@/lib/dmath"
 
 // The practical consequence, and the reason this paper matters beyond curve
 // fitting. The compute-optimal token-to-parameter ratio D*/N* is what tells you
@@ -32,23 +33,23 @@ const C_LO = 1e18
 const C_HI = 2e25
 const DATA_HI = 3e21 // right edge of the observed range
 
-const ratio = (m: number, C: number) => R_ANCHOR * Math.pow(C / C_ANCHOR, m)
+const ratio = (m: number, C: number) => R_ANCHOR * mpow(C / C_ANCHOR, m)
 
 export function AllocationDivergence() {
   const [logC, setLogC] = useState(24)
 
-  const C = Math.pow(10, logC)
-  const lx = (c: number) => ((Math.log10(c) - Math.log10(C_LO)) / (Math.log10(C_HI) - Math.log10(C_LO))) * 100
+  const C = mpow(10, logC)
+  const lx = (c: number) => ((mlog10(c) - mlog10(C_LO)) / (mlog10(C_HI) - mlog10(C_LO))) * 100
 
   const vals = LAWS.map((l) => ratio(l.m, C))
   const rMin = Math.min(...LAWS.flatMap((l) => [ratio(l.m, C_LO), ratio(l.m, C_HI)]))
   const rMax = Math.max(...LAWS.flatMap((l) => [ratio(l.m, C_LO), ratio(l.m, C_HI)]))
-  const ly = (r: number) => 96 - ((Math.log10(r) - Math.log10(rMin)) / (Math.log10(rMax) - Math.log10(rMin))) * 92
+  const ly = (r: number) => 96 - ((mlog10(r) - mlog10(rMin)) / (mlog10(rMax) - mlog10(rMin))) * 92
 
   const N = 60
   const curve = (m: number) =>
     Array.from({ length: N + 1 }, (_, i) => {
-      const c = Math.pow(10, Math.log10(C_LO) + (i / N) * (Math.log10(C_HI) - Math.log10(C_LO)))
+      const c = mpow(10, mlog10(C_LO) + (i / N) * (mlog10(C_HI) - mlog10(C_LO)))
       return `${lx(c)},${ly(ratio(m, c))}`
     }).join(" ")
 

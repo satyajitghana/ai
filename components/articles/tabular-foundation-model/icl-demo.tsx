@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
+import { mexp } from "@/lib/dmath"
 
 // TabFM's core move, drawn as a diagram: in-context learning for tables. You don't
 // train the model — you paste labeled example rows into the context and it predicts a
@@ -47,7 +48,7 @@ const pillX = (i: number, k: number) => MX + USABLE * ((i + 0.5) / k) - RW / 2
 
 function conf(k: number) {
   if (k === 0) return 0.5
-  return 0.5 + 0.46 * (1 - Math.exp(-k / 2.5))
+  return 0.5 + 0.46 * (1 - mexp(-k / 2.5))
 }
 
 export function IclDemo() {

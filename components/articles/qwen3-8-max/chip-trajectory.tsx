@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
+import { mlog10 } from "@/lib/dmath"
 
 // The chip-design case study, as a staircase. Qwen3.8-Max ran ~500 turns of an
 // autonomous edit-simulate-synthesize-layout loop against a GCD/RSA hardware
@@ -27,8 +28,8 @@ const STEPS: Step[] = [
   { turn: 500, gates: 678, label: "Gate-level refinement", detail: "Local optimizations — a shared NOR-gate tree, absolute-difference subtraction splitting, byte-to-bit selection logic — squeezed out the final redundancies." },
 ]
 
-const LOG_MIN = Math.log10(600)
-const LOG_MAX = Math.log10(9000)
+const LOG_MIN = mlog10(600)
+const LOG_MAX = mlog10(9000)
 const Y_TICKS = [700, 1000, 2000, 4000, 8000]
 const X_TICKS = [0, 100, 200, 300, 400, 500]
 
@@ -40,7 +41,7 @@ const PT = 18
 const PB = 232
 
 const xPix = (turn: number) => PL + (turn / 500) * (PR - PL)
-const yPix = (gates: number) => PB - ((Math.log10(gates) - LOG_MIN) / (LOG_MAX - LOG_MIN)) * (PB - PT)
+const yPix = (gates: number) => PB - ((mlog10(gates) - LOG_MIN) / (LOG_MAX - LOG_MIN)) * (PB - PT)
 
 function stepPath(): string {
   let d = `M ${xPix(STEPS[0].turn)} ${yPix(STEPS[0].gates)} `
