@@ -31,6 +31,14 @@
  *   pnpm check:spacing             # all articles
  *   pnpm check:spacing kimi-k3 …   # specific slugs
  *
+ * `next dev` keeps every compiled route in memory, and the whole article set
+ * is more than the default heap holds — it dies partway through a full run
+ * with "Ineffective mark-compacts near heap limit". Give it room:
+ *
+ *   NODE_OPTIONS=--max-old-space-size=8192 pnpm dev
+ *
+ * and if it still dies, pass slugs and go a batch at a time.
+ *
  * Exits non-zero if anything is found.
  */
 
@@ -85,21 +93,35 @@ async function main() {
   const targets = slugs()
   const findings: { slug: string; hits: string[] }[] = []
   let unreachable = 0
+  let consecutive = 0
+  let died = false
 
   for (const slug of targets) {
+    // Once the dev server is gone every remaining page fails the same way.
+    // Grinding through a hundred of them buries the real cause, so stop and
+    // name it.
+    if (consecutive >= 3) {
+      died = true
+      unreachable += targets.length - targets.indexOf(slug)
+      break
+    }
+
     let res
     try {
       res = await page.goto(`${BASE}/articles/${slug}`, { waitUntil: "domcontentloaded", timeout: 120_000 })
     } catch {
       unreachable++
+      consecutive++
       console.error(`  ?  ${slug} — could not load (is \`pnpm dev\` running?)`)
       continue
     }
     if (!res || res.status() !== 200) {
       unreachable++
+      consecutive++
       console.error(`  ?  ${slug} — HTTP ${res?.status() ?? "??"}`)
       continue
     }
+    consecutive = 0
     await page.waitForTimeout(600)
 
     // NOTE: no named inner functions in here. tsx/esbuild rewrites them with a
@@ -155,6 +177,12 @@ async function main() {
   await browser.close()
 
   const total = findings.reduce((a, f) => a + f.hits.length, 0)
+  if (died) {
+    console.error(`\nGave up after 3 unreachable pages in a row — the dev server is gone.`)
+    console.error(`  Most likely it ran out of heap. Restart it with more:`)
+    console.error(`    NODE_OPTIONS=--max-old-space-size=8192 pnpm dev`)
+    console.error(`  then re-run, passing slugs to go a batch at a time if needed.`)
+  }
   if (unreachable) console.error(`\n${unreachable} page(s) unreachable — results are incomplete.`)
   if (total) {
     console.error(`\n✗ ${total} fused word boundar${total === 1 ? "y" : "ies"} across ${findings.length} page(s).`)

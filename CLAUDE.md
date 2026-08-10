@@ -62,7 +62,7 @@ Rules for paper figures:
 - `pnpm validate:content` — load every MDX through the Zod content layer (loud failure)
 - `pnpm validate:mdx` — **compile** every MDX body the way the build does (same remark plugins), so JSX/MDX syntax errors fail here instead of at the Vercel build
 - `pnpm validate` — `typecheck` + `validate:content` + `validate:mdx`. **Run this after any content/data edit, before committing.**
-- `pnpm check:spacing [slug…]` — renders articles in a headless browser and reports words fused together at JSX element boundaries (`the restskip`). Needs `pnpm dev` running, so it is deliberately outside `validate`. Run it after writing a component with prose that wraps around inline tags.
+- `pnpm check:spacing [slug…]` — renders articles in a headless browser and reports words fused together at JSX element boundaries (`the restskip`). Needs `pnpm dev` running, so it is deliberately outside `validate`. Run it after writing a component with prose that wraps around inline tags. A full run needs `NODE_OPTIONS=--max-old-space-size=8192 pnpm dev` — Turbopack holds every compiled route and the default heap dies around a hundred articles in.
 
 ## Guardrails (LOCKED)
 - **Never edit `data/.generated/*`** — machine-generated, off-limits.
