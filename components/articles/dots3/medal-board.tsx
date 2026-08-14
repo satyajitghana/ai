@@ -4,7 +4,10 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 
-// IMO 2026 result for dots-note-3.0, from the dots team's own page.
+// IMO 2026 result, from dots' own write-up. Attribution matters here: the
+// entrant was not dots3-note Preview as released but "an internal harness
+// around a branch of dots3-note Preview" that generated proofs recursively and
+// used tools to evaluate and improve them.
 //
 // Six problems, 7 points each, 42 total. The page counts are the ones listed
 // in its "Solution overview" strip, and they are the most concrete thing on
