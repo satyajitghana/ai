@@ -1,0 +1,107 @@
+---
+title: "MAGI-2 Preview: 114B parameters, 6B awake, and two sparsities doing the work"
+description: "Sand AI's unified audio-video model activates 1 parameter in 19. Reading the published safetensors headers, the 114B total is exact and the '6B active' figure lands at 5.96B — but only once you account for the fact that the model carries three sets of modality weights and a token is only ever one modality. MoE sparsity alone gets you to 7.71B. Plus hyper-connections with four residual streams, and 64 GB of the 307 GB checkpoint that Sand AI did not train."
+date: 2026-08-14
+interest: 5
+helpful: 4
+tags:
+  - video-generation
+  - audio
+  - open-weights
+  - moe
+  - architecture
+  - explainer
+---
+
+import { ActiveBudget } from "@/components/articles/magi-2-preview/active-budget"
+import { LayerStack } from "@/components/articles/magi-2-preview/layer-stack"
+import { CheckpointLedger } from "@/components/articles/magi-2-preview/checkpoint-ledger"
+
+Sand AI released [MAGI-2 Preview](https://github.com/SandAI-org/MAGI-2-preview) under Apache 2.0: a **114B-parameter unified audio-video generation model that activates just 6B parameters per token**. Text-to-video or image-to-video, ten-second clips, sound generated alongside the picture and muxed into the same file. Eight Hopper GPUs to run it.
+
+Both halves of that headline are checkable against the published weights, and they check out — but the second one only works for a reason the card does not spell out.
+
+## Where 6B comes from
+
+<ActiveBudget />
+
+The total is exact. The safetensors index reports `total_size: 228107858176`, which at bf16 is **114.05B parameters**. Reconstructing it from the published tensor shapes and the config gives 113.88B — 0.15% apart, close enough to say the decomposition is right rather than lucky.
+
+The active figure is more interesting. The MoE is 256 experts across 12 heads — 3,072 expert slots — with top-6 routing *per head*, so 72 of 3,072 fire for any token. That takes the MoE weight in a layer from 3.02B down to 70.8M.
+
+Apply that alone and you land at **7.71B active**, not 6B.
+
+The rest comes off because of something visible only in the shapes. On layer 0, `linear_qkv` is `[27648, 3072]`; on layer 2 the same tensor is `[9216, 3072]`. Exactly three times as large, and `k_norm` goes `[384]` against `[128]` to match. The model carries **three sets of weights — one per modality** — in its dense layers and in the modality-specific shared expert of every MoE layer. A token is video *or* audio *or* text, never all three, so two thirds of those weights sit resident and idle.
+
+Put both sparsities together and it comes to **5.96B**, against a stated "just 6B parameters per token." One active parameter in 19.1.
+
+That is the design worth naming: MoE sparsity and modality sparsity multiplied, not just the MoE ratio everyone quotes.
+
+## The stack
+
+<LayerStack />
+
+Forty layers, hidden size 3072. The config lists `mm_layers: [0, 1, 38, 39]` and MoE on layers 2 through 37 — dense at both ends, sparse through the middle.
+
+That placement says what Sand AI thinks the hard part is. Mixing three modalities is treated as an entrance-and-exit problem: two dense layers at the bottom and two at the top, each carrying private weights per modality. Everything between them runs a *single shared attention* over the fused sequence and spends its capacity on routed experts. Dense where the modalities are still separate, sparse once they are already mixed.
+
+The three modalities enter through their own embedders — video at 48 channels, audio at 64, text at 5120 — and leave through separate video and audio output heads. There is no text head: text is conditioning, not output.
+
+The refiner is a different model, not a smaller copy of the same one. Its config gives **30 layers at hidden 4096** with 8 query groups, `mm_layers: [0, 1, 28, 29]` — the same dense-at-the-edges pattern — and **no MoE at all**. It also sets `local_attn_layers` to all thirty. That is a sensible split of labour: upscaling 512×896 to 1088×1920 is a local problem, so the second stage is dense, wider, shallower, and never looks far across the frame. It gets 14 GB and 5 denoising steps against the preview stage's 228 GB and 100.
+
+## Four residual streams
+
+The tensor names give away a technique the README never mentions. Every layer carries `mhc_alpha_pre_attn`, `mhc_bias_res_attn` shaped `[4, 4]`, and an `mhc_norm.weight` of `[12288]` — which is 4 × 3072.
+
+That is **hyper-connections**: instead of one residual stream with `x + f(x)`, the model maintains four parallel streams and learns how to mix them, with a 4×4 matrix deciding how each stream feeds the next block. The config confirms it as `mhc_config: { num_stream: 4, alpha_init: 0.01 }`, and the residual state really is four times as wide as the hidden size — the embedders write into 12288, not 3072.
+
+Two implementation details in `magi2_preview.py` are worth flagging because they are not obvious from the config:
+
+- The connection matrices go through a **Sinkhorn-Knopp** normalization (`_sinkhorn_knopp_affine_fwd_kernel`), which makes them doubly stochastic — every stream contributes and receives a fixed total, so no stream can quietly dominate.
+- The whole thing runs through a hand-written Triton kernel (`_hyper_connect_fwd_kernel`). Four residual streams is four times the memory traffic if you do it naively.
+
+The attention has two further additions: **attention sinks** (one sink token per layer, via FlashAttention-3's `fa3_func_with_sink`) and **gating** — a `linear_g` projection per layer, 24 outputs on MoE layers and 72 on the modality-specific ones, one per query group.
+
+## What you are actually downloading
+
+<CheckpointLedger />
+
+307 GB, and **64 GB of it Sand AI did not train**: the text encoder is Qwen3.5-27B, the video VAE comes from Wan2.2-TI2V-5B, and the audio VAE is Stability's stable-audio-open-1.0. The repo names each one and links it, which is the right way to do this — but it does mean "114B open-weights video model" describes the transformer, not the system you run.
+
+The 2 GB `turbo_vae` is Sand AI's own distilled VAE decoder, and it is on by default (`use_turbo_vae: true`). It is also the only distilled component in the release, which brings up the cost.
+
+## The honest problem: 105 denoising steps
+
+The README is unusually direct about this:
+
+> Neither transformer has been step-distilled, so the denoising step count is where most of the wall-clock time goes.
+
+The shipped configuration is **100 preview steps plus 5 refiner steps**. The preview stage generates at 512×896 and the refiner takes it to 1088×1920. A distilled release with "far fewer" steps is listed as coming soon, with no date.
+
+So the model that exists today is the slow one, on purpose, and Sand AI is saying so in the release rather than after someone benchmarks it. What is not stated anywhere is how long 105 steps actually takes on the eight Hopper GPUs it requires — there is no wall-clock figure in the repo, the card, or the config.
+
+Everything else about the runtime is specified in detail: `cp_size: 8` and `ep_size: 8`, so context parallelism (Ulysses) and expert parallelism both span all eight GPUs; guidance is 5.0 for video and 7.0 for audio; output is 12.5 fps over a 10-second clip; the video VAE stride is `[8, 16, 16]`.
+
+There is even a `--deterministic` flag, and a commit whose entire purpose is *"add Inductor compile-time configs for bit-exact reproducibility."* For a diffusion model where a one-ULP difference changes the video, shipping bit-exactness as a supported mode is a real courtesy.
+
+## Prompt enhancement is not optional in practice
+
+The captions the model trained on are long and structured, so the pipeline ships a prompt-enhancement step that asks an instruction-following LLM for a **structured JSON caption** of the 10-second clip, then renders it to Markdown before encoding. Templates are included for T2V and I2V separately.
+
+It talks to an OpenAI-compatible endpoint and is off unless you set an `API_KEY`. The README is candid that "a short hand-written prompt underuses" the model — which means the shipped quality bar assumes a second model in the loop that the checkpoint does not include. The repo does hedge this properly by shipping two already-enhanced example prompts so you can see what the model actually expects.
+
+## What is missing
+
+**No evaluation of any kind.** No VBench, no comparison against Wan, Kling, Veo, Sora or anything else, no human preference study, no ablation. For a release whose stated purpose is to explore "an efficient path to scaling video generation," there is no published evidence that the efficiency buys quality. The samples in `assets/` are inputs, not results.
+
+**No wall-clock or cost figure**, as above.
+
+**The technical blog is unreachable.** The architecture, training system and data pipeline are described at [sand.ai/blog/magi-2-preview](https://sand.ai/blog/magi-2-preview), which sits behind a WAF that returns a challenge page rather than content. Everything in this article therefore comes from the repository, the model card and the published weights — which turned out to be enough to verify the headline numbers, but means the training and systems claims are unexamined here.
+
+## Why it is worth the attention anyway
+
+The parameter accounting is the result. A model that keeps three modality-specific copies of its dense weights and routes 72 of 3,072 expert slots per token gets to 19× sparsity without either mechanism being exotic on its own — and both are legible in the shapes, which is rarer than it should be.
+
+The rest is a set of choices that are individually defensible and unusual together: hyper-connections with four Sinkhorn-normalized streams, attention sinks and gating, modality-private layers only at the edges, a distilled VAE decoder but undistilled transformers. It is a lot of recent architecture research in one checkpoint, shipped Apache 2.0 with the shapes visible.
+
+The thing I would want before recommending it is a number — any number — comparing its output to something else.
