@@ -1,0 +1,179 @@
+---
+title: "DeepSeek Harness: an agent harness that refuses to send what it didn't log"
+description: "DeepSeek open-sourced dsh, an agent harness built on Cordis where everything — including the agent loop — is a replaceable plugin across 219 packages. The interesting engineering isn't the loop. It's a runtime check that compares every outgoing model request against a fresh replay of the session log and throws if they differ by a byte, plus the repo-wide discipline around it: 219 mandatory invariant companions, 27 verify scripts, and 686 design notes for a codebase that took 12,293 commits in 65 days."
+date: 2026-08-14
+interest: 5
+helpful: 4
+featured: true
+tags:
+  - agents
+  - harness
+  - open-source
+  - architecture
+  - typescript
+  - explainer
+---
+
+import { ProfileLayers } from "@/components/articles/deepseek-harness/profile-layers"
+import { TurnFlow } from "@/components/articles/deepseek-harness/turn-flow"
+import { LogInvariant } from "@/components/articles/deepseek-harness/log-invariant"
+import { RepoDiscipline } from "@/components/articles/deepseek-harness/repo-discipline"
+
+[deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) is an MIT-licensed agent harness from DeepSeek that you run with `npx @deepseek-ai/dsh web`. The npm package was first published on 2026-08-10; six versions shipped in the four days after that, the latest being `0.1.0-rc.6`. It is labelled a developer preview, and the README is blunt about what that means: **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
+
+The obvious thing to write about an agent harness is its agent loop. That turns out to be the least interesting part of this one. The loop is about what you would guess — claim input, assemble a prompt, call a model, run the tools it asked for, repeat while anything is owed. What is unusual is everything built *around* the loop to make it hold still, and the reason that machinery exists is legible in the commit history: the repository went from its first commit to that npm release in **61 days**, taking **12,293 commits across 65 active days** on the way. At least 209 of its 984 merged pull requests came off `codex/*` branches, which is a floor rather than a count.
+
+That combination — a codebase moving faster than humans can review, and a product whose whole job is to be trustworthy about what it told a model — produced a design decision worth stealing.
+
+## Everything is a plugin, and it means it
+
+`dsh` is built on [Cordis](https://github.com/cordiverse/cordis), a plugin framework DeepSeek vendored into the repo at v4.0.1 and rescoped under its own namespace. Cordis is five ideas: a plugin contributes services to a shared context; a service claims a stable key like `ctx.tools` or `ctx.llm`; plugins declare what they need with `inject` rather than being boot-ordered by hand; communication is typed events; and every registration is a reversible effect that unwinds when its plugin unloads.
+
+The architecture doc states the consequence directly, and unlike most claims of this shape it survives contact with the source:
+
+> There is no privileged core to patch: you extend dsh by mounting a plugin beside the others.
+
+The model adapter is a plugin. The tool registry is a plugin. The session log is a plugin. The agent loop is a plugin — `core/agent` owns the `Agent` interface and the live registry, while `core/agent-loop` is described as "the default driver implementing that interface." Swapping it is a config row, not a fork.
+
+There are **219 workspace packages** under `packages/*/*`. Twenty-one of them are model-facing tools (`tool-bash`, `tool-fs`, `tool-lsp`, `tool-subagent`, `tool-terminal`, and so on). The rest are seams, providers, UI surfaces, and policy.
+
+A running `dsh` is composed at boot from ordered layers: bundles stack in listed order, then the profile's own patch file, then the home-level one, then any `--patch` overlay. I parsed the three committed bundle patches to see what that actually produces.
+
+<ProfileLayers />
+
+The detail I found convincing is base's own header comment, which explains why a row whose value differs between modes is *not allowed* to live in base: a patch replaces a row's whole `config` rather than merging into it, so a mode-varying row belongs to each mode bundle, which restates it completely. That is a rule written down because someone expected agents to add rows to this file.
+
+## One turn
+
+A **step** is one model request plus the tools it calls. A **turn** is zero or more steps: it opens before its first input is claimed and closes once nothing is owed. Here is the repo's own flow block, verbatim:
+
+```text
+turn/start
+  claim next-step input plus one queued message
+  assemble prompt sections + tool schemas
+  -> agent/pre-step                   reject | enter(messages)
+     reject, or a first enter rewritten empty -> close the turn with no step
+     step/start
+     append entered messages as user/message
+     derive model history from the log
+     agent/request -> llm/stream -> assistant/chunk* -> assistant/message
+     tool/call* -> tools/pre-execute -> tools/execute -> tools/post-execute -> tool/result*
+     step/end
+     tools owe another request, or next-step input arrived -> claim -> next step
+  -> agent/turn-stopping
+turn/end
+```
+
+Two kinds of thing are interleaved there. Some events are durable facts appended to the session log; the rest are live extension points, and most of those are around-middleware — a listener receives `next()`, and either wraps the call and delegates or owns the decision and returns without delegating.
+
+<TurnFlow />
+
+The repo draws the same lifecycle as a sequence diagram, which adds what a linear list cannot: who talks to whom, and the branches. Both `alt` blocks are worth reading — a rejected pre-step leaves the turn open having spent no step, and a terminal request failure routes to an `agent/request-error` waterfall that returns a retry action or preserves the original error.
+
+<Figure
+  src="/articles/deepseek-harness/fig2.png"
+  alt="Sequence diagram of one agent turn across nine participants: User, Agent, Driver, hook listeners, ctx.systemPrompt, ctx.llm, ctx.tools, Session, and a UI or SDK listener. It shows turn/start, the pre-step waterfall with its reject branch, step/start, prompt assembly, the llm/stream waterfall and streamed chunks, a request-error retry branch, the tool-call loop, step/end, and turn/end."
+  caption="One turn, all nine participants. Note that Session receives an event at every stage the model's view changes. (deepseek-harness, docs/agent-lifecycle.md — rendered from the repo's mermaid source.)"
+/>
+
+Note the line `derive model history from the log`. It is doing more work than it looks like.
+
+## The check that makes the log the source
+
+Most harnesses treat the transcript as a rendering of the conversation: the conversation lives in memory, and the log is written alongside it for display and debugging. `dsh` inverts this. The log is the source, model history is *projected* from it by `deriveMessages()`, and a runtime invariant refuses to let those two drift apart.
+
+The whole of `packages/core/agent-loop/src/invariant.ts` is 63 lines. This is its core:
+
+```ts
+ctx.on('llm/stream', (options: GenerateOptions, next) => {
+  if (!isAgentLoopRequest(options)) return next()
+  if (!Object.isFrozen(options)) fail('a loop-built request must be frozen')
+  // ...
+  const expected = session.deriveMessages()
+  if (JSON.stringify(options.messages) !== JSON.stringify(expected)) {
+    fail(`llm request for session "${String(session.id)}" diverges from the
+          dispatch-time durable derivation (log-reconstruction desync)`)
+  }
+  // ... and the folded request header must match model, system, temperature,
+  //     maxTokens, stop and tools
+  return next()
+}, { global: true, prepend: true })
+```
+
+Every request the loop builds is compared, byte for byte through `JSON.stringify`, against a *fresh replay of the session log made at dispatch time*. If a plugin slips an extra message into the outgoing request without writing a session event for it, the request does not go out. It throws.
+
+The `prepend: true` matters: it means a replay or mock listener that short-circuits the waterfall still cannot get in front of the check.
+
+<LogInvariant />
+
+The failure this prevents is the quiet one. Injecting an unlogged message doesn't crash anything and usually makes the model behave *better* — it is exactly the sort of change that ships. What it destroys is reproducibility: from then on, the log no longer explains the answer, and "why did it do that?" has no reachable answer. The repo states the rule as **model-visible ⟺ logged**, and this is the line of code that makes it true rather than aspirational.
+
+The same header check covers sampling settings, which I think is the sharper half. Temperature and tool schemas are part of what makes a run reproducible, so retuning one between the logged header and the actual call is treated as divergence rather than a tweak.
+
+## The same idea, applied to tools
+
+Tool execution gets the same treatment, and the repo's own pipeline diagram is the clearest statement of it. Two details in there are the log-is-source rule again, wearing different clothes.
+
+`tool/call` is **logged before execution** — not after, not on completion. If the process dies mid-tool, the log still records that the call was attempted. And at the far end, `tool/result` is labelled *single model-facing outcome*: however the call actually went — denied by a guard, refused at the approval prompt, thrown inside the tool body, thrown by a wrapper, timed out — every path converges through registry normalization and `finalizeContent` into exactly one recorded result.
+
+<Figure
+  src="/articles/deepseek-harness/fig1.png"
+  alt="Flowchart of the tool execution pipeline. An assistant tool-call block leads to a logged tool/call event, then the tools/pre-execute waterfall for hooks, permission and sandbox, which may ask a one-shot ctx.approval prompt; monotonic guards then allow or deny, the tools/execute waterfall wraps the tool body, tools/post-execute follows, registry normalization turns throws into isError, finalizeContent runs last, and a single tool/result is logged."
+  caption="Every failure path — guard denial, refused approval, a throw in the tool body or in a wrapper — converges on one normalized, logged outcome. (deepseek-harness, docs/tool-execution-pipeline.md — rendered from the repo's mermaid source.)"
+/>
+
+Note the dotted `throw` edges all landing on the same normalization box. A tool that raises does not produce a missing result; it produces an `isError` result that the model sees and the log records. That is what lets the invariant in the previous section hold for a turn where something went wrong, which is the only kind of turn where reproducibility actually matters.
+
+## 219 invariant companions, and what they actually contain
+
+Here is where I nearly published something wrong.
+
+Every one of the 219 package directories contains exactly one `src/invariant.ts`. I checked the correspondence as a set difference in both directions: zero packages without one, zero orphans. My first instinct was to write that as "219 packages all enforce runtime invariants."
+
+They don't. Only **35** of the 219 ever call `fail(...)`. The other 184 are 20-line files whose install function is empty:
+
+```ts
+/** No runtime invariant: this stateless seam owns types while implementations
+    enforce immutable-store checks. */
+const install: InvariantInstaller = () => {}
+```
+
+That looked like ceremony until I read `scripts/package-invariants.ts`, which is what enforces the convention. A package missing its companion is a violation. An empty install function that does *not* carry a comment beginning `No runtime invariant:` is a violation. A non-empty install function that never uses its bound failure reporter is a violation.
+
+So the number that matters is not 219 checks. It is **219 decisions** — every package has been made to answer "what runtime invariant do you own?", and 184 of them answer "none, because…" in a sentence a reviewer can disagree with. Absence is recorded rather than assumed. That is a much better idea than 219 checks would have been, and it is the kind of thing that only pays off at this repo's scale.
+
+<RepoDiscipline />
+
+## The repo is built by the workflow it ships
+
+The discipline makes sense once you look at how the code got written.
+
+`.agents/notes/` holds **686 design notes** — 507 implemented, 143 archived, 25 proposed, and 11 rejected, kept deliberately as the record of what was decided against. (The raw file count is 1,386; every note has a `.zh.md` twin, and counting both would double it.) Alongside them, `.agents/skills/` holds eleven repo-specific skills with names like `dsh-prose-standard`, `dsh-doc-standards`, `dsh-find-simplifications`, and `dsh-archive-agent-notes`.
+
+Of 984 merged pull requests, **209 came off `codex/*` branches** — a lower bound on machine-authored work rather than a total, since it only counts one agent's branch naming. Another 210 came from `worktree/*`, which I am not going to attribute either way.
+
+There is more test code than source code: roughly 205,500 lines of TypeScript under `src/`, against about 222,200 lines of `.spec.ts` and `.e2e.ts`. And CI runs 27 standalone `verify-*` scripts plus eleven catalog generators re-run with `--check`, covering things most repositories leave to habit — dead documentation links, markdown wrapping, mermaid syntax, JSDoc on exports, whether the English and Chinese docs are still paired, whether the generated config and tool catalogs still match the code they describe.
+
+Read together, these are one decision made repeatedly: once enough of the code is machine-written, every rule a human reviewer would have applied has to become a script, or it stops being applied.
+
+## Interop, and one honest gap
+
+`dsh` can drive other harnesses. `subagent-claude-code` invokes the official Claude Agent SDK in the delegating session's workspace and returns only the final answer through the shared subagent contract; `subagent-codex` and `subagent-acp` do the same for their respective agents. In the other direction, `hooks-claude-code` and `hooks-codex` run a user's *existing* hook configuration on the harness's own interception points.
+
+The Claude Code bridge is refreshingly self-effacing about why it exists:
+
+> A native cordis plugin could do everything this bridge does — more powerfully, with typed returns and no serialization boundary. **The bridge exists only as a compatibility path for the mapped CC command-hook subset.**
+
+The model story is thinner than the plugin story. Only one first-party adapter ships (`llm-deepseek`); everything else routes through `llm-pi-ai`, a generic multi-provider adapter built on the third-party [`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai). That is a reasonable trade — a new OpenAI-compatible gateway becomes configuration rather than a code change — but it does mean the polish gradient between DeepSeek's own models and everyone else's runs through a dependency they don't control.
+
+## What I'd actually take from this
+
+Ignore the plugin count. 219 packages is a consequence of the architecture, not evidence for it, and a smaller project copying that number would just be slower.
+
+The transferable ideas are two, and both are cheap:
+
+**Make the log the source, then check it.** If the context you send is derived from your durable record rather than accumulated beside it, then a divergence is a crash instead of a slow mystery. The check is a few lines and it runs on every request. Nearly every agent system I've read builds the request and writes the log as two separate acts of bookkeeping, and quietly hopes they agree.
+
+**Make "no check here" a thing you have to say out loud.** The 184 empty invariant files are worth more than they look, because a missing check and a considered decision not to check are indistinguishable in most codebases, and a script can tell them apart here.
+
+The caveats are real: this is a developer preview with breaking changes promised in capital letters, nine weeks old, and moving fast enough that any specific file I quoted may have been rewritten by the time you read it. Every number here is measured at commit `47f9438` (2026-08-13) — I cloned the repository rather than reading the README, because the README does not mention the invariant at all, and that is the only part I would still be thinking about a week from now.
