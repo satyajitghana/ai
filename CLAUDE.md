@@ -62,6 +62,7 @@ Rules for paper figures:
 - `pnpm validate:content` — load every MDX through the Zod content layer (loud failure)
 - `pnpm validate:mdx` — **compile** every MDX body the way the build does (same remark plugins), so JSX/MDX syntax errors fail here instead of at the Vercel build
 - `pnpm validate` — `typecheck` + `validate:content` + `validate:mdx`. **Run this after any content/data edit, before committing.**
+- `pnpm check:spacing [slug…]` — renders articles in a headless browser and reports words fused together at JSX element boundaries (`the restskip`). Needs `pnpm dev` running, so it is deliberately outside `validate`. Run it after writing a component with prose that wraps around inline tags. A full run needs `NODE_OPTIONS=--max-old-space-size=8192 pnpm dev` — Turbopack holds every compiled route and the default heap dies around a hundred articles in.
 
 ## Guardrails (LOCKED)
 - **Never edit `data/.generated/*`** — machine-generated, off-limits.
@@ -70,6 +71,8 @@ Rules for paper figures:
 - **Never post to social without explicit approval.** `/amplify` only drafts into `drafts/<date>/`; Satyajit reviews and approves before anything is posted.
 - **No PDFs stored for papers** — paper links are derived from `arxivId`.
 - **MDX prose: escape a bare `<`.** In MDX a `<` starts a JSX tag, so `<2%`, `x < 3`, `<0.5` etc. in prose break the build (`validate:content` only checks frontmatter — `validate:mdx` catches these). Write `&lt;`, or wrap the expression in `` `code` `` or `$math$`.
+- **JSX prose: put spaces where a line break can't.** JSX trims every line of a text node, so a space that lands next to a newline disappears — including a *leading* space, whenever its text runs onto a further line (`<code>x</code> and then prose that wraps` renders `xand`). Use `{" "}` between the element and the text, or a leading space inside the tag (`<em> word</em>`). `pnpm check:spacing` catches what slips through.
+- **Numbers that reach the DOM go through `lib/dmath`.** `Math.exp/log/pow/sin/cos/hypot/atan2` are only "implementation-dependent approximations" per spec, so Node and Chrome can differ by one ULP — enough to make an SVG coordinate serialize differently on server and client and trigger a hydration mismatch. Use the `m*` wrappers; `+ - * /`, `sqrt`, `round`, `min`, `max` are exact and fine as-is.
 - Quality gate: if there's nothing meaningful to publish, no-op — never post filler.
 
 ## The crew

@@ -181,7 +181,7 @@ export function ParamCounts() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           &ldquo;Stated&rdquo; is the number in Thinking Machines&apos; own blog prose and the HF model-index
           table for both models. &ldquo;Measured&rdquo; is the Hugging Face API&apos;s{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-xs">safetensors.total</code> field — the actual
+          <code className="rounded bg-muted px-1 py-0.5 text-xs">safetensors.total</code>{" "}field — the actual
           parameter count in the released weight files, fetched directly rather than taken from either
           card. Both models&apos; stated totals sit a few percent above what their own weights measure.
         </p>
