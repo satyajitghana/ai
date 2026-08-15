@@ -1,0 +1,189 @@
+---
+title: "Qwen3.8, weights in hand: 98% of a 2.4T model is routed experts"
+description: "The Qwen3.8 collection is four repositories, two licenses and one architecture. Reading the files rather than the model card: the 95B active figure only closes if you count the untied embeddings, the FP8 checkpoint quantizes nothing but routed experts, three independent parties agree the Gated DeltaNet path is what you must not touch, reasoning_effort turns out to be two English sentences in a Jinja template, and the dense 27B beats a larger model on every agentic benchmark while losing the ones that test recall."
+date: 2026-08-15
+interest: 5
+helpful: 5
+tags:
+  - qwen
+  - open-weights
+  - moe
+  - quantization
+  - architecture
+  - inference
+  - vllm
+---
+
+import { ParamLedger } from "@/components/articles/qwen3-8-open-weights/param-ledger"
+import { HybridStack } from "@/components/articles/qwen3-8-open-weights/hybrid-stack"
+import { AgencySplit } from "@/components/articles/qwen3-8-open-weights/agency-split"
+import { QuantLadder } from "@/components/articles/qwen3-8-open-weights/quant-ladder"
+
+When [Qwen3.8-Max was announced](/articles/qwen3-8-max) on 3 August, the open weights were a promise: 2.4 trillion parameters, 95B active, "next week." The [Qwen3.8 collection](https://huggingface.co/collections/Qwen/qwen38) is that promise landing, and it is now four repositories deep.
+
+Which means the interesting work has changed. There is no technical report, and there probably will not be one. But there is a `config.json`, a weight index, a chat template, an FP8 exclusion list, two serving recipes and a genuinely rigorous third-party quantization study. That is more than enough to check the claims, and checking them turns up several things the model cards do not say.
+
+## What actually shipped
+
+| repository | params | license | created | downloads | likes |
+|---|---|---|---|---|---|
+| [Qwen3.8-2.4T-A95B](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B) | 2.4T / 95B active | **`qwen3.8-max`** | 8 Aug | 6.4k | 949 |
+| [Qwen3.8-2.4T-A95B-FP8](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B-FP8) | same, FP8 | **`qwen3.8-max`** | 8 Aug | 10.7k | 191 |
+| [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) | 27B dense + vision | **Apache-2.0** | 5 Aug | 91.9k | 9.5k |
+| [Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | same, FP8 | **Apache-2.0** | 13 Aug | 123k | 381 |
+
+Two things jump out of that table before any architecture.
+
+**The licenses are not the same.** The 27B is plain Apache-2.0. The 2.4T ships under a bespoke `qwen3.8-max` license that is MIT-shaped with two riders: products above 100M monthly actives or \$20M monthly revenue must display the model name in their UI, and anyone running a "Model as a Service or AI Work Assistant business" whose group revenue passes **\$50M over any twelve months** needs a separate commercial license from Qwen. Internal use is carved out explicitly, as long as you do not expose the model or its outputs to third parties. It is a reasonable license and it is not an open-source one, and "the first Qwen-Max-class model getting open weights" deserves the asterisk.
+
+**The 27B is the release.** It has fourteen times the downloads and ten times the likes of the flagship, and it went up three days earlier. Note also that in both pairs the FP8 repo out-downloads the bf16 one while collecting a fraction of the likes — bf16 is what people bookmark and requantize from, FP8 is what they actually serve.
+
+## Reading the architecture out of the files
+
+Both models are the same design at two scales, and Qwen describes the stack in one line on each card:
+
+> Hidden Layout: 23 × (3 × (Gated DeltaNet → MoE) → 1 × (Gated Attention → MoE))
+
+The most useful thing you can do with a model card number is try to rebuild it. If the reconstruction lands, you understand the architecture; if it does not, you have found something.
+
+<ParamLedger />
+
+It lands. Summing the config — 92 layers of 512-expert MoE, 23 gated-attention layers, 69 Gated DeltaNet layers, two untied embedding matrices and one MTP block — gives **2.446181T** against the weight index's **2.446183T**. The 1.6M-parameter residual is the layernorms, which I did not bother to count.
+
+Three things fall out of the exercise that no card mentions:
+
+**The 95B active figure needs the embeddings.** The compute path — routed experts, shared expert, router, both attention types — comes to 91.2B. You only reach 95.3B by counting the untied `embed_tokens` and `lm_head`, 2.03B each. That is a defensible convention, but it is a convention, and it is 4% of the headline.
+
+**`q_proj` is twice as wide as you would guess.** `head_dim` is 256 with 64 query heads, so 64 × 256 = 16,384 — already 2× the 8,192 hidden size. But the actual tensor is `[32768, 8192]`, twice that again, because `attn_output_gate: true` fuses the output gate into the same projection. The attention block is genuinely wider than the residual stream it reads from, in both directions.
+
+**The MTP block costs 26.4B parameters.** The multi-token-prediction head is not a small linear probe. It is a complete extra layer — its own gated attention, its own 512-expert MoE, plus a fusion projection — weighing 1.08% of the model. That is a larger draft model than most models. Whether it earns that is a question the serving recipe answers below, and the answer is "only at depth 3."
+
+## The hybrid, and what it is supposed to buy
+
+<HybridStack />
+
+`full_attention_interval: 4`, so three Gated DeltaNet layers then one gated attention layer, all the way up. The DeltaNet layers are Mamba-shaped — `A_log`, `dt_bias`, a kernel-4 depthwise `conv1d`, and a fused `in_proj_qkv` that carries 16 QK heads and 128 V heads at head dim 128 (`[20480, 8192]`, which is exactly 16·128 + 16·128 + 128·128). They keep a fixed-size recurrent state. They do not keep a KV cache.
+
+That is the entire pitch: at 256K context the 23 attention layers of the 2.4T want a KV cache that grows linearly, and the other 69 layers contribute a constant.
+
+Except the advertised saving is only real if your runtime knows about it. The most careful GGUF publisher for the 27B quotes **256 KB of attention cache per token**, and 2 GB at 8K. The sixteen full-attention layers in that model need 2 · 4 heads · 256 dims · 2 bytes · 16 layers = **64 KB per token**. The quoted figure is exactly 4× that — and 4 is the hybrid interval, i.e. precisely what you get if every layer is given a cache. I have not read llama.cpp's allocator for the `qwen35` architecture, so I will not tell you which of "allocation detail" and "deliberate margin" it is. I will tell you it is worth checking on your own hardware before you size a card, because the difference is 1.6 GB at 8K and 6.4 GB at 32K.
+
+## The 27B is the interesting model
+
+<AgencySplit />
+
+Sort the 27B's benchmark table by what each row measures and a clean pattern appears that Qwen does not point at.
+
+On anything agentic, the 27B beats **Qwen3.7-Plus** — a larger model from the previous generation — on all thirteen rows, mean margin +10.9. Several margins are not subtle: OSWorld-Verified 84.3 against 73.3, Vision2Web 62.9 against 42.1, RecreationBench 47.1 against 30.2. DeepSWE 1.1 goes from 14.2 to 42.2, a three-fold jump that scale does not explain and that reads like a benchmark the training mix learned to do.
+
+Flip to the rows where the answer has to already be in the weights and it loses five of seven — GPQA Diamond, HLE, ERQA, RealWorldQA, OmniDocBench — with ERQA down 4.3 and HLE down 3.9.
+
+That split is the most useful finding in the release. **A generation of post-training bought an enormous amount of doing and almost no knowing.** Which is roughly what you would expect, and it is still worth seeing measured: if your workload is agentic, a 27B from this generation genuinely substitutes for something much larger; if your workload is recall, it does not, and no amount of harness will fix that.
+
+The number I would treat most carefully is QwenSWEBench, where the 27B scores 79.0 against the 2.4T flagship's 80.7. A dense 27B landing within 1.7 points of a 2.4-trillion-parameter model is an extraordinary claim, and it is on Qwen's own benchmark, run by Qwen, against models Qwen did not train. The three `Qwen*Bench` rows should be read as internal instrumentation, not as evidence.
+
+## `reasoning_effort` is two sentences
+
+Both cards advertise "official support for `reasoning_effort`" as a headline feature. It is implemented in the chat template, and you can read the whole implementation:
+
+```jinja
+{%- if resolved_reasoning_effort == 'xhigh' %}
+    {%- set reasoning_instructions = 'Reasoning effort is set to xhigh. Please think
+      carefully through the task, validate key assumptions, consider plausible
+      alternatives, and prioritize correctness, consistency, and clarity in the
+      final answer.' %}
+{%- elif resolved_reasoning_effort == 'low' %}
+    {%- set reasoning_instructions = 'Reasoning effort is set to low. Keep your
+      thinking brief and focused, moving directly to the conclusion without
+      unnecessary elaboration.' %}
+{%- endif %}
+```
+
+That is it. `medium` sets nothing at all — it is the untouched model, and `xhigh` and `low` are two English sentences prepended to the system message. There is no token budget, no separate decode path, no architectural switch.
+
+This is not a criticism: the model was presumably post-trained to respond to those exact strings, which is what makes it "official" rather than a prompt you invented. But it has consequences worth knowing.
+
+- The effort level lives in **prompt space**, competing with your own system prompt for attention.
+- Any harness that replaces the system message silently drops it.
+- You can replicate all three levels, or invent new ones, with a string.
+
+Two more control details:
+
+**`preserve_thinking` defaults to on**, and it means every prior assistant turn keeps its full `<think>` block in context. Combined with Qwen's own recommendation to allow 262,144 tokens of reasoning per turn, an agentic loop can spend its context window on its own history of deliberation faster than you expect. Setting it false strips reasoning from all turns before the last user message.
+
+**The 2.4T cannot stop thinking.** Its template raises outright: `Disabling thinking is not supported.` The 27B accepts `enable_thinking: false` and emits an empty `<think></think>` pair. If you were planning to use the flagship for anything latency-sensitive, that is a design constraint, not a setting.
+
+Tool calls also moved off JSON to an XML-ish form — `<tool_call><function=name><parameter=p>` — which reads oddly until you notice it means multi-line code payloads need no escaping at all. That is a real improvement for a coding agent, and it explains why quantizers are shipping "tool calling improvements" notes.
+
+## What FP8 actually quantizes
+
+Open `quantization_config` on the 2.4T FP8 checkpoint and read `modules_to_not_convert`. It spares:
+
+- every attention projection — `q_proj`, `k_proj`, `v_proj`, `o_proj`
+- every Gated DeltaNet projection — `in_proj_qkv`, `in_proj_z`, `in_proj_a`, `in_proj_b`, `conv1d`, `out_proj`
+- the shared expert, all three projections, plus the router and the shared-expert gate
+- `lm_head` and `embed_tokens`
+- the entire MTP block
+
+What is left is the routed experts, and the routed experts are **97.97% of the model**. So the FP8 checkpoint is not "the model in FP8." It is *the experts in FP8 and the model in bf16*, which happens to look the same from a distance because the experts are almost all of it.
+
+The arithmetic confirms the reading. Take 2.3966T routed parameters to one byte, leave the remaining 49.6B at two, and you predict **2.270 TiB**. vLLM's recipe publishes the FP8 checkpoint at **2.27 TiB**. (The bf16 figure checks too: 4.450 TiB reconstructed against 4.45 TiB published.)
+
+The 27B FP8 config makes the same choice at a smaller scale — the GDN gating path, both embedding matrices, every layernorm and the entire vision tower stay bf16 — with one artifact worth a chuckle: its exclusion list names `mlp.gate` and `mlp.shared_expert_gate`, tensors that do not exist in a dense model, along with a fused `in_proj_ba` that is not in the checkpoint either. Harmless, and clear evidence both configs came off one template.
+
+### Three parties, one conclusion
+
+Here is the finding I would actually carry away from this release, because it arrives from three directions that did not coordinate:
+
+1. Qwen's **2.4T FP8** config refuses to quantize any Gated DeltaNet projection.
+2. Qwen's **27B FP8** config refuses to quantize the DeltaNet gating path.
+3. A third-party quantizer, measuring rather than guessing, found that lifting `in_proj_z` and `out_proj` by one precision step cost 0.16 GB and removed **11% of the remaining divergence** — the single best trade in their whole search.
+
+In a hybrid GDN/attention model, the linear-attention path is the precision-critical part. If you are building your own quantization mix for this architecture, that is where the bits go.
+
+## Serving it
+
+Both [vLLM recipes](https://recipes.vllm.ai/Qwen/Qwen3.8-27B) are unusually candid, and three of their findings generalize.
+
+**MTP depth 3, not 1.** MTP-1 measured **64.8% acceptance** and is not merely marginal — it is *negative* at scale: +3.4% at concurrency 1, −9% at 128, −23% at 256, because the draft pass displaces real work once the batch is compute-bound. Depth 3 is worth roughly 2.3× on per-user output rate (FP8/TP16: 130 → 307 tok/s/user). A 26.4B draft head is only worth its weight if you speculate deep enough to amortize it.
+
+**Context length is a concurrency dial.** At `--max-model-len 262144` the engine reserved KV for **25** concurrent requests. At 9,240 — 8K in, 1K out — the same 70 GiB of KV served **506**. Twenty times the concurrency from one flag, and nothing about the model changed.
+
+**Tensor parallel must divide 64 attention heads**, so only 1/2/4/8/16/32 are legal. The recipe walks through the consequence: FP8 needs 2,325 GiB, which is three GB300 trays by capacity, but TP12 is not a thing — so it is a four-tray, sixteen-GPU deployment. Capacity planning on this model is arithmetic on head counts, not on gigabytes.
+
+Smaller items worth knowing: `--load-format fastsafetensors --safetensors-load-strategy lazy` cut weight load from 545s to 306s on a 1.32 TiB checkpoint; MXFP4 does not load on NVIDIA (use NVFP4); the 1M-context `--hf-overrides` key nests under `text_config` for the 27B but sits flat for the 2.4T; and hybrid models have a CUDA-graph failure mode where `assert num_cache_lines >= batch` means your capture size exceeded the *recurrent-state* cache, which is a separate resource from the KV cache and one most people have never had to think about.
+
+## Running it on your own machine
+
+<Figure
+  src="/articles/qwen3-8-open-weights/fig1.png"
+  alt="Log-scale scatter of mean KL divergence from the bf16 weights against file size in GB for Qwen3.8-27B, comparing two publishers' quantization ladders. Both curves fall steeply from about 0.34 at 8.5 GB to about 0.001 at 25 GB. The two lines track each other closely, with the Atomic Dynamic line slightly lower across most of the range and the unsloth line lower near 18 GB and extending further to 31 GB."
+  caption="Every quantization of Qwen3.8-27B the publisher could find, theirs and everyone else's, measured on one harness against the unquantized weights. Note that they plot the run where a competitor beats them, near 18 GB. (AtomicChat/Qwen3.8-27B-GGUF.)"
+/>
+
+The GGUF ecosystem produced two serious repositories within a day of each other, and they are interestingly different.
+
+[unsloth](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) has 25 files, 868k downloads, and a card that says "Unsloth Dynamic V3.0 (preview) for SOTA quantization performance" with no measurement attached. [AtomicChat](https://huggingface.co/AtomicChat/Qwen3.8-27B-GGUF) has 16 files, 8k downloads, and a card that is essentially a small paper.
+
+<QuantLadder />
+
+The AtomicChat card measures per-token KL divergence against the **bf16** weights — not against `Q8_0`, which is the usual shortcut — publishes the reference logits so you can measure your own builds against the same point, downloads its competitors' files and measures those on the same harness rather than quoting their published numbers, and flags the one size band where it loses. That is the right protocol, and it produces four results worth keeping:
+
+- **Where the bits go beats how many there are.** Ten builds within one gigabyte of each other span 2.2× in divergence. Nothing changes but tensor assignment.
+- **The ends of the network matter most.** Peak activation energy sits on layers 52–62, with a second peak on layer 0. Lifting the first four and last twelve helped more than widening the band to 32 layers.
+- **`Q8_0` is not lossless.** 0.00064 divergence, 98.92% top-1 — it disagrees with the original on about one token in ninety-three.
+- **A quant name is not a specification.** Three publishers ship a `Q4_K_M` for this model: 16.8 GB, 19.0 GB and 17.1 GB, spanning 1.9× in divergence.
+
+There is also a nice architectural footnote: the MTP head never executes during a normal forward pass, so the importance matrix has nothing to say about it at any corpus size, and llama.cpp refuses to quantize it low rather than guess. It is pinned to `q5_k` in every file.
+
+**One practical warning.** AtomicChat's repository contains no `mmproj`. Qwen3.8-27B is a vision-language model — its HF pipeline tag is `image-text-to-text` — and those quants are text-only. unsloth ships `mmproj-F16.gguf` at 0.93 GB, which is exactly the 0.466B-parameter vision tower I reconstructed from the weight index. If you want the 27B to see, that file is not optional and only one of the two repositories has it.
+
+## What this release does not establish
+
+There is **no technical report**. Every number in every table is Qwen's, produced on Qwen's harness, and three of the coding benchmarks are Qwen's own instrumentation. The 2.4T's headline claim — matching or beating Opus 4.8 and GPT 5.6 Sol on agentic coding — is now at least *checkable*, since the weights are public, but nobody has checked it yet.
+
+There is **no training detail at all**: no token count, no data mix, no post-training description, nothing about how MTP was trained "with multiple steps," and no ablation for any architectural choice. The 3:1 hybrid interval, 512 experts with 10 active, head dim 256, a 25% partial rotary factor — all are presented as facts about the artifact rather than as decisions with evidence behind them.
+
+And the thing I would most like to see is the thing least likely to arrive: an honest account of why DeepSWE 1.1 went from 14.2 to 42.2 in one generation. Three-fold jumps on a single benchmark, in a family where three of the benchmarks are the vendor's own, are exactly the results that deserve the most explanation and usually get the least.
+
+What is genuinely good here is how much of the release is *legible*. The parameter counts reconstruct. The FP8 size falls out of the exclusion list. The vision tower's size matches the mmproj byte-for-byte. `reasoning_effort` can be read in full in nine lines of Jinja. That is not nothing — it is the difference between a model you can reason about and a model you can only benchmark, and for a 2.4-trillion-parameter flagship it is more than we usually get.
