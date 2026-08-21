@@ -174,10 +174,20 @@ export async function* streamWithFallback(args: {
   throw lastErr instanceof Error ? lastErr : new Error("all models failed")
 }
 
+// A superset of the original `{ error, detail }` shape — the existing keys are
+// untouched so the chat UI keeps working, with the RFC 9457 members added
+// alongside so an agent gets the same machine-readable contract it gets from
+// every other failure on the site.
 export const offlinePayload = {
   error: "chat offline",
   detail:
     "The chat is offline right now. The site is still fully agent-readable: start at /llms.txt, fetch any page as .md, or use the /api/* JSON endpoints.",
+  type: "https://ai.thesatyajit.com/developers#error-service_unavailable",
+  title: "Service Unavailable",
+  status: 503,
+  code: "service_unavailable",
+  hint: "No model is configured. Use the static surfaces instead: /llms.txt, any page + .md, or the /api/* JSON endpoints — none of them need a model.",
+  docs: "https://ai.thesatyajit.com/openapi.json",
 } as const
 
 // ── the tool set ────────────────────────────────────────────────────────────

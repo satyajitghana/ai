@@ -21,6 +21,11 @@ const nextConfig: NextConfig = {
   // Clean `.md` variants for agents: /blog/foo.md -> /md/blog/foo, etc.
   async rewrites() {
     return [
+      // Versioned alias for the JSON API. Same handlers, stable prefix: agents
+      // that pin /api/v1/* keep a contract that cannot change under them, and a
+      // breaking change would ship as /api/v2/* with Deprecation/Sunset headers
+      // on v1. Declared first so it wins before the .md rules.
+      { source: "/api/v1/:path*", destination: "/api/:path*" },
       { source: "/blog/:slug.md", destination: "/md/blog/:slug" },
       { source: "/articles/:slug.md", destination: "/md/articles/:slug" },
       { source: "/logs/:slug.md", destination: "/md/logs/:slug" },

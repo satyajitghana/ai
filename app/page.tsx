@@ -17,12 +17,14 @@ const STAR = "oklch(0.79 0.15 82)" // warm gold, matches the articles page
 function SectionHeader({ path, href }: { path: string; href: string }) {
   return (
     <div className="mt-16 mb-4 flex items-baseline justify-between">
-      <Link
-        href={href}
-        className="font-mono text-xs tracking-wide text-muted-foreground transition-colors hover:text-foreground"
-      >
-        ~/{path}
-      </Link>
+      <h2 className="font-mono text-xs tracking-wide">
+        <Link
+          href={href}
+          className="text-muted-foreground transition-colors hover:text-foreground"
+        >
+          ~/{path}
+        </Link>
+      </h2>
       <Link
         href={href}
         className="font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
