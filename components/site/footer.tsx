@@ -20,6 +20,9 @@ const footerLinks = [
   { href: "/reading", label: "reading" },
   { href: "/github", label: "github" },
   { href: "/changelog", label: "changelog" },
+  { href: "/developers", label: "developers" },
+  { href: "/contact", label: "contact" },
+  { href: "/privacy", label: "privacy" },
   { href: "/colophon", label: "colophon" },
   { href: "/feed.xml", label: "rss" },
 ] as const

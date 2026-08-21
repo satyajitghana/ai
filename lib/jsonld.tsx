@@ -23,15 +23,48 @@ export function personJsonLd(): WithContext<Person> {
     "@type": "Person",
     "@id": `${siteUrl}/#person`,
     name: profile.name,
+    description: `${profile.title} at ${profile.company.name} in ${profile.location}. ${profile.tagline} ${profile.bio[0]}`,
+    disambiguatingDescription: profile.tagline,
     jobTitle: profile.title,
     email: `mailto:${profile.links.email}`,
     url: siteUrl,
+    image: absoluteUrl("/opengraph-image"),
+    // The employer, described completely enough for an agent to verify the
+    // affiliation and route a contact request without leaving the graph.
     worksFor: {
       "@type": "Organization",
+      "@id": `${siteUrl}/#organization`,
       name: profile.company.name,
       url: profile.company.url,
+      description:
+        "Industrial AI company building 3D perception and deep-learning systems for construction and infrastructure.",
+      address: {
+        "@type": "PostalAddress",
+        addressLocality: "Bengaluru",
+        addressRegion: "Karnataka",
+        addressCountry: "IN",
+      },
+      contactPoint: {
+        "@type": "ContactPoint",
+        contactType: "technical support",
+        email: profile.links.email,
+        url: absoluteUrl("/contact"),
+        availableLanguage: ["English"],
+      },
     },
-    address: { "@type": "PostalAddress", addressLocality: profile.location },
+    address: {
+      "@type": "PostalAddress",
+      addressLocality: "Bengaluru",
+      addressRegion: "Karnataka",
+      addressCountry: "IN",
+    },
+    contactPoint: {
+      "@type": "ContactPoint",
+      contactType: "personal",
+      email: profile.links.email,
+      url: absoluteUrl("/contact"),
+      availableLanguage: ["English"],
+    },
     sameAs: [
       profile.links.github,
       profile.links.linkedin,
