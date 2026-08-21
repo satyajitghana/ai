@@ -100,6 +100,11 @@ export async function GET(
     headers: {
       "content-type": "text/markdown; charset=utf-8",
       vary: "Accept, Accept-Encoding",
+      // Cloudflare's Markdown-for-Agents convention: tell the caller roughly how
+      // much context this document will cost before it decides to spend it. A
+      // ~4-chars-per-token estimate, which is close enough for budgeting and
+      // cheap enough to compute on every response.
+      "x-markdown-tokens": String(Math.ceil(markdown.length / 4)),
     },
   })
 }

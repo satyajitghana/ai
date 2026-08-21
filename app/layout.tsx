@@ -9,6 +9,7 @@ import { SiteHeader } from "@/components/site/header"
 import { TerminalOverlay } from "@/components/terminal/terminal-overlay"
 import { cn } from "@/lib/utils"
 import { JsonLd, personJsonLd, websiteJsonLd } from "@/lib/jsonld"
+import { WebMcp } from "@/components/site/webmcp"
 import { siteUrl } from "@/lib/site"
 
 // Grotesk for display + body (unified, minimal), IBM Plex Mono as the accent.
@@ -104,6 +105,7 @@ export default function RootLayout({
       <body className="flex min-h-svh flex-col">
         <JsonLd data={personJsonLd()} />
         <JsonLd data={websiteJsonLd()} />
+        <WebMcp />
         <ThemeProvider>
           <SiteHeader />
           {children}

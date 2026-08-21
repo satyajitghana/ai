@@ -280,6 +280,199 @@ await check("json-ld · Person and Organization are complete", async () => {
   return "Person + Organization complete"
 })
 
+// ── 11. RFC 8288 Link headers ────────────────────────────────────────────────
+
+await check("link headers · RFC 8288 relations on the homepage", async () => {
+  const res = await get("/")
+  const link = res.headers.get("link")
+  assert(!!link, "no Link header")
+  for (const rel of ["api-catalog", "service-desc", "service-doc", "describedby"]) {
+    assert(link!.includes(`rel="${rel}"`), `Link header missing rel="${rel}"`)
+  }
+  assert(/<https:\/\/[^>]+>/.test(link!), "Link targets must be absolute URIs")
+  return `${link!.split(",").length} relations`
+})
+
+// ── 12. RFC 9727 API catalog ─────────────────────────────────────────────────
+
+await check("api-catalog · RFC 9727 linkset", async () => {
+  const res = await get("/.well-known/api-catalog")
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  const ct = res.headers.get("content-type") ?? ""
+  assert(ct.includes("application/linkset+json"), `expected linkset+json, got "${ct}"`)
+  const body = await res.json()
+  assert(Array.isArray(body.linkset), "no linkset array")
+  assert(body.linkset.length > 0, "empty linkset")
+  for (const entry of body.linkset) {
+    assert(typeof entry.anchor === "string", "linkset entry has no anchor")
+  }
+  const api = body.linkset[0]
+  assert(!!api["service-desc"], "first anchor has no service-desc")
+  assert(!!api["service-doc"], "first anchor has no service-doc")
+  return `${body.linkset.length} anchors`
+})
+
+// ── 13. MCP server card ──────────────────────────────────────────────────────
+
+await check("mcp · server card (SEP-1649)", async () => {
+  const res = await get("/.well-known/mcp/server-card.json")
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  const card = await res.json()
+  assert(!!card.serverInfo?.name, "no serverInfo.name")
+  assert(!!card.serverInfo?.version, "no serverInfo.version")
+  assert(card.transport?.type === "streamable-http", `unexpected transport ${card.transport?.type}`)
+  assert(/^https:\/\//.test(card.transport?.endpoint ?? ""), "transport endpoint must be absolute")
+  assert(!!card.capabilities, "no capabilities")
+  assert(Array.isArray(card.tools) && card.tools.length > 0, "no tools listed")
+  return `${card.tools.length} tools, ${card.transport.type}`
+})
+
+// ── 14. ARD capability manifest ──────────────────────────────────────────────
+
+await check("ard · ai-catalog.json", async () => {
+  const res = await get("/.well-known/ai-catalog.json")
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  assert(res.headers.get("access-control-allow-origin") === "*", "ARD manifest must be CORS-open")
+  const cat = await res.json()
+  assert(!!cat.specVersion, "no specVersion")
+  assert(!!cat.host, "no host object")
+  assert(Array.isArray(cat.entries) && cat.entries.length > 0, "no entries")
+  for (const e of cat.entries) {
+    assert(/^urn:air:/.test(e.id ?? ""), `entry id is not a urn:air identifier: ${e.id}`)
+    assert(!!e.displayName, `${e.id} has no displayName`)
+    assert(!!e.type, `${e.id} has no media type`)
+    assert(!!e.url !== !!e.data, `${e.id} must have exactly one of url or data`)
+    const q = e.representativeQueries
+    assert(Array.isArray(q) && q.length >= 2 && q.length <= 5,
+      `${e.id} needs 2-5 representativeQueries, has ${q?.length ?? 0}`)
+  }
+  return `${cat.entries.length} entries`
+})
+
+// ── 15. agent skills index, with verifiable digests ──────────────────────────
+
+await check("agent-skills · index and sha256 digests", async () => {
+  const res = await get("/.well-known/agent-skills/index.json")
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  const index = await res.json()
+  assert(!!index.$schema, "no $schema")
+  assert(Array.isArray(index.skills) && index.skills.length > 0, "no skills")
+
+  for (const s of index.skills) {
+    for (const f of ["name", "type", "description", "url", "sha256"]) {
+      assert(f in s, `skill "${s.name ?? "?"}" missing "${f}"`)
+    }
+    assert(/^[0-9a-f]{64}$/.test(s.sha256), `skill "${s.name}" has a malformed sha256`)
+  }
+
+  // Verify one digest end to end — the whole point of publishing them. The
+  // index carries absolute production URLs, so map the path onto whatever BASE
+  // we are actually probing.
+  const first = index.skills[0]
+  const skillRes = await get(new URL(first.url).pathname)
+  assert(skillRes.ok, `skill URL ${first.url} returned ${skillRes.status}`)
+  const bytes = new Uint8Array(await skillRes.arrayBuffer())
+  const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+  assert(digest === first.sha256, `digest mismatch for ${first.name}: served ${digest}, index says ${first.sha256}`)
+
+  return `${index.skills.length} skills, digest verified for "${first.name}"`
+})
+
+// ── 16. Content Signals in robots.txt ────────────────────────────────────────
+
+await check("robots.txt · Content-Signal directives", async () => {
+  const res = await get("/robots.txt")
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  const body = await res.text()
+  const signals = body.match(/^Content-Signal:.*$/gm) ?? []
+  assert(signals.length > 0, "no Content-Signal directive")
+  const first = signals[0]!
+  for (const key of ["ai-train", "search", "ai-input"]) {
+    assert(first.includes(`${key}=`), `Content-Signal missing "${key}"`)
+  }
+  assert(/^Sitemap:/m.test(body), "robots.txt lost its Sitemap line")
+  assert(/^User-agent: \*/m.test(body), "robots.txt lost its wildcard group")
+  return first.replace("Content-Signal: ", "")
+})
+
+// ── 17. auth.md tells an agent to stop looking ───────────────────────────────
+
+await check("auth.md · states that no auth exists", async () => {
+  const res = await get("/auth.md")
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  const ct = res.headers.get("content-type") ?? ""
+  assert(ct.includes("text/markdown"), `expected text/markdown, got "${ct}"`)
+  const body = await res.text()
+  assert(/there is none/i.test(body), "auth.md should say plainly that there is no auth")
+  assert(body.includes("oauth-protected-resource"), "auth.md should name the absent documents")
+  return `${body.length} bytes`
+})
+
+await check("auth · OAuth metadata is absent, not fabricated", async () => {
+  for (const path of [
+    "/.well-known/openid-configuration",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-protected-resource",
+  ]) {
+    const res = await get(path)
+    assert(res.status === 404, `${path} should 404 (no authorization server exists), got ${res.status}`)
+  }
+  return "3 documents correctly absent"
+})
+
+// ── 18. the MCP server actually serves what its card advertises ──────────────
+
+await check("mcp · live server matches its server card", async () => {
+  const rpc = async (method: string, id: number) => {
+    const res = await get("/api/mcp/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id, method, params: method === "initialize" ? {
+        protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "check-agent-surfaces", version: "1.0" },
+      } : {} }),
+    })
+    assert(res.ok, `${method} returned ${res.status}`)
+    const text = await res.text()
+    // The endpoint answers as SSE; the JSON-RPC payload is on the data: line.
+    const line = text.split("\n").find((l) => l.startsWith("data:"))
+    assert(!!line, `${method} returned no data frame`)
+    return JSON.parse(line!.slice(5).trim())
+  }
+
+  const init = await rpc("initialize", 1)
+  assert(!!init.result?.serverInfo?.name, "initialize returned no serverInfo")
+  assert(!!init.result?.capabilities?.tools, "server does not advertise tools capability")
+
+  const list = await rpc("tools/list", 2)
+  const live: string[] = (list.result?.tools ?? []).map((t: { name: string }) => t.name)
+  assert(live.length > 0, "tools/list returned nothing")
+
+  // The card is a published promise — hold it to what the server does.
+  const cardRes = await get("/.well-known/mcp/server-card.json")
+  const card = await cardRes.json()
+  const advertised: string[] = card.tools.map((t: { name: string }) => t.name)
+
+  const missing = advertised.filter((n) => !live.includes(n))
+  const undocumented = live.filter((n) => !advertised.includes(n))
+  assert(missing.length === 0, `card advertises tools the server does not serve: ${missing.join(", ")}`)
+  assert(undocumented.length === 0, `server serves tools the card omits: ${undocumented.join(", ")}`)
+  assert(card.transport.endpoint.endsWith("/api/mcp/mcp"), "card endpoint does not match the live route")
+
+  return `${live.length} tools, card matches server exactly`
+})
+
+// ── 19. markdown token hint ──────────────────────────────────────────────────
+
+await check("markdown · x-markdown-tokens hint", async () => {
+  const res = await get("/about", { headers: { accept: "text/markdown" } })
+  const tokens = res.headers.get("x-markdown-tokens")
+  assert(!!tokens, "no x-markdown-tokens header")
+  assert(Number(tokens) > 0, `implausible token count "${tokens}"`)
+  return `${tokens} tokens`
+})
+
 // ── report ───────────────────────────────────────────────────────────────────
 
 const failed = results.filter((r) => !r.ok)
