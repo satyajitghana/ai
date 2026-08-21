@@ -33,6 +33,9 @@ export default function sitemap(): MetadataRoute.Sitemap {
     "/notes",
     "/colophon",
     "/changelog",
+    "/developers",
+    "/contact",
+    "/privacy",
   ].map((p) => ({
     url: absoluteUrl(p),
     // The homepage and the index pages that grow most often rank as the

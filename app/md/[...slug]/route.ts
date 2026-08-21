@@ -8,11 +8,17 @@ import {
   getSnippets,
 } from "@/lib/content"
 import { contentMarkdown, dataPageMarkdown } from "@/lib/markdown"
+import { absoluteUrl, siteUrl } from "@/lib/site"
 
 // Agent-facing markdown variants. Humans hit /blog/foo — agents hit /blog/foo.md,
 // which next.config.ts rewrites to /md/blog/foo and lands here.
 export const dynamic = "force-static"
-export const dynamicParams = false
+// Unknown slugs have to reach the handler so it can return the markdown 404
+// recovery document. With dynamicParams = false the router rejects them first
+// and serves the HTML 404 instead, which is the wrong representation for a
+// caller that just told us it wanted markdown. Known slugs are still
+// prerendered from generateStaticParams below.
+export const dynamicParams = true
 
 const DATA_PAGES = ["about", "resume", "health", "now", "uses", "reading"]
 
@@ -33,6 +39,35 @@ export function generateStaticParams() {
   ]
 }
 
+function notFoundMarkdown(path: string): string {
+  return [
+    "# 404 — not found",
+    "",
+    `No page at \`${path}\` on ${siteUrl}.`,
+    "",
+    "## Where to look next",
+    "",
+    `- [/llms.txt](${absoluteUrl("/llms.txt")}) — curated index of every page and agent surface`,
+    `- [/llms-full.txt](${absoluteUrl("/llms-full.txt")}) — the entire content corpus in one file`,
+    `- [/sitemap.xml](${absoluteUrl("/sitemap.xml")}) — every canonical URL`,
+    `- [/openapi.json](${absoluteUrl("/openapi.json")}) — the JSON API spec`,
+    `- [/developers](${absoluteUrl("/developers")}) — how to call this site programmatically`,
+    "",
+    "## Sections",
+    "",
+    ...["articles", "blog", "logs", "projects", "arxiv", "notes", "snippets"].map(
+      (s) => `- [/${s}](${absoluteUrl(`/${s}`)})`
+    ),
+    "",
+    "## Search",
+    "",
+    `Full-text search: \`GET ${absoluteUrl("/api/search")}?q=<terms>\``,
+    "",
+    "Any page also has a markdown twin: append `.md` to its URL, or send `Accept: text/markdown`.",
+    "",
+  ].join("\n")
+}
+
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ slug: string[] }> }
@@ -47,10 +82,24 @@ export async function GET(
         : undefined
 
   if (!markdown) {
-    return new Response("not found", { status: 404 })
+    // A 404 an agent can act on. A bare "not found" tells a crawler the path is
+    // wrong but not where to go instead, so it either gives up or guesses; this
+    // hands back the same recovery map the HTML 404 shows a human, in the
+    // markdown the caller already said it wanted.
+    return new Response(notFoundMarkdown(`/${slug.join("/")}`), {
+      status: 404,
+      headers: {
+        "content-type": "text/markdown; charset=utf-8",
+        "cache-control": "no-store",
+        vary: "Accept, Accept-Encoding",
+      },
+    })
   }
 
   return new Response(markdown, {
-    headers: { "content-type": "text/markdown; charset=utf-8" },
+    headers: {
+      "content-type": "text/markdown; charset=utf-8",
+      vary: "Accept, Accept-Encoding",
+    },
   })
 }

@@ -1,3 +1,4 @@
+import { problem } from "@/lib/api-error"
 import { getBlogPosts, getLogs } from "@/lib/content"
 
 export const dynamic = "force-static"
@@ -18,6 +19,12 @@ export async function GET(
   const post =
     getBlogPosts().find((p) => p.slug === slug) ??
     getLogs().find((l) => l.slug === slug)
-  if (!post) return Response.json({ error: "not found" }, { status: 404 })
+  if (!post)
+    return problem({
+      code: "not_found",
+      detail: `No blog post or log with slug "${slug}".`,
+      hint: "List every slug at /api/posts, or read the index at /llms.txt.",
+      instance: `/api/posts/${slug}`,
+    })
   return Response.json(post)
 }
