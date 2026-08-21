@@ -1,3 +1,4 @@
+import { problem } from "@/lib/api-error"
 import { z } from "zod"
 
 import {
@@ -35,7 +36,12 @@ export async function POST(req: Request) {
 
   const parsed = bodySchema.safeParse(await req.json().catch(() => null))
   if (!parsed.success) {
-    return Response.json({ error: "invalid body" }, { status: 400 })
+    return problem({
+      code: "invalid_request",
+      detail: "Request body must be JSON of the form {\"question\": string} with question at most 4000 characters.",
+      hint: 'POST {"question": "..."} with content-type: application/json. See /openapi.json#/paths/~1api~1ask.',
+      instance: "/api/ask",
+    })
   }
 
   try {
@@ -48,9 +54,11 @@ export async function POST(req: Request) {
   } catch (error) {
     // Upstream (OpenAI) failure after exhausting the fallback chain.
     const message = error instanceof Error ? error.message : String(error)
-    return Response.json(
-      { error: "upstream model error", detail: message },
-      { status: 502 }
-    )
+    return problem({
+      code: "bad_gateway",
+      detail: `Upstream model error after exhausting the fallback chain: ${message}`,
+      hint: "Retry after a short backoff. The static content APIs under /api/* and the markdown twins do not depend on a model and stay available.",
+      instance: "/api/ask",
+    })
   }
 }
