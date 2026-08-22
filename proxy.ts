@@ -1,9 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server"
 
 import { prefersMarkdown } from "@/lib/accept"
+import { LINK_HEADER } from "@/lib/discovery"
 import { READ_LIMIT, clientKey, rateLimit, rateLimitHeaders } from "@/lib/rate-limit"
 
-// Two agent-facing concerns that have to happen before a route handler runs.
+// Three agent-facing concerns that have to happen before a route handler runs.
+//
+// Named `proxy` rather than `middleware`: Next 16.2 deprecated the middleware
+// file convention in favour of this one. Same signature, same matcher config.
 //
 // 1. Markdown content negotiation (acceptmarkdown.com). The site already serves
 //    a markdown twin of every page at `<path>.md`. This makes the same content
@@ -13,7 +17,12 @@ import { READ_LIMIT, clientKey, rateLimit, rateLimitHeaders } from "@/lib/rate-l
 //    HTML variant and hand it to an agent asking for markdown, or vice versa,
 //    depending purely on which one landed in the cache first.
 //
-// 2. RateLimit headers (RFC 9331) on every /api/* response, not just the 429s.
+// 2. Link headers (RFC 8288) advertising the discovery documents. An agent that
+//    fetches one page should not have to guess that an OpenAPI spec, an API
+//    catalog and an MCP server exist — the relations say so in the response it
+//    already has, before it parses a byte of the body.
+//
+// 3. RateLimit headers (RFC 9331) on every /api/* response, not just the 429s.
 //    An agent can only self-throttle if it learns its budget while it is still
 //    inside it. The expensive model endpoints keep their own stricter in-handler
 //    limits; this is the loose outer guard that makes the policy visible.
@@ -31,7 +40,7 @@ function markdownTarget(pathname: string): string | null {
   return null
 }
 
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl
 
   // --- /api/*: advertise the rate-limit budget on every response -------------
@@ -66,6 +75,7 @@ export function middleware(req: NextRequest) {
 
     const res = NextResponse.next()
     for (const [k, v] of Object.entries(headers)) res.headers.set(k, v)
+    res.headers.set("link", LINK_HEADER)
     return res
   }
 
@@ -75,16 +85,19 @@ export function middleware(req: NextRequest) {
   if (target && prefersMarkdown(req.headers.get("accept"))) {
     const res = NextResponse.rewrite(new URL(target, req.url))
     res.headers.set("vary", "Accept, Accept-Encoding")
+    res.headers.set("link", LINK_HEADER)
     return res
   }
 
   const res = NextResponse.next()
   if (target) res.headers.set("vary", "Accept, Accept-Encoding")
+  res.headers.set("link", LINK_HEADER)
   return res
 }
 
 export const config = {
   matcher: [
+    "/",
     "/api/:path*",
     "/about", "/resume", "/health", "/now", "/uses", "/reading",
     "/blog/:slug", "/articles/:slug", "/logs/:slug",

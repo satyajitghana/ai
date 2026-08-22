@@ -267,6 +267,57 @@ claude mcp add --transport http satyajit https://ai.thesatyajit.com/api/mcp/mcp
         </pre>
       </Section>
 
+      <Section id="discovery" title="Discovery documents">
+        <p className="max-w-prose leading-7 text-muted-foreground">
+          Every response from this origin carries RFC 8288{" "}
+          <code className="font-mono text-xs">Link</code> headers pointing at the documents below,
+          so a client that fetched any page already knows they exist.
+        </p>
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full text-left font-mono text-xs">
+            <thead className="text-muted-foreground">
+              <tr>
+                <th className="pb-2 pr-4 font-normal">document</th>
+                <th className="pb-2 font-normal">what it is</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                ["/.well-known/api-catalog", "RFC 9727 API catalog, as an RFC 9264 linkset"],
+                ["/.well-known/mcp/server-card.json", "MCP server card (SEP-1649, proposal stage)"],
+                ["/.well-known/mcp.json", "MCP manifest with transport and when-to-use"],
+                ["/.well-known/ai-catalog.json", "ARD capability manifest with representative queries"],
+                ["/.well-known/agent-skills/index.json", "Agent Skills index, each entry sha256-verifiable"],
+                ["/.well-known/ai-plugin.json", "Plugin manifest"],
+                ["/auth.md", "States plainly that there is no authentication"],
+                ["/openapi.json", "OpenAPI 3.1 description of the JSON API"],
+                ["/llms.txt", "Curated index, with when-to-use guidance"],
+              ].map(([href, what]) => (
+                <tr key={href} className="border-t">
+                  <td className="py-2 pr-4">
+                    <a href={href} className="text-foreground underline underline-offset-4">
+                      {href}
+                    </a>
+                  </td>
+                  <td className="py-2 text-muted-foreground">{what}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="mt-4 max-w-prose leading-7 text-muted-foreground">
+          Two OAuth documents are <em>deliberately</em>{" "}absent —{" "}
+          <code className="font-mono text-xs">/.well-known/openid-configuration</code> and{" "}
+          <code className="font-mono text-xs">/.well-known/oauth-protected-resource</code>. There is
+          no authorization server behind this site, and publishing metadata describing one would
+          send agents chasing a token endpoint that does not exist.{" "}
+          <a href="/auth.md" className="underline underline-offset-4 hover:text-foreground">
+            /auth.md
+          </a>{" "}
+          says so in the place a client checks first.
+        </p>
+      </Section>
+
       <Section id="contact" title="Questions">
         <p className="max-w-prose leading-7 text-muted-foreground">
           Something broken, or an endpoint you wish existed? Mail{" "}
