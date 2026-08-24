@@ -1,0 +1,206 @@
+---
+title: "FreeToken: a 753B model on one GPU, and the two bandwidths that decide everything"
+description: "An edge-native MoE engine that refuses to pick an offloading strategy and measures one instead. q★ = m·B_P/B_H divides each decode step's cache misses between PCIe and the CPU using bandwidths profiled on the machine it is actually running on — and the right answer swings from 25% to 91% across ordinary consumer hardware. Two RTX 5090s with different hosts want opposite designs."
+date: 2026-08-23
+featured: true
+interest: 5
+helpful: 5
+tags:
+  - moe
+  - edge-inference
+  - serving
+  - systems
+  - agents
+  - explainer
+---
+
+import { QStarPolicy } from "@/components/articles/freetoken/q-star-policy"
+import { PrefillPipeline } from "@/components/articles/freetoken/prefill-pipeline"
+import { SemanticAnchors } from "@/components/articles/freetoken/semantic-anchors"
+import { ExpertLocality } from "@/components/articles/freetoken/expert-locality"
+import { HardwareLadder } from "@/components/articles/freetoken/hardware-ladder"
+
+There is a sentence buried in [FreeToken](https://arxiv.org/abs/2608.16157)'s evaluation that reframes the entire local-inference conversation, and it is not any of the headline numbers. It is this: two of the six test machines have **the same RTX 5090 in them**, on the same PCIe 5.0 ×16 link. One is a rented server, one is a gaming desktop. Moving between them costs FreeToken 4% of its decode rate and costs llama.cpp a fifth of its.
+
+Same GPU. Same link. Same model, bit-identical weights. A 20% swing, produced entirely by which memory the *host* has.
+
+That is the paper's actual thesis, and everything else — a 753B model on one workstation GPU, a 284B model on a gaming desktop, a 35B model on an 8 GB laptop at 39.3 tok/s — follows from taking it seriously.
+
+| | |
+|---|---|
+| Paper | [arXiv:2608.16157](https://arxiv.org/abs/2608.16157), 17 Aug 2026 · Yang, Fan, Pan, Xi, Wang, Sun, Keutzer, Han, Zaharia, Xu, Stoica |
+| Code | [FlashML-org/FreeToken](https://github.com/FlashML-org/FreeToken), Apache 2.0 · desktop app at [flashml.ai](https://www.flashml.ai/) |
+| What it is | an MoE serving engine that treats a personal machine as one elastic inference platform rather than a small GPU |
+| Core idea | profile two bandwidths on the machine; let them decide the CPU–GPU split at every layer of every step |
+| Headline | GLM-5.2 (753B-A40B) at **14.9 tok/s** on a single RTX PRO 6000 · DeepSeek-V4-Flash (284B) interactively on a 32 GB desktop |
+| Consistency | decode rate stays within **12%** of single-turn across three real agent workloads; worst-case TTFT stays under **44 s** everywhere |
+
+## The gap is not a hardware gap
+
+The framing in the introduction is the sharpest version of an argument that has been getting muddier for two years. Open weights have almost caught proprietary models on capability. They have not caught up on *accessibility*, because obtaining a model and affording to run it are different problems, and only the first one got solved.
+
+The paper's counter-observation is that the hardware already exists and is idle. More than a hundred million consumer machines have discrete GPUs — Steam alone reports over 200 million monthly actives with discrete NVIDIA parts in roughly 72% of surveyed systems. The missing piece is a serving system that can look at one heterogeneous machine and map its GPU, CPU, memory and interconnect onto the strongest configuration that machine can actually run.
+
+That sounds like a tuning problem. It is not, and the reason it is not is the interesting part.
+
+<Figure
+  src="/articles/freetoken/fig1.png"
+  alt="A two-part system diagram. The upper panel, Prefill, shows a PCIe load lane transferring layer l, l+1, l+2 while a GPU compute lane computes each one step behind, and a context timeline with orange checkpoint triangles at the special-token boundaries between system, reasoning, tool call, tool output and answer blocks; below it an edited version of the same context has the tool output struck out and a new suffix appended, annotated 'resume here; re-prefill only the suffix'. The lower panel, Decode, shows a router selecting twelve experts of which eight hit a GPU LRU expert cache and four miss; the four misses are split by q star equals m times B PCIe over B Host equals one, sending one expert over PCIe into a cache slot and computing three in place on the host CPU, with both partial outputs merging exactly into the layer output."
+  caption="The whole system on one page: double-buffered prefill with checkpoints anchored at special tokens, and a decode step where the misses are split by measured bandwidth rather than by policy. (FreeToken, Figure 2.)"
+/>
+
+## Three problems, and none of them is the GPU
+
+### Prefill streams the entire model, every time
+
+MoE's selling point at the edge is that decode touches only `k` of `E` experts per token. Prefill destroys that property: thousands of tokens per layer activate nearly the whole expert set, so a prefill pass streams essentially the complete expert pool across the interconnect. An FP4 deployment of DeepSeek-V4-Flash means moving roughly 140 GB — about two seconds on an RTX 5090's PCIe 5.0 link, five on a 4090- or 3090-class desktop, ten or more on the ×8 links common in laptops. An engine that fetches experts on demand exposes that whole window as GPU idle time on every turn.
+
+### Agents re-prefill constantly, and hybrid attention makes it expensive
+
+Frontier models increasingly interleave full attention with sliding-window or recurrent layers — gated DeltaNet in Qwen3.6-35B-A3B, Kimi Delta Attention in Kimi-K3. A recurrent layer compresses its entire prefix into one evolving state, and each saved state costs as much memory as the KV cache of hundreds of tokens, so engines keep only a few checkpoints.
+
+Meanwhile agent harnesses edit their context on nearly every turn: they delete old tool outputs, strip thinking blocks, elide observations. Any checkpoint taken *after* an edited position is invalid, and because checkpoints are sparse, the engine falls back a long way and re-prefills thousands of tokens. A consumer GPU cannot hide that — an RTX 5090 delivers roughly a fifth of an H100's and a tenth of a B200's dense BF16 throughput, so each redundant re-prefill occupies the machine for tens of seconds.
+
+### Nothing on the edge is dedicated
+
+The GPU is shared with the compositor, a browser, and possibly a game. The VRAM budget differs across launches and can shrink mid-session. The best split of that budget between KV cache and experts moves too, because agentic sessions accumulate context while the expert working set stays roughly fixed — so a split chosen on turn one is wrong by turn ten. And the engine gets started and stopped constantly, which means the roughly 20 seconds it takes to read a 140 GB pool off a 7 GB/s NVMe is a user-visible cost that recurs.
+
+## Prefill: hide the pool behind the wire
+
+FreeToken's answer to the first problem is to stop fetching on demand entirely. It allocates two full-layer buffers out of the same slot pool the decode cache uses: while the GPU computes layer `l` out of one buffer, a dedicated transfer stream fills the complete expert set of layer `l+1` into the other, then they swap.
+
+The detail that makes it work is *full-layer* granularity. Because the whole layer is loaded, the transfer can start **before that layer's routing is known** — there is nothing to wait for. Weight movement runs continuously in the background instead of serially between layers. And because the buffers come from the shared pool, there is no separate prefill cache and no phase handoff: whatever survives prefill seeds the decode cache.
+
+<PrefillPipeline />
+
+The result is that prefill becomes exactly, measurably transfer-bound, which is the best outcome available. An 8,192-token chunk completes in 1.19–1.22 s; streaming Qwen3.6's 64.4 GB expert pool once at the 52.7 GB/s the link actually delivers takes 1.222 s. Prefill throughput climbs to 6.7k tok/s at 16k tokens. Disabling the second buffer costs 19% at 4k, 25% at 8k and 26% at 16k — the penalty growing with prompt length precisely because longer prompts do more per-layer computation, so serializing exposes more of it.
+
+## Semantic anchors: checkpoint where the harness cuts
+
+The second prefill mechanism is the one I find most quietly clever, because it is not a systems trick at all. It is noticing that agent frameworks have already told you where they are going to edit.
+
+Full-attention KV gets a radix prefix tree, as in every modern serving engine — any prefix is reusable. Recurrent layers cannot do that, so reuse depends entirely on state checkpoints, and only a few fit. FreeToken spends that budget at **semantic anchors**: the special-token boundaries marking thinking segments, tool calls, tool outputs, and conversation turns.
+
+Why those positions? Because they are exactly where the harnesses cut:
+
+- **OpenClaw** strips thinking blocks from every assistant turn but the latest.
+- **OpenCode** replaces tool outputs beyond a recent window with a fixed placeholder.
+- **SWE-agent** elides all but the last `n` observations.
+
+In every case the edit replaces or removes *whole blocks marked by special tokens*, and the harness preserves the exact prefix up to the edited block. A checkpoint anchored at that boundary survives; one taken at an arbitrary offset probably does not. When it survives, full-attention layers reuse their KV up to the edit point, recurrent layers resume from the anchor, and only the genuinely new suffix is re-prefilled.
+
+<SemanticAnchors />
+
+The framing I keep coming back to is that this is a *protocol* observation wearing systems clothing. The chat template's special tokens were designed to delimit blocks for the model. It turns out they also delimit them for the cache, and nobody had spent the checkpoint budget accordingly.
+
+## Decode: the one equation
+
+Now the part the paper is really about.
+
+At each MoE layer during decode, the router picks its experts, the GPU checks residency, and the hits execute immediately. The question is what to do with the `m` misses. Each one can be pulled over PCIe into a cache slot and executed on the GPU, or executed in place on the CPU where its weights already live.
+
+Neither is universally right, and this is the crux. Transfer-only leaves residual host bandwidth and CPU cores idle whenever host memory can deliver more bytes than the link can move. CPU-only leaves the link idle and forfeits every future hit a cache fill would have bought. The correct mixture depends on the machine — and, as the paper puts it, **cannot be read from specification sheets**.
+
+So FreeToken measures. Two bandwidths, profiled on the target hardware at deployment: the pinned expert-transfer bandwidth $B_\mathrm{P}$ and the host-side expert-processing bandwidth $B_\mathrm{H}$. Because both DMA transfers and CPU execution read from the same host-memory subsystem, a saturated PCIe transfer leaves a residual
+
+$$
+B_\mathrm{R} = \max(B_\mathrm{H} - B_\mathrm{P},\; 0)
+$$
+
+which is precisely what the concurrent CPU branch has to work with. So the two branch times are
+
+$$
+T_\mathrm{fill}(q) \approx \frac{qS}{B_\mathrm{P}}, \qquad T_\mathrm{cpu}(m-q) \approx \frac{(m-q)S}{B_\mathrm{H} - B_\mathrm{P}}
+$$
+
+and balancing them gives the whole policy:
+
+$$
+\frac{q}{m-q} \approx \frac{B_\mathrm{P}}{B_\mathrm{H} - B_\mathrm{P}}, \qquad q^\star \approx m\,\frac{B_\mathrm{P}}{B_\mathrm{H}}
+$$
+
+<QStarPolicy />
+
+Two properties fall out of that expression that are worth more than the expression itself.
+
+**The expert size $S$ cancels.** $q^\star$ is a property of the machine, not of the model loaded onto it — which is why it can be profiled once at deployment and then left alone across a 35B model and a 753B one.
+
+**The floor is the host bandwidth, and the fills are free.** Substitute $q^\star$ back in and the balanced time is exactly $mS/B_\mathrm{H}$. That is not a coincidence: both branches read the same DRAM, so the bytes and the bandwidth are fixed no matter how you divide them, and the split only decides whether one branch finishes early and idles. The balanced point is the only one that keeps host memory saturated end to end — and it lands at the same latency a pure-CPU path would, while leaving $q^\star$ more experts resident for the next token. Filling costs nothing and pays later.
+
+The degenerate case is handled by the same formula rather than by a special case: as $B_\mathrm{H}$ approaches $B_\mathrm{P}$, $q^\star$ approaches `m` and the system becomes pure on-demand cache fill with no separate branches. FreeToken rounds to an integer, always keeps at least one fill so the cache keeps warming, launches the CPU branch first, and merges the two partial sums exactly — no algorithmic approximation anywhere.
+
+## Residency that follows the router
+
+The other half of decode is reducing `m` in the first place.
+
+Routing has strong temporal locality: across consecutive steps, the same MoE layer keeps selecting overlapping or recently-used experts. FreeToken turns that into GPU residency with a shared global LRU whose contents follow the router — a hit refreshes recency, a fill admits, an eviction removes whatever the model demanded least recently.
+
+The competition does not do this. llama.cpp assigns MoE tensors to devices when the model is *loaded*. KTransformers pins a hot subset chosen at prefill time and runs the rest on CPU. Both freeze a decision that routing invalidates within a few tokens.
+
+<ExpertLocality />
+
+Replayed on identical routing traces at equal cache capacity — 37% of Qwen3.6's expert pool, 11% of DeepSeek-V4-Flash's, which is what an RTX 5090 holds — the global LRU misses 16% and 39% of decode-time expert reads, against 41% and 59% for KTransformers' prefill-updated placement and 62% and 89% for llama.cpp's routing-blind split. The ordering holds at every capacity short of the full pool.
+
+<Figure
+  src="/articles/freetoken/fig2.png"
+  alt="Two panels. Left, a grouped bar chart of prefill throughput in thousands of tokens per second at prompt lengths 1K through 16K, comparing FreeToken, FreeToken without overlap, KTransformers, llama.cpp and Ollama; FreeToken reaches 6.68K at 16K tokens against 4.95K without overlap and 1.68K for KTransformers. Right, two line charts of decode-time expert miss rate against cache size as a percentage of the expert pool, for Qwen3.6-35B and DeepSeek-V4-Flash; FreeToken's LRU curve falls far below KTransformers' prefill-update and llama.cpp's static split across the whole capacity range."
+  caption="Left: the second buffer is worth 19–26% of prefill throughput, and the gap widens with prompt length. Right: at equal capacity, residency that follows the router misses a fraction of what a frozen placement does. (FreeToken, Figure 4.)"
+/>
+
+Keeping all of that inside a CUDA Graph is its own implementation problem, and the paper's answer is to move every routing-dependent decision onto the GPU as *data* inside a statically captured graph. One kernel per MoE layer deduplicates the routed experts, classifies them against the residency table, derives `q`, selects victims, and rewrites logical expert IDs into physical slot IDs or a CPU-assignment flag. Victim selection avoids the classic LRU trap of one full-cache scan per eviction by identifying the `K` least-recently-used candidates in a single pass and consuming the first `q ≤ K`. The CPU branch is captured into the same graph — device-to-host copies, a host-function submit node, the GPU path, a sync node, and the result copy back — so replay re-executes the whole heterogeneous step with no per-token Python scheduling.
+
+## Elastic memory, because the machine is not yours
+
+The third problem gets two mechanisms, both resting on one property: **the CPU-resident expert pool is the source of truth, so GPU memory affects only performance, never correctness.** Once that is true, a lot becomes permissible.
+
+**Runtime cache reconfiguration.** At any scheduler safe point, FreeToken can rebuild the GPU expert cache for a revised VRAM budget — re-establishing the captured execution path for the new configuration without restarting the engine or reloading the host pool. A game claims 6 GB; the engine shrinks and keeps serving.
+
+**Fast bootstrap.** Loading reads expert weights from disk directly into their final host layout and pins the memory only *afterward* — pinning empty buffers first would fault in and zero gigabytes of pages merely to overwrite them. Warmup is eliminated by construction: the first request is served with a cold cache, its misses handled by the ordinary decode path, and the cache heats up through normal serving. The FTW weight format stores experts pre-merged into the runtime bank layout so launch can skip tensor discovery and repacking entirely and read aligned chunks with parallel direct I/O.
+
+## What it buys, on real agents
+
+The evaluation runs four workloads that are agent traces rather than benchmarks: AIME with long chain-of-thought and no tools (W1); a SWE-bench issue through the OpenCode harness with real tool execution over three turns (W2); the same issue driven by **Claude Code** through each engine's Anthropic-compatible endpoint, spawning concurrent subagents and growing sessions to 56–65k tokens (W3); and thirteen fixed turns of an email/calendar agent through OpenClaw at stock configuration, carrying a ~24.5k-token system-context floor (W4).
+
+On an RTX 5090, FreeToken sustains 77–83 tok/s on Qwen3.6-35B-A3B and 22–25 tok/s on DeepSeek-V4-Flash — 1.8–2.3× and 1.5–1.9× the strongest baseline in each workload.
+
+The number I would actually put on a slide is the *stability*: the decode rate stays within **12%** of the single-turn W1 value across all three agent workloads, while KTransformers on DSV4-Flash has already surrendered 31% of its W1 rate by W2. Single-stream benchmarks systematically overstate baseline agentic performance, and this is the cleanest demonstration of that I have seen.
+
+<Callout type="note">
+The tail latency result deserves its own sentence, because the paper words it exactly right: **tail TTFT is an availability boundary, not a latency statistic.** FreeToken's worst turn stays under 44 s in every cell. Every baseline crosses 150 s somewhere — llama.cpp at 232 s, Ollama at 179 s, KTransformers at 946 s. OpenClaw ships a 120 s idle watchdog; Claude Code's default request timeout is roughly ten minutes. Past those thresholds you are not slow, you are *down*.
+</Callout>
+
+## Across six machines
+
+<HardwareLadder />
+
+<Figure
+  src="/articles/freetoken/fig3.png"
+  alt="A grouped bar chart of coding-agent decode throughput in tokens per second across six systems: RTX 4060 laptop, RTX 3090, RTX 4090, RTX 5090, RTX 5090 desktop, and RTX PRO 6000 running GLM-5.2. FreeToken leads every group, at 39.3, 36.2, 42.9, 76.7, 73.8 and 14.9 tokens per second against baselines of 22.3, 27.4, 31.8, 41.1, 34.8 and 7.3; crosses mark configurations KTransformers cannot serve on the laptop and workstation."
+  caption="The same experiment across the hardware range. Note the fourth and fifth groups: identical RTX 5090 silicon, different host — FreeToken gives up 4%, llama.cpp gives up a fifth. (FreeToken, Figure 5.)"
+/>
+
+FreeToken leads the strongest baseline by 1.3× on the 3090 and 4090, 1.9× on the 5090 server, 2.1× on the 5090 desktop, and 1.8× on the RTX 4060 laptop, where an NVFP4 build sustains 39.3 tok/s on an 8 GB, PCIe ×8 machine — 92% of the RTX 4090 rate, and above the 33 tok/s median decode speed measured for Codex in production traces.
+
+Then the frontier tier: GLM-5.2, 753B parameters with 40B active, a 433 GB NVFP4 checkpoint, served on a single RTX PRO 6000 at 14.9 tok/s against llama.cpp's 7.3 — with bit-identical expert weights and comparable mean TTFT, 7.5 s against 7.8 s. KTransformers has no servable path at all on that box: its GLM-5.2 methods want 753 GB to 1.5 TB of host-resident experts against 512 GiB of host memory, and its CPU kernels do not read the NVFP4 layout.
+
+## What I would want to see next
+
+A few things the paper does not settle, none of which undercut it.
+
+**The bandwidth profile is static.** $B_\mathrm{P}$ and $B_\mathrm{H}$ are measured at deployment, but the paper's own §2.3 argues that nothing on an edge machine is dedicated — and a browser doing GPU compositing or another process hammering DRAM changes the effective host bandwidth *during* a session. The elastic memory manager already handles VRAM fluctuating at runtime; the bandwidths get the same argument and a one-shot measurement. Re-profiling at scheduler safe points looks like a small change with a real payoff on a machine someone is also using.
+
+**Three of the five consumer machines are emulated.** The 3090/4090/5090 rows are rented dual-socket servers capped at 6 CPU threads and NUMA-pinned so their host bandwidth lands in the 56.7–77.3 GB/s range real edge machines reach. The paper is upfront about this and validates the emulation with two genuine edge boxes — and the 5090 desktop row is the one doing the most work in the argument precisely because it is real. Still, a thread cap is not a memory controller, and I would like the untiered version of all five.
+
+**Accuracy is asserted, not measured.** The merge is exact and the weights are bit-identical, so there is no reason to expect drift — but the coding runs are only required to produce the reference gold patch, and agent trajectories diverge across engines, so there is no cross-engine quality comparison to read. That is a defensible scoping decision for a systems paper. It does mean "identical outputs" is an architectural claim here rather than an evaluated one.
+
+**The `q★` derivation assumes a clean bandwidth model.** Balancing $T_\mathrm{fill}$ against $T_\mathrm{cpu}$ treats DMA and CPU kernels as drawing from one linear pool. Real memory controllers are not that polite about mixed read patterns and DMA contention, and the model has no term for GPU-side execution of the filled experts. It evidently works well enough — the cross-hardware results are the evidence — but the fact that the *right* integer `q` is often 1 or 2 means the policy is fairly forgiving of a mis-estimate, which may be doing more of the work than the derivation.
+
+## Why this one matters
+
+The pattern to take away is not the equation. It is that FreeToken keeps replacing *decisions* with *measurements*, and each replacement makes a class of hardware serviceable that was not before.
+
+Where to place experts becomes: follow the router, and let LRU decide. How to split miss work becomes: measure two bandwidths and let arithmetic decide. Where to checkpoint recurrent state becomes: put them where the harness already told you it cuts. How much VRAM to use becomes: whatever there is right now, rebuilt at the next safe point.
+
+None of those individually is a research result. Together they are the difference between a 753B model being open-weight and a 753B model being *runnable*, on one card someone can buy. The paper's closing framing — turning open weights into deployable local software — is the right one, and the two-RTX-5090 experiment is the proof that it took a system to get there rather than a faster card.
+
+The engine is Apache 2.0, `uv pip install "freetoken[accel]"`, with Anthropic- and OpenAI-compatible endpoints and support for more than twenty MoE models across MXFP4, NVFP4, FP8 and BF16. It acknowledges mini-sglang as its inspiration and borrows from SGLang, vLLM, FlashInfer, flash-linear-attention, LightLLM and llama.cpp — which, given that llama.cpp is also the baseline it beats, is a nicer piece of citation etiquette than this field usually manages.

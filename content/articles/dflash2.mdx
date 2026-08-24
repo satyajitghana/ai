@@ -1,0 +1,128 @@
+---
+title: "DFlash 2: the drafter already knew the answer, it just picked the wrong one"
+description: "A parallel speculative drafter's top pick is right 85% of the time at the first block position — and the right token is in its top sixteen 99.5% of the time. DFlash 2 spends two million parameters connecting candidates that were already computed, and a two-tap convolution to stop the block decaying at the end. One more accepted token per pass, for 1.3% more latency, with the output provably unchanged."
+date: 2026-08-23
+interest: 5
+helpful: 5
+tags:
+  - speculative-decoding
+  - inference
+  - block-diffusion
+  - serving
+  - explainer
+---
+
+import { SelectionHeadroom } from "@/components/articles/dflash2/selection-headroom"
+import { PathSelector } from "@/components/articles/dflash2/path-selector"
+import { SuffixDecay } from "@/components/articles/dflash2/suffix-decay"
+import { ConcurrencyCliff } from "@/components/articles/dflash2/concurrency-cliff"
+
+There is one number in [DFlash 2](https://inco.ai/blog/dflash2/) that makes the rest of the post feel inevitable.
+
+At the first position of a draft block, a five-layer DFlash drafter's **top pick is correct 85.4% of the time**. The correct token is somewhere in its **top sixteen candidates 99.5% of the time**.
+
+The drafter is not failing to know the answer. It is failing to choose it. And the candidates it needs are already sitting in a tensor it already computed.
+
+| | |
+|---|---|
+| Who | [Inco AI](https://inco.ai/blog/dflash2/) · code at [z-lab/dflash](https://github.com/z-lab/dflash) · 18 Aug 2026 |
+| What | two additions to parallel block drafting: a pairwise path selector and a two-tap dynamic convolution |
+| Cost | **+1.3%** draft–verify cycle latency, ~3% more drafter parameters |
+| Gain | **+1.05** accepted tokens per pass over DFlash (21%), +0.48 over DSpark |
+| Losslessness | greedy output matches the target exactly; sampling preserves its distribution |
+| Out today | drafters for [Qwen3.8-27B](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) and Meta's Muse Glimmer |
+| Throughput | 2.7–3.4× autoregressive on Qwen3.8-27B, 3.1–4.6× on Muse Glimmer |
+
+## The setup, briefly
+
+Speculative decoding exists because decode is memory-bound: the cost of a forward pass is dominated by streaming weights out of DRAM, not by the arithmetic. If a cheap drafter guesses the next `k` tokens, the target model can verify all of them in *one* pass, amortizing that weight load across however many turn out to be right.
+
+For years the drafter itself stayed autoregressive — one token at a time, which is a strange thing to accept when the entire premise is that sequential decoding is the problem. DFlash, released in January and now in SGLang, vLLM, TensorRT-LLM and llama.cpp, made the draft one-pass too: **every position of the block predicted in parallel**, block-diffusion style. NVIDIA measured up to 15× throughput with it on Blackwell, Google reported 3× more tokens per second on TPUs, and CoreWeave's production Kimi K2.7 Code endpoint runs it by default. Meta ships one with Muse Glimmer, as do Poolside, Xiaomi and NVIDIA with their own models.
+
+Predicting in parallel buys the speed. It also creates the problem this post is about.
+
+## Every pick is plausible; nothing makes them fit
+
+When each position is predicted independently, each token is reasonable *on its own terms* and nothing coordinates them. The characteristic failure is a stutter: two neighbouring positions both independently deciding the most likely next word is `decoding`, producing "good for decoding decoding". Verification kills the block at the first mismatch, and the whole tail is discarded.
+
+<PathSelector />
+
+Recent methods buy coherence by bolting a sequential head onto the drafter — DSpark and Domino both rewrite each position's full-vocabulary distribution conditioned on the token before it. That works. It also reintroduces exactly the autoregressive step the parallel design was built to remove.
+
+DFlash 2's question is whether that is necessary, and the answer comes from measuring the drafter's own candidate lists.
+
+<SelectionHeadroom />
+
+Turn those conditional recall rates into acceptance length — a block is accepted up to its first mistake, plus the verifier's own token — and the top-pick row gives 4.27 while the top-16 oracle gives 6.79. **Two and a half tokens per pass of pure selection headroom**, requiring no new predictions at all.
+
+So DFlash 2 keeps the top 16 candidates at every position and scores every adjacent pair:
+
+$$
+S_t(a, b) = U_t(b) + \langle A(a) \odot H(h_t),\; B(b) \rangle
+$$
+
+The first term is DFlash's own logit for `b`. The second asks how well `b` follows `a`: `A` and `B` give each token a compact 256-dimensional embedding, matched under a context gate `H(h_t)` that decides which parts of the match count — a low-rank bilinear attention over adjacent candidates. Every pair at every position is scored in one shot, with no extra backbone or LM-head pass. The only sequential work left is a walk over precomputed scores: greedy follows the best successor, sampling draws from the same scores, and rejection sampling restores the exact target distribution.
+
+<Callout type="note">
+The comparison against the alternative is the argument in one line. The selector adds **2.0M parameters and 0.6%** of cycle latency and lifts acceptance from 4.27 to 4.61 at temperature 0. DSpark's sequential correction adds **77.8M and 9.6%** to reach 4.49. Roughly 40× fewer parameters, 16× less latency, and a better result. Choosing is cheaper than predicting.
+</Callout>
+
+<Figure
+  src="/articles/dflash2/fig1.png"
+  alt="A left-to-right pipeline diagram. On the left, a context of tokens ending in the target-decoded token 'for', followed by three mask tokens. These enter the DFlash2 Backbone: five layers of attention and MLP with dynamic short convolutions before and after each, then the target LM head, producing drafted candidates. Those feed the Parallel Path Selector, drawn as a trellis of top-16 candidate boxes at positions one, two and three with a green path traced through one candidate per column, labelled 'top-16 per position, associative scan to one path'. On the right, the emitted sequence: for, speculative, decoding, end-of-sequence."
+  caption="The whole design. The backbone drafts a block in one pass with two-tap convolutions inside each layer; the selector traces one coherent path through the candidates it produced. (Inco AI, Qwen3.8-27B-DFlash2 model card.)"
+/>
+
+## Suffix decay is a backbone problem, and a local one
+
+The selector cannot fix everything, and the recall table says why: **even the oracle decays**, from 99.5% at the first position to 87.8% at the last. No amount of choosing helps when the candidates themselves have run out. That is a backbone problem.
+
+Depth fixes it — a fifteen-layer drafter holds the end of the block far better than a five-layer one. But the curves are nearly identical at position zero, which means ten extra attention blocks are adding capacity everywhere including where none was needed, at 15.2% more cycle latency. Indiscriminate.
+
+The targeted fix comes from looking at where the drafter's attention actually goes. It has two jobs: read the context *before* the block, and model dependencies *inside* it. And it progressively abandons the second — within-block attention mass falls from 30% in layer 1 to 8% in layer 5, and what remains concentrates in a shrinking handful of heads.
+
+<SuffixDecay />
+
+So split the jobs. A block is only 4 to 16 tokens long and the tightest dependencies are between neighbours, so the natural operator is a very short convolution: two taps, one on the current position and one reaching a single position back, with content-adaptive weights.
+
+$$
+\operatorname{Conv}_k(x)_t = k_{t,0} \odot x_t + k_{t,1} \odot x_{t-1}
+$$
+
+One sits before and after each attention and MLP sublayer of every drafter layer. Each coefficient combines a learned base kernel with a small correction from the current hidden state, shared across every 16 channels. The first position reads the last verified token's representation; every later position reads its predecessor's. Information crosses the block while all positions still compute in parallel — the convolution is block-local and stateless, so it drops in without touching attention, the LM head, or verification.
+
+With **16.5M added parameters (3%)**, five layers plus convolution lands on the fifteen-layer curve. And afterwards the average within-block attention across layers 4 and 5 falls from 9.4% to 0.5% — attention hands the local job over and goes back to reading context, which is a satisfying confirmation that the diagnosis was right rather than merely a lucky architecture change.
+
+## What the two together are worth
+
+On Qwen3.5-4B, mean acceptance length across five benchmarks: MTP 4.54, DFlash 4.92, DSpark 5.49, **DFlash 2 5.97**. That is +1.05 tokens over DFlash — 21% — and +0.48 over DSpark, for a combined 1.3% of cycle latency. Position by position on MATH-500, DFlash 2 holds near 86% all the way to the fifteenth draft position while every baseline finishes 6 to 9 points below it.
+
+The two shipped drafters tell the same story against each model's *official* speculation path. On Qwen3.8-27B, DFlash 2 averages 4.80 against the model's built-in MTP at 4.28 and a community DSpark drafter at 3.62. On Muse Glimmer, 5.70 against the official DFlash drafter Meta ships at 4.44.
+
+## Why acceptance length is not a leaderboard statistic
+
+Here is where I would push back on how these results usually get read — and, to be fair, where the model card is more honest than the blog post.
+
+<ConcurrencyCliff />
+
+At batch size 1, every speculative method is a clear win and the ranking barely matters. At concurrency 32, four of MTP's five tasks and four of DSpark's are **slower than not speculating at all**. MT-Bench is the worst cell: 0.77× for MTP, 0.74× for DSpark. Turning the feature off would make those servers faster.
+
+None of that is a bug. Batching already amortizes the weight loads that speculation exists to amortize, so as arithmetic intensity climbs, verifying seven tokens to keep three is just waste. Which reframes what an extra accepted token per pass is *for*: not a better score, but the difference between the technique still applying at your serving concurrency and not. DFlash 2 stays above water in all fifteen cells. It is the only one that does.
+
+## What I would want to know next
+
+**The oracle is still at 6.79.** Pairwise scoring is, by the authors' own description, the simplest selector they could think of, and it claims about 0.34 of a 2.5-token gap. A trigram term, a wider beam, or a learned scan over three-token windows all seem obviously worth trying — and the fact that a *low-rank bilinear form over adjacent pairs* gets this far mostly suggests nobody has looked hard yet.
+
+**The 16 is a hyperparameter nobody varied.** Top-16 per position at block size 8 means 16 × 8 pairwise blocks to score. There is no ablation on that width in the post, and it is the one knob that trades selector cost against how much of the oracle is reachable at all. Recall@16 is 99.5% at position 0; what is Recall@4, and does the cheaper selector get most of the same lift?
+
+**The convolution's win is measured on one family.** The two-tap kernel closing the gap to fifteen layers is a strong result, but it is shown on Qwen3-4B, and "suffix decay is local" is an architectural claim about how much within-block dependency a drafter needs. Models with different block sizes — Muse Glimmer runs 16, twice Qwen3.8-27B's 8 — are exactly where a one-position reach should start to strain.
+
+**Lossless is doing real work in the pitch, and it should be checked.** Greedy output matching the target exactly is a property of the verification rule, not of the drafter, so it holds by construction. Sampling preserving the target distribution is a stronger claim, resting on rejection sampling over the selector's scores rather than over the drafter's raw logits. The post asserts it; I would like to see the distributional test.
+
+## The line I keep coming back to
+
+> Choosing is cheaper than predicting.
+
+That is a general principle wearing a speculative-decoding costume, and it applies well beyond drafters. A model that has already computed a distribution over candidates has done the expensive part. The mistake is treating the argmax as the answer when the distribution was the answer — and then, having thrown away the rest, paying a second full model to reconstruct what you discarded.
+
+DFlash 2 gets an extra token per verification pass for 1.3% more latency because it stopped throwing the shortlist away. In seven months DFlash went from a paper to three and a half million downloads and an ecosystem of vendor-shipped drafters; the sequel is a two-million-parameter bilinear form and a two-tap kernel. Inference really is nowhere near its floor.
