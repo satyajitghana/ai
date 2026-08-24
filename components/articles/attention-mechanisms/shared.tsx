@@ -53,8 +53,14 @@ export function useTicker(
   ms: number,
   onTick: () => void
 ) {
+  // The latest-callback ref, written from an effect rather than during render:
+  // the interval must see the newest onTick without restarting every time the
+  // caller passes a fresh closure, and a ref written mid-render is a mutation
+  // React has no way to account for.
   const cb = useRef(onTick)
-  cb.current = onTick
+  useEffect(() => {
+    cb.current = onTick
+  })
   useEffect(() => {
     if (!playing || reduced) return
     const id = setInterval(() => cb.current(), ms)

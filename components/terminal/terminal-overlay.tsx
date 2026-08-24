@@ -119,17 +119,30 @@ export function TerminalOverlay() {
 
   // Instant keyword search (BM25) as you type — free text only, debounced.
   // Enter still asks the AI; these are the fast "jump to a page" matches.
+  //
+  // Whether the query is searchable at all is decided during render, not by
+  // clearing state from inside the effect. The old shape had the effect blank
+  // `hits` and `searching` on every keystroke that was too short or started
+  // with a command verb, which is a state update to express something the
+  // input already said.
+  const query = input.trim()
+  const searchable =
+    query.length >= 2 && !VERBS.includes(query.split(/\s+/)[0].toLowerCase())
+
+  // `hits` keeps whatever the last real search returned, so what renders is
+  // gated on the query still being searchable rather than on the state alone.
+  const shownHits = searchable ? hits : []
+  const shownSearching = searchable && searching
+
   useEffect(() => {
-    const q = input.trim()
-    const verb = q.split(/\s+/)[0].toLowerCase()
-    if (q.length < 2 || VERBS.includes(verb)) {
-      setHits([])
-      setSearching(false)
-      return
-    }
-    setSearching(true)
+    if (!searchable) return
+    const q = query
     const ctrl = new AbortController()
     const t = setTimeout(() => {
+      // The indicator goes up when the request actually starts, not when the
+      // effect runs — one fewer state update per keystroke, and a fast typist
+      // never sees it flicker during the debounce window.
+      setSearching(true)
       fetch(`/api/search?q=${encodeURIComponent(q)}&limit=6`, { signal: ctrl.signal })
         .then((r) => r.json())
         .then((d) => setHits(Array.isArray(d.results) ? d.results : []))
@@ -143,7 +156,7 @@ export function TerminalOverlay() {
       clearTimeout(t)
       ctrl.abort()
     }
-  }, [input])
+  }, [searchable, query])
 
   useEffect(() => {
     if (open) inputRef.current?.focus()
@@ -371,7 +384,7 @@ export function TerminalOverlay() {
             spellCheck={false}
             enterKeyHint="search"
           />
-          {searching ? (
+          {shownSearching ? (
             <CircleNotchIcon
               size={15}
               className="shrink-0 animate-spin text-muted-foreground"
@@ -409,7 +422,7 @@ export function TerminalOverlay() {
         {/* suggestions / ask action */}
         <div className="border-t">
           {/* loading indicator while the keyword search is in flight */}
-          {searching && !hits.length ? (
+          {shownSearching && !shownHits.length ? (
             <div className="flex items-center gap-2 border-b px-4 py-2.5 text-muted-foreground">
               <CircleNotchIcon size={14} className="animate-spin" />
               <span className="text-[13px]">searching pages…</span>
@@ -417,9 +430,9 @@ export function TerminalOverlay() {
           ) : null}
 
           {/* instant keyword matches (BM25) — jump straight to a page */}
-          {hits.length ? (
+          {shownHits.length ? (
             <ul className="max-h-[38vh] overflow-y-auto border-b">
-              {hits.map((h) => (
+              {shownHits.map((h) => (
                 <li key={h.url}>
                   <button
                     type="button"

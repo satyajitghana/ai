@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
@@ -123,7 +124,7 @@ export function PrecisionMap() {
             only partly shrinks. The hard part Bonsai solves is quantizing the parts everyone else protects.</>
           )}{" "}
           Compare with the mixed-precision approach of{" "}
-          <a href="/articles/nemotron-nvfp4" className="text-foreground underline underline-offset-4">native FP4 training</a>,
+          <Link href="/articles/nemotron-nvfp4" className="text-foreground underline underline-offset-4">native FP4 training</Link>,
           which deliberately keeps some layers higher precision.
         </p>
       </div>

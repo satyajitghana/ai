@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
 import { mlog10 } from "@/lib/dmath"
@@ -109,7 +110,7 @@ export function ThroughputScaling() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           The dense 14B line falls off a cliff as context grows — each decoded token re-reads a{" "}
-          <a href="/articles/how-llm-inference-works" className="text-foreground underline decoration-foreground/30 underline-offset-2">KV cache</a>{" "}
+          <Link href="/articles/how-llm-inference-works" className="text-foreground underline decoration-foreground/30 underline-offset-2">KV cache</Link>{" "}
           that grows with sequence length. Soofi keeps only <span className="text-foreground">6 of 52 layers</span>{" "}as
           attention (~6&nbsp;KB/token, 11–53× smaller than the dense baselines) while 23 Mamba-2 layers carry a{" "}
           <span style={{ color: SOOFI }}>fixed-size recurrent state</span>, so its throughput stays nearly flat and is

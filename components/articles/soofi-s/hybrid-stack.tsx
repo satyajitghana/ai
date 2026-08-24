@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
@@ -131,11 +132,11 @@ export function HybridStack() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Most of the depth is <span style={{ color: COLOR.mamba }}>Mamba-2</span>{" "}(linear-time sequence mixing, a
           fixed-size recurrent state) and granular{" "}
-          <a href="/articles/mixture-of-experts-from-scratch" className="text-foreground underline decoration-foreground/30 underline-offset-2">MoE</a>{" "}
+          <Link href="/articles/mixture-of-experts-from-scratch" className="text-foreground underline decoration-foreground/30 underline-offset-2">MoE</Link>{" "}
           <span style={{ color: COLOR.moe }}>capacity</span>. Full{" "}
           <span style={{ color: COLOR.gqa }}>attention</span>{" "}appears in only 6 of 52 layers — those are the only
           ones whose cache grows with context. It is the same hybrid recipe as{" "}
-          <a href="/articles/nemotron-nvfp4" className="text-foreground underline decoration-foreground/30 underline-offset-2">Nemotron</a>,
+          <Link href="/articles/nemotron-nvfp4" className="text-foreground underline decoration-foreground/30 underline-offset-2">Nemotron</Link>,
           reused deliberately so the German–English data recipe can be measured against an architecture-identical
           control.
         </p>

@@ -162,7 +162,7 @@ export function InvertedIndex() {
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
           The index maps each term to its postings list — the documents that contain it — built once
-          at index time. A query walks only its own terms' postings and scores their union;{" "}
+          at index time. A query walks only its own terms&rsquo; postings and scores their union;{" "}
           {skipped > 0 ? (
             <>
               the other <span className="text-foreground">{skipped}</span>{" "}document
@@ -171,8 +171,8 @@ export function InvertedIndex() {
           ) : (
             <>here every document happens to match at least one term.</>
           )}{" "}
-          At web scale that's the difference between scoring a handful of postings and scanning a
-          billion documents — and it's the same index Lucene has shipped since 2011.
+          At web scale that&rsquo;s the difference between scoring a handful of postings and scanning a
+          billion documents — and it&rsquo;s the same index Lucene has shipped since 2011.
         </p>
       </div>
     </figure>

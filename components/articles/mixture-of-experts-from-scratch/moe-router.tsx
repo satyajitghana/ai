@@ -102,7 +102,6 @@ export function MoeRouter() {
 
   const gateMode = stage >= 3
   const winner = ordered[0] // highest gate → accent
-  const runner = ordered[1] // second → amber
 
   // shared, comparable heights
   const frac = (i: number) => {

@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
@@ -183,7 +184,7 @@ export function SwitchRouting() {
           <span style={{ color: SEL }}>argmax</span>. Halving the routes halves the router math and — because experts live on
           different devices — the number of token copies shuffled across the network. Switch&apos;s bet is that with a
           load-balancing loss and a capacity buffer, one expert per token is enough. See the mechanism built up in{" "}
-          <a className="underline decoration-dotted underline-offset-2" href="/articles/mixture-of-experts-from-scratch">Mixture of Experts, from scratch</a>.
+          <Link className="underline decoration-dotted underline-offset-2" href="/articles/mixture-of-experts-from-scratch">Mixture of Experts, from scratch</Link>.
         </p>
       </div>
     </figure>

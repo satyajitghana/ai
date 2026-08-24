@@ -192,7 +192,7 @@ export function LinearAttention() {
         <span style={{ color: ATT }}>d×d state</span>{" "}and update it per token, exactly like an RNN. Constant memory,
         linear time, unbounded context — at the cost of approximating the softmax, which usually shows up as weaker
         recall. Performer (FAVOR+) is the same idea with a random-feature φ that provably approximates the softmax
-        kernel; "lightning" and gated-linear variants add decay so old state fades.
+        kernel; &ldquo;lightning&rdquo; and gated-linear variants add decay so old state fades.
       </p>
     </FigureCard>
   )

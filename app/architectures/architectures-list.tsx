@@ -10,6 +10,7 @@ import {
 } from "@phosphor-icons/react/dist/ssr"
 
 import { ArchDiagram } from "@/components/architectures/registry"
+import { useUrlState } from "@/lib/use-url-state"
 import { cn } from "@/lib/utils"
 
 // Client gallery for /architectures: a grid of architecture "blocks". Diagrams
@@ -143,9 +144,20 @@ const SORTS: { key: Sort; label: string }[] = [
   { key: "name", label: "a–z" },
 ]
 
+// Family and sort live in the query string so a view is shareable and survives
+// a refresh. An unrecognised family falls back to "all" rather than filtering
+// everything away.
+function parseUrlState(sp: URLSearchParams): { family: string; sort: Sort } {
+  const f = sp.get("family")
+  const s = sp.get("sort")
+  return {
+    family: f && (f === "diagram" || FAMILY_ORDER.includes(f)) ? f : "all",
+    sort: s === "interest" || s === "signal" || s === "new" || s === "name" ? s : "unique",
+  }
+}
+
 export function ArchitecturesList({ items }: { items: ArchCard[] }) {
-  const [family, setFamily] = useState<string>("all")
-  const [sort, setSort] = useState<Sort>("unique")
+  const [{ family, sort }, setParams] = useUrlState(parseUrlState)
   const [expanded, setExpanded] = useState<ArchCard | null>(null)
   const topRef = useRef<HTMLDivElement>(null)
 
@@ -175,15 +187,6 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
     }
   })
 
-  // Restore filter + sort from the URL on mount (shareable, refresh-safe).
-  useEffect(() => {
-    const sp = new URLSearchParams(window.location.search)
-    const f = sp.get("family")
-    if (f && (f === "diagram" || FAMILY_ORDER.includes(f))) setFamily(f)
-    const s = sp.get("sort")
-    if (s === "interest" || s === "signal" || s === "new" || s === "name") setSort(s)
-  }, [])
-
   // Modal: close on Escape, lock body scroll while open.
   useEffect(() => {
     if (!expanded) return
@@ -199,24 +202,16 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
     }
   }, [expanded])
 
-  const writeUrl = (nextFamily: string, nextSort: Sort) => {
-    const sp = new URLSearchParams(window.location.search)
-    if (nextFamily !== "all") sp.set("family", nextFamily)
-    else sp.delete("family")
-    if (nextSort !== "unique") sp.set("sort", nextSort)
-    else sp.delete("sort")
-    const qs = sp.toString()
-    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname)
-  }
+  const writeUrl = (nextFamily: string, nextSort: Sort) =>
+    setParams((sp) => {
+      if (nextFamily !== "all") sp.set("family", nextFamily)
+      else sp.delete("family")
+      if (nextSort !== "unique") sp.set("sort", nextSort)
+      else sp.delete("sort")
+    })
 
-  const applyFamily = (f: string) => {
-    setFamily(f)
-    writeUrl(f, sort)
-  }
-  const applySort = (s: Sort) => {
-    setSort(s)
-    writeUrl(family, s)
-  }
+  const applyFamily = (f: string) => writeUrl(f, sort)
+  const applySort = (s: Sort) => writeUrl(family, s)
 
   const chip = (active: boolean) =>
     cn(

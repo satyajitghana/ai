@@ -30,7 +30,6 @@ const STAGES = {
 export function PretokenPipeline() {
   const [mode, setMode] = useState<"naive" | "gigatoken">("gigatoken")
   const stages = STAGES[mode]
-  const total = stages.reduce((a, s) => a + s.w, 0)
 
   const chip = (active: boolean) =>
     cn(

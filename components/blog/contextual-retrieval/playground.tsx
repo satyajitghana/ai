@@ -308,7 +308,7 @@ export function ContextualRetrievalPlayground() {
                 <span className="text-foreground">#{plainRank}</span>{" "}on standard chunks to{" "}
                 <span style={{ color: ACCENT }}>#{ctxRank}</span>{" "}once each chunk carries its context —{" "}
                 {plainRank > ctxRank ? `${plainRank - ctxRank} places higher` : "no worse"}. Scores are a real in-browser BM25 and a
-                TF-IDF cosine standing in for an embedding model; contextual prefixes stand in for Claude's output.
+                TF-IDF cosine standing in for an embedding model; contextual prefixes stand in for Claude&rsquo;s output.
               </p>
             </div>
           )}

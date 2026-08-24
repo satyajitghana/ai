@@ -222,7 +222,7 @@ export function RopeUnbundling() {
         <p className="mt-3 text-sm leading-6 text-muted-foreground">{STAT[bias]}</p>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Freed of all three jobs, attention (MLA) is left to do only content matching — the paper's own framing is
+          Freed of all three jobs, attention (MLA) is left to do only content matching — the paper&rsquo;s own framing is
           that MLA without RoPE is the limiting case where every channel has zero rotary frequency. Nothing here is
           tied to a training length, which is the mechanistic reason extrapolation works at all.
         </p>

@@ -2,8 +2,6 @@
 
 import { useState } from "react"
 
-import { cn } from "@/lib/utils"
-
 // The unification, drawn as a map. One root — G(n) = exp(nωL) with the exact
 // relative law — forks into two families, and each known positional scheme drops
 // out as a specific generator. Click any node to see which generator it is, its

@@ -114,8 +114,8 @@ export function DiffAttention() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          At <span className="text-foreground">λ = 0</span>{" "}it's just ordinary attention — a lot of
-          mass bleeds onto the eight filler words. Raise λ and the second map's noise gets
+          At <span className="text-foreground">λ = 0</span>{" "}it&rsquo;s just ordinary attention — a lot of
+          mass bleeds onto the eight filler words. Raise λ and the second map&rsquo;s noise gets
           subtracted out, collapsing attention onto{" "}
           <span style={{ color: SIGNAL }}>Denver</span>{" "}and{" "}
           <span style={{ color: SIGNAL }}>Friday</span>. Sparser, more precise attention is what the

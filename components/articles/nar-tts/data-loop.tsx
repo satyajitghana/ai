@@ -2,8 +2,6 @@
 
 import { useState } from "react"
 
-import { cn } from "@/lib/utils"
-
 // The data loop from docs/quality.md, drawn — because the thing that makes it
 // worth drawing is that it closes.
 //

@@ -101,7 +101,7 @@ export function InlineControl() {
           The instruction re-colors the whole line — pitch, rate, affect — without touching a word
           of the text. The <span style={{ color: ACCENT }}>[tags]</span>{" "}are separate: 86 of them,
           placed inline, fire non-verbal events exactly where they sit. Content, global style, and
-          punctuated non-verbals are three independent knobs, which is what "controllable" actually
+          punctuated non-verbals are three independent knobs, which is what &ldquo;controllable&rdquo; actually
           has to mean.
         </p>
       </div>

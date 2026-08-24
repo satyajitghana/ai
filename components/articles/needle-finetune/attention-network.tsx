@@ -2,8 +2,6 @@
 
 import { useState } from "react"
 
-import { cn } from "@/lib/utils"
-
 // The Simple Attention Network, block by block.
 //
 // Every component in Needle's architecture exists to buy capability without
@@ -121,7 +119,7 @@ export function AttentionNetwork() {
             </title>
 
             {/* the four residual lanes */}
-            {LANE_Y.map((yy, i) => (
+            {LANE_Y.map((yy) => (
               <line
                 key={yy}
                 x1={78}

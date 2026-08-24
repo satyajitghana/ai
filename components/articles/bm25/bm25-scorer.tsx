@@ -173,7 +173,7 @@ export function Bm25Scorer() {
           Each score is a sum over query terms of <span className="text-foreground">rarity</span>{" "}(IDF) times a
           term-frequency factor that <span className="text-foreground">saturates</span>{" "}(controlled by k1) and is
           <span className="text-foreground"> normalized by document length</span>{" "}(controlled by b). Rare query terms
-          dominate; repeating a common word barely helps; and long documents don't win just for being long.
+          dominate; repeating a common word barely helps; and long documents don&rsquo;t win just for being long.
         </p>
       </div>
     </figure>

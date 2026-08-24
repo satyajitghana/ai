@@ -2,8 +2,6 @@
 
 import { useState } from "react"
 
-import { cn } from "@/lib/utils"
-
 // The architecture the card actually describes, which is more sensible than the
 // model claims around it.
 //
