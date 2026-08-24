@@ -40,3 +40,17 @@ export function prefersMarkdown(acceptHeader: string | null): boolean {
 
   return md > 0 && md > html
 }
+
+/**
+ * True when the client explicitly named an HTML type — i.e. it is a browser.
+ * A wildcard does not count: the `star/star` Accept that curl, crawlers and most
+ * SDKs send names no type at all, and those callers are better served a
+ * machine-readable representation than a styled page. Used to decide which 404
+ * body to return.
+ */
+export function prefersHtml(acceptHeader: string | null): boolean {
+  if (!acceptHeader) return false
+  return parseAccept(acceptHeader).some(
+    ({ type }) => type === "text/html" || type === "application/xhtml+xml",
+  )
+}
