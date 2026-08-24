@@ -115,10 +115,15 @@ export function KuramotoField() {
 
   const phases = useRef(seedPhases("noise", 1))
   const seedN = useRef(1)
+  // Both are read live inside the animation loop, which must not restart when
+  // a control moves — so they stay refs, written from an effect rather than
+  // during render.
   const kRef = useRef(k)
-  kRef.current = k
   const lutRef = useRef<RGB[]>(PALETTES[0].lut)
-  lutRef.current = PALETTES.find((p) => p.id === palette)?.lut ?? PALETTES[0].lut
+  useEffect(() => {
+    kRef.current = k
+    lutRef.current = PALETTES.find((p) => p.id === palette)?.lut ?? PALETTES[0].lut
+  })
 
   // natural frequencies: a gentle radial gradient → seeds travelling target waves
   const omega = useRef<Float32Array>(

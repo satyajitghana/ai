@@ -75,7 +75,15 @@ export function Spectrum() {
     return () => clearInterval(id)
   }, [playing, maxStep])
 
-  useEffect(() => setStep(0), [ri])
+  // Rewind whenever a different run is selected. Adjusting state during render
+  // rather than from an effect: React discards this render and redoes it with
+  // step 0, so the stale frame never reaches the screen — an effect would paint
+  // the old run's position first and correct it a frame later.
+  const [prevRi, setPrevRi] = useState(ri)
+  if (prevRi !== ri) {
+    setPrevRi(ri)
+    setStep(0)
+  }
 
   const mx = stopX(r.pos)
 

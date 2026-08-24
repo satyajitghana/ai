@@ -209,4 +209,50 @@ const handler = createMcpHandler(
   }
 )
 
-export { handler as GET, handler as POST }
+// The Streamable HTTP spec says a client MUST send
+// `Accept: application/json, text/event-stream`, and the SDK enforces it with a
+// 406. That is correct and it is also the single most common reason a probe
+// fails to complete a handshake here: plenty of clients, health checks and
+// audit tools send `Accept: application/json` or no Accept at all, get the 406,
+// and report the server as broken.
+//
+// Refusing them proves a point nobody benefits from. Any request that can
+// accept JSON is given the header the SDK wants before it reaches the handler,
+// so the handshake completes and the client gets a well-formed response in a
+// media type it asked for. A client that explicitly accepts neither JSON nor
+// SSE is left alone and still gets the 406 it has earned.
+const REQUIRED_ACCEPT = "application/json, text/event-stream"
+
+function acceptsNeither(accept: string | null): boolean {
+  if (!accept) return false
+  const types = accept.split(",").map((p) => p.split(";")[0]!.trim().toLowerCase())
+  const ok = ["application/json", "text/event-stream", "*/*", "application/*", "text/*"]
+  return !types.some((t) => ok.includes(t))
+}
+
+async function tolerantHandler(req: Request): Promise<Response> {
+  const accept = req.headers.get("accept")
+  if (acceptsNeither(accept)) return handler(req)
+
+  const needsBoth =
+    !accept ||
+    !accept.toLowerCase().includes("application/json") ||
+    !accept.toLowerCase().includes("text/event-stream")
+
+  if (!needsBoth) return handler(req)
+
+  const headers = new Headers(req.headers)
+  headers.set("accept", REQUIRED_ACCEPT)
+  return handler(
+    new Request(req.url, {
+      method: req.method,
+      headers,
+      body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer(),
+      // @ts-expect-error -- duplex is required by undici for a streamed body and
+      // is not yet in the DOM Request typings.
+      duplex: "half",
+    }),
+  )
+}
+
+export { tolerantHandler as GET, tolerantHandler as POST }

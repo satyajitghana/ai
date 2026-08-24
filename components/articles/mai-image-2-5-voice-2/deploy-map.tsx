@@ -208,8 +208,8 @@ export function DeployMap() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Both tracks are Microsoft's <span className="text-foreground">own</span>{" "}models, and the story is where they
-          land: swapped into Microsoft's product surface in place of third-party models, each with a self-reported
+          Both tracks are Microsoft&rsquo;s <span className="text-foreground">own</span>{" "}models, and the story is where they
+          land: swapped into Microsoft&rsquo;s product surface in place of third-party models, each with a self-reported
           serving win — <span style={{ color: IMG }}>−84% GPU cost</span>{" "}in PowerPoint versus GPT-Image-2,{" "}
           <span style={{ color: VOICE }}>−89%</span>{" "}in Dynamics 365. Hover a product to trace its model; toggle a track
           to isolate the fan.

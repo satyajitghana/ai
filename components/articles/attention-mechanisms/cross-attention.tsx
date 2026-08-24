@@ -198,7 +198,7 @@ export function CrossAttention() {
         Same query, two different things to read. In <span style={{ color: LOCAL }}>self-attention</span>{" "}the decoder
         token attends the target sequence it is building — causally, so it never sees the future. In{" "}
         <span style={{ color: ATT }}>cross-attention</span>{" "}the query comes from the decoder but the keys and values come
-        from the <em>encoder's</em>{" "}output, with no causal mask: the whole source is already known. It is the join
+        from the <em>encoder&rsquo;s</em>{" "}output, with no causal mask: the whole source is already known. It is the join
         between two sequences — French→English here, or image patches→caption in a vision-language model.
       </p>
     </FigureCard>

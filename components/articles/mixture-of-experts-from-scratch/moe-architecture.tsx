@@ -80,83 +80,92 @@ function vcurve(y1: number, y2: number, x = CX) {
   return `M ${x} ${y1} C ${x} ${my}, ${x} ${my}, ${x} ${y2}`
 }
 
+// Hoisted out of the component. Defining it during render makes a new
+// component type on every keystroke, so React unmounts and remounts the
+// whole node instead of updating it; `selected` and `setSelected` come in
+// as props now that it no longer closes over them.
+function Node({
+  id,
+  top,
+  title,
+  sub,
+  badge,
+  selected,
+  setSelected,
+}: {
+  id: StageId
+  top: number
+  title: string
+  sub?: string
+  badge?: string
+  selected: StageId
+  setSelected: (id: StageId) => void
+}) {
+  const active = selected === id
+  return (
+    <g
+      role="button"
+      tabIndex={0}
+      aria-pressed={active}
+      aria-label={title}
+      onClick={() => setSelected(id)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault()
+          setSelected(id)
+        }
+      }}
+      style={{ cursor: "pointer" }}
+      className="transition-all"
+    >
+      <rect
+        x={NX}
+        y={top}
+        width={NW}
+        height={NH}
+        rx={9}
+        fill={active ? "color-mix(in oklab, var(--background), var(--foreground) 5%)" : "var(--background)"}
+        stroke={active || id === "moe" ? ACCENT : "var(--border)"}
+        strokeWidth={active ? 2 : 1.5}
+        filter={active || id === "moe" ? "url(#moe-arch-soft)" : undefined}
+      />
+      <text
+        x={sub ? NX + 14 : CX}
+        y={sub ? top + 17 : top + 24}
+        textAnchor={sub ? "start" : "middle"}
+        className="fill-foreground font-mono"
+        fontSize={11}
+        fontWeight={600}
+      >
+        {title}
+      </text>
+      {sub ? (
+        <text x={NX + 14} y={top + 30} className="fill-muted-foreground font-mono" fontSize={9}>
+          {sub}
+        </text>
+      ) : null}
+      {badge ? (
+        <>
+          <rect x={NX + NW - 58} y={top + 11} width={48} height={18} rx={5} fill="var(--muted)" />
+          <text
+            x={NX + NW - 34}
+            y={top + 23}
+            textAnchor="middle"
+            className="fill-muted-foreground font-mono"
+            fontSize={9}
+          >
+            {badge}
+          </text>
+        </>
+      ) : null}
+    </g>
+  )
+}
+
 export function MoeArchitecture() {
   const [selected, setSelected] = useState<StageId>("moe")
   const stage = STAGES[selected]
 
-  const Node = ({
-    id,
-    top,
-    title,
-    sub,
-    badge,
-  }: {
-    id: StageId
-    top: number
-    title: string
-    sub?: string
-    badge?: string
-  }) => {
-    const active = selected === id
-    return (
-      <g
-        role="button"
-        tabIndex={0}
-        aria-pressed={active}
-        aria-label={title}
-        onClick={() => setSelected(id)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault()
-            setSelected(id)
-          }
-        }}
-        style={{ cursor: "pointer" }}
-        className="transition-all"
-      >
-        <rect
-          x={NX}
-          y={top}
-          width={NW}
-          height={NH}
-          rx={9}
-          fill={active ? "color-mix(in oklab, var(--background), var(--foreground) 5%)" : "var(--background)"}
-          stroke={active || id === "moe" ? ACCENT : "var(--border)"}
-          strokeWidth={active ? 2 : 1.5}
-          filter={active || id === "moe" ? "url(#moe-arch-soft)" : undefined}
-        />
-        <text
-          x={sub ? NX + 14 : CX}
-          y={sub ? top + 17 : top + 24}
-          textAnchor={sub ? "start" : "middle"}
-          className="fill-foreground font-mono"
-          fontSize={11}
-          fontWeight={600}
-        >
-          {title}
-        </text>
-        {sub ? (
-          <text x={NX + 14} y={top + 30} className="fill-muted-foreground font-mono" fontSize={9}>
-            {sub}
-          </text>
-        ) : null}
-        {badge ? (
-          <>
-            <rect x={NX + NW - 58} y={top + 11} width={48} height={18} rx={5} fill="var(--muted)" />
-            <text
-              x={NX + NW - 34}
-              y={top + 23}
-              textAnchor="middle"
-              className="fill-muted-foreground font-mono"
-              fontSize={9}
-            >
-              {badge}
-            </text>
-          </>
-        ) : null}
-      </g>
-    )
-  }
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
@@ -276,10 +285,10 @@ export function MoeArchitecture() {
           </text>
 
           {/* stage nodes (drawn last so they sit above connectors) */}
-          <Node id="embed" top={Y.embed} title="embeddings" sub="token + position" />
-          <Node id="attn" top={Y.attn} title="ln → attention" sub="+ residual" />
-          <Node id="moe" top={Y.moe} title="ln → sparse MoE" sub="+ residual" badge="top-2 / 8" />
-          <Node id="head" top={Y.head} title="final norm → LM head" sub="→ logits" />
+          <Node id="embed" top={Y.embed} title="embeddings" sub="token + position" selected={selected} setSelected={setSelected} />
+          <Node id="attn" top={Y.attn} title="ln → attention" sub="+ residual" selected={selected} setSelected={setSelected} />
+          <Node id="moe" top={Y.moe} title="ln → sparse MoE" sub="+ residual" badge="top-2 / 8" selected={selected} setSelected={setSelected} />
+          <Node id="head" top={Y.head} title="final norm → LM head" sub="→ logits" selected={selected} setSelected={setSelected} />
         </svg>
 
         {/* code panel */}

@@ -12,6 +12,38 @@ const u = (path: string) => `${siteUrl}${path}`
 
 export const MCP_ENDPOINT = u("/api/mcp/mcp")
 
+/**
+ * The API contract this deployment serves, echoed on every `/api/*` response as
+ * `API-Version` so a client can record what it integrated against without
+ * parsing the spec.
+ */
+export const API_VERSION = "1"
+
+/** Where the versioning and sunset rules live, in prose and as a Link relation. */
+export const DEPRECATION_POLICY_URL = u("/developers/versioning")
+
+/**
+ * The lifecycle of every published API version.
+ *
+ * `status` is the machine-readable state; `sunset` is an RFC 8594 date, present
+ * only once a version has been scheduled for removal. Nothing is deprecated
+ * today, and saying so explicitly is more useful to an agent than silence —
+ * "no sunset scheduled" is a fact it can act on, an absent field is not.
+ */
+export const API_VERSIONS = [
+  {
+    version: "1",
+    basePath: "/api/v1",
+    status: "current" as const,
+    since: "2026-07-01",
+    deprecated: null,
+    sunset: null,
+  },
+]
+
+/** Minimum notice between announcing a deprecation and switching a version off. */
+export const DEPRECATION_NOTICE_DAYS = 180
+
 /** The canonical descriptions, reused across every discovery document. */
 export const SITE = {
   name: "Satyajit Ghana — AI-native personal site",

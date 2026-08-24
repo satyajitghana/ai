@@ -90,7 +90,7 @@ export function KalmanTrack() {
   const [t, setT] = useState(NS)
   const [playing, setPlaying] = useState(true)
 
-  const { truth, meas } = useMemo(makeData, [])
+  const { truth, meas } = useMemo(() => makeData(), [])
   const { est, std } = useMemo(() => runKF(meas, q, r), [meas, q, r])
 
   useEffect(() => {

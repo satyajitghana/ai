@@ -128,6 +128,60 @@ export async function dataPageMarkdown(
   page: string
 ): Promise<string | undefined> {
   switch (page) {
+    // The homepage. `/` is the URL an agent tries first and the one an
+    // acceptmarkdown probe checks, so it needs a markdown twin like every other
+    // page — an orientation document rather than a dump, pointing at the
+    // indexes that hold the actual corpus.
+    case "home": {
+      const { getArticles, getBlogPosts, getProjects } = await import("@/lib/content")
+      const articles = getArticles().slice(0, 10)
+      const posts = getBlogPosts().slice(0, 5)
+      const projects = getProjects().filter((p) => p.featured).slice(0, 5)
+
+      return (
+        header(`${profile.name} — ${profile.title}`, "/") +
+        [
+          profile.tagline,
+          "",
+          ...profile.bio,
+          "",
+          "## When to use this site",
+          "",
+          "Reach for it when a task needs Satyajit Ghana's own writing, records or opinions —",
+          "who he is and what he has built, what he has written about a specific model, paper or",
+          "architecture, or what appeared in his dated arXiv digests. It is not a general search",
+          "engine, a paper database, or a source of truth about anything outside its own content.",
+          "",
+          "## Agent surfaces",
+          "",
+          `- [/llms.txt](${absoluteUrl("/llms.txt")}) — curated index of every page`,
+          `- [/llms-full.txt](${absoluteUrl("/llms-full.txt")}) — the whole corpus in one file`,
+          `- [/openapi.json](${absoluteUrl("/openapi.json")}) — OpenAPI 3.1 description of the JSON API`,
+          `- [/developers](${absoluteUrl("/developers")}) — API, MCP server and versioning policy`,
+          `- MCP (Streamable HTTP): \`${absoluteUrl("/api/mcp/mcp")}\``,
+          "- Any page has a markdown twin: append `.md`, or send `Accept: text/markdown`.",
+          "",
+          "## Sections",
+          "",
+          ...["articles", "blog", "logs", "projects", "arxiv", "notes", "snippets"].map(
+            (s) => `- [/${s}](${absoluteUrl(`/${s}`)})`
+          ),
+          "",
+          "## Latest articles",
+          "",
+          ...articles.map((a) => `- [${a.title}](${absoluteUrl(a.url)}) — ${a.description}`),
+          "",
+          "## Featured projects",
+          "",
+          ...projects.map((p) => `- [${p.title}](${absoluteUrl(p.url)}) — ${p.description}`),
+          "",
+          "## Latest posts",
+          "",
+          ...posts.map((p) => `- [${p.title}](${absoluteUrl(p.url)}) — ${p.description}`),
+          "",
+        ].join("\n")
+      )
+    }
     case "about": {
       return (
         header("About Satyajit Ghana", "/about") +

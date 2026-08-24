@@ -70,7 +70,7 @@ export function Rotation() {
   // quantizer range tuned (data-free) for the ROTATED distribution: coords ~ N(0, 1/D)
   const range = 3 / Math.sqrt(D)
 
-  const { vec, quant, sim } = useMemo(() => {
+  const { vec, sim } = useMemo(() => {
     const vec = rotated ? ROT : RAW
     const quant = quantize(vec, bits, range)
     return { vec, quant, sim: cos(vec, quant) }

@@ -29,7 +29,7 @@ function makeField() {
 }
 
 export function IkdMap() {
-  const field = useMemo(makeField, [])
+  const field = useMemo(() => makeField(), [])
   const [sxPos, setSx] = useState(30)
   const [playing, setPlaying] = useState(true)
 

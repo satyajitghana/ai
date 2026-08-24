@@ -19,7 +19,6 @@ import { cn } from "@/lib/utils"
 
 const ACC = "oklch(0.72 0.15 195)" // reconstruct / success
 const BAD = "oklch(0.58 0.19 25)" // replay failure
-const MUTE = "oklch(0.62 0.02 260)"
 
 type SceneId = "match" | "edit" | "empty"
 

@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
@@ -112,7 +113,7 @@ export function GatedMLA() {
           input-conditioned: it decides per token which attention channels were worth attending to
           and turns the rest down. Instella-MoE&rsquo;s gate is a single linear layer; the same idea
           shows up as a heavier, full-rank version in{" "}
-          <a href="/articles/kimi-k3" className="underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground">Kimi K3&rsquo;s Gated MLA</a>{" "}
+          <Link href="/articles/kimi-k3" className="underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground">Kimi K3&rsquo;s Gated MLA</Link>{" "}
           — two labs landing on the same attention-output gate independently.
         </p>
       </div>

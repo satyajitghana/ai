@@ -33,10 +33,18 @@ const rnd = (v: number) => Math.round(v * 100) / 100
 export function PhaseDials() {
   const [k, setK] = useState(0.6)
   const [playing, setPlaying] = useState(true)
-  const phases = useRef<number[]>([...INIT])
-  const [, force] = useState(0)
+  // The phases are state, not a ref driving a forced re-render. The loop
+  // already allocated a fresh array every frame, so this costs the same and
+  // means render reads a value React knows about instead of a mutable box.
+  const [phases, setPhases] = useState<number[]>(() => [...INIT])
+
+  // Coupling is read live inside the animation loop, which must not restart
+  // when the slider moves — so it stays a ref, written from an effect rather
+  // than during render.
   const kRef = useRef(k)
-  kRef.current = k
+  useEffect(() => {
+    kRef.current = k
+  })
 
   useEffect(() => {
     if (!playing) return
@@ -45,32 +53,32 @@ export function PhaseDials() {
     const step = (t: number) => {
       const dt = last ? Math.min((t - last) / 1000, 0.05) : 0.016
       last = t
-      const th = phases.current
-      // order parameter (mean field)
-      let sx = 0
-      let sy = 0
-      for (let i = 0; i < N; i++) {
-        sx += mcos(th[i])
-        sy += msin(th[i])
-      }
-      sx /= N
-      sy /= N
-      const r = mhypot(sx, sy)
-      const psi = matan2(sy, sx)
-      const K = kRef.current
-      const next = new Array(N)
-      for (let i = 0; i < N; i++) {
-        next[i] = th[i] + dt * (OMEGA[i] + K * r * msin(psi - th[i]))
-      }
-      phases.current = next
-      force((c) => c + 1)
+      setPhases((th) => {
+        // order parameter (mean field)
+        let sx = 0
+        let sy = 0
+        for (let i = 0; i < N; i++) {
+          sx += mcos(th[i])
+          sy += msin(th[i])
+        }
+        sx /= N
+        sy /= N
+        const r = mhypot(sx, sy)
+        const psi = matan2(sy, sx)
+        const K = kRef.current
+        const next = new Array<number>(N)
+        for (let i = 0; i < N; i++) {
+          next[i] = th[i] + dt * (OMEGA[i] + K * r * msin(psi - th[i]))
+        }
+        return next
+      })
       raf = requestAnimationFrame(step)
     }
     raf = requestAnimationFrame(step)
     return () => cancelAnimationFrame(raf)
   }, [playing])
 
-  const th = phases.current
+  const th = phases
   let sx = 0
   let sy = 0
   for (let i = 0; i < N; i++) {
@@ -151,10 +159,7 @@ export function PhaseDials() {
             </button>
             <button
               type="button"
-              onClick={() => {
-                phases.current = [...INIT]
-                force((c) => c + 1)
-              }}
+              onClick={() => setPhases([...INIT])}
               className="cursor-pointer rounded border px-2 py-1 text-muted-foreground transition-colors hover:text-foreground"
             >
               reset phases

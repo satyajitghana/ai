@@ -99,6 +99,7 @@ export default function Page() {
           </a>
           , fetch any page as markdown by appending{" "}
           <span className="text-foreground">.md</span>, query{" "}
+          {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- API endpoint for agents, not a page */}
           <a
             href="/api/profile"
             className="text-foreground underline underline-offset-4"
@@ -128,7 +129,7 @@ export default function Page() {
                   href={`/articles/${a.slug}`}
                   className="group flex items-baseline justify-between gap-4"
                 >
-                  <span className="underline-offset-4 group-hover:underline">
+                  <h3 className="underline-offset-4 group-hover:underline">
                     {a.title}
                     {a.featured ? (
                       <StarIcon
@@ -139,7 +140,7 @@ export default function Page() {
                         style={{ color: STAR }}
                       />
                     ) : null}
-                  </span>
+                  </h3>
                   <span className="shrink-0 font-mono text-xs text-muted-foreground">
                     {a.date}
                   </span>
@@ -157,9 +158,9 @@ export default function Page() {
           <li key={p.slug} className="group">
             <Link href={`/projects/${p.slug}`} className="block">
               <div className="flex items-baseline justify-between gap-4">
-                <span className="font-medium underline-offset-4 group-hover:underline">
+                <h3 className="font-medium underline-offset-4 group-hover:underline">
                   {p.title}
-                </span>
+                </h3>
                 <span className="shrink-0 font-mono text-xs text-muted-foreground">
                   {p.stack.slice(0, 3).join(" · ")}
                 </span>
@@ -181,9 +182,9 @@ export default function Page() {
               href={`/blog/${p.slug}`}
               className="group flex items-baseline justify-between gap-4"
             >
-              <span className="underline-offset-4 group-hover:underline">
+              <h3 className="underline-offset-4 group-hover:underline">
                 {p.title}
-              </span>
+              </h3>
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
                 {p.date}
               </span>
@@ -201,9 +202,9 @@ export default function Page() {
               href={`/logs/${l.slug}`}
               className="group flex items-baseline justify-between gap-4"
             >
-              <span className="underline-offset-4 group-hover:underline">
+              <h3 className="underline-offset-4 group-hover:underline">
                 {l.title ?? l.slug}
-              </span>
+              </h3>
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
                 {l.date}
               </span>
@@ -218,10 +219,10 @@ export default function Page() {
           <SectionHeader path="arxiv" href="/arxiv" />
           <Link href={`/arxiv/${digest.slug}`} className="group block">
             <div className="flex items-baseline justify-between gap-4">
-              <span className="underline-offset-4 group-hover:underline">
+              <h3 className="underline-offset-4 group-hover:underline">
                 arXiv digest — {digest.papers.length} papers
                 {digest.papers.some((p) => p.standout) ? " · standout ★" : ""}
-              </span>
+              </h3>
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
                 {digest.date}
               </span>

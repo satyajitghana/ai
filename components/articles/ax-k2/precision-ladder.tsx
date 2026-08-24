@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
@@ -138,7 +139,7 @@ export function PrecisionLadder() {
               Rounding an FP8-native model down to NVFP4 costs under a point on most of these eleven benchmarks —
               GSM8K (&minus;2.50) and MATH (&minus;2.42) are the outliers, HumanEval and KoBEST-COPA actually tick
               up. Compare that to{" "}
-              <a href="/articles/neutrino-1">Neutrino-1&rsquo;s</a> finding for a much larger jump — full precision
+              <Link href="/articles/neutrino-1">Neutrino-1&rsquo;s</Link> finding for a much larger jump — full precision
               rounded straight into ternary: 5-shot MMLU fell to 24.2&ndash;24.7, against a 25.0 chance line. The
               difference is what the base format already was. NVFP4 here is one more turn of the screw on a format
               (FP8) the model was already trained natively in; ternary there was a format the rounded models never

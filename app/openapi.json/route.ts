@@ -13,15 +13,48 @@ export const dynamic = "force-static"
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` })
 const arrayOf = (name: string) => ({ type: "array", items: ref(name) })
 
-// Every operation shares the same failure envelope and the same rate-limit
-// headers, so they are declared once and referenced everywhere.
-const errors = (...codes: ("400" | "404" | "429" | "500" | "502" | "503")[]) =>
-  Object.fromEntries(codes.map((c) => [c, { $ref: `#/components/responses/${c}` }]))
-
 const rateLimitHeaders = {
   RateLimit: { $ref: "#/components/headers/RateLimit" },
   "RateLimit-Policy": { $ref: "#/components/headers/RateLimitPolicy" },
 }
+
+type ErrCode = "400" | "404" | "405" | "429" | "500" | "502" | "503"
+
+const ERROR_DESCRIPTIONS: Record<ErrCode, string> = {
+  "400": "Invalid request — a required parameter is missing or malformed.",
+  "404": "No such resource.",
+  "405": "Method not allowed on this path.",
+  "429": "Rate limited. Wait for Retry-After, then resume.",
+  "500": "Unexpected server error.",
+  "502": "Upstream model error after the fallback chain was exhausted.",
+  "503": "Model-backed endpoint is offline. Static surfaces are unaffected.",
+}
+
+/**
+ * Every operation shares the same failure envelope, and every operation states
+ * it in full rather than pointing at `components/responses`.
+ *
+ * The indirection was tidier to write and worse to consume: resolving
+ * `$ref: "#/components/responses/404"` and then the `$ref` to `Problem` inside
+ * it is two hops, and a tool that walks `responses[code].content` — which is
+ * most of them, including the function-calling converters this spec exists for
+ * — sees an operation with no typed error at all. Inline costs a few kilobytes
+ * of duplication and makes each operation readable on its own.
+ */
+const errors = (...codes: ErrCode[]) =>
+  Object.fromEntries(
+    codes.map((c) => [
+      c,
+      {
+        description: ERROR_DESCRIPTIONS[c],
+        headers:
+          c === "429"
+            ? { ...rateLimitHeaders, "Retry-After": { $ref: "#/components/headers/RetryAfter" } }
+            : rateLimitHeaders,
+        content: { "application/problem+json": { schema: ref("Problem") } },
+      },
+    ]),
+  )
 
 /** A GET that returns a typed payload, with the shared errors attached. */
 function get(opts: {
@@ -46,7 +79,7 @@ function get(opts: {
           headers: rateLimitHeaders,
           content: { "application/json": { schema: opts.schema } },
         },
-        ...errors(...(opts.extraErrors ?? []), "429", "500"),
+        ...errors(...(opts.extraErrors ?? []), "405", "429", "500"),
       },
     },
   }
@@ -494,25 +527,10 @@ export function GET() {
           schema: { type: "integer" },
         },
       },
-      responses: Object.fromEntries(
-        (
-          [
-            ["400", "Invalid request — a required parameter is missing or malformed."],
-            ["404", "No such resource."],
-            ["429", "Rate limited. Wait for Retry-After, then resume."],
-            ["500", "Unexpected server error."],
-            ["502", "Upstream model error after the fallback chain was exhausted."],
-            ["503", "Model-backed endpoint is offline. Static surfaces are unaffected."],
-          ] as const
-        ).map(([code, description]) => [
-          code,
-          {
-            description,
-            headers: code === "429" ? { ...rateLimitHeaders, "Retry-After": { $ref: "#/components/headers/RetryAfter" } } : rateLimitHeaders,
-            content: { "application/problem+json": { schema: ref("Problem") } },
-          },
-        ]),
-      ),
+      // Kept so that anything already resolving `#/components/responses/404`
+      // still finds it, even though every operation now states its errors
+      // inline. Same objects, one source.
+      responses: errors("400", "404", "405", "429", "500", "502", "503"),
     },
   }
 
