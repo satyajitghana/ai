@@ -84,12 +84,24 @@ export default function Page() {
         data={{
           "@context": "https://schema.org",
           "@type": "WebAPI",
-          name: "Satyajit Ghana — site API",
+          name: "Satyajit Ghana site API",
+          alternateName: [
+            "ai.thesatyajit.com API",
+            "Satyajit Ghana MCP server",
+            "Satyajit Ghana developer documentation",
+          ],
           description:
-            "Public read-only JSON API, MCP server and markdown surfaces for ai.thesatyajit.com.",
+            "Public read-only JSON API, MCP server and markdown surfaces for ai.thesatyajit.com. No authentication, OpenAPI 3.1, RFC 9457 errors, RFC 9331 rate-limit headers.",
           url: absoluteUrl("/developers"),
           documentation: absoluteUrl("/openapi.json"),
           termsOfService: absoluteUrl("/privacy"),
+          isAccessibleForFree: true,
+          license: absoluteUrl("/colophon"),
+          hasPart: [
+            { "@type": "APIReference", name: "OpenAPI 3.1 specification", url: absoluteUrl("/openapi.json") },
+            { "@type": "WebPage", name: "API versioning and deprecation policy", url: absoluteUrl("/developers/versioning") },
+            { "@type": "WebPage", name: "Authentication (there is none)", url: absoluteUrl("/auth.md") },
+          ],
           provider: { "@id": `${siteUrl}/#person` },
           potentialAction: {
             "@type": "SearchAction",
@@ -235,6 +247,19 @@ export default function Page() {
           <code className="font-mono text-xs">Sunset</code> (RFC 8594) headers naming the removal
           date. Additive changes — a new endpoint, a new optional field — are not breaking and land
           in place.
+        </p>
+        <p className="mt-3 max-w-prose leading-7 text-muted-foreground">
+          The full policy is at{" "}
+          <Link href="/developers/versioning" className="underline underline-offset-4 hover:text-foreground">
+            /developers/versioning
+          </Link>
+          , and the same facts as JSON at{" "}
+          <Link href="/developers/versioning.json" className="underline underline-offset-4 hover:text-foreground">
+            /developers/versioning.json
+          </Link>
+          {" "}— which version is current, what counts as breaking, and whether anything has a
+          sunset date yet. Every <code className="font-mono text-xs">/api/*</code> response also
+          carries an <code className="font-mono text-xs">API-Version</code> header.
         </p>
       </Section>
 

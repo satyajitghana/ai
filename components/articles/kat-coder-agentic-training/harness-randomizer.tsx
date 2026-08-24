@@ -32,6 +32,58 @@ const rendered: Record<Protocol, string[]> = {
 const W = 760
 const H = 250
 
+// Hoisted out of the component: it closes over nothing from the render scope,
+// and a component value recreated every render remounts its whole subtree.
+const AxisCol = ({
+  x,
+  title,
+  options,
+  sel,
+  onSel,
+}: {
+  x: number
+  title: string
+  options: readonly string[]
+  sel: number
+  onSel: (i: number) => void
+}) => (
+  <g>
+    <text x={x} y={38} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9.5}>
+      {title}
+    </text>
+    {options.map((o, i) => {
+      const y = 52 + i * 30
+      const active = i === sel
+      const wpx = Math.max(84, o.length * 6.2 + 18)
+      return (
+        <g key={o} className="cursor-pointer" onClick={() => onSel(i)}>
+          <rect
+            x={x - wpx / 2}
+            y={y}
+            width={wpx}
+            height={22}
+            rx={11}
+            fill={active ? ACCENT : "var(--muted)"}
+            opacity={active ? 0.92 : 0.35}
+            stroke={active ? ACCENT : "transparent"}
+            strokeWidth={1.5}
+            className="transition-all duration-200"
+          />
+          <text
+            x={x}
+            y={y + 15}
+            textAnchor="middle"
+            className={cn("font-mono", active ? "fill-background" : "fill-muted-foreground")}
+            fontSize={9.5}
+          >
+            {o}
+          </text>
+        </g>
+      )
+    })}
+  </g>
+)
+
 export function HarnessRandomizer() {
   const [p, setP] = useState(0)
   const [c, setC] = useState(0)
@@ -50,56 +102,6 @@ export function HarnessRandomizer() {
     const mx = (x1 + x2) / 2
     return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`
   }
-
-  const AxisCol = ({
-    x,
-    title,
-    options,
-    sel,
-    onSel,
-  }: {
-    x: number
-    title: string
-    options: readonly string[]
-    sel: number
-    onSel: (i: number) => void
-  }) => (
-    <g>
-      <text x={x} y={38} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9.5}>
-        {title}
-      </text>
-      {options.map((o, i) => {
-        const y = 52 + i * 30
-        const active = i === sel
-        const wpx = Math.max(84, o.length * 6.2 + 18)
-        return (
-          <g key={o} className="cursor-pointer" onClick={() => onSel(i)}>
-            <rect
-              x={x - wpx / 2}
-              y={y}
-              width={wpx}
-              height={22}
-              rx={11}
-              fill={active ? ACCENT : "var(--muted)"}
-              opacity={active ? 0.92 : 0.35}
-              stroke={active ? ACCENT : "transparent"}
-              strokeWidth={1.5}
-              className="transition-all duration-200"
-            />
-            <text
-              x={x}
-              y={y + 15}
-              textAnchor="middle"
-              className={cn("font-mono", active ? "fill-background" : "fill-muted-foreground")}
-              fontSize={9.5}
-            >
-              {o}
-            </text>
-          </g>
-        )
-      })}
-    </g>
-  )
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">

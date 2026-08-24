@@ -227,7 +227,7 @@ export function OnPolicyDistillation() {
             ) : currentStatus === "diverge" ? (
               <>
                 step {step}: <span style={{ color: WARN }}>at inference</span>, the student samples its own
-                token here — the first point it can differ from the teacher's trace.
+                token here — the first point it can differ from the teacher&rsquo;s trace.
               </>
             ) : (
               <>

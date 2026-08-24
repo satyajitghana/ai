@@ -149,37 +149,36 @@ export function BitLayout() {
             />
           ))}
           {/* field brackets + labels */}
-          {(() => {
-            let start = 0
-            return f.fields.map((fld) => {
-              const cx = x0 + (start + fld.n / 2) * cw
-              const bx = x0 + start * cw
-              const bw = fld.n * cw - 1.5
-              const el = (
-                <g key={fld.k}>
-                  <line
-                    x1={bx}
-                    y1={eltY + cellH + 6}
-                    x2={bx + bw}
-                    y2={eltY + cellH + 6}
-                    stroke="var(--border)"
-                    strokeWidth={1}
-                  />
-                  <text
-                    x={cx}
-                    y={eltY + cellH + 19}
-                    textAnchor="middle"
-                    className="fill-muted-foreground font-mono"
-                    fontSize={9}
-                  >
-                    {fld.k} ({fld.n})
-                  </text>
-                </g>
-              )
-              start += fld.n
-              return el
-            })
-          })()}
+          {/* Each field starts where the previous ones ended. That was a `let`
+              accumulated inside the map; a prefix sum says the same thing
+              without a variable that outlives the render. */}
+          {f.fields.map((fld, fi) => {
+            const start = f.fields.slice(0, fi).reduce((a, x) => a + x.n, 0)
+            const cx = x0 + (start + fld.n / 2) * cw
+            const bx = x0 + start * cw
+            const bw = fld.n * cw - 1.5
+            return (
+              <g key={fld.k}>
+                <line
+                  x1={bx}
+                  y1={eltY + cellH + 6}
+                  x2={bx + bw}
+                  y2={eltY + cellH + 6}
+                  stroke="var(--border)"
+                  strokeWidth={1}
+                />
+                <text
+                  x={cx}
+                  y={eltY + cellH + 19}
+                  textAnchor="middle"
+                  className="fill-muted-foreground font-mono"
+                  fontSize={9}
+                >
+                  {fld.k} ({fld.n})
+                </text>
+              </g>
+            )
+          })}
 
           {/* ── one block ── */}
           <text x={sx0} y={stripY - 12} className="fill-muted-foreground font-mono" fontSize={11}>

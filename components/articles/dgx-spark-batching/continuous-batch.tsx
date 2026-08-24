@@ -2,7 +2,6 @@
 
 import { useState } from "react"
 
-import { cn } from "@/lib/utils"
 import { Range } from "@/components/articles/ui/range"
 
 // Continuous batching, drawn as a scene. Each user is a stream with its OWN prompt

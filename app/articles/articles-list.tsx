@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useRef } from "react"
 import Link from "next/link"
 import {
   CaretLeftIcon,
@@ -8,6 +8,7 @@ import {
   StarIcon,
 } from "@phosphor-icons/react/dist/ssr"
 
+import { useUrlState } from "@/lib/use-url-state"
 import { cn } from "@/lib/utils"
 
 // Client list: filter (All / Featured / High-signal), sort (updated / signal /
@@ -80,10 +81,23 @@ const SORTS: { key: Sort; label: string }[] = [
   { key: "helpful", label: "helpful" },
 ]
 
+// Filter, sort and page live in the query string so a view is shareable and
+// survives a refresh. `featured=1` is the legacy spelling of `filter=featured`
+// and is still honoured on read; writes drop it.
+function parseUrlState(sp: URLSearchParams): { filter: Filter; sort: Sort; page: number } {
+  const f = sp.get("filter")
+  const s = sp.get("sort")
+  const p = Number(sp.get("page"))
+  return {
+    filter:
+      f === "high" || f === "featured" ? f : sp.get("featured") === "1" ? "featured" : "all",
+    sort: s === "signal" || s === "interest" || s === "helpful" ? s : "new",
+    page: Number.isFinite(p) && p >= 1 ? p : 1,
+  }
+}
+
 export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
-  const [filter, setFilter] = useState<Filter>("all")
-  const [sort, setSort] = useState<Sort>("new")
-  const [page, setPage] = useState(1)
+  const [{ filter, sort, page }, setParams] = useUrlState(parseUrlState)
   const topRef = useRef<HTMLDivElement>(null)
 
   const featuredCount = articles.filter((a) => a.featured).length
@@ -108,43 +122,20 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
   const start = (current - 1) * PAGE_SIZE
   const shown = sorted.slice(start, start + PAGE_SIZE)
 
-  // Restore filter + sort + page from the URL on mount (shareable, refresh-safe).
-  useEffect(() => {
-    const sp = new URLSearchParams(window.location.search)
-    const f = sp.get("filter")
-    if (f === "high" || f === "featured") setFilter(f)
-    else if (sp.get("featured") === "1") setFilter("featured") // back-compat
-    const s = sp.get("sort")
-    if (s === "signal" || s === "interest" || s === "helpful") setSort(s)
-    const p = Number(sp.get("page"))
-    if (Number.isFinite(p) && p >= 1) setPage(p)
-  }, [])
+  const writeUrl = (nextFilter: Filter, nextSort: Sort, nextPage: number) =>
+    setParams((sp) => {
+      sp.delete("featured") // drop the legacy param
+      if (nextFilter !== "all") sp.set("filter", nextFilter)
+      else sp.delete("filter")
+      if (nextSort !== "new") sp.set("sort", nextSort)
+      else sp.delete("sort")
+      if (nextPage > 1) sp.set("page", String(nextPage))
+      else sp.delete("page")
+    })
 
-  const writeUrl = (nextFilter: Filter, nextSort: Sort, nextPage: number) => {
-    const sp = new URLSearchParams(window.location.search)
-    sp.delete("featured") // drop the legacy param
-    if (nextFilter !== "all") sp.set("filter", nextFilter)
-    else sp.delete("filter")
-    if (nextSort !== "new") sp.set("sort", nextSort)
-    else sp.delete("sort")
-    if (nextPage > 1) sp.set("page", String(nextPage))
-    else sp.delete("page")
-    const qs = sp.toString()
-    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname)
-  }
-
-  const applyFilter = (f: Filter) => {
-    setFilter(f)
-    setPage(1)
-    writeUrl(f, sort, 1)
-  }
-  const applySort = (s: Sort) => {
-    setSort(s)
-    setPage(1)
-    writeUrl(filter, s, 1)
-  }
+  const applyFilter = (f: Filter) => writeUrl(f, sort, 1)
+  const applySort = (s: Sort) => writeUrl(filter, s, 1)
   const goto = (p: number) => {
-    setPage(p)
     writeUrl(filter, sort, p)
     topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
   }

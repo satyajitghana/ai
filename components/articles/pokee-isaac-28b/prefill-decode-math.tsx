@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
 import { cn } from "@/lib/utils"
@@ -132,9 +133,9 @@ export function PrefillDecodeMath() {
           <span style={{ color: ACCENT }}>{totalTime.toFixed(1)}s</span>{" "}total. The two rates differ by ~
           {ratio}× because they are different bottlenecks — prefill is one big matrix multiply over the whole
           prompt, decode is one token at a time gated by memory bandwidth (see{" "}
-          <a href="/articles/how-llm-inference-works" className="underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground">
+          <Link href="/articles/how-llm-inference-works" className="underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground">
             how LLM inference works
-          </a>
+          </Link>
           ) — and no architecture change moves them closer together; it only shifts where the two curves sit.
         </p>
       </div>

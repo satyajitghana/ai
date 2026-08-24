@@ -25,7 +25,6 @@ import { cn } from "@/lib/utils"
 // distribution and loses where it does not, by margins that track distance rather
 // than size.
 
-const ACCENT = "oklch(0.60 0.15 255)"
 const WARM = "oklch(0.68 0.13 85)"
 const GOOD = "oklch(0.55 0.16 155)"
 const MUTED = "oklch(0.62 0.03 250)"

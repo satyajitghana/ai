@@ -37,7 +37,6 @@ const AX0 = (W - AW) / 2 // 220
 const AH = 58
 const AY = 286
 const ACX = W / 2 // 380
-const land = (j: number) => Number((AX0 + ((j + 0.5) / N) * AW).toFixed(2))
 
 const fmt = (n: number, d = 2) => (n < 0 ? "−" : "") + Math.abs(n).toFixed(d)
 const wtLabel = (v: number) => (v > 0 ? "+1" : v < 0 ? "−1" : "0")

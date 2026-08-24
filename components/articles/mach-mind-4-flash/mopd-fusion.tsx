@@ -220,9 +220,9 @@ export function MopdFusion() {
             </>
           ) : (
             <>
-              Summing every domain's reward into <span className="text-foreground">one objective</span>{" "}makes the gradients collide.
+              Summing every domain&rsquo;s reward into <span className="text-foreground">one objective</span>{" "}makes the gradients collide.
               Watch the bars: as training proceeds, a gain on one capability shows up as a{" "}
-              <span className="text-foreground">regression on another</span>{" "}— the paper's <em>see-saw degradation</em>. The
+              <span className="text-foreground">regression on another</span>{" "}— the paper&rsquo;s <em>see-saw degradation</em>. The
               weakest capability stays stuck.
             </>
           )}

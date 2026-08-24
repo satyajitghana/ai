@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
@@ -109,8 +110,8 @@ export function AttentionStack() {
           — I checked all 52 and there are no exceptions. So the layers that see the whole context carry no
           positional encoding at all, and order information reaches them only through what the sliding layers below
           already encoded. That is the same NoPE-on-global-attention arrangement in{" "}
-          <a href="/articles/kimi-k3" className="underline underline-offset-2">Kimi K3</a>{" "}and{" "}
-          <a href="/articles/maple-preview" className="underline underline-offset-2">Maple-Preview</a>, arrived at
+          <Link href="/articles/kimi-k3" className="underline underline-offset-2">Kimi K3</Link>{" "}and{" "}
+          <Link href="/articles/maple-preview" className="underline underline-offset-2">Maple-Preview</Link>, arrived at
           independently by three labs in the same year, and the usual argument for it is length extrapolation:
           a layer with no notion of absolute distance has nothing to be surprised by when the context grows.
         </p>

@@ -86,8 +86,8 @@ export function TrainingStages() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The two tracks aren't independent: <span className="text-foreground">mid-training</span>{" "}is
-          where the diffusion Generator learns to attend over the Reasoner's keys, so by the time
+          The two tracks aren&rsquo;t independent: <span className="text-foreground">mid-training</span>{" "}is
+          where the diffusion Generator learns to attend over the Reasoner&rsquo;s keys, so by the time
           post-training specializes the model into six task heads, the plan-to-pixels pathway is
           already in place.
         </p>

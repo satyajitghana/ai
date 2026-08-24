@@ -260,14 +260,6 @@ const CATEGORIES: Category[] = [
   },
 ]
 
-function findBench(key: string): { cat: Category; bench: Bench } {
-  for (const cat of CATEGORIES) {
-    const bench = cat.benches.find((b) => b.key === key)
-    if (bench) return { cat, bench }
-  }
-  return { cat: CATEGORIES[0], bench: CATEGORIES[0].benches[0] }
-}
-
 export function BenchmarkExplorer() {
   const [catKey, setCatKey] = useState(CATEGORIES[0].key)
   const [benchKey, setBenchKey] = useState(CATEGORIES[0].benches[0].key)
@@ -385,7 +377,7 @@ export function BenchmarkExplorer() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Every number above is copied from the source's own two tables — nothing here is estimated. Switch categories
+          Every number above is copied from the source&rsquo;s own two tables — nothing here is estimated. Switch categories
           and benchmarks to see the honest spread: outright wins (PaperBench, IFBench, PLawBench, Parametric CAD Bench),
           close losses (Terminal Bench 2.1, WebArena-Verified), and clear losses (DeepSWE 1.1, HLE, MLS-Bench-Lite —
           not shown here, see the full table). Rows with an eval-setup note are the ones where the comparison is not

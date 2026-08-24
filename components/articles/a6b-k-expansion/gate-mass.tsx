@@ -38,7 +38,6 @@ const OFF = "var(--muted-foreground)"
 
 const N = 32
 const W = 760
-const H = 250
 const MX = 22
 const USABLE = W - 2 * MX
 const PER = USABLE / N

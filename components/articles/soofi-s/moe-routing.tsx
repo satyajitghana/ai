@@ -18,7 +18,6 @@ const KTOP = 6
 const NSHARED = 2
 
 const COLS = 16
-const ROWS = NROUTED / COLS // 8
 
 // Deterministic per-token expert scores — no randomness.
 function score(token: number, e: number) {
