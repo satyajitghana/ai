@@ -18,6 +18,21 @@ const nextConfig: NextConfig = {
       { protocol: "https", hostname: "raw.githubusercontent.com" },
     ],
   },
+  // NOTE on `Vary: Accept` for the HTML half of a negotiated page.
+  //
+  // It belongs here, and it does not work here. A `headers()` entry lands in
+  // routes-manifest.json and is then dropped on the way out: a page render
+  // writes its own Vary (the RSC dimensions plus Accept-Encoding) over
+  // whatever the manifest or the proxy set, verified in 16.3.2 by shipping a
+  // uniquely-named probe header and watching it never arrive. The markdown half
+  // is a route handler and keeps its own Vary, so the negotiated representation
+  // — the one acceptmarkdown.com checks — is correctly labelled either way.
+  //
+  // The gap is the HTML half, where a shared cache is told the response does
+  // not vary on Accept. It is closed in vercel.json, which the CDN applies
+  // after the function returns and Next cannot overwrite. If this ever moves
+  // off Vercel, that header has to move with it.
+
   // Clean `.md` variants for agents: /blog/foo.md -> /md/blog/foo, etc.
   async rewrites() {
     return [

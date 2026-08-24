@@ -34,6 +34,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     "/colophon",
     "/changelog",
     "/developers",
+    "/developers/versioning",
     "/contact",
     "/privacy",
   ].map((p) => ({

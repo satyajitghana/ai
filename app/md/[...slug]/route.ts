@@ -8,7 +8,7 @@ import {
   getSnippets,
 } from "@/lib/content"
 import { contentMarkdown, dataPageMarkdown } from "@/lib/markdown"
-import { absoluteUrl, siteUrl } from "@/lib/site"
+import { NOT_FOUND_MARKDOWN_HEADERS, notFoundMarkdown } from "@/lib/not-found"
 
 // Agent-facing markdown variants. Humans hit /blog/foo — agents hit /blog/foo.md,
 // which next.config.ts rewrites to /md/blog/foo and lands here.
@@ -20,7 +20,7 @@ export const dynamic = "force-static"
 // prerendered from generateStaticParams below.
 export const dynamicParams = true
 
-const DATA_PAGES = ["about", "resume", "health", "now", "uses", "reading"]
+const DATA_PAGES = ["home", "about", "resume", "health", "now", "uses", "reading"]
 
 export function generateStaticParams() {
   return [
@@ -39,34 +39,6 @@ export function generateStaticParams() {
   ]
 }
 
-function notFoundMarkdown(path: string): string {
-  return [
-    "# 404 — not found",
-    "",
-    `No page at \`${path}\` on ${siteUrl}.`,
-    "",
-    "## Where to look next",
-    "",
-    `- [/llms.txt](${absoluteUrl("/llms.txt")}) — curated index of every page and agent surface`,
-    `- [/llms-full.txt](${absoluteUrl("/llms-full.txt")}) — the entire content corpus in one file`,
-    `- [/sitemap.xml](${absoluteUrl("/sitemap.xml")}) — every canonical URL`,
-    `- [/openapi.json](${absoluteUrl("/openapi.json")}) — the JSON API spec`,
-    `- [/developers](${absoluteUrl("/developers")}) — how to call this site programmatically`,
-    "",
-    "## Sections",
-    "",
-    ...["articles", "blog", "logs", "projects", "arxiv", "notes", "snippets"].map(
-      (s) => `- [/${s}](${absoluteUrl(`/${s}`)})`
-    ),
-    "",
-    "## Search",
-    "",
-    `Full-text search: \`GET ${absoluteUrl("/api/search")}?q=<terms>\``,
-    "",
-    "Any page also has a markdown twin: append `.md` to its URL, or send `Accept: text/markdown`.",
-    "",
-  ].join("\n")
-}
 
 export async function GET(
   _req: Request,
@@ -88,11 +60,7 @@ export async function GET(
     // markdown the caller already said it wanted.
     return new Response(notFoundMarkdown(`/${slug.join("/")}`), {
       status: 404,
-      headers: {
-        "content-type": "text/markdown; charset=utf-8",
-        "cache-control": "no-store",
-        vary: "Accept, Accept-Encoding",
-      },
+      headers: { ...NOT_FOUND_MARKDOWN_HEADERS },
     })
   }
 

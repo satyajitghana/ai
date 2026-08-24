@@ -473,6 +473,284 @@ await check("markdown · x-markdown-tokens hint", async () => {
   return `${tokens} tokens`
 })
 
+// ── 27. the 404 body a non-browser gets ──────────────────────────────────────
+//
+// The audit that prompted these checks probed with plain curl, which sends
+// `Accept: */*` and names no type. That caller used to get 40 KB of app shell.
+// It now gets the markdown recovery map, while a browser keeps the styled page —
+// so both halves have to be asserted or one will quietly swallow the other.
+
+await check("404 · wildcard Accept gets markdown", async () => {
+  const res = await get("/some-path-that-does-not-exist", { headers: { accept: "*/*" } })
+  assert(res.status === 404, `expected 404, got ${res.status}`)
+  const type = res.headers.get("content-type") ?? ""
+  assert(type.includes("text/markdown"), `expected text/markdown, got "${type}"`)
+  const body = await res.text()
+  assert(body.startsWith("# 404"), "body does not start with an h1")
+  for (const link of ["/llms.txt", "/sitemap.xml", "/openapi.json", "/developers"]) {
+    assert(body.includes(link), `recovery body does not link ${link}`)
+  }
+  assert(/\baccept\b/i.test(res.headers.get("vary") ?? ""), "Vary does not include Accept")
+  return `404 markdown, ${body.length} chars`
+})
+
+await check("404 · a browser still gets the HTML page", async () => {
+  const res = await get("/some-path-that-does-not-exist", {
+    headers: { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+  })
+  assert(res.status === 404, `expected 404, got ${res.status}`)
+  const type = res.headers.get("content-type") ?? ""
+  assert(type.includes("text/html"), `expected text/html, got "${type}"`)
+  return "html 404 preserved"
+})
+
+await check("404 · no Accept header at all gets markdown", async () => {
+  const res = await get("/nope-9f3a/deeper/still")
+  assert(res.status === 404, `expected 404, got ${res.status}`)
+  assert(
+    (res.headers.get("content-type") ?? "").includes("text/markdown"),
+    "a caller that named no type should not be handed HTML",
+  )
+  return "markdown 404"
+})
+
+// ── 28. the homepage negotiates markdown like every other page ───────────────
+
+await check("negotiation · the homepage has a markdown twin", async () => {
+  const res = await get("/", { headers: { accept: "text/markdown" } })
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  const type = res.headers.get("content-type") ?? ""
+  assert(type.includes("text/markdown"), `expected text/markdown, got "${type}"`)
+  assert(/\baccept\b/i.test(res.headers.get("vary") ?? ""), "Vary does not include Accept")
+  const body = await res.text()
+  assert(body.startsWith("# "), "markdown homepage has no h1")
+  assert(/when to use/i.test(body), "markdown homepage has no when-to-use guidance")
+  return `${body.length} chars`
+})
+
+await check("negotiation · the homepage still serves HTML to a browser", async () => {
+  const res = await get("/", {
+    headers: { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+  })
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  assert((res.headers.get("content-type") ?? "").includes("text/html"), "browser did not get HTML")
+  return "html preserved"
+})
+
+// `Vary: Accept` on the HTML half comes from vercel.json, because a Next page
+// render overwrites whatever the proxy or next.config sets (see the note in
+// next.config.ts). So it is asserted only against a deployment — running this
+// against `next start` locally would fail for a reason that does not exist in
+// production, and a check that cries wolf gets ignored.
+const IS_DEPLOYMENT = /^https:\/\//.test(BASE)
+
+if (IS_DEPLOYMENT) {
+  await check("negotiation · HTML half declares Vary: Accept", async () => {
+    const res = await get("/", {
+      headers: { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+    })
+    const vary = res.headers.get("vary") ?? ""
+    assert(/\baccept\b/i.test(vary), `Vary does not include Accept (got "${vary}")`)
+    return vary
+  })
+}
+
+// ── 29. versioning and deprecation are observable, not just documented ───────
+
+await check("versioning · API-Version header on /api/*", async () => {
+  const res = await get("/api/profile")
+  const v = res.headers.get("api-version")
+  assert(!!v, "no API-Version header")
+  assert(/^\d+$/.test(v), `implausible version "${v}"`)
+  const link = res.headers.get("link") ?? ""
+  assert(/rel="deprecation"/.test(link), "no Link rel=deprecation pointing at the policy")
+  return `API-Version: ${v}`
+})
+
+await check("versioning · policy page exists at its own URL", async () => {
+  const res = await get("/developers/versioning")
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  const html = await res.text()
+  const text = html.replace(/<[^>]+>/g, " ")
+  assert(/<h1/i.test(html), "policy page has no h1")
+  for (const term of ["Sunset", "Deprecation", "180"]) {
+    assert(text.includes(term), `policy page never mentions ${term}`)
+  }
+  return "policy page reachable"
+})
+
+await check("versioning · machine-readable policy", async () => {
+  const res = await get("/developers/versioning.json")
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  const doc = (await res.json()) as {
+    current?: string
+    versions?: { version: string; status: string; sunset: string | null }[]
+    deprecation?: { minimumNoticeDays?: number; signals?: unknown[] }
+  }
+  assert(!!doc.current, "no current version named")
+  assert(Array.isArray(doc.versions) && doc.versions.length > 0, "no versions listed")
+  assert(
+    doc.versions.some((v) => v.version === doc.current && v.status === "current"),
+    "the named current version is not marked current in the table",
+  )
+  assert(
+    typeof doc.deprecation?.minimumNoticeDays === "number",
+    "no minimum notice window declared",
+  )
+  return `v${doc.current}, ${doc.versions.length} version(s)`
+})
+
+// ── 30. the spec states its errors where a converter will look ───────────────
+//
+// The failure this guards against is subtle: `$ref` into components/responses
+// validates fine and reads fine, and a function-calling converter walking
+// responses[code].content still sees an operation with no typed error.
+
+await check("openapi · every operation types its errors inline", async () => {
+  const spec = (await (await get("/openapi.json")).json()) as {
+    paths: Record<string, Record<string, { responses?: Record<string, Record<string, unknown>> }>>
+  }
+  const METHODS = ["get", "post", "put", "patch", "delete"]
+  let checked = 0
+  for (const [path, item] of Object.entries(spec.paths)) {
+    for (const [method, op] of Object.entries(item)) {
+      if (!METHODS.includes(method)) continue
+      const responses = op.responses ?? {}
+      const errorCodes = Object.keys(responses).filter((c) => /^[45]/.test(c))
+      assert(errorCodes.length > 0, `${method.toUpperCase()} ${path} declares no error responses`)
+      for (const code of errorCodes) {
+        const res = responses[code] as {
+          $ref?: string
+          content?: Record<string, { schema?: { $ref?: string } }>
+        }
+        assert(!res.$ref, `${method.toUpperCase()} ${path} ${code} is a $ref, not an inline response`)
+        const problem = res.content?.["application/problem+json"]
+        assert(!!problem, `${method.toUpperCase()} ${path} ${code} has no problem+json content`)
+        assert(
+          problem.schema?.$ref === "#/components/schemas/Problem",
+          `${method.toUpperCase()} ${path} ${code} does not reference the Problem schema`,
+        )
+        checked++
+      }
+    }
+  }
+  return `${checked} error responses, all typed`
+})
+
+await check("errors · unsupported method returns problem+json", async () => {
+  const res = await get("/api/profile", { method: "POST" })
+  assert(res.status === 405, `expected 405, got ${res.status}`)
+  const type = res.headers.get("content-type") ?? ""
+  assert(type.includes("application/problem+json"), `expected problem+json, got "${type}"`)
+  assert(!!res.headers.get("allow"), "405 without an Allow header")
+  const body = (await res.json()) as { code?: string; status?: number }
+  assert(body.code === "method_not_allowed", `unexpected code "${body.code}"`)
+  assert(body.status === 405, `body status ${body.status} disagrees with the response`)
+  return `code=${body.code}, Allow: ${res.headers.get("allow")}`
+})
+
+await check("errors · POST /api/ask is still accepted", async () => {
+  // The 405 guard must not swallow the one endpoint that takes a body. A 503
+  // here is a correct answer — the model backend is optional — so anything
+  // other than 405 proves the method is reaching the handler.
+  const res = await get("/api/ask", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ question: "who is satyajit" }),
+  })
+  assert(res.status !== 405, "POST /api/ask was rejected as a bad method")
+  return `reached the handler (${res.status})`
+})
+
+// ── 31. the MCP handshake survives a client that only accepts JSON ───────────
+//
+// The Streamable HTTP spec says a client MUST accept both application/json and
+// text/event-stream, and the SDK returns 406 when it does not. Being right about
+// that is why an audit reported the handshake as failing.
+
+await check("mcp · handshake with Accept: application/json only", async () => {
+  const res = await fetch(`${BASE}/api/mcp/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "check", version: "1" } },
+    }),
+  })
+  assert(res.status === 200, `expected 200, got ${res.status}`)
+  const body = await res.text()
+  const line = body.split("\n").find((l) => l.startsWith("data:")) ?? body
+  const parsed = JSON.parse(line.replace(/^data:\s*/, "")) as {
+    result?: { serverInfo?: { name?: string }; protocolVersion?: string }
+  }
+  assert(!!parsed.result?.serverInfo?.name, "no serverInfo in the initialize result")
+  return `initialize ok as ${parsed.result.serverInfo.name}`
+})
+
+await check("mcp · handshake with no Accept header", async () => {
+  const res = await fetch(`${BASE}/api/mcp/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "check", version: "1" } },
+    }),
+  })
+  assert(res.status === 200, `expected 200, got ${res.status}`)
+  return "initialize ok"
+})
+
+await check("mcp · the base path points at the endpoint", async () => {
+  const res = await get("/api/mcp")
+  assert(res.ok, `GET /api/mcp expected 2xx, got ${res.status}`)
+  const doc = (await res.json()) as { endpoint?: string }
+  assert(doc.endpoint?.endsWith("/api/mcp/mcp") === true, `base path names "${doc.endpoint}"`)
+
+  const post = await fetch(`${BASE}/api/mcp`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+  })
+  assert(post.status === 308, `POST /api/mcp should 308 to the endpoint, got ${post.status}`)
+  return "base path resolves"
+})
+
+// ── 32. when-to-use guidance on the agent-instruction surfaces ───────────────
+
+await check("when-to-use · agent-skills index", async () => {
+  const doc = (await (await get("/.well-known/agent-skills/index.json")).json()) as {
+    whenToUse?: string
+  }
+  assert(!!doc.whenToUse, "agent-skills index has no whenToUse")
+  assert(doc.whenToUse.length > 120, "whenToUse is too short to be guidance")
+  assert(/\bnot\b/i.test(doc.whenToUse), "whenToUse names no negative case")
+  return `${doc.whenToUse.length} chars`
+})
+
+await check("when-to-use · ai-plugin manifest", async () => {
+  const doc = (await (await get("/.well-known/ai-plugin.json")).json()) as {
+    when_to_use?: string
+  }
+  assert(!!doc.when_to_use, "ai-plugin.json has no when_to_use")
+  return `${doc.when_to_use.length} chars`
+})
+
+// ── 33. the homepage has real heading depth without JavaScript ───────────────
+
+await check("no-JS · homepage headings nest", async () => {
+  const html = await (await get("/")).text()
+  const count = (tag: string) => (html.match(new RegExp(`<${tag}[\\s>]`, "gi")) ?? []).length
+  assert(count("h1") === 1, `expected exactly 1 h1, found ${count("h1")}`)
+  assert(count("h2") >= 3, `expected at least 3 h2, found ${count("h2")}`)
+  assert(count("h3") >= 3, `expected at least 3 h3 — a flat h1/h2 outline scores as partial`)
+  return `h1×${count("h1")} h2×${count("h2")} h3×${count("h3")}`
+})
+
 // ── report ───────────────────────────────────────────────────────────────────
 
 const failed = results.filter((r) => !r.ok)
