@@ -1,8 +1,9 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { ArrowsOutSimpleIcon, ArrowsInSimpleIcon } from "@phosphor-icons/react/dist/ssr"
 
+import { useHydrated } from "@/lib/use-hydrated"
 import { cn } from "@/lib/utils"
 
 // Wraps a long code block so it shows a preview height with a fade and an
@@ -19,12 +20,11 @@ export function CodeCollapse({
   label?: string
   collapsedHeight?: number
 }) {
-  const [mounted, setMounted] = useState(false)
+  const mounted = useHydrated()
   const [open, setOpen] = useState(false)
 
   // collapse only after hydration — the server (and no-JS) render shows the whole
   // file, so the first client render matches it and the collapse happens post-mount.
-  useEffect(() => setMounted(true), [])
   const collapsed = mounted && !open
 
   return (

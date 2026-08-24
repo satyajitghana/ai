@@ -51,7 +51,10 @@ export function SparsityDepth() {
       </div>
 
       <div className="p-3 sm:p-4">
-        {/* global state split (aggregate, all layers) */}
+        {/* Whole-model state split, aggregated across all layers.
+            Do not begin this comment with the word "global" — ESLint reads a
+            block comment opening that way as a globals directive and declares
+            every word after it as an unused variable. */}
         <div className="mb-4">
           <div className="mb-1 flex items-center justify-between font-mono text-[10px] text-muted-foreground">
             <span>state occupancy, whole model</span>

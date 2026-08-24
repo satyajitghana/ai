@@ -22,7 +22,6 @@ const PASS = "oklch(0.58 0.13 150)" // green — passing / verified
 
 const N = 24
 const COLS = 8
-const ROWS = 3
 
 // deterministic latent "recoverability" per trajectory, spread across [0,1]
 const rec = (i: number) => (msin(i * 2.399 + 0.7) + 1) / 2
@@ -101,7 +100,6 @@ export function DataFlywheel() {
 
           {/* stage pipeline */}
           {STAGES.map((s, k) => {
-            const active = s === stage
             return (
               <g key={s}>
                 {k < STAGES.length - 1 && (

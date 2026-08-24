@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 import { ArrowsOutSimpleIcon, XIcon } from "@phosphor-icons/react/dist/ssr"
 
+import { useHydrated } from "@/lib/use-hydrated"
 import { cn } from "@/lib/utils"
 
 // Wraps a diagram/figure and adds an expand-to-fullscreen control. The children
@@ -21,9 +22,7 @@ export function Zoomable({
   label?: string
 }) {
   const [open, setOpen] = useState(false)
-  const [mounted, setMounted] = useState(false)
-
-  useEffect(() => setMounted(true), [])
+  const mounted = useHydrated()
 
   useEffect(() => {
     if (!open) return

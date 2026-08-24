@@ -157,7 +157,6 @@ export function Decouple() {
 // small architecture sketch drawn in the right region of the scene (x ≈ 372…706)
 function Sketch({ optKey, color }: { optKey: (typeof OPTS)[number]["key"]; color: string }) {
   const cx = 540
-  const cy = 96
   const node = (x: number, y: number, w: number, h: number, label: string, snow = false) => (
     <g>
       <rect x={x} y={y} width={w} height={h} rx={8} fill="var(--background)" stroke={color} strokeWidth={1.5} filter="url(#dc-soft)" />

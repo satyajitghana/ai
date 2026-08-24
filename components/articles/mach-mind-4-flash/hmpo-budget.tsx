@@ -190,7 +190,7 @@ export function HmpoBudget() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          The budget <span style={{ color: ACCENT }}>b</span>{" "}is just the median length of the group's{" "}
+          The budget <span style={{ color: ACCENT }}>b</span>{" "}is just the median length of the group&rsquo;s{" "}
           <span style={{ color: GREEN }}>correct</span>{" "}rollouts — no threshold to tune. Reward decays from 1 toward λ as a
           correct trace grows, then falls off a cliff to <span className="text-foreground">0</span>{" "}the moment it runs over
           budget, and an <span style={{ color: RED }}>incorrect</span>{" "}trace earns 0 at any length (correctness first, length

@@ -18,7 +18,6 @@ export function PowerFactory() {
   const [dsx, setDsx] = useState(true)
   const extra = dsx ? Math.round(base * 0.4) : 0
   const total = base + extra
-  const cols = 20
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">

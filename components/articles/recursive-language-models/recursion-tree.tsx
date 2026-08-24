@@ -223,9 +223,9 @@ export function RecursionTree() {
       </div>
 
       <p className="mt-3 border-t px-3 pt-3 pb-3 text-sm leading-6 text-muted-foreground sm:px-4">
-        Each node's own context holds one task — the model inside it never sees the other branches.
-        The <span className="text-foreground">program</span> holds the whole job: the root session's
-        Python namespace, not any single model's context window, is what tracks all {sessions}{" "}
+        Each node&rsquo;s own context holds one task — the model inside it never sees the other branches.
+        The <span className="text-foreground">program</span> holds the whole job: the root session&rsquo;s
+        Python namespace, not any single model&rsquo;s context window, is what tracks all {sessions}{" "}
         sessions. Drag <span className="text-foreground">fanout</span> up and the node count grows as{" "}
         <code>fanout^depth</code>, not <code>depth</code> — which is why Prime Agent enforces a real
         depth budget in code (<code>RLM_DEPTH &gt;= RLM_MAX_DEPTH</code> raises before a comm even

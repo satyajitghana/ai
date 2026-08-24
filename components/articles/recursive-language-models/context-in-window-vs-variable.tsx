@@ -82,7 +82,7 @@ export function ContextInWindowVsVariable() {
           </text>
           {overflow > 0 && (
             <text x={BAR_X + BAR_W + 8} y={ROW1_Y + BAR_H / 2 + 4} className="font-mono" fontSize={10} fill={ACCENT_WINDOW}>
-              +{fmtTokens(overflow)} don't fit
+              +{fmtTokens(overflow)} don&rsquo;t fit
             </text>
           )}
 
@@ -125,7 +125,7 @@ export function ContextInWindowVsVariable() {
         The bottom bar is the REPL: the corpus sits in a variable sized by machine
         memory, not context budget, and only what the model chooses to{" "}
         <code>print()</code> — here, a found slice — ever enters its context. This is
-        the same shape as the paper's S-NIAH and OOLONG runs: scale the input and
+        the same shape as the paper&rsquo;s S-NIAH and OOLONG runs: scale the input and
         watch one line flatten while the other degrades. The honest caveat is the
         same one that applies to any REPL-as-context design: if the model prints the
         whole variable instead of a slice, this bound disappears.

@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
@@ -109,14 +110,14 @@ export function BlockScale() {
         </div>
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Every block's stored weight is a state in <code>{"{−1, 0, +1}"}</code> times that block's shared scale —
+          Every block&rsquo;s stored weight is a state in <code>{"{−1, 0, +1}"}</code> times that block&rsquo;s shared scale —
           &quot;state times scale,&quot; in Fermion&apos;s own words. Small blocks (2) buy more scales — more metadata
           bytes — and generally track the row more closely; one scale for the{" "}
           <span className="text-foreground">whole row</span>{" "}(16) is the cheapest to store and the coarsest fit.
           That whole-row case is exactly{" "}
-          <a href="/articles/ternary15m" className="underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground">
+          <Link href="/articles/ternary15m" className="underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground">
             Ternary15M&apos;s
-          </a>{" "}
+          </Link>{" "}
           absmean-per-output-channel scale — Neutrino-1 instead splits each row into many fixed-size blocks along the
           input dimension, trading a little more metadata for a tighter fit per group.
         </p>

@@ -192,7 +192,7 @@ export function AutoMixer() {
               </span>
             </div>
             <div className="mt-1 text-[10px] leading-4 text-muted-foreground">
-              weights favor coding + math (the paper's optimization targets); commonsense is down-weighted.
+              weights favor coding + math (the paper&rsquo;s optimization targets); commonsense is down-weighted.
             </div>
           </div>
         </div>

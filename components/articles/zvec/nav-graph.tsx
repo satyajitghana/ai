@@ -134,15 +134,16 @@ export function NavGraph() {
   const [step, setStep] = useState(0) // pure, deterministic first render
   const [playing, setPlaying] = useState(false)
 
+  // Reaching the end stops the walk. That was `setPlaying(false)` inside the
+  // effect; deriving it instead means the effect only ever schedules a timer,
+  // and there is no state update chasing a condition the render already knows.
+  const running = playing && step < last
+
   useEffect(() => {
-    if (!playing) return
-    if (step >= last) {
-      setPlaying(false)
-      return
-    }
+    if (!running) return
     const id = setTimeout(() => setStep((s) => Math.min(s + 1, last)), 620)
     return () => clearTimeout(id)
-  }, [playing, step, last])
+  }, [running, step, last])
 
   const visited = new Set(path.slice(0, step + 1))
   const cur = path[step]
@@ -280,13 +281,17 @@ export function NavGraph() {
           <button
             type="button"
             onClick={() => {
-              if (step >= last) setStep(0)
-              setPlaying((p) => !p)
+              if (step >= last) {
+                setStep(0)
+                setPlaying(true)
+              } else {
+                setPlaying((p) => !p)
+              }
             }}
             className="cursor-pointer rounded-md px-2.5 py-1 font-mono text-xs text-background transition-colors"
             style={{ background: ACC }}
           >
-            {playing ? "pause" : step >= last ? "replay" : "play"}
+            {running ? "pause" : step >= last ? "replay" : "play"}
           </button>
           <button
             type="button"

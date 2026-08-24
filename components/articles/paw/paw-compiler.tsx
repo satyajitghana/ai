@@ -68,7 +68,6 @@ const yT = 52, hT = 62 // top row
 const yB = 214, hB = 76 // bottom row
 const cyT = yT + hT / 2
 const cyB = yB + hB / 2
-const cxA = xA + wA / 2
 const cxB = xB + wB / 2
 const cxC = xC + wC / 2
 

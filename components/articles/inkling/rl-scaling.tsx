@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
 import { mlog10, mpow } from "@/lib/dmath"
@@ -129,7 +130,7 @@ export function RlScaling() {
 
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Two things happened at once over 30M+ rollouts of{" "}
-          <a className="underline decoration-foreground/30 underline-offset-4" href="/articles/ring-zero-trillion-scale-rl">large-scale RL</a>.
+          <Link className="underline decoration-foreground/30 underline-offset-4" href="/articles/ring-zero-trillion-scale-rl">large-scale RL</Link>.
           Reward rose <span style={{ color: INK }}>log-linearly</span>{" "}— a straight line on this log-x axis, from an
           SFT-initialised <span style={{ color: INK }}>0.264</span>{" "}to the released{" "}
           <span style={{ color: INK }}>0.356</span>{" "}— so more compute kept paying off predictably. And with no brevity
