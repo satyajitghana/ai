@@ -1,0 +1,133 @@
+---
+title: "Speculative programmatic tool calling"
+description: "If your agent's action space is code, a turn contains a long generation followed by several slow sub-calls — and almost every harness waits for the first to finish before starting the second. Alex Zhang's sPTC launches tool calls from a half-written REPL cell by forking the interpreter and running the partial program in a shadow namespace. A walk through the mechanism, the four cases that decide what can leave early, and why the speed-up is so hard to measure."
+date: 2026-08-25
+interest: 5
+helpful: 4
+tags:
+  - agents
+  - inference
+  - harness
+  - tool-calling
+  - latency
+---
+
+import { SpecTimeline } from "@/components/articles/spec-ptc/spec-timeline"
+import { ShadowRepl } from "@/components/articles/spec-ptc/shadow-repl"
+import { VarianceTrap } from "@/components/articles/spec-ptc/variance-trap"
+
+Start with a scheduling observation rather than a technique. In a harness where the model's action space is code — CodeAct, "code mode", a [Recursive Language Model](https://arxiv.org/abs/2512.24601) — a single turn looks like this: the model streams a REPL cell for thirty seconds, and that cell contains four sub-agent calls at eight seconds each. Total, sixty-two seconds.
+
+Both halves of that are avoidable. The four sub-calls were probably independent of each other, and the model finished writing the first one twelve seconds in. Nothing about the first call needs the last token of the cell to exist.
+
+[Alex Zhang's sPTC](https://alexzhang13.github.io/blog/2026/spec-ptc/) is the trick that follows from noticing this: parse the partial generation as it streams, and pre-launch the tool calls you can already fully specify. If the finished cell really does call them, they return instantly from cache. The name is borrowed from the two places the idea already lives — [speculative execution](https://en.wikipedia.org/wiki/Speculative_execution) in CPUs and [speculative decoding](https://arxiv.org/abs/2211.17192) in LLMs — and it is doing the same job at a third level of the stack.
+
+| | |
+|---|---|
+| The idea | pre-launch tool calls from a **partially generated** REPL cell; the real call collects a cached promise |
+| Why now | when the action space is code, a turn holds a long generation **and** several slow calls — JSON tool calling had neither |
+| The mechanism | a **deepcopy fork** of the REPL, executed on the partial program, with an allowlist for purity |
+| Two savings | overlap calls with token streaming · act as a naive **JIT** over calls the model wrote serially but need not be |
+| Measured | 1–1.2× on RLM over [OOLONG](https://arxiv.org/abs/2511.02817) and OOLONG-Pairs · `Qwen3-30B-A3B-Instruct-0527` · 8×H100 · 5 runs each |
+| Prior art | [Conveyor](https://arxiv.org/abs/2406.00059) · [Speculative Interaction Agents](https://arxiv.org/abs/2605.13360) · [AsyncFC](https://arxiv.org/abs/2605.15077) |
+| Code | [alexzhang13/spec-ptc](https://github.com/alexzhang13/spec-ptc) · slots into the author's RLM implementation |
+
+## Why this did not matter until recently
+
+Worth being precise about, because it explains why an idea this simple was not already standard.
+
+Under JSON tool calling there was nothing to overlap. The model emits one call, the turn ends, the tool runs, the result comes back as a new message. By the time the model has generated enough tokens to specify the call, there are approximately no tokens left to generate — so speculating over the tail of the stream buys you nothing, and the literature reflects that: the technique was explored a little and mostly shelved as not worth the overhead.
+
+Programmatic tool calling breaks that in two directions at once. A cell contains *several* calls, arranged in whatever control flow the model felt like writing, so there is intra-cell parallelism that nobody asked for and nobody exploits. And modern models think for a long time before they write anything, so the generation in front of the calls got much longer relative to the calls themselves. Both changes push in the same direction, and the second one is still growing.
+
+<Video
+  src="/articles/spec-ptc/teaser"
+  poster="/articles/spec-ptc/teaser-poster.jpg"
+  alt="A terminal recording showing a model streaming a plan that chunks a long context, labels each chunk with a sub-model, and calls a judge, with tool calls launching against the stream as it is still being written."
+  caption="The setup: a long context, chunked, with a sub-model call per chunk and a judge over the results. Every one of those sub-calls is specified long before the cell finishes. (alexzhang13.github.io/blog/2026/spec-ptc, Figure 1.)"
+/>
+
+## Where the wall clock goes
+
+<SpecTimeline />
+
+The two savings in that control are independent and they compose, which is worth separating because only one of them needs streaming.
+
+The **JIT** saving needs no streaming at all. Two sub-agent calls the model wrote on consecutive lines are, very often, not sequential in any sense that matters — the model wrote them in an order because code has an order, not because the second needs the first. Executing the cell as written blocks on each in turn anyway. Recognising that and overlapping them collapses `n × tool` to a single `tool`.
+
+The **streaming** saving slides that whole block leftward, underneath the generation. And this is where the regime matters: push the generation slider up, into the territory of a model that thinks for a minute before it writes, and the sub-calls stop being on the critical path at all. The turn costs what the generation costs, and adding a fifth sub-call is free.
+
+There is a second-order effect the post flags that is easy to miss. On a local model serving one or two chats, decoding the main context is heavily *memory-bound* — the GPU is waiting on weights, not arithmetic. Speculated sub-calls arriving concurrently raise the arithmetic intensity of that window, so the overlap is not merely free, it can make the batch more efficient. On a hosted API you get none of that; batching is abstracted away behind someone else's scheduler, and the only gain is the wall-clock overlap.
+
+## What can leave early
+
+The easy case is a call whose arguments are literals: the moment the closing parenthesis arrives in the stream, the call is fully specified, and parsing is enough to launch it. Every interesting case is not that. Arguments depend on variables computed earlier in the cell; calls sit inside conditionals whose branch is not yet decided, or inside loops whose trip count is unknown, or inside function bodies that have not been invoked.
+
+sPTC's answer is a **shadow REPL**: a deepcopy fork of the real interpreter, executed on the partial program as it streams. Anything that could touch external state — `open`, most library calls — is marked unsafe and not evaluated, and a speculatable tool whose inputs depend on an unsafe expression is simply not speculated.
+
+<ShadowRepl />
+
+The taint propagation in case 4 is the part I'd point at. It is not just that `open()` is skipped — the variable it produced is poisoned, and the call downstream of it is refused too, while a call that never touched the filesystem goes ahead. That is the correct conservatism, and it works because the two error modes are wildly asymmetric: refusing to speculate costs the latency you were already paying, while speculating something with a side effect corrupts state the real cell has not reached yet.
+
+The design decision I like most is the one about *not* promoting the fork. The shadow REPL is thrown away even when every speculation hit; the real cell executes from its own clean namespace. The reason is that the model might still produce code that errors on line five, and a partial executor that had already mutated real state would leave the harness somewhere no retry can recover from. A cell is one unit of computation. The speculator is allowed to guess about it and never allowed to become it.
+
+There is also a bookkeeping subtlety worth naming, because it is the kind of thing that quietly breaks a majority vote. Identical sub-calls are common on purpose — sample the same sub-agent five times, take the mode — and a single speculated result must not be handed to all five, or the vote becomes unanimous by construction. So the cache is indexed by inputs *and occurrence*, unless the tool is declared deterministic.
+
+## The contract
+
+The library surface is small, which is most of its appeal:
+
+```python
+@spec.tool(speculatable=True, pure=True)
+def llm_query(prompt: str) -> str:
+    ...
+```
+
+Two flags carrying two different meanings. `speculatable` is a *cost* decision — a sub-LLM call is worth pre-launching, a sub-RLM call might be far too expensive to fire on a guess. `pure` is a *correctness* decision, and it is what lets the shadow REPL evaluate the expression at all.
+
+Underneath, the harness maintains two namespaces: the real one, and a shadow in which every speculatable tool is replaced by a version that launches the work and registers a promise. As the stream advances, the shadow REPL re-runs the partial program; when the cell finally executes for real, each tool checks the promise store for its `(inputs, occurrence)` key and either collects a result that has been in flight for twenty seconds or does the work normally.
+
+The overhead is genuinely small in both directions. On runtime, the speculator only parses and checks feasibility over the partial cell. On memory, a deepcopy of the REPL is cheap relative to the variables it points at, because harnesses tend to have few large mutable objects. The real cost sits somewhere else entirely: **the tool's serving engine**, which now receives speculated requests that may never be collected. That is the knob to be careful with, and it is the reason aggressiveness should be tunable rather than maximal.
+
+## About that speed-up
+
+Here is the measurement, and I want to spend a moment on it because it is more interesting than the number.
+
+<Figure
+  src="/articles/spec-ptc/fig1.png"
+  alt="A six-panel bar chart comparing base RLM against speculative PTC plus RLM on OOLONG and OOLONG-Pairs, at temperature 0 and 0.7, across four and eight concurrent tasks. Panels show wall time, sub-calls per task, and turns per task; every bar carries a wide 95% t-interval and most pairs overlap substantially."
+  caption="Qwen3-30B-A3B-Instruct-0527 on a node of 8×H100, vLLM, five runs per cell. Note the middle column: the speculative arm frequently makes more sub-calls per task, not fewer. (alexzhang13.github.io/blog/2026/spec-ptc.)"
+/>
+
+The reported result is **1–1.2×** on the RLM setting, and the author is explicit that pinning it down is hard: the outcome depends on tool latency, tokens generated, serving-engine load, and — the killer — the actual choices the harness makes.
+
+That last clause deserves unpacking, because it is not the usual noise disclaimer. An RLM decides at runtime how many sub-calls to issue and how many turns to take. Two runs of the same task on the same model are not two samples of one quantity; they are two *different amounts of work*. You can see this directly in the middle column of the plot above: the speculative arm often does more sub-calls per task than the baseline, and still finishes sooner.
+
+<VarianceTrap />
+
+Walk the seed slider at five runs with a true effect of 1.15× planted in the data. The observed ratio wanders from below 1 to above 1.3, and the intervals overlap almost every time. That is not a flaw in the experiment — it is the arithmetic of trying to resolve a 15% scheduling gain underneath trajectory variance of ±40%, and the honest response to being in that situation is precisely the one the post takes: report a range and say why it is a range.
+
+Which sets up the thing worth being clear about. **The mechanism does not need the benchmark.** If a call is specified at t=12 and the cell finishes at t=30, launching at 12 instead of 30 saves eighteen seconds; this is arithmetic, not a hypothesis. What the benchmark is trying to measure is something else and much harder — how much of that arithmetic survives contact with a real trajectory, a real serving queue, and a harness that keeps changing its mind about what to do next. A wide interval on that question is the correct output.
+
+<Video
+  src="/articles/spec-ptc/comparison"
+  poster="/articles/spec-ptc/comparison-poster.jpg"
+  alt="A side-by-side terminal recording of the same question answered twice, labelled speculative and serial. In the speculative pane sub-calls begin while the code is still being written; in the serial pane they only start once generation finishes."
+  caption="The same question, both schedules, side by side. The left pane's tool calls start while its code is still streaming; the right pane's cannot begin until generation completes. (alexzhang13.github.io/blog/2026/spec-ptc.)"
+/>
+
+## Where it sits
+
+Three prior results are worth placing against it, and the post places them precisely.
+
+[**Conveyor**](https://arxiv.org/abs/2406.00059) (Xu et al., 2024) let users declare partial execution opportunities — a line of code — parsed during decoding. [**Speculative Interaction Agents**](https://arxiv.org/abs/2605.13360) (Hooper et al., 2026) formalised that as speculative tool calling, aimed mainly at cutting time-to-first-token by overlapping a long thinking chain with an invoked tool. [**AsyncFC**](https://arxiv.org/abs/2605.15077) (Feng et al., 2026) attacked the blocking-implementation problem instead, with future-based async wrappers around function calls — at the cost, as the post notes, of not being 1:1 with the original harness trajectory.
+
+The argument for why the PTC case is the one where this pays off is a good one. Under standard tool calling, by the time enough tokens exist to specify the call, there are few tokens left — the window you are overlapping into is small by construction. Code execution makes the call pattern much richer: several calls, dependencies among them, conditionals, loops, unknown runtime. More structure means more room for overlap, and it also means more decisions about what is safe to overlap, which is why the design space here is larger than "start the call earlier."
+
+## What I take from it
+
+The framing underneath this is the interesting part, and it is the author's stated position rather than a conclusion of the post: **code in a REPL is the only tool a system needs, and every other tool is a function inside it.** That is a claim about interface design, and sPTC is what happens when you take it seriously enough to look at the resulting execution schedule. Once actions are programs, the harness is a runtime — and runtimes have decades of literature about overlapping slow operations with fast ones that agent frameworks have not touched.
+
+The honest limits, all of which the post states. The speed-ups are modest and hard to measure. The implementation covers {"{"}Python, bash, Bun{"}"} × {"{"}coding harness, RLM, game agent{"}"} and is not language- or harness-agnostic. The extra load lands on the tool's serving engine, which is exactly where a high-volume system is already contended. And the deterministic LM-program suite where the effect is cleanest was left out of the post as too specific — a defensible call, but it means the numbers we do see are the messy ones.
+
+What is not a limit: the direction. The post's own closing bet is that the real value is not overlapping tool calls with the *generation*, but JIT-compiling them against the *REPL execution itself*, which gets more expensive as harnesses write more complex programs. Speculating into a stream is the easy version. Treating a generated cell as a dependency graph to be scheduled is the version that keeps paying, and nothing in the current agent stack is doing it.
