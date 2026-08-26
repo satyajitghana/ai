@@ -1,0 +1,169 @@
+---
+title: "GLM-5.3-Flash: 45 layers, 11 of them expensive"
+description: "320B parameters, 18B active, and a stack where only eleven of forty-five layers keep a KV cache. A walk through the hybrid linear-plus-sparse attention, the IndexPool trick that pays down the tax sparse attention never advertises, the manifold-constrained hyper-connections that a rival lab ablated away the same week — and an honest scoring of Z.ai's own benchmark table, which undersells the model in one direction and oversells it in another."
+date: 2026-08-26
+interest: 5
+helpful: 4
+tags:
+  - glm
+  - moe
+  - linear-attention
+  - sparse-attention
+  - long-context
+  - open-weights
+---
+
+import { LayerStack } from "@/components/articles/glm-5-3-flash/layer-stack"
+import { IndexPool } from "@/components/articles/glm-5-3-flash/index-pool"
+import { RivalTally } from "@/components/articles/glm-5-3-flash/rival-tally"
+
+The interesting number in [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) is not 320B, and it is not 18B. It is **eleven**.
+
+That is how many of its forty-five layers hold a KV cache. The other thirty-four carry a fixed-size recurrent state that does not grow when the conversation does. At the 1M-token context this model natively supports, that single structural fact decides almost everything about what it costs to serve — and it is visible in `config.json`, in a field called `layer_types`, before you read a word of the announcement.
+
+| | |
+|---|---|
+| Weights | `zai-org/GLM-5.3-Flash` · **MIT** · `Glm5NextForConditionalGeneration` |
+| Size | **320B** total · **18B** active · 45 layers · hidden 4,096 |
+| Attention | **34 KDA linear** + **11 NoPE sparse MLA** layers, three to one · `index_topk` 2,048 |
+| Checkpoint | native **FP8**, ≈306 GiB of weights · `GLM-5.3-Flash-BF16` is roughly twice that |
+| Experts | **288 routed**, 8 active, 1 shared · first 3 layers dense · routed scaling 2.5 |
+| Context | **1,048,576** tokens native |
+| Multimodal | first natively multimodal GLM-5 · ViT depth 24, hidden 1,024, 448px tiles |
+| The new tricks | **IndexPool** (`index_kpool: 4`) · **mHC** (`hc_mult: 4`, `hc_sinkhorn_iters: 20`) |
+| Claimed savings | vs GLM-5.3: attention compute **÷3.01**, KV cache **÷4.44** |
+| Corpus | **30T** multimodal tokens |
+| Price point | Artificial Analysis Intelligence Index v4.1.1 **57** at **$0.045**/task (discounted) |
+| Lineage | [GLM-5 technical report, arXiv:2602.15763](https://arxiv.org/abs/2602.15763) · [announcement](https://z.ai/blog/glm-5.3-flash) |
+
+## The stack
+
+<LayerStack />
+
+Switch between the two shapes and the headline comparison Z.ai draw — against GLM-4.5 — lands differently than a parameter count suggests. The totals are close, 320B against 355B. What changed is that the new model reaches that total with **half the depth and half the activated parameters**, and spends the difference on a much larger expert pool: 288 routed experts against 160, still firing eight per token.
+
+Halving depth is the unusual move. Ninety-two layers to forty-five is not a tuning decision; it is a bet that a wider, sparser network with better token-mixing beats a deeper one at equal budget. The first three layers keep a dense feed-forward block before the mixture-of-experts takes over — a standard warm-up that stops the router from having to make decisions on representations that have barely formed.
+
+The announcement says "linear attention" and "sparse attention" without naming either, but [vLLM's recipe](https://recipes.vllm.ai/zai-org/GLM-5.3-Flash) does, and the names matter. The linear layers are **KDA** — Kimi Delta Attention, the gated delta-rule recurrence from the Kimi line — and the sparse layers are **NoPE sparse MLA**, multi-head latent attention with the compressed KV of DeepSeek's design and no rotary encoding at all. The config agrees on both counts: `mla_use_nope: true`, `kv_lora_rank: 512`, `q_lora_rank: 1536`, and a serving flag named `VLLM_SSM_CONV_STATE_LAYOUT` that only exists because the linear layers carry a state-space convolution.
+
+So the token-mixing here is not novel work. It is two well-understood components from two other labs, interleaved three to one, with the latent-KV compression stacked *on top of* the sparsity so the eleven expensive layers are also the cheapest possible version of expensive. The originality is in the composition and in the two pieces that follow.
+
+<Figure
+  src="/articles/glm-5-3-flash/fig1.png"
+  alt="A three-panel diagram. On the left, the GLM-5.3-Flash architecture: image and text feed a ViT and an embedding into a stack of blocks, three of which pair mHC with linear attention and MoE, one of which pairs mHC with sparse attention and MoE, topped by an MTP layer and LM head. In the centre, the sparse attention detail showing context hidden states producing a KV cache and indexer keys, the keys passing through 4x pooling into an indexer cache, then an indexer, TopK, KV block selection and sparse attention. On the right, two line charts against sequence length up to 1M: per-layer KV cache size, where GLM-5.3 rises to about 600 and GLM-5.3-Flash to about 135, annotated 4.44x; and per-layer attention compute, annotated 3.01x."
+  caption="The whole design on one sheet. The centre panel is the part worth lingering on — the indexer has its own cache and its own cost, and the 4× pooling stage exists to shrink both. (Z.ai, GLM-5.3-Flash announcement.)"
+/>
+
+## The tax sparse attention doesn't advertise
+
+Sparse attention is normally sold on the bit that stops growing: fix a budget of positions per query — `index_topk` is 2,048 here — and attention cost goes flat no matter how long the context gets.
+
+That is true, and it is half the story. Something has to decide *which* 2,048, and deciding means scoring the query against every key in the sequence. The selector is linear in context even when the attention it feeds is constant, so past a certain length the selector *is* the cost.
+
+<IndexPool />
+
+This is what **IndexPool** exists for, and `config.json` states it precisely: `index_kpool: 4` with `index_kpool_compress: true`. Four indexer key vectors are weight-pooled into one before scoring, so the scan runs over a quarter as many entries and the indexer's own cache shrinks by the same factor.
+
+Two details make it more than a blunt downsample. `index_kpool_always_select_tail` keeps the most recent block out of the pooling, because the tokens just written are the ones you can least afford to blur. And `index_share_for_mtp_iteration` reuses the selected indices across speculative-decoding steps, so the draft model does not pay for the scan again — a trick Qwen adopt too, and credit to GLM for.
+
+The honest framing: IndexPool does not make selection sublinear. It divides it by four. The term still grows with context — it just grows from a base four times lower, which at a million tokens is the difference between a rounding error and a bottleneck.
+
+Worth noting what the efficiency chart in that figure actually claims, and what it does not. Against **GLM-5.3** the reductions are large and specific: attention compute ÷3.01, KV cache ÷4.44 per layer. Against **Kimi-K3** and **DeepSeek-V4-Flash**, Z.ai say plainly that their KV cache is *still slightly larger* and call it "further room for improvement." A vendor chart that shows the vendor losing a comparison is worth more than the one that shows it winning.
+
+## mHC, and a lab that deleted it the same week
+
+The other architectural change is in every block: **Manifold-Constrained Hyper-Connections**. The config carries `mhc: true`, `hc_mult: 4`, and `hc_sinkhorn_iters: 20`.
+
+Hyper-connections widen the residual stream from one channel into several — four here — so that early features have somewhere to travel deep into the network without being repeatedly overwritten by everything in between. Three learned operators do the work: one reads a block's input from the branches, one writes its output back, and one mixes the branches with each other. The "manifold-constrained" part applies to that third operator: it is projected onto the set of **doubly stochastic** matrices, which is what the twenty Sinkhorn iterations in the config are doing. Constraining branch mixing to be conservative — no branch can amplify or drain the others — is a stability argument, and it is a real one at this scale.
+
+Here is what makes this the most interesting line in the release. In the same week, [Qwen3.8-Flash-Next](/articles/qwen3-8-flash-next) shipped a component called Gated Residual that is explicitly the same idea, four branches and all — and its technical report says they ablated the branch-mixing operator and **dropped it altogether**, reporting that removing it "costs nothing" while removing memory traffic and a source of instability.
+
+So two labs, the same month, on the same architectural question, reached opposite conclusions about the one operator mHC exists to constrain. Neither has published a head-to-head. That is not a criticism of either — it is the actual state of knowledge, and it is more useful to know than another round of benchmark bars.
+
+## The base model, read honestly
+
+<Figure
+  src="/articles/glm-5-3-flash/fig2.png"
+  alt="A grouped bar chart comparing GLM-5.3-Flash against GLM-5.2, DeepSeek-V4-Vision-Exp, Claude Opus 4.8, GPT-5.6 Terra and Gemini 3.7 Flash across coding, agentic, office and vision benchmarks."
+  caption="The full benchmark table from the announcement. The next control scores it row by row rather than reading the bars. (Z.ai, GLM-5.3-Flash announcement.)"
+/>
+
+Before the instruct numbers, the base model, because it is where architecture claims are least dressed up. Z.ai's own table:
+
+| | GLM-4.5-Base | GLM-5-Base | DeepSeek-V4-Flash-Base | **GLM-5.3-Flash-Base** |
+|---|---|---|---|---|
+| Activated / total | 32B / 355B | 40B / 744B | 13B / 284B | **18B / 320B** |
+| MMLU | 86.1 | **88.3** | 88.5 | 88.1 |
+| BBH | 86.2 | **87.4** | 84.9 | 86.6 |
+| HellaSwag | 87.1 | **88.1** | 85.3 | 87.1 |
+| LiveCodeBench-Base | 28.1 | 34.4 | 29.9 | **37.6** |
+| SimpleQA | 30 | **36** | 31.2 | 33.5 |
+
+The claim in the post is that it "outperforms GLM-4.5-Base overall and remains competitive with GLM-5-Base across most benchmarks", and that is exactly right — including the part people will skim past. Against **GLM-5-Base** it is behind on four of five, and ahead only on code. What makes that a good result rather than a bad one is the first row: it is doing it with **18B activated parameters against 40B**, from a model less than half the total size. Competitive at 45% of the activated compute is the whole argument, and stating it as competitive rather than superior is the correct call.
+
+The one genuine jump is LiveCodeBench-Base, 34.4 to 37.6, on a base model. That is a pre-training result, not a post-training one, and it is consistent with everything downstream being coding-shaped.
+
+## Scoring the instruct table
+
+<RivalTally />
+
+Z.ai describe the result as "approaching Claude Opus 4.8 on coding and agentic benchmarks." On their own numbers that undersells it: across the fourteen rows where both models have a score, **GLM-5.3-Flash is ahead on nine**. Toolathlon, AutomationBench, DeepSWE, GDPval, OfficeQA, Chartography, and all three vision rows go to GLM.
+
+The losses are worth naming precisely, because one is not close. **NL2Repo** — repository-scale code generation under a 1M context — is 56.3 against Opus 4.8's 69.7. That is a thirteen-point gap on the single benchmark that most resembles "hand it a codebase and a feature request", and it is also the row where DeepSeek-V4-Vision-Exp beats GLM. If your workload is repo-scale synthesis rather than agentic iteration, that row is the one to weigh.
+
+Then switch the control to **Gemini 3.7 Flash** and read the bottom three rows. BabyVision 53.4 against 70.9. MVbench 77.8 against 82.2. MMVU 80.5 against 82.3. General video and perception all go the other way — on the release whose headline is that this is the first natively multimodal GLM.
+
+The shape that falls out is consistent and specific: GLM-5.3-Flash is strong where vision is *instrumental* — reading a chart, judging a rendered UI, working through a document — and weaker where vision is the task. Given that the post frames visual intelligence entirely in terms of the coding loop and professional artifacts, that is arguably the capability they built rather than a shortfall. But it is not what "natively multimodal" implies, and the benchmark table says so plainly enough that it is odd the prose doesn't.
+
+<Figure
+  src="/articles/glm-5-3-flash/fig3.png"
+  alt="A scatter plot of the Artificial Analysis Intelligence Index against cost per task on a logarithmic axis, with GLM-5.3-Flash marked on the Pareto frontier at an index of 57 and about $0.045 per task, well to the left of models at similar intelligence."
+  caption="The commercial claim: index 57 at $0.045 per task, which the post describes as a level of intelligence previously available at roughly 10× the cost. (Z.ai, GLM-5.3-Flash announcement.)"
+/>
+
+## Serving it on non-NVIDIA silicon
+
+The last section of the announcement is the one with the least benchmark theatre and possibly the most consequence. GLM-5.3-Flash has been served for a week at production scale on a cluster of **Chinese AI accelerators**, and Z.ai claim a 3× end-to-end improvement over their own initial baseline on that hardware, reaching "hardware efficiency and per-token cost comparable to mainstream NVIDIA GPUs."
+
+The stack they describe is specific enough to be checkable in outline: a dedicated inference engine built on SGLang; intra-node tensor parallelism for the linear-attention layers and the LM head; **ReplaySSM**; W8A8 weights and activations; a hybrid INT8/FP8/BF16 KV cache; and Layer Split. At cluster scale, an **Encode–Prefill–Decode** disaggregation that separates multimodal encoding, prefill and decode into independently scheduled worker pools.
+
+Two things about this are worth separating. The engineering claim — that these accelerators can serve a frontier-scale model economically — is supported only by a ratio against their own unspecified starting point, which is the weakest form of a performance claim. But the architectural claim underneath it is strong and self-consistent: chips "primarily constrained by memory capacity and bandwidth" are exactly the hardware for which you would design a model with thirty-four cache-free layers out of forty-five. The architecture and the silicon were chosen together, and that is the part that generalises.
+
+There is also a nice detail buried in it: the serving stack was optimised with the help of a GLM-5.3-powered infrastructure agent that worked on kernels and bottleneck diagnosis. A model helping build the system that serves it is either a milestone or a press line depending on how much detail follows, and here no detail follows.
+
+<Figure
+  src="/articles/glm-5-3-flash/fig4.png"
+  alt="A grouped bar chart of Z.ai Code Bench v1.0 scores at low, medium and max effort levels, comparing GLM-5.3-Flash with GLM-5.2 and Claude Opus 4.8, with GLM-5.3-Flash reaching 29.0 at max effort against Opus 4.8's 29.5."
+  caption="Z.ai's in-house coding evaluation, run in Claude Code 2.1.207. At max effort the gap to Opus 4.8 is half a point — on the benchmark its authors designed. (Z.ai, GLM-5.3-Flash announcement.)"
+/>
+
+## Running it
+
+Four serving paths are listed, which is unusually broad for launch day: [SGLang](https://cookbook.sglang.io/autoregressive/GLM/GLM-5.3-Flash), [vLLM](https://recipes.vllm.ai/zai-org/GLM-5.3-Flash), [TokenSpeed](https://lightseek.org/tokenspeed/recipes/models#glm-5-3-flash), and [KTransformers](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.md). The KTransformers entry matters more than its placement suggests: an 18B-active model with 288 experts is a good candidate for CPU-offloading the expert weights, which is what puts a 320B model on hardware that cannot hold 320B.
+
+The vLLM recipe is the one with real numbers in it, and they set the floor. The default checkpoint is **native FP8** at about **306 GiB of weights** before any runtime or KV overhead; the BF16 variant is roughly double. Support is **Hopper and newer only**, and NoPE sparse MLA needs **FlashInfer 0.6.17+** — though the troubleshooting note on the same page says 0.6.18, so take the higher number. The straightforward launch is four-way tensor parallel on a single GB200 tray with the MTP layer drafting five tokens:
+
+```bash
+vllm serve zai-org/GLM-5.3-Flash \
+  --tensor-parallel-size 4 \
+  --kv-cache-dtype fp8 \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
+  --tool-call-parser glm47 --reasoning-parser glm45 \
+  --enable-auto-tool-choice
+```
+
+One constraint in there is worth pulling out because it costs real memory: **Hopper cannot run an FP8 KV cache for this model and must serve BF16 KV**. Blackwell can. For a model whose entire pitch is a small KV footprint, the generation of GPU you own decides whether you get the headline number or twice it.
+
+The recipe also documents prefill/decode disaggregation across one 8-GPU node, bridged by NIXL — the same EPD idea as the production stack, in a form you can run. Two details there are load-bearing and easy to get wrong: the KDA conv-state and KV-cache layouts must be pinned identically on both pools (`VLLM_SSM_CONV_STATE_LAYOUT=DS`, `VLLM_KV_CACHE_LAYOUT=HND`), and `num_speculative_tokens` must match on both sides or the draft tokens do not line up.
+
+The evaluation footnotes deserve a read before quoting any of the numbers. HLE with tools ran at a 300K context with a context-management strategy and GPT-5.6-luna as judge. DeepSWE used the mini-swe-agent harness at 400K context with a six-hour timeout. Terminal-Bench ran inside Claude Code 2.1.207. NL2Repo used rule-based *and* LLM-based judging specifically to catch unauthorised `pip` and `curl` calls — a detail that tells you agentic benchmarks are now adversarial enough to need anti-cheat, and that Z.ai found something worth blocking.
+
+## The ledger
+
+**Well supported.** The architecture is fully legible from the published config, and every structural claim in the post matches it: 34 linear and 11 sparse layers, `index_kpool: 4`, `hc_mult: 4`, 288 experts with 8 active, a 1,048,576-token position budget. Base-model results stated as competitive rather than superior, which is what they are. A KV-cache comparison that shows two rivals ahead. Four serving frameworks at launch, MIT-licensed, and evaluation footnotes precise enough to reproduce from.
+
+**Thin.** The 3× serving improvement is a ratio against an unstated baseline on unnamed hardware — the least checkable number in the release, carrying the most strategically loaded claim. The infrastructure-agent story has no detail attached. And there is no ablation anywhere isolating the contribution of mHC, IndexPool or the linear/sparse split from each other or from the new 30T corpus, so "more intelligence with less compute" is an outcome, not an explanation.
+
+**Mis-framed, in both directions.** "Approaching Claude Opus 4.8" understates a table where GLM leads nine of fourteen. "The first natively multimodal model in the GLM-5 series" oversells a vision capability that loses all three general perception rows to Gemini 3.7 Flash, sometimes by seventeen points.
+
+The thing I would keep is neither the price nor the benchmark position. It is that the shape of the model is now openly a *serving* decision — eleven cache-bearing layers out of forty-five, chosen because the memory bandwidth of the target accelerator said so. Chinchilla-era architecture choices were about validation loss. This one is about what the hardware in the building can hold, and it is not pretending otherwise.
