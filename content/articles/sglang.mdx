@@ -1,0 +1,401 @@
+---
+title: "SGLang: the tree, and the language nobody remembers"
+description: "1.3 million lines, 219 model architectures, and a KV cache that is a radix tree rather than a hash map. Read from the source at e27a7fa: how lock_ref makes a prefix structurally un-evictable, how a draft tree gets verified in one forward pass, why the paper's cache-aware scheduler is no longer the default, and why jump-forward decoding — the compressed-FSM trick the paper is half-famous for — is still implemented in four backends and called by none of them."
+date: 2026-08-26
+updated: 2026-08-26
+interest: 4
+helpful: 5
+tags:
+  - inference
+  - systems
+  - sglang
+  - serving
+  - constrained-decoding
+  - open-source
+---
+
+import { RadixTree } from "@/components/articles/sglang/radix-tree"
+import { FrontendIr } from "@/components/articles/sglang/frontend-ir"
+import { JumpForward } from "@/components/articles/sglang/jump-forward"
+import { DraftTree } from "@/components/articles/sglang/draft-tree"
+import { LpmQueue } from "@/components/articles/sglang/lpm-queue"
+
+The name is the giveaway and almost nobody uses it that way. **SGLang** — *structured generation language* — began as a language for writing LLM programs, with `gen`, `select`, `fork` and `join` as primitives, and the fast runtime existed to execute those programs well. Today it is deployed overwhelmingly as an OpenAI-compatible server, and the language is the part people have forgotten.
+
+Both halves are still in the repo, and the connection between them is the most interesting thing about it: **RadixAttention exists because of the language.** If your programs fork, the cache should be a tree.
+
+This is a read of the repo at `e27a7fa`, alongside the paper (arXiv 2312.07104v2). Two of the paper's three headline techniques are still load-bearing. The third is dead code, and I will show you the grep.
+
+| | |
+|---|---|
+| Scale | **3,485** Python files under `python/` · **1,324,609** lines · **219** model architectures |
+| The cache | a **radix tree** over token prefixes, not a hash map of blocks |
+| Eviction | priority **heap** (`heapq`), cascading up the trunk, with lock-based protection |
+| Frontend | `python/sglang/lang/` — `api.py`, `ir.py`, `interpreter.py`, `tracer.py` |
+| IR nodes | `SglGen`, `SglSelect`, `SglFork`, `SglGetForkItem`, `SglVariable`, `SglCommitLazy`, `SglSeparateReasoning` |
+| Cache variants | `radix_cache`, `radix_cache_cpp`, `swa_radix_cache`, `pure_swa_radix_cache`, `unified_radix_cache`, `chunk_cache` |
+| Grammar backends | `xgrammar` (default), `outlines`, `llguidance`, `none` — 2,305 lines in `srt/constrained/` |
+| Speculative decoding | 34 files, 17,558 lines · EAGLE, EAGLE3, NEXTN, STANDALONE, NGRAM, DFLASH, DSPARK |
+| Disaggregation | 26,952 lines · `mooncake` (default), `nixl`, `mori`, `ascend`, `mooncake_tcp`, `fake` |
+| Default schedule policy | `fcfs` — **not** the paper's cache-aware `lpm` |
+
+## A tree, not a map
+
+The headline mechanism is RadixAttention: keep the KV cache indexed by a radix tree over token prefixes, so requests that share a prefix share the path through the tree.
+
+<RadixTree />
+
+The distinction from a hash-map prefix cache is narrower than the marketing suggests and shows up in one specific place: **divergence**. vLLM hashes fixed-size blocks and looks them up; a shared prefix is a run of separately-hashed blocks that happen to match. SGLang keeps it as one node with one refcount, and when a request diverges the tree **splits the node** at the divergence point. For a workload that forks a conversation five ways, the tree is the natural shape and the map is an approximation of it.
+
+The accounting in `radix_cache.py` is what turns that from a diagram into a cache. Each `TreeNode` carries `lock_ref`, `last_access_time` and `priority`, and:
+
+```python
+def inc_lock_ref(self, node: TreeNode):
+    if node.lock_ref == 0:
+        self.evictable_size_ -= len(node.key)
+        self.protected_size_ += len(node.key)
+```
+
+A prefix that an in-flight request still needs is moved out of the evictable pool entirely. It is not *recent*; it is **ineligible**. That distinction is the difference between a cache that occasionally evicts a prefix it is about to need again and one that structurally cannot.
+
+Eviction itself is not LRU either. It runs off a heap:
+
+```python
+heapq.heapify(eviction_heap)
+...
+if len(x.parent.children) == 0 and x.parent.lock_ref == 0:
+    heapq.heappush(eviction_heap, (new_priority, x.parent))
+```
+
+Priority-ordered rather than strictly least-recent, and **cascading**: when a leaf goes and leaves its parent childless and unlocked, the parent becomes an eviction candidate too. That is exactly right — an interior prefix is only worth keeping while something below it is — and it is the kind of behaviour a flat block map cannot express, because it has no notion of "below."
+
+This is the paper's own picture of the same idea, and it is still the clearest thing anyone has drawn about prefix caching. Watch step (4): a second chat session arrives, and node `b` **splits** so the two sessions can share the system prompt without either owning it.
+
+<Figure
+  src="/articles/sglang/fig1.png"
+  alt="Nine panels showing a radix tree of KV cache prefixes evolving as requests arrive: a system prompt node splits when a second chat session begins, a few-shot batch attaches to the root, self-consistency sampling fans four children off one node, and evicted nodes are marked in dashed red."
+  caption="The tree across nine time points: two chat sessions, a few-shot batch, and a self-consistency fan-out. Green is new, blue is a cache hit, dashed red is evicted. (SGLang, Figure 3)."
+/>
+
+Two details from the source that complicate the tidy story. First, the tree is not matched token by token unless you ask it to be: `RadixKey.page_aligned()` truncates every key to a multiple of `page_size`, `match()` rounds the result down again, and `child_key()` returns `t[0]` at `page_size == 1` but `tuple(t[:page_size])` otherwise. So a node's children live in a **dict keyed on the first page**. The structure between nodes is a tree; the lookup inside a node is a hash map. The difference from vLLM is real, but it is a difference about where the boundaries fall, not about hashing versus not hashing.
+
+Second, `RadixKey.match` is not a loop:
+
+```python
+# Exponential search for the first diverging token: gallop in doubling
+# windows (one C-level slice compare each), then binary-search the window
+# holding the divergence -- no per-token Python loop on long shared prefixes.
+```
+
+Galloping search over `array('q')` slices, so a 4,000-token shared prefix costs about a dozen C-level comparisons instead of 4,000 Python iterations. Somebody profiled this. Which brings us to the other thing they did about it.
+
+## What the C++ tree is actually for
+
+There is a `cpp_radix_tree/` directory next to `radix_cache.py`: 1,000 lines of C++20 behind a 182-line Python wrapper, JIT-compiled at import through `torch.utils.cpp_extension.load` with `-O3`. The obvious reading is "the Python tree got slow, so they rewrote it." That is at most half of it, and the header tells you the rest:
+
+```cpp
+std::tuple<std::vector<at::Tensor>, std::size_t, NodeHandle, NodeHandle>
+    match_prefix(const token_vec_t& key);
+std::tuple<std::vector<std::tuple<IOTicket, at::Tensor, at::Tensor>>, std::size_t>
+    writing_through(const token_vec_t& key, at::Tensor value);
+std::tuple<IOTicket, std::vector<at::Tensor>>
+    loading_onboard(NodeHandle host_id, at::Tensor indices);
+void commit_writing_through(IOTicket ticket, bool success);
+```
+
+`match_prefix` returns *four* things: the device indices it matched, how many tokens matched on the **host**, and a node handle for each tier. `TreeNode` has `on_gpu()`, `on_cpu()`, `on_both()`, and an `is_leaf_device()` that is true when no child is resident on the GPU. `writing_through` and `loading_onboard` hand back an `IOTicket` that a later `commit` resolves.
+
+This is not a faster radix tree. It is a **two-tier cache with asynchronous transactions**, and the reason it went to C++ is that maintaining eviction order across GPU and host memory with in-flight copies is exactly the kind of bookkeeping that a per-step Python loop cannot do quietly.
+
+It costs. `RadixCacheCpp` calls itself "the experimental C++ radix tree", rejects `cache_salt` outright, asserts that KV cache events are off, and its `Impl` asserts `key.size() % page_size == 0` — page granularity only, no token-level matching. And it is gated behind an environment variable, not a flag:
+
+```python
+if envs.SGLANG_EXPERIMENTAL_CPP_RADIX_TREE.get():
+    logger.info("Using experimental C++ radix tree implementation.")
+    return RadixCacheCpp(params=params, server_args=server_args)
+```
+
+One more thing worth noticing while you are down here. The C++ node's children are `std::unordered_map<token_vec_t, std::unique_ptr<TreeNode>, std_vector_hash>`, and `std_vector_hash` is the boost hash-combine over the tokens of the first page. The radix tree hashes. It just hashes at a different granularity than the thing it is contrasted with.
+
+## Constrained decoding, and the part nothing calls
+
+`srt/constrained/` is 2,305 lines across four backends — `xgrammar` (the default), `outlines`, `llguidance`, and a `reasoner_grammar_backend` wrapper that defers the constraint until a reasoning trace has closed. All of them implement the same interface, and the interface has two halves.
+
+The first half is the token mask, and it is completely conventional. Each decode step, `fill_vocab_mask` writes one row of a bitmask; `SamplingBatchInfo.update_regex_vocab_mask` fills a row per unfinished grammar request; `ModelRunner._preprocess_logits` applies it just before sampling with a Triton kernel that sets illegal logits to negative infinity. The buffer is `torch.full(get_bitmask_shape(batch, vocab), -1, dtype=bitmask_dtype, pin_memory=...)`, and as the comment in `spec_utils.py` puts it, "32 boolean bitmask values are packed into 32-bit integers." For Llama-3's 128,256-token vocabulary that is 4,008 int32 words — 16,032 bytes per request per step, pinned and copied host-to-device every step of every constrained request.
+
+The compilation is off the critical path. `BaseGrammarBackend` holds a `ThreadPoolExecutor` and a cache keyed on `(key_type, key_string)`; a hit calls `copy()` on the compiled grammar to get a fresh matcher rather than recompiling, and the scheduler keeps requests with unready grammars in a separate `grammar_queue` that `get_ready_grammar_requests()` drains into the waiting queue. This is the paper's second constrained-decoding claim — that reusing a preprocessed state machine across a batch is worth 2.4× — and it is alive and well.
+
+The second half is the interesting one, and it is the reason people cite this paper.
+
+<Figure
+  src="/articles/sglang/fig2.png"
+  alt="Four panels comparing a normal finite state machine with a compressed one for the regex quote-summary-quote-colon-space-quote. The normal FSM has fourteen states chained one per character, and its decoding process alternates four token emissions with four LLM decode steps. The compressed FSM has two states and needs a single LLM decode."
+  caption="A regex whose first thirteen characters are not a choice. The normal FSM asks the model for all four tokens; the compressed one emits them and asks once. (SGLang, Figure 4)."
+/>
+
+**Jump-forward decoding.** Most of a JSON schema is not a decision. Once the grammar is at `{`, the next characters are `"name": "` whatever the model thinks, so there is nothing to sample. `outlines_jump_forward.py` finds these stretches by walking the FSM's transitions and keeping only the states with exactly one outgoing edge:
+
+```python
+outgoings_ct[state] += 1
+if outgoings_ct[state] > 1:
+    if state in state_to_jump_forward:
+        del state_to_jump_forward[state]
+    break
+```
+
+A run of such states is a span the runtime can append without a forward pass at all. Here is what that is worth, on a real schema tokenized with a real tokenizer.
+
+<JumpForward />
+
+33 tokens, 12 of which the model has to produce. On the decode phase that is 2.75×, against the paper's measured 1.6× end-to-end — a gap that is entirely believable once you remember that prefill, retokenization and batching do not get faster.
+
+Now the part I did not expect. **Nothing calls it.**
+
+```
+$ grep -rn "try_jump_forward\|jump_and_retokenize\|jump_forward_str_state" .
+./python/sglang/srt/constrained/base_grammar_backend.py:120,130,140
+./python/sglang/srt/constrained/xgrammar_backend.py:164,170,174
+./python/sglang/srt/constrained/outlines_backend.py:80,104,108
+./python/sglang/srt/constrained/llguidance_backend.py:191,198,201
+./python/sglang/srt/constrained/reasoner_grammar_backend.py:226,231,236
+```
+
+Every hit is a definition or a delegation to one. There is no call site in `managers/`, none in `model_executor/`, none in `test/`, none in `benchmark/`, none in the Rust router. The outlines backend has gone further and pre-emptied the machinery:
+
+```python
+def _compile_regex(self, regex: str) -> BaseGrammarObject:
+    ...
+    jump_forward_map = None
+    return OutlinesGrammar(guide, jump_forward_map)
+```
+
+so `try_jump_forward` returns `None` on its first line — `if not self.jump_forward_map: return None`.
+
+The only trace left of it running is a fossil: `sgl-model-gateway/tests/common/mock_worker.rs` still emits a `completion_tokens_wo_jump_forward` field in its canned responses, and no Python file in the repository produces that key any more.
+
+I cannot tell you from the tree alone *why* it was unwired, and I will not guess at a commit I did not read. What I can tell you is that the paper's own appendix lists the bill. Appendix B.2: a jump has to retokenize everything before it, because "the compressed text `{"summary": "` can only be tokenized as `{"`, `summary`, `":` and `_"`" — which is exactly what `cl100k_base` does to that string, so the claim checks out — and my widget above finds four of its 33 tokens straddling a grammar boundary, `",` being the model's closing quote fused with the grammar's comma. Appendix B.3 admits the deeper one: emitting a compressed span **distorts the output distribution**, because the model never got to weigh the alternatives that the compression assumed away. And structurally, a jump changes the request's token count between scheduler iterations, which is the single most annoying thing you can do to an overlap scheduler and a CUDA graph.
+
+A 1.6× throughput win that is lossy, needs a retokenize, and fights the batching loop is a different proposition in 2026 than it was in 2023. The honest summary is that SGLang's most-cited constrained-decoding contribution is present in the codebase as an interface with no implementation behind it, and that the feature which actually ships is the same masked-logits approach the paper described as the thing it was improving on.
+
+## Speculative decoding puts a tree inside the tree
+
+`srt/speculative/` is 34 files and 17,558 lines, and the algorithm list has outgrown the two everyone knows: `EAGLE, EAGLE3, NEXTN, STANDALONE, NGRAM, DFLASH, DSPARK`, plus "any name registered via `SpeculativeAlgorithm.register`". Two of those have their own articles here — [DFlash 2](/articles/dflash2) and [DeepSeek DSpark](/articles/deepseek-dspark) — and finding both vendored into the same directory is a decent measure of how fast this part of the stack moves.
+
+The shape is the same for all of them, and it is a tree.
+
+<DraftTree />
+
+`organize_draft_results` says it in one comment: `# b, n, topk; n = 1 + (num_steps-1) * topk`. The draft model runs `--speculative-num-steps` times: the first step expands the target's last token into `--speculative-eagle-topk` children, and every later step expands each of the `topk` surviving beams into `topk` more — so the count of parents across all steps is `1 + (num_steps-1) * topk`, and the candidate count is that times `topk` again. Then `torch.topk(score_list, num_draft_token - 1)` keeps the best of them by cumulative score and discards the rest before the target model ever sees them. Because cumulative scores are products of probabilities, a child can never outscore its parent, so the survivors form a tree without anyone checking.
+
+`build_tree_kernel_efficient` turns that into three things the attention kernel needs: a `tree_mask`, a `positions` vector (`if depth of each draft token is [0, 1, 1, 2] and the prompt length is 7 then positions = [7, 8, 8, 9]`), and a pair of `retrieve_next_token` / `retrieve_next_sibling` arrays — first-child and next-sibling, the classic way to store an n-ary tree in two flat vectors. The mask is what makes the whole thing work: each draft token attends only to its own ancestors, so every branch is a valid independent continuation and **one target forward pass verifies all of them**.
+
+The mask is also expensive in a way worth pricing. In `FULL_MASK` mode it is a bool tensor of `seq_lens_sum * num_verify_tokens + num_verify_tokens² * bs` entries — one byte each. At 256 requests of 32k context with 16 draft tokens that is 128 MiB, which is why the code now skips the fill when nothing reads it:
+
+```python
+# Only the [0, seq_len) prefix columns depend on this fill; the kernel below
+# writes every tree cell itself. Skip the (up to 100s of MB) per-step memset
+# when nothing reads the mask.
+```
+
+Then the part that matters for the rest of this article: what a draft tree does to the radix cache. Two things, and both are more invasive than I expected.
+
+**The accepted chain gets physically moved.** After verification, `move_accept_tokens_to_target_kvcache` calls `token_to_kv_pool_allocator.get_kvcache().move_kv_cache(tgt_cache_loc, accept_out_cache_loc)`. The draft wrote KV for every node of the tree into scratch slots; the accepted path is a scattered subset of those. The radix tree maps a token run to a *contiguous* vector of KV indices, so the accepted KV has to be compacted into a line before the tree can adopt it. A tree of KV is fine for one step of attention and useless as a cache entry.
+
+**The cache key changes shape.** With EAGLE on, `RadixKey.maybe_to_bigram_view` flips the key into a bigram view: N raw tokens become N−1 logical units, each the pair `(t_i, t_{i+1})`, and every match, split and `child_key` runs over pairs. That follows from what EAGLE's drafter eats — the embedding of token *i+1* concatenated with the target's hidden state at *i* — so a cached draft slot at position *i* is only reusable when **both** tokens agree. A prefix that matches token-for-token under plain decoding may not match at all under EAGLE, and the cache is quietly a different cache.
+
+There is a third interaction, between speculation and grammar, and it is my favourite piece of code in the repo. When both are on, `spec_utils.generate_token_bitmask` walks the draft tree depth-first and computes a mask row **per tree node**, accepting each draft token into the FSM on the way down and rolling it back on the way up:
+
+```python
+is_accepted = (parent_bitmask[current_token // 32] & (1 << (current_token % 32))) != 0
+if is_accepted:
+    grammar.accept_token(int(draft_tokens[curr]))
+    grammar.fill_vocab_mask(allocate_token_bitmask, curr)
+    ...
+    grammar.rollback(1)
+```
+
+The grammar is being speculatively executed alongside the model, with the same accept-and-rewind discipline, and `MAX_ROLLBACK_TOKENS = 200` is the depth budget for it. That is the cost of composing two features that each assumed they owned the decode step.
+
+## The scheduler is where the cache is won or lost
+
+The cache does not choose what to cache. The scheduler does, by choosing what to run, and `schedule_policy.py` offers six ways to choose:
+
+```python
+class CacheAwarePolicy(Enum):
+    LPM = "lpm"                 # longest prefix match
+    DFS_WEIGHT = "dfs-weight"   # depth-first search weighting
+
+class CacheAgnosticPolicy(Enum):
+    FCFS = "fcfs"
+    LOF = "lof"                 # longest output first
+    RANDOM = "random"
+    ROUTING_KEY = "routing-key"
+```
+
+`_sort_by_longest_prefix` sorts the waiting queue by `-r.num_matched_prefix_tokens`, so the request with the most of its prompt already in the tree goes next and leaves the tree warm for its siblings. `_sort_by_dfs_weight` is the paper's other idea: weight each tree node by how many waiting requests hang off it, then emit the queue in a weighted depth-first order so a subtree is drained before it can be evicted.
+
+There is a nice third mechanism nobody talks about, for the case where the prefix is not in the tree *yet*. `_compute_prefix_matches` builds a second, simulated radix tree over the waiting queue itself, and for any request whose real cache match is thin (`len(r.prefix_indices) <= IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD`, 32 tokens) it checks that queue-local tree instead:
+
+```python
+if len(in_batch_matching_prefixes) >= IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD:
+    temporary_deprioritized.add(r.rid)
+else:
+    self.waiting_queue_radix_tree.insert(...)
+```
+
+A request that already shares 32 tokens with an earlier request in the same queue is sorted to the very back — `_sort_by_longest_prefix` gives it a key of `float("inf")` — so its sibling runs first, populates the tree, and it comes back as a hit instead of a duplicate prefill. The scheduler is deliberately delaying work in order to create a cache entry that does not exist yet.
+
+<LpmQueue />
+
+The simulation above is small but the arithmetic is real: three interleaved conversations against a KV budget too small to hold all three prefixes go from 14,688 prefill tokens under FCFS to 5,472 under LPM, a factor of 2.68. Drag the budget up and the gap closes to nothing, which is the honest framing — cache-aware scheduling does not create throughput, it makes a small cache behave like a big one.
+
+Here is the paper's version of the same claim, and the reason I went looking.
+
+<Figure
+  src="/articles/sglang/fig3.png"
+  alt="Three panels. Panels a and b plot batch size, throughput, total latency and first-token latency against cache hit rate from zero to one hundred percent, all improving monotonically with hit rate. Panel c is a grouped bar chart of normalized throughput for seven ablations across four benchmarks, in which the FCFS Schedule bar is the worst of all on LLM Judge."
+  caption="Throughput rises monotonically with cache hit rate (a, b), and in the ablation (c) the FCFS bar is the shortest of all seven on LLM Judge — about 0.15 against 1.0 for the full system. (SGLang, Figure 8)."
+/>
+
+In the paper's own ablation, replacing cache-aware scheduling with FCFS is the single worst thing you can do to the LLM-Judge benchmark — worse than removing the tree structure, worse than turning the cache off entirely. So I went to check what the default is:
+
+```python
+schedule_policy: A[
+    str,
+    Arg(help="The scheduling policy of the requests.",
+        choices=["lpm", "random", "fcfs", "dfs-weight", "lof", "priority", "routing-key"]),
+    NS("schedule"),
+] = "fcfs"
+```
+
+`fcfs`. The policy the paper ablates as a degradation is what you get if you do not ask. And when you do ask, it can decline:
+
+```python
+def _determine_active_policy(self, waiting_queue: List[Req]) -> Policy:
+    if self.policy == CacheAwarePolicy.LPM and len(waiting_queue) > 128:
+        # Turn off the expensive prefix matching and sorting when the #queue is large.
+        return CacheAgnosticPolicy.FCFS
+    return self.policy
+```
+
+LPM disables itself above 128 queued requests — which is the load at which ordering matters most, and precisely the load a throughput benchmark runs at. Both of these are defensible: `calc_priority` runs a full radix match for every waiting request on **every** prefill scheduling pass, in a loop that fires every few milliseconds, so at some queue depth the sort costs more than the hits it wins. But the effect is that a technique the paper measures as worth several times throughput is off by default and self-limiting when on, and none of the numbers people quote come with that footnote.
+
+Neither claim is wrong. It is a claim about a knob, quoted as a claim about a system.
+
+## The overlap that pays for itself
+
+The other piece of engineering worth naming is that SGLang works hard to keep the CPU off the critical path. The core of `event_loop_overlap` is short and legible: launch this batch's forward, then process the *previous* batch's results while the GPU is busy.
+
+```python
+if batch:
+    batch_result = self.run_batch(batch)
+    self._apply_war_barrier()
+    self.result_queue.append((batch.copy(), batch_result))
+...
+if self.last_batch:
+    if not disable_overlap_for_batch:
+        pop_and_process()
+```
+
+The obvious objection is that step *n+1* needs the token sampled at step *n*, and reading that token means a device-to-host sync, which is the thing you were trying to avoid. `overlap_utils.FutureMap` is the answer, and it is a good one: the sampled tokens never leave the GPU.
+
+```python
+batch.input_ids = future_map.output_tokens_buf[batch.req_pool_indices]
+```
+
+`output_tokens_buf` is a device tensor indexed by request-pool slot. The forward pass scatters its results into it; the next iteration gathers from it. The CPU builds the batch out of *slot numbers*, which it already knows, and never learns the token values. `new_seq_lens_buf` works the same way, with a pinned host mirror pulled on a private stream gated on a `publish_ready` event, so even the lengths only come back when a backend actually needs them — `decide_needs_cpu_seq_lens` ORs a `needs_cpu_seq_lens` flag across the attention backends and skips the copy if they all opt out.
+
+And then there is grammar, which breaks it. From the same loop:
+
+```python
+# Run sample of the current batch
+# It depends on the result of the last batch (e.g., grammar), so we run it
+# after the last batch is processed.
+```
+
+You cannot compute step *n+1*'s token mask until the FSM has consumed step *n*'s token, and consuming it means having it. So sampling is deferred to the end of the iteration, after the previous batch has been retired — and when speculative decoding is also on, `is_disable_overlap_for_batch` gives up and takes the sync: "Sync so the FSM advance lands before the next batch's bitmask", described in the code as a "permanent path for host-draft algorithms, not a pending migration." Grammar is the one thing in this loop that has to *see* the last token rather than merely know which slot it landed in — which is a reasonable extra reason a technique that also rewrites the token stream mid-request stopped being called.
+
+## Prefill and decode on separate machines
+
+`srt/disaggregation/` is 26,952 lines, and the two module docstrings at the top of `prefill.py` and `decode.py` are the best documentation in the repository. Condensed, the prefill server:
+
+```
+1. Bootstrap Queue — handshake and preallocation, poll senders
+2. Waiting Queue   — PrefillAdder pops, run forward, move to Inflight
+3. Inflight Queue  — poll the sender; once the transfer finishes, return
+```
+
+Decode server:
+
+```
+1. PreallocQueue — handshake, pre-allocate KV once there is room
+2. TransferQueue — poll the receiver
+3. WaitingQueue  — build a PrebuiltExtendBatch: "Skip the prefill forward
+                    but only populate metadata"
+4. RunningBatch  — merge into the running batch and decode
+```
+
+That last line is the whole idea. The decode worker builds a batch that looks exactly like a freshly-prefilled one and then does not prefill it, because the KV arrived over the wire.
+
+The wire is RDMA, not serialization. `KVArgs` carries `kv_data_ptrs`, `kv_data_lens`, `kv_item_lens`, `aux_data_ptrs` and an `ib_device` — raw device pointers into registered memory, with a poll-based state machine over them (`KVPoll.Bootstrapping → WaitingForInput → Transferring → Success`). Five real transports plus a `fake` one for testing; `mooncake` is the default, `nixl` and `mori` and `ascend` are the alternatives, and `mooncake_tcp` exists for when you do not have InfiniBand and have accepted your fate.
+
+The part that shows someone ran this in anger is that the transfer is not a phase. `send_kv_chunk(req, last_chunk=False, end_idx=req.tmp_end_idx)` is called **per chunked-prefill chunk**, so chunk *n* is crossing the network while chunk *n+1* is being computed, and the prefix the prefill worker got from its own radix cache is shipped too (`send_kv_chunk(req, last_chunk=False, end_idx=cached_end)`). Transfer units are pages, via `kv_to_page_indices`.
+
+One default worth knowing before you draw the architecture diagram. `disaggregation_decode_enable_radix_cache` is `False`, and its help text reads:
+
+> Enable radix cache on decode server (PD mode). Caches KV prefixes to avoid redundant transfers. Incompatible with `--enable-hisparse`, speculative decoding, and `--disaggregation-transfer-backend fake`.
+
+In a disaggregated deployment the decode workers have **no prefix cache by default**, and turning it on is mutually exclusive with speculative decoding. The tree stops at the prefill boundary. Whatever RadixAttention buys you, it buys on one side of the split.
+
+## The language, still there
+
+<FrontendIr />
+
+`python/sglang/lang/` is not vestigial. `api.py` exposes `gen`, `gen_int`, `gen_string`, `select`, `image`, `video` and the role helpers; `ir.py` defines the node types a traced program becomes — `SglGen`, `SglSelect`, `SglFork`, `SglGetForkItem`, `SglVariable`, `SglVarScopeBegin`/`End`, `SglConcateAndAppend`, `SglSeparateReasoning`; and `interpreter.py` and `tracer.py` run or trace them.
+
+The load-bearing node is `SglCommitLazy`. Because a program is an **IR** rather than a sequence of blocking HTTP calls, the runtime can defer, batch and schedule the generations. Four chat-completions calls are four independent requests that each re-send and re-prefill the shared prefix, and the server can only recover the waste afterwards by recognising it in the cache. A forked SGLang program *declares* the sharing, so the prefix is prefilled once by construction.
+
+Being fair about it: now that prefix caching is universal, most of that benefit is recoverable without the language. What the language still buys is programs with genuine control flow — forks and joins, constrained choice between named options, multi-turn state held across generations. For a single completion it buys nothing, which is presumably why most users never meet it.
+
+`SglSeparateReasoning` is a nice marker of when this was updated. It exists to split a reasoning trace from the answer — a primitive that would have made no sense when the project started.
+
+## What the cache directory says about 2026
+
+`python/sglang/srt/mem_cache/` is worth listing, because the file names are a record of what the last year did to inference:
+
+```
+radix_cache.py            swa_radix_cache.py        pure_swa_radix_cache.py
+radix_cache_cpp.py        unified_radix_cache.py    chunk_cache.py
+cpp_radix_tree/           evict_policy.py           allocation_sizing.py
+deepseek_v4_memory_pool.py  deepseek_v4_compress_state.py  dsa_cache_layer_split.py
+mamba_slot_fused.py       swa_memory_pool.py        memory_pool_host.py
+multi_ended_allocator.py  embedding_cache_controller.py   storage/  sparsity/
+```
+
+Four things in there are not general-purpose. `swa_radix_cache` and `pure_swa_radix_cache` exist for sliding-window attention, where a prefix match does not imply a reusable cache because old positions have fallen out of the window. `deepseek_v4_memory_pool.py`, `deepseek_v4_compress_state.py` and `dsa_cache_layer_split.py` are named after one model family. `mamba_slot_fused.py` is for recurrent state, which is not a KV cache at all.
+
+That is the same pressure I found in [vLLM](/articles/vllm): the models stopped being uniform stacks of full-attention layers, and the cache — the one component that assumed uniformity hardest — is where the bill arrives. A radix tree over *token prefixes* quietly assumes that matching tokens implies matching state. For a sliding window or a recurrent layer that is false, and you can watch the codebase discovering it one file at a time. The EAGLE bigram key is the same discovery from a different direction: with a drafter attached, matching tokens stop implying matching state too.
+
+## Checking the headline number
+
+The abstract says "up to 6.4× higher throughput compared to state-of-the-art inference systems." Every version of that sentence I have seen quoted drops the setup, which is in Section 6.1 and Appendix C and is not hidden at all:
+
+- Llama-7B on **a single A10G, 24 GB**, fp16. A 70B configuration exists on 4×A100.
+- The baseline is **vLLM v0.2.5**, December 2023 — before vLLM had automatic prefix caching. The paper's own footnote says so: "RadixAttention has been partially integrated as an optional experimental feature into the latest version of vLLM; therefore, we used an earlier version for comparison."
+- Every benchmark in the throughput figure is chosen for prefix sharing: tree-of-thought, skeleton-of-thought, few-shot MMLU, multi-turn chat, an LLM judge with branch-solve-merge.
+
+So the measured quantity is *prefix caching versus no prefix caching, on workloads that are almost entirely prefix.* That is a fair experiment and the paper describes it accurately. It is simply not the sentence "SGLang is 6.4× faster than vLLM", which is the sentence it turned into. The paper is also careful in the other direction — the RadixAttention overhead measurement (0.2 s of a 74.3 s ShareGPT run, under 0.3%) is a genuinely useful number and the reason the tree can be on by default.
+
+Two of the three headline techniques, then, survive contact with the source: the tree is real and load-bearing, and grammar reuse across a batch is real and load-bearing. The compressed FSM is a good idea that the codebase quietly stopped executing.
+
+## The ledger
+
+**What is genuinely distinctive.** The radix tree is not a marketing reskin of prefix caching: node splitting, cascading eviction up the trunk, and lock-based protection are all things a flat block map cannot express. The `lock_ref` design — moving a prefix out of the evictable pool rather than merely marking it recent — is the correct answer to a bug most caches have. The `FutureMap` relay, which lets the scheduler build the next batch out of pool slots without ever reading a sampled token, is the cleanest solution to CPU/GPU overlap I have read. And the frontend language is a real IR with a tracer, not a wrapper.
+
+**What is convergent.** Everything else. 219 model architectures, structured-output backends, EAGLE and MTP speculative decoding, disaggregated prefill/decode over RDMA, quantization formats. SGLang and vLLM are solving the same problem with the same techniques and increasingly the same file names; the interesting differences are in the cache and the frontend, and nowhere else.
+
+**What I would watch.** Three things. Whether the tree survives contact with hybrid models — six files in that cache directory exist because a prefix match no longer implies a reusable state, and each one is a special case bolted onto a data structure whose whole appeal was that it was the general case. Whether jump-forward decoding comes back, or whether the interface is deleted and the paper's most-cited trick becomes a historical note. And whether the default schedule policy ever becomes `lpm`, because a cache-aware scheduler that is off by default and switches itself off under load is a feature only in the changelog.
+
+None of that is a criticism of the engineering. It is the honest cost of having picked a strong abstraction early and then discovering, one file at a time, where it does not hold — the same story the attention-backend directory tells in the other engine.
+
+The thing I would keep is the smaller observation. SGLang's cache is shaped like its language: a tree, because programs fork. Then speculative decoding arrived and turned out to need a tree too, for a completely unrelated reason, and the two trees do not compose without physically moving KV around and rewriting the cache key as bigrams. That the language went out of fashion and the tree stayed is a decent argument that the tree was the better idea all along; that everything now has to be taught about it is the bill.

@@ -1,0 +1,180 @@
+---
+title: "Qwen3.8-Flash-Next: four changes and an honest report"
+description: "125B parameters plus 51B of N-gram embeddings, 6B active, trained for about a ninth of what its predecessor cost. Three of every four layers are Gated DeltaNet; the fourth uses a sparse attention that indexes micro-blocks rather than tokens. But the reason to read this release is the technical report, which keeps finding places where training loss and downstream accuracy point in different directions — and says so."
+date: 2026-08-26
+interest: 5
+helpful: 5
+featured: true
+tags:
+  - qwen
+  - moe
+  - linear-attention
+  - sparse-attention
+  - long-context
+  - open-weights
+---
+
+import { HybridAblation } from "@/components/articles/qwen3-8-flash-next/hybrid-ablation"
+import { QsaIndexer } from "@/components/articles/qwen3-8-flash-next/qsa-indexer"
+import { GatedResidual } from "@/components/articles/qwen3-8-flash-next/gated-residual"
+import { NgramScaling } from "@/components/articles/qwen3-8-flash-next/ngram-scaling"
+
+Most model releases give you a benchmark table and an architecture diagram, and the diagram is a picture of a decision whose justification you have to take on faith. [Qwen3.8-Flash-Next](https://qwen.ai/blog?id=qwen3.8-flash-next) comes with a [28-page technical report](https://github.com/QwenLM/Qwen3.8-Flash-Next/blob/main/tech_report.pdf) whose ablation tables are properly controlled, and which repeatedly reports that the thing they optimised and the thing they wanted did not move together.
+
+That is the interesting part. The architecture is four changes — attention, residual, embedding, optimiser — and each one comes with the experiment that chose it, including the ones that came out ambiguous.
+
+| | |
+|---|---|
+| Weights | `Qwen/Qwen3.8-Flash-Next` · `Qwen4ExpForConditionalGeneration` — an early preview of the **Qwen4** architecture |
+| Size | **125B** backbone + **51B** N-gram embeddings · **6B** active per token · 48 layers · hidden 2,560 |
+| Attention | **36 GDN** + **12 QSA** layers, three to one (`full_attention_interval: 4`) |
+| Experts | **512** routed, **10** active, 1 shared · `moe_intermediate_size` 640 |
+| Context | **262,144** native · 1M with YaRN |
+| Residual | **Gated Residual** — 4 branches (`hc_count: 4`), low-rank 320 |
+| Embedding | trigram lookup (`ngram_size: 3`), base vocabulary 20M, at **layer 2** only |
+| Speed | QSA kernel **7.6× prefill / 4.9× decode** at 1M · **8.6×** prefill throughput vs Qwen3.7-Plus at 1M with 90% cache hits |
+| Training cost | about **1/9** of Qwen3.7-Plus |
+| Price | **$0.16** / M input · **$0.47** / M output as `Qwen3.8-Flash` |
+| Locally | [Unsloth GGUFs](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) · smallest is **75 GB**, BF16 is 355 GB |
+
+<Figure
+  src="/articles/qwen3-8-flash-next/fig1.png"
+  alt="The Qwen3.8-Flash-Next architecture. Input tokens feed a vocabulary embedding and an N-gram embedding layer marked 'Layer 2 only'. The stack alternates three GDN layers with one QSA layer, repeated L over 4 times. Each layer is expanded: a four-slot expanded residual feeds GR Read into either Gated DeltaNet or Qwen Sparse Attention, then GR Write back into the residual, then GR Read into a MoE block and GR Write again. MTP modules and a prediction head sit at the top."
+  caption="Every number in this diagram is checkable against config.json: four residual slots, one QSA layer in every four, the N-gram table at layer 2, one MTP module. (Qwen, Qwen3.8-Flash-Next announcement.)"
+/>
+
+## 1 — Attention: remember cheaply, retrieve precisely
+
+Three of every four layers are **Gated DeltaNet**, which compresses the prefix into a fixed-size recurrent state rather than a growing cache. The fourth is global attention, because a finite state cannot reproduce exact token-level retrieval no matter how well it is gated.
+
+The delta rule is what makes GDN more than decayed averaging. At each step the layer estimates what value is already associated with the incoming key and writes back only the *residual error*, scaled by a write gate, after decaying the whole state. Repeated or similar keys therefore update an existing association instead of piling up outer products — an erase-and-write, not an append.
+
+<HybridAblation />
+
+Both comparisons in that control are worth having. Against a full-attention Transformer the hybrid wins eight of nine, which mostly tells you the hybrid is not a compromise. Against a **sliding-window** hybrid — the cheap way to get the same asymptotics — it wins seven of nine, and the split is diagnostic: MATH +8.50, MultiPL-E +5.55, MMMLU +3.50, while EvalPlus goes the other way by 2.41.
+
+A window forgets by position. A gated delta rule forgets by relevance. The benchmarks where that distinction pays are exactly the ones needing something from far back that a fixed 128-token window has already dropped.
+
+Two implementation notes from the report that are easy to skip and shouldn't be. GDN here uses a **bounded sigmoid output gate** rather than the SiLU of the original formulation, which they say improved things consistently — the same preference for bounded gates recurs in the residual work below. And on positional encoding: RoPE and NoPE looked equivalent during pre-training, but the NoPE variant showed "a substantially higher rate of endless generation *after post-training*." A choice that looks free on the pre-training curve and costs you termination behaviour later is the kind of finding that only comes from having shipped.
+
+### QSA: the selector is the cost
+
+<Figure
+  src="/articles/qwen3-8-flash-next/fig2.png"
+  alt="An overview diagram of Qwen Sparse Attention showing a sequence compressed into micro-blocks, a lightweight indexer scoring block-level importance, selection of the most relevant regions, and sparse attention over the selected blocks."
+  caption="QSA compresses before it indexes. The saving is not only in the attention — it is in the scan that decides what to attend to. (Qwen, Qwen3.8-Flash-Next announcement.)"
+/>
+
+The global-attention layers use **Qwen Sparse Attention**. The observation behind it: sparse attention fixes the number of positions read, so the attention itself goes flat in context — but the indexer that chooses those positions still scores the query against everything, and at a million tokens the choosing costs more than the reading.
+
+QSA aggregates the sequence into micro-blocks first, estimates importance per block, then selects regions. `indexer_compress_ratio: 4` in the config, with a budget of 2,048. Both the scan and the indexer's own cache shrink fourfold.
+
+One design decision deserves the emphasis the report gives it. Some approaches share indices *across layers* to amortise the selector. Qwen deliberately do not, and the reason is specific to this architecture: in a hybrid where GDN and attention layers alternate, there is much less cross-layer attention similarity to exploit, so a shared index would be built on an assumption the stack violates.
+
+<QsaIndexer />
+
+The measured quality is more interesting than the speedup. On 8-needle MRCR, QSA is **behind** full attention at 128K and 256K — by 1.16 and 1.20 — and then **ahead by 9.87 at 512K and 5.73 at 1M**. A compressed index does lose information, and at moderate lengths that shows up as a small loss. What it buys is that the surviving signal keeps working at lengths where full attention's own scores go soft.
+
+That crossover is worth stating plainly because the announcement doesn't: if your workload lives at 128K, QSA is a small accuracy cost for a large speed gain, not a free win. Past 256K it is both.
+
+<Figure
+  src="/articles/qwen3-8-flash-next/fig3.png"
+  alt="A bar chart of relative prefill throughput at a 90% prefix cache hit rate, showing Qwen3.8-Flash-Next reaching about 8.6 times the throughput of Qwen3.7-Plus at a 1M-token context length."
+  caption="8.6× the prefill throughput of Qwen3.7-Plus at 1M tokens, in a setup with 90% prefix-cache hits. The cache-hit assumption is doing real work in that number and is stated up front. (Qwen, Qwen3.8-Flash-Next announcement.)"
+/>
+
+## 2 — Residual: four lanes instead of one
+
+In a standard Transformer every layer reads from and writes to the same residual stream, so early features get progressively diluted by everything written after them. **Gated Residual** widens that stream into four parallel branches and gates the reads and writes.
+
+<GatedResidual />
+
+The ladder in that control is the report at its best, and its own summary of it is the line I would keep from the whole document: *this is one of several places in this report where loss and downstream accuracy do not move together.*
+
+By training loss, widening the stream is essentially the entire result — 0.021 of 0.027 — and making the gates data-dependent adds 0.002, which reads as noise. By benchmark average the ordering inverts: the data-dependent step is worth **1.98 points** against **1.58** for the widening. A team watching the loss curve during the run would have concluded the second change did nothing.
+
+The empirical note attached to it is lovely: one of the four branches reliably becomes a long-range pathway connecting the first attention layer to most of the middle and later layers. Nobody designed that; the gates found it.
+
+And then the disagreement. GR is hyper-connections with the **branch-mixing operator deleted** — the ablation says removing it costs nothing while removing memory traffic and a source of instability. That operator is precisely what [GLM-5.3-Flash](/articles/glm-5-3-flash) keeps, constrained to a doubly-stochastic manifold with twenty Sinkhorn iterations, in a model that shipped the same week. Same idea, four branches each, opposite conclusions about the one operator, and no head-to-head anywhere. Worth knowing that the question is open rather than settled.
+
+Two practical consequences of the gating that the report flags: it suppresses activation outliers, and the residual state can be held in **FP8**, which matters when you are carrying four of them.
+
+## 3 — Embedding: 51B of parameters that cost almost no compute
+
+**N-gram embedding** looks up a table using the current token and the two before it — `ngram_size: 3` — rather than the current token alone. The appeal is arithmetic: lookups are deterministic and known in advance, so the table can live in host memory and be prefetched in parallel with computation, adding enormous capacity for almost no per-token FLOPs. Qwen add **51B** of it and place it at **layer 2**, so the prefetch overlaps layer 1.
+
+<NgramScaling />
+
+Now the honest part, which the report does not bury. Scaled with additional parameters, loss falls monotonically from 1.585 to 1.526 across the whole range from none to 200×. Downstream does not follow: MATH peaks at 20× and gives back two of its five points; GSM8K the same; BBH peaks at 50×; MMLU-Pro and MMMLU at 100×. The only group that tracks the loss curve to the end is **Chinese** — C-Eval 66.91 → 74.94, CMMLU 68.10 → 73.24 — which is a coherent result rather than a fluke, since a trigram table is a memory for frequent local character patterns and should help most where the tokenizer is under most pressure.
+
+There is a second study, under a *fixed* parameter budget with experts traded away to pay for the embeddings, and it is even more candid: loss is best at 10×, that optimum "is not evident in other evaluations", out-of-domain perplexity barely moves, and downstream shows "no clear improvement over the MoE-only baseline." Their conclusion is that N-gram embeddings and MoE experts play distinct roles — which is a fair reading, and also an admission that swapping one for the other did not pay. The paragraph after it lists parameter-efficiency tricks they tried (token normalisation, non-uniform allocation across N-gram orders, frequency-based partitioning) and reports **no consistent gains** from any of them.
+
+So: 51B is defensible on loss and on Chinese. That it beats spending the same parameters on more experts is, by their own evidence, not demonstrated.
+
+## 4 — Optimisation: Muon, split carefully
+
+The model is trained with **Muon**, with three refinements the report is specific about. Muon is applied to parameters that genuinely act as two-dimensional linear maps — attention, GDN and expert weights — while embeddings, the MoE router and GR's low-rank parameters stay on AdamW. Fused matrices are **split back into their independent linear transformations before orthogonalisation**: QKV, SwiGLU and the GDN projections are stored fused for speed, and orthogonalising the fused block would be orthogonalising a matrix that does not correspond to any single map.
+
+With the scaling law refitted for the new architecture and optimiser, the model tolerates larger learning rates and batch sizes. The finding I liked most is a negative one: **batch-size warmup turned out to be unnecessary**, and ramping up from a small batch cost **18.8% more optimizer steps** for no better final result. That is a widely-followed practice reported as pure overhead, with a number attached.
+
+## Where it lands
+
+The headline claim is the cost ratio: Qwen3.8-Flash-Next trains for about **one ninth** of what Qwen3.7-Plus did — a 397B model with 17B active — and beats it nearly everywhere. On the published language table it leads DeepSWE 1.1 (58.7), SWE-bench Pro (62.5), SWE-bench Multilingual (81.0), CoWorkBench (73.9), JobBench (55.7 against Qwen3.7-Plus's 27.6), Toolathlon (73.5), IFBench (81.3), GPQA Diamond (91.7) and LiveCodeBench v6 (91.9).
+
+Two rows go the other way and both are worth noting. **NL2Repo-Bench** is 48.1 against DeepSeek-V4-Flash's 54.2 — repo-scale generation again, the same benchmark [GLM-5.3-Flash](/articles/glm-5-3-flash) loses badly. And **HLE** is 35.9 against Claude Opus 4.6's 40.0, the one place the frontier model is clearly still ahead.
+
+On vision the story is cleaner: it leads its own 27B sibling and Qwen3.7-Plus on every listed row, and beats Opus 4.6 comfortably on AndroidWorld (84.5 vs 62.0), ERQA (72.3 vs 40.8), LVBench (76.6 vs 63.0) and RealWorldQA (88.5 vs 73.9). OSWorld 2.0 binary at 19.4 is a reminder of where computer-use actually is: partial credit 52.3, full task completion under one in five.
+
+The base-model table is the quiet confirmation. At 6B active against Qwen3.7-Plus's 17B, it wins MMLU-Pro (73.23 vs 70.90), SuperGPQA (51.36 vs 48.42) and BBH (90.87 vs 89.41), and loses MMLU, MMLU-Redux, GPQA and MATH by small margins. Competitive at roughly a third of the activated compute is the architecture's actual claim, and the base numbers support it better than the instruct ones do.
+
+## Running it locally
+
+This is where the architecture produces a genuinely unusual deployment story. Because so much of the model is either sparsely-activated experts or a deterministically-addressed lookup table, **it runs on system RAM far better than a dense model would** — Unsloth's guidance is that CPU-with-RAM versus GPU-with-VRAM "may make relatively little difference", which makes large-unified-memory machines (Macs, DGX Spark) unusually good targets.
+
+The [GGUF quants](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) span **75 GB to 355 GB**, and the small end has a wrinkle worth understanding: the 1-bit build is **75 GB**, which is large for 1-bit, because the N-gram and per-layer embedding tables are **not quantized below 4-bit**. Their access pattern is random, and quantizing them hard damages the model disproportionately. The result is a quant that is less aggressive than its name suggests — 79% smaller than BF16 while retaining a reported 80% top-1 accuracy. You can also push the N-gram table to SSD and `mmap` it, which is exactly the property the architecture was designed around.
+
+```bash
+unsloth run --model unsloth/Qwen3.8-Flash-Next-GGUF:UD-Q4_K_XL
+```
+
+Sampling differs by mode and it matters: thinking mode wants `temperature=1.0, top_p=0.95, top_k=20, presence_penalty=0.0`; instruct mode wants `temperature=0.7, top_p=0.80, top_k=20, presence_penalty=1.5`. Reasoning effort is set through the chat template — `--chat-template-kwargs '{"reasoning_effort":"medium"}'`. At time of writing it needs a specific [llama.cpp PR](https://github.com/ggml-org/llama.cpp/pull/27742) rather than mainline.
+
+## Day zero in SGLang, where the claims get tested
+
+The architecture section above is a set of promises about cost. [LMSYS shipped day-0 support in SGLang](https://www.lmsys.org/blog/2026-08-26-qwen-flash-next) and, in doing so, published the numbers that say whether those promises hold when someone else has to implement them. It is the best companion piece to the technical report, because a serving team has no incentive to flatter an architecture they now have to make fast.
+
+**The N-gram claim survives contact, decisively.** The whole argument for a 51B lookup table was that its access pattern is sparse and deterministic, so it need not live on the accelerator. SGLang tested exactly that: each token touches only **16 rows**, so they keep each rank's vocabulary-parallel shard in *pinned host memory* and gather the selected rows into a small BF16 GPU buffer with a Triton UVA kernel, on a dedicated CUDA stream that overlaps the first decoder block. On H200 at TP4:
+
+| | before | after |
+|---|---|---|
+| Target-model weights per GPU | 83.91 GiB | **60.45 GiB** (−23.46) |
+| Allocated KV capacity | 1.84M tokens | **3.28M tokens** (+78.54%) |
+| Matched throughput | — | **−0.07%** (geometric mean) |
+
+Twenty-three gigabytes off the GPU, seventy-eight percent more KV budget, and throughput unchanged to within a rounding error. They also verified that four fixed prompts produced **exactly matching output IDs**, and that the chosen-token logprob trace matched exactly — so this is a pure storage relocation, not an approximation. That is the single most convincing piece of evidence in either document that the N-gram design is sound, and it comes from the people who had to make it work rather than the people who proposed it.
+
+**The Gated Residual costs real kernel engineering.** Four residual streams mean every block does a Mix to read and a Combine to write, and those are new operators nobody had tuned. Built with NVIDIA and shipped through FlashInfer, the fused single-GEMM path takes Mix from **12.36 µs to 6.03 µs** at `M = 4` on B300 — a 2.05× kernel speedup worth **+7.6%** end to end — and Combine from **4.17 µs to 2.13 µs**, 1.96×, worth **+5.49%**. At large `M` the fused Combine is up to **2.54×** faster than the cuBLAS baseline at 6,144 GB/s effective bandwidth.
+
+Read that as a cost, not just a win. A widened residual stream is nearly free in FLOPs and distinctly not free in memory traffic and kernel work, and the model only performs as advertised once someone has written the fused path. The report says the branch-mixing operator was dropped partly to reduce memory access; these numbers are what that sentence looks like in practice.
+
+**QSA's indexer gets special handling in speculative decoding.** SGLang found that the draft model was re-running the indexer on every MTP step, and eliminated it: each iteration opens with a draft-extend over the tokens the target just accepted, that pass runs the indexer anyway, and its last accepted row is captured and reused across the whole draft loop, with `N + 1` extra columns filled in at lookup so the draft still sees its own in-flight tokens. Because the query has moved by at most `N` positions out of `L`, the reused ranking is essentially what a recomputation would have produced — and they report **accept length unchanged**. Draft indexer work per iteration drops from `N` invocations to one.
+
+The headline serving number: at TP4 on B200, the NVFP4 checkpoint decodes at **540 tok/s at batch size 1** with MTP, at an accept length of 3.3 including the bonus token.
+
+## The family around it
+
+Flash-Next is a preview of the Qwen4 architecture, not the whole 3.8 line, and the dense siblings are where most derivative work is landing. One worth noting for how carefully it is documented: [`Jiunsong/SuperQwen3.8-27b-abliterated`](https://huggingface.co/Jiunsong/SuperQwen3.8-27b-abliterated), built on **Qwen3.8-27B** — the dense model, not this one — with a rank-4 refusal-subspace edit applied to 100 tensors (output projections in layers 15–63, plus embeddings and `lm_head`).
+
+Abliteration releases are usually a set of adjectives and a download link. This one ships receipts: the parent revision pinned to a commit hash, refusal measured at **30/32 → 0/32 with zero empty outputs**, a paired capability floor of 7/8, tool use and vision both passing, and — the part that matters technically — **333 vision tensors and 15 MTP tensors verified byte-exact**, with 100 declared tensors changed and zero unexpected ones. It also fixes something upstream: the chat template defaulted unspecified reasoning effort to `xhigh`, and this release defaults to `medium` and adds a stop condition, tested across 36 effort/task combinations.
+
+Two honest notes. It is a 52 GB full-BF16 checkpoint measured at **4.34 tok/s** decode on a single DGX Spark — a useful reminder that dense 27B on that class of hardware is a very different proposition from the RAM-friendly sparse model this article is about. And a verified 262,043-token retrieval is an acceptance test, which the card says plainly: "not a claim of perfect recall on every task."
+
+## The ledger
+
+**Unusually well evidenced.** Four architectural changes, each with a controlled ablation at 25B–35B scale, same pipeline, one variable at a time. A GDN-versus-SWA comparison that isolates content-dependent memory from windowing. QSA quality measured across four length bands, including the bands where it loses. A residual ladder that reports loss and benchmarks separately *because they disagree*. An N-gram scaling study whose conclusion is mostly negative. A kernel library, [FlashQLA](https://github.com/QwenLM/FlashQLA), released alongside. Open weights, GGUFs on day zero, and a config that matches the diagram field for field. And independent corroboration from SGLang, whose host-offload result is bit-exact and costs 0.07% throughput — the strongest evidence anywhere that the N-gram table belongs off the accelerator.
+
+**Load-bearing assumptions.** The 8.6× prefill figure assumes a 90% prefix-cache hit rate — stated, but it is the difference between a headline and a benchmark. The 1/9 training cost is a ratio against their own previous model with no absolute figures. And the ablations run at 25B–35B while the shipped model is 125B+51B, so every architectural conclusion is an extrapolation across roughly a 4× scale gap.
+
+**Not shown.** That 51B of N-gram embedding beats 51B of additional experts — their own fixed-budget study says it doesn't clearly. Whether GR's deleted branch-mixing operator is genuinely free, since the lab shipping the competing answer the same week disagrees. And what any of this does to post-training behaviour beyond the endless-generation note, which is the one place they looked and found something.
+
+The thing worth taking from this release is not the model, good as it is. It is a technical report from a frontier lab that keeps saying *the metric we could watch and the metric we wanted diverged here* — three separate times, with tables — and then tells you which one it followed. That is rarer than a new attention variant, and considerably more useful.
