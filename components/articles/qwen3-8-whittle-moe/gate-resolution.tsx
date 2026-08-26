@@ -252,7 +252,7 @@ export function GateResolution() {
               const p = (100 * m.count) / n
               const ty = i % 2 === 0 ? 84 : 68
               const anchor = p < 12 ? "start" : p > 88 ? "end" : "middle"
-              const tx = p < 12 ? px(p) - 4 : p > 88 ? px(p) + 4 : px(p)
+              const tx = p < 12 ? px(p) + 4 : p > 88 ? px(p) - 4 : px(p)
               return (
                 <g key={m.count}>
                   <line

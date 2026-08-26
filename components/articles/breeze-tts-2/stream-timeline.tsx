@@ -39,7 +39,7 @@ const BLUE = "oklch(0.60 0.15 255)"
 const AMBER = "oklch(0.68 0.13 85)"
 const MUTED = "oklch(0.62 0.03 250)"
 
-type Stage = { key: string; label: string; sub: string; layers: number; colour: string }
+type Stage = { key: string; label: string; sub: string; layers: number; colour: string; batch?: boolean }
 
 export function StreamTimeline() {
   const [firstChunk, setFirstChunk] = useState(true)
@@ -54,32 +54,36 @@ export function StreamTimeline() {
     stages.push({
       key: "text",
       label: "Gemma-3-1B text encoder",
-      sub: `26 layers × ${encoderPasses}${cfg ? (fast ? ", batch 2" : ", run twice") : ""}`,
+      sub: `26 layers × ${encoderPasses}${cfg && !fast ? " (run twice)" : ""}`,
       layers: 26 * encoderPasses,
       colour: GREEN,
+      batch: cfg && fast,
     })
     stages.push({
       key: "prefill",
       label: "Qwen3 backbone prefill",
-      sub: `28 layers${cfg ? ", batch 2" : ""}`,
+      sub: "28 layers",
       layers: 28,
       colour: BLUE,
+      batch: cfg,
     })
   } else {
     stages.push({
       key: "decode",
       label: "Qwen3 backbone decode",
-      sub: `28 layers × ${chunkFrames} frame${chunkFrames > 1 ? "s" : ""}${cfg ? ", batch 2" : ""}`,
+      sub: `28 layers × ${chunkFrames} frame${chunkFrames > 1 ? "s" : ""}`,
       layers: 28 * chunkFrames,
       colour: BLUE,
+      batch: cfg,
     })
   }
   stages.push({
     key: "depth",
     label: "depth decoder",
-    sub: `15 steps × 12 layers${firstChunk ? "" : ` × ${chunkFrames}`}${cfg ? ", batch 2" : ""}`,
+    sub: `15 steps × 12 layers${firstChunk ? "" : ` × ${chunkFrames} frames`}`,
     layers: 180 * (firstChunk ? 1 : chunkFrames),
     colour: AMBER,
+    batch: cfg,
   })
   stages.push({
     key: "codec",
@@ -94,7 +98,7 @@ export function StreamTimeline() {
   const perSecond = 12.5 * (28 + 180) + 12.5 * 8 / chunkFrames
 
   const W = 700
-  const H = 202
+  const H = 166
   const trackX = 6
   const trackW = 600
   const trackY = 14
@@ -242,11 +246,11 @@ export function StreamTimeline() {
                 <tspan fill={b.colour} fillOpacity={0.95}>
                   {"■ "}
                 </tspan>
-                {`${b.label} — ${b.sub} = ${b.layers}`}
+                {`${b.label} — ${b.sub} = ${b.layers}${b.batch ? "   ·   batch 2 under CFG" : ""}`}
               </text>
             ))}
 
-            <line x1={0} y1={H - 42} x2={W} y2={H - 42} stroke="currentColor" strokeOpacity={0.1} />
+            <line x1={0} y1={H - 44} x2={W} y2={H - 44} stroke="currentColor" strokeOpacity={0.1} />
             <text x={0} y={H - 26} fontSize={8.5} fill="currentColor" fillOpacity={0.7} fontFamily="ui-monospace, monospace">
               {`steady state costs ${Math.round(perSecond)} serial layer evaluations per second of speech — ${chunkFrames === 1 ? "one" : "two"} codec ${chunkFrames === 1 ? "frame" : "frames"} per chunk`}
             </text>
