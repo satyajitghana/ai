@@ -1,0 +1,156 @@
+---
+title: "FlashAttention-3: the kernel is mostly a schedule"
+description: "FlashAttention-2 was an algorithm — tile the computation so the score matrix never reaches HBM. FlashAttention-3 is mostly not. It is a scheduling problem solved against one specific chip: split the warpgroups by job so the loader can hand its registers to the maths, stagger two consumer warpgroups so the tensor cores stop waiting on the exponential, and recompile the whole thing when someone asks for FP8. Read from the source, where the register constants land on exactly 65,536."
+date: 2026-08-26
+interest: 5
+helpful: 5
+tags:
+  - cuda
+  - attention
+  - kernels
+  - gpu
+  - inference
+---
+
+import { RegisterFile } from "@/components/articles/flash-attention-3/register-file"
+import { WarpPipeline } from "@/components/articles/flash-attention-3/warp-pipeline"
+import { Fp8Constraints } from "@/components/articles/flash-attention-3/fp8-constraints"
+
+FlashAttention-1 and 2 were algorithmic. The insight — tile the computation and keep a running softmax so the N×N score matrix never touches HBM — is a statement about arithmetic that would be true on any accelerator with a memory hierarchy. You can explain it on a whiteboard.
+
+[FlashAttention-3](https://tridao.me/publications/flash3/flash3.pdf) is not really that kind of result. The tiling is unchanged. What changed is that Hopper added hardware for asynchrony — a copy engine that runs independently of the SMs, warpgroup-wide matrix instructions, and an instruction that lets one warpgroup hand its registers to another — and FA3 is the work of rewriting attention as a *schedule* that keeps those units all busy at once. It is much less portable and much more interesting than it sounds.
+
+This is a read of [the `hopper/` directory](https://github.com/Dao-AILab/flash-attention/tree/main/hopper), where the tuning constants are visible and, once you multiply them out, unusually revealing.
+
+| | |
+|---|---|
+| What it is | the Hopper-specialised forward and backward attention kernels in `Dao-AILab/flash-attention` |
+| Requires | H100 / H800, **CUDA ≥ 12.3** (12.8 recommended), still labelled a **beta release** |
+| Precision | FP16 / BF16 forward **and** backward · **FP8 forward only** |
+| The three ideas | warp specialization · GEMM–softmax overlap ("pingpong") · block-quantized FP8 |
+| Hardware it leans on | **TMA** (async copy engine) · **WGMMA** (warpgroup MMA) · `setmaxnreg` |
+| Mainloop | `mainloop_fwd_sm90_tma_gmma_ws.hpp`, **1,717 lines** |
+| Tile schedulers | **five** — single, static persistent, dynamic persistent, varlen dynamic persistent, and a longest-processing-time one for the backward pass |
+| Successor | **FlashAttention-4**, written in CuTeDSL, targets Hopper *and* Blackwell — `pip install flash-attn-4` |
+
+## Why a schedule, and not an algorithm
+
+The arithmetic of attention has an awkward property: it is two matrix multiplications with a softmax wedged between them, and the softmax is not a matrix multiplication. On an H100 the tensor cores that execute WGMMA and the multi-function unit that evaluates the exponential are separate hardware. Within a single warp the dependency chain forces them to alternate — you cannot softmax scores that do not exist yet, and you cannot start the second GEMM without the probabilities.
+
+So a straightforward implementation leaves one of the two most expensive units in the machine idle essentially all the time. That is the problem FA3 is solving, and both of its headline techniques are answers to it.
+
+<WarpPipeline />
+
+Step through the three modes. The first is FA2's shape: one warpgroup, everything in order, one colour active at a time. The second adds a **producer** warpgroup that does nothing but issue TMA loads for the next tile — the memory pipeline stops being on the critical path. The third staggers **two consumer warpgroups** against a named barrier so that while one is in the softmax the other is in the GEMM.
+
+Nothing got faster. The units simply stopped taking turns.
+
+The barrier calls are literally named for it in the source — `warp_scheduler_barrier_sync()` and `warp_scheduler_barrier_arrive()` — and the predicate that turns them on is worth quoting because it is so nakedly empirical:
+
+```cpp
+// These are tuned for speed. They don't affect correctness.
+static constexpr bool UseSchedulerBarrier = (IntraWGOverlap
+    ? (NumMmaWarpGroups >= 2) && (!Is_FP8 ? kHeadDim <= 128 : kHeadDim >= 128)
+    : NumMmaWarpGroups == 2)
+    && !LargeHeadDimV;
+```
+
+Note the inversion. For FP16 the overlap pays off at head dimensions *at most* 128; for FP8, at *at least* 128. That is not a typo — FP8 roughly halves the GEMM time without halving the softmax time, so the imbalance the barrier is correcting for moves to the other side of the same threshold.
+
+## The register file, to the register
+
+Warp specialization is usually explained as latency hiding. There is a second reason for it that matters more, and it is visible in four constants.
+
+<RegisterFile />
+
+A thread's register allocation is normally uniform across a block, and registers are the binding constraint on an attention kernel — the output accumulator, the running softmax statistics and the operand fragments all live there, and a kernel that spills has already lost. Hopper's `setmaxnreg` lets a warpgroup return registers to the SM's pool so another can take more than its uniform share, which is only useful if warpgroups do different jobs.
+
+So FA3 gives the producer as little as possible and the consumers as much as possible:
+
+```cpp
+static constexpr uint32_t LoadRegisterRequirement =
+    NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 24 : 40) : 32);
+static constexpr uint32_t MmaRegisterRequirement =
+    NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 240 : 232) : 160);
+```
+
+Multiply those out against an SM's 65,536 registers and the tuning becomes obvious. Three MMA warpgroups: 128 × 32 + 384 × 160 = **exactly 65,536**. Two with TMA: 128 × 24 + 256 × 240 = **64,512**, which is 98.4%. These are not round numbers that happened to work; they are the largest allocations that fit.
+
+The TMA-versus-`cp.async` pair is the neatest illustration of the whole idea. With TMA the copy engine computes addresses in hardware, so the producer needs 24 registers. Without it the producer must compute its own, needs 40 — and the consumers give up 8 each to pay for the difference. The 240 in that line is a direct consequence of the 24.
+
+<Figure
+  src="/articles/flash-attention-3/fig1.png"
+  alt="A bar chart of FlashAttention-3 forward-pass speed on an H100 80GB SXM5 in FP16, comparing throughput in TFLOPs per second across head dimensions and sequence lengths against FlashAttention-2 and a cuDNN baseline."
+  caption="The published forward-pass numbers on H100 in FP16. The gains are largest where there is most to overlap. (Dao-AILab/flash-attention, assets/flash3_fp16_fwd.png.)"
+/>
+
+## FP8 is a different kernel
+
+The usual framing of low precision is a knob you turn. In this mainloop it is a recompilation.
+
+<Fp8Constraints />
+
+Three of the four differences in that control are static type switches or `static_assert`s rather than runtime branches, which is the technical way of saying an FP8 FlashAttention-3 and an FP16 one are different kernels that share a file.
+
+The one that catches people is the V transpose. WGMMA wants the second GEMM's operand K-major, and a row-major V is not:
+
+```cpp
+static constexpr bool Transpose_V = Is_FP8 && !V_colmajor;
+static constexpr GMMA::Major MmaMajorV =
+    !Is_FP8 && !V_colmajor ? GMMA::Major::MN : GMMA::Major::K;
+```
+
+So for FP8 the kernel physically transposes V in shared memory using `LDSM.T` and `STSM`, with a 64×32 or 32×64 block depending on whether `kHeadDimV` is a multiple of 64. For FP16 it does no transposing at all. And if you can hand it a column-major V, `V_colmajor` skips the whole thing — a real, rarely-mentioned reason to care how your KV cache is laid out.
+
+The quality story is in the descale pointers:
+
+```cpp
+float const* ptr_q_descale, *ptr_k_descale, *ptr_v_descale;
+StrideDescale const stride_q_descale, stride_k_descale, stride_v_descale;
+```
+
+Those strides are what make FP8 attention usable rather than merely fast. E4M3 carries about four bits of mantissa; a single scale for a whole tensor throws most of that away when heads differ in magnitude, which they reliably do. Having a stride means the scale varies per batch and per head. It is the least glamorous line in the file and it is doing most of the numerical work.
+
+There is also a constraint that propagates a long way upstream:
+
+```cpp
+static_assert(!(!MmaPV_is_RS && Is_FP8), "MmaPV must be RS if FP8");
+```
+
+The probabilities must be in *registers* when the second GEMM issues. That is not a preference the kernel can fall back from — it constrains how the softmax output is staged, which interacts with the register budget above, which interacts with how many warpgroups you can afford. The pieces are not independent.
+
+## Five schedulers
+
+The part of the repo that gets the least attention and does the most for real workloads is `tile_scheduler.hpp`, which contains five distinct scheduler classes:
+
+- `SingleTileScheduler` — one tile per block, no persistence
+- `StaticPersistentTileScheduler` — persistent blocks, compile-time work assignment
+- `DynamicPersistentTileScheduler` — persistent blocks pulling work from a counter
+- `VarlenDynamicPersistentTileScheduler` — the same, for ragged batches
+- `SingleTileBwdLPTScheduler` — longest-processing-time first, for the backward pass
+
+That last one is the tell. In the backward pass with causal masking, tiles have wildly different amounts of work — an early query tile attends to almost nothing, a late one to everything — so scheduling them in order leaves whole SMs idle at the tail. Longest-processing-time-first is a classic list-scheduling heuristic, and finding it inside an attention kernel is a good reminder that "make attention fast" is, past a certain point, a load-balancing problem rather than a numerical one.
+
+The varlen scheduler exists for the same reason at batch level: real serving traffic is ragged, and a scheduler that assumes uniform sequence lengths wastes the difference.
+
+## What is actually in the box
+
+Worth being precise, because the README's headline understates the surface area. The forward path supports variable-length batches, paged KV, GQA packing (`PackGQA`), split-KV with a separate combine kernel, attention softcapping, and appending to a KV cache in-place — the Python surface is `flash_attn_func`, `flash_attn_varlen_func`, `flash_attn_qkvpacked_func`, `flash_attn_with_kvcache`, `flash_attn_combine` and `get_scheduler_metadata`.
+
+That last one is a small thing worth noticing: the scheduler's metadata computation is exposed so a serving framework can compute it once and reuse it across steps rather than paying for it every call. It is the kind of API that only exists because somebody was profiling a real inference server.
+
+And the honest status line: FA3 is still labelled a **beta release** in the README — "for testing / benchmarking before we integrate that with the rest of the repo" — with FP8 forward only, no FP8 backward. It has been in that state for a while, which tells you something about how much of this is Hopper-specific work that does not generalise cleanly.
+
+## FlashAttention-4, and why the approach changed
+
+The same repo now ships **FlashAttention-4**, and the interesting thing about it is the implementation language: it is written in **CuTeDSL** rather than C++ templates, and targets Hopper *and* Blackwell.
+
+That is a direct response to the problem this article is about. FA3 is a schedule tuned against one chip, expressed as hundreds of `constexpr` predicates over head dimension, warpgroup count, data type and layout — which is why `UseSchedulerBarrier` looks the way it does. Every new architecture means rederiving those by hand. A DSL that can express the schedule and retarget it is the natural next move once you have written that predicate more than once.
+
+## The ledger
+
+**What FA3 actually contributes.** Not an algorithm — a demonstration that on hardware with independent async units, attention performance is dominated by whether those units are simultaneously busy, and that getting them there requires restructuring the kernel around *roles* rather than around the maths. Warp specialization, GEMM–softmax overlap, and an FP8 path with per-head scaling that keeps the numerics usable.
+
+**What it costs.** The register constants land on exactly 65,536 because someone tuned them to the boundary; they are correct for H100 and meaningless anywhere else. The scheduler barrier heuristic inverts by data type with no derivation offered beyond "tuned for speed". FP8 is a separate compilation with a `static_assert` that reaches into unrelated parts of the kernel. This is extremely good engineering and it is not portable, which is precisely why FA4 abandoned the expression medium.
+
+**Still open.** FP8 backward does not exist. The beta label has not come off. And the broader question the repo poses without answering: if every architecture generation needs its schedule rederived, the durable artifact is the DSL, not the kernel — which makes FA3 less a destination than the most carefully documented example of the problem.
