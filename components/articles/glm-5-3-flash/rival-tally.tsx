@@ -49,6 +49,12 @@ const ROWS: Row[] = [
   { name: "MMVU", cat: "vision", s: [80.5, null, 72.7, 67.4, 75.8, 82.3] },
 ]
 
+const CAT_COLOUR: Record<string, string> = {
+  agentic: "oklch(0.60 0.15 255)",
+  office: "oklch(0.68 0.13 85)",
+  vision: "oklch(0.55 0.10 300)",
+}
+
 const CATS = {
   agentic: "coding + agentic",
   office: "office + charts",
@@ -77,7 +83,9 @@ export function RivalTally() {
   const ROW_H = 18
   const H = ROWS.length * ROW_H + 14
   const MID = 430
-  const SCALE = 7.5
+  // widest negative delta is NL2Repo at -13.4; at 6 px/point that bar starts at
+  // MID-80, which clears the score column ending at MID-120
+  const SCALE = 6
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
@@ -138,7 +146,7 @@ export function RivalTally() {
               if (x.delta === null) {
                 return (
                   <g key={x.row.name}>
-                    <text x={4} y={y + 11} fontSize={8.5} fill="currentColor" fillOpacity={0.3} fontFamily="ui-monospace, monospace">
+                    <text x={14} y={y + 11} fontSize={8.5} fill="currentColor" fillOpacity={0.3} fontFamily="ui-monospace, monospace">
                       {x.row.name}
                     </text>
                     <text x={MID + 8} y={y + 11} fontSize={7.5} fill="currentColor" fillOpacity={0.3} fontFamily="ui-monospace, monospace">
@@ -153,13 +161,20 @@ export function RivalTally() {
               const w = x.row.rating ? 26 : Math.min(200, Math.abs(d) * SCALE)
               return (
                 <g key={x.row.name}>
-                  <text x={4} y={y + 11} fontSize={8.5} fill="currentColor" fillOpacity={0.85} fontFamily="ui-monospace, monospace">
+                  <text x={14} y={y + 11} fontSize={8.5} fill="currentColor" fillOpacity={0.85} fontFamily="ui-monospace, monospace">
                     {x.row.name}
                   </text>
-                  <text x={250} y={y + 11} fontSize={7} fill="currentColor" fillOpacity={0.38} fontFamily="ui-monospace, monospace">
-                    {CATS[x.row.cat]}
-                  </text>
-                  <text x={MID - 74} y={y + 11} fontSize={7.5} textAnchor="end" fill="currentColor" fillOpacity={0.55} fontFamily="ui-monospace, monospace">
+                  {/* a dot, not text: the category column collided with the scores */}
+                  <rect
+                    x={4}
+                    y={y + 4}
+                    width={5}
+                    height={5}
+                    rx={1}
+                    fill={CAT_COLOUR[x.row.cat]}
+                    fillOpacity={0.85}
+                  />
+                  <text x={MID - 120} y={y + 11} fontSize={7.5} textAnchor="end" fill="currentColor" fillOpacity={0.55} fontFamily="ui-monospace, monospace">
                     {x.mine} vs {x.theirs}
                   </text>
                   <rect
