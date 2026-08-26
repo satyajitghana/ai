@@ -34,23 +34,24 @@ import { cn } from "@/lib/utils"
 
 const OK = "oklch(0.55 0.16 155)"
 const BAD = "oklch(0.58 0.19 27)"
-const INK = "oklch(0.62 0.03 250)"
 
 const K = 16
 const BASE_LOGITS = Array.from({ length: K }, (_, j) => -j * 0.42 - (j % 3) * 0.11)
 
+// sharpness 0 scales every logit to zero, which is the exact-reconstruction point
 const PRESETS = [
-  ["uniform", 400],
-  ["mild", 120],
-  ["confident", 42],
-  ["peaked", 16],
+  ["indifferent", 0],
+  ["mild", 25],
+  ["confident", 50],
+  ["peaked", 85],
 ] as const
+const MAX_SHARP = 2.5
 
 export function ScaleFold() {
-  const [tau100, setTau100] = useState(120) // softmax temperature × 100
+  const [sharp, setSharp] = useState(25) // 0 = perfectly indifferent router
 
-  const tau = tau100 / 100
-  const ex = BASE_LOGITS.map((l) => mexp(l / tau))
+  const sc = (sharp / 100) * MAX_SHARP
+  const ex = BASE_LOGITS.map((l) => mexp(l * sc))
   const z = ex.reduce((a, b) => a + b, 0)
   const w = ex.map((v) => v / z)
   const coef = w.map((v) => K * v) // what each expert is actually multiplied by
@@ -58,7 +59,7 @@ export function ScaleFold() {
   const maxC = coef[0]
   const minC = coef[K - 1]
   const rms = Math.sqrt(coef.reduce((a, c) => a + (c - 1) * (c - 1), 0) / K)
-  const exact = rms < 0.005
+  const exact = sharp === 0
 
   const W = 700
   const X0 = 54
@@ -91,11 +92,11 @@ export function ScaleFold() {
             <button
               key={label}
               type="button"
-              onClick={() => setTau100(v)}
-              aria-pressed={tau100 === v}
+              onClick={() => setSharp(v)}
+              aria-pressed={sharp === v}
               className={cn(
                 "cursor-pointer rounded-full border px-2.5 py-1 font-mono text-[10px] transition-colors",
-                tau100 === v
+                sharp === v
                   ? "border-foreground/30 bg-muted/50 text-foreground"
                   : "border-border text-muted-foreground hover:text-foreground",
               )}
@@ -219,21 +220,21 @@ export function ScaleFold() {
             router softmax
           </span>
           <Range
-            min={16}
-            max={400}
-            step={2}
-            value={tau100}
-            onChange={(e) => setTau100(Number(e.target.value))}
+            min={0}
+            max={100}
+            step={1}
+            value={sharp}
+            onChange={(e) => setSharp(Number(e.target.value))}
             className="flex-1"
-            aria-label="router softmax temperature: high is flat and uniform, low is peaked and confident"
+            aria-label="how confident the router is: zero is perfectly indifferent, one hundred is sharply peaked on one expert"
             accent={exact ? OK : BAD}
           />
-          <span className="w-20 shrink-0 text-right font-mono text-[10px] tabular-nums text-foreground">
-            τ = {tau.toFixed(2)}
+          <span className="w-24 shrink-0 text-right font-mono text-[10px] tabular-nums text-foreground">
+            {sharp === 0 ? "indifferent" : `sharpness ${sharp}`}
           </span>
         </div>
         <div className="mt-1 font-mono text-[9px] text-muted-foreground">
-          drag left for a confident router, right for a flat one — the exact point is the far right
+          the far left is the only exact point, and it is a router that has decided nothing
         </div>
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">

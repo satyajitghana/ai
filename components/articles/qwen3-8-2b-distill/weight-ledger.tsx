@@ -194,7 +194,7 @@ export function WeightLedger() {
                           height={26}
                           fill={grp.color}
                           fillOpacity={on ? 0.92 : 0.3}
-                          stroke="var(--background, #fff)"
+                          stroke="var(--background)"
                           strokeWidth={0.6}
                         />
                         {w > 56 ? (

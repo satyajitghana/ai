@@ -57,7 +57,7 @@ export function RvqStack() {
   const paramsKept = keep * BINS * DIM
 
   const W = 700
-  const H = 258
+  const H = 236
   const left = 74
   const trackW = 598
   const colW = trackW / N

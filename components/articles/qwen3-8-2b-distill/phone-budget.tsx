@@ -75,7 +75,7 @@ const DEVICES = [
 
 const gb = (b: number) => `${(b / 1e9).toFixed(2)} GB`
 const mb = (b: number) => `${(b / 1e6).toFixed(0)} MB`
-const kt = (n: number) => (n >= 1000 ? `${(n / 1024).toFixed(0)}k` : String(n))
+const kt = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n))
 
 export function PhoneBudget() {
   const [qi, setQi] = useState(0)
@@ -112,7 +112,6 @@ export function PhoneBudget() {
   const scaleMax = Math.max(device.bytes, total)
   const px = (b: number) => (b / scaleMax) * SPAN
   const budgetX = PAD + px(budget)
-  const totalX = PAD + px(total)
 
   // the two labels that can collide: the budget marker and the total readout
   const budgetLabelEnd = budgetX > W - 190
@@ -226,6 +225,16 @@ export function PhoneBudget() {
             <text x={PAD} y={49} fontSize={8.5} fill="currentColor" fillOpacity={0.5} fontFamily="ui-monospace, monospace">
               what llama.cpp allocates
             </text>
+            <text
+              x={PAD + SPAN}
+              y={49}
+              fontSize={9}
+              textAnchor="end"
+              fill={fits ? REC : KV}
+              fontFamily="ui-monospace, monospace"
+            >
+              {gb(total)} total
+            </text>
             <rect x={PAD} y={54} width={SPAN} height={24} rx={4} fill="currentColor" fillOpacity={0.04} />
             {segs.reduce<{ x: number; nodes: React.ReactNode[] }>(
               (acc, s, i) => {
@@ -239,7 +248,7 @@ export function PhoneBudget() {
                     height={24}
                     fill={s.c}
                     fillOpacity={0.85}
-                    stroke="var(--background, #fff)"
+                    stroke="var(--background)"
                     strokeWidth={0.6}
                   />,
                 )
@@ -248,16 +257,6 @@ export function PhoneBudget() {
               },
               { x: PAD, nodes: [] },
             ).nodes}
-            <text
-              x={Math.min(totalX + 6, W - 4)}
-              y={70}
-              fontSize={9}
-              textAnchor={totalX > W - 90 ? "end" : "start"}
-              fill={fits ? REC : KV}
-              fontFamily="ui-monospace, monospace"
-            >
-              {gb(total)}
-            </text>
 
             {/* legend */}
             {[

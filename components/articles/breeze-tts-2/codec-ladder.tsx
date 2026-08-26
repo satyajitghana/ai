@@ -206,7 +206,8 @@ export function CodecLadder() {
           needs future frames imposes a floor on latency no amount of CUDA graphs can lift. Breeze&rsquo;s
           does not: <code>lane.py</code>{" "}rebuilds every convolution as a cached-left-context step,
           the transformer window looks only backwards over 72 frames (5.76 s of history), and the
-          whole per-stream state is under 12 MiB. The cost is that this rewrite is hand-maintained
+          whole per-stream state is under 12 MiB at the shipped chunk size. The cost is that this
+          rewrite is hand-maintained
           against a specific upstream tokenizer — <code>compat.py</code>{" "}reaches into{" "}
           <code>qwen_tts</code>{" "}for six internal modelling classes by name.
         </p>

@@ -208,7 +208,7 @@ export function TokenBudget() {
                 strokeWidth={0.9}
               />
             ))}
-            <text x={barX + barW} y={16} fontSize={9} textAnchor="end" fill={BLUE} fontFamily="ui-monospace, monospace">
+            <text x={barX + barW} y={33} fontSize={8} textAnchor="end" fill={BLUE} fillOpacity={0.8} fontFamily="ui-monospace, monospace">
               {hz} frames
             </text>
 

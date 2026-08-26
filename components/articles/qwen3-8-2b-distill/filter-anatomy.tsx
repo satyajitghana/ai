@@ -159,7 +159,7 @@ export function FilterAnatomy() {
       <span
         key={`m${i}`}
         className="rounded px-0.5 font-semibold"
-        style={{ color: col, boxShadow: `inset 0 -0.42em 0 ${col}22` }}
+        style={{ color: col, backgroundColor: `color-mix(in oklch, ${col} 15%, transparent)` }}
       >
         {s.text.slice(r.start, r.end)}
       </span>,
