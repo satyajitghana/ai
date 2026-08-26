@@ -1,7 +1,8 @@
 ---
 title: "vLLM: what PagedAttention turned into"
-description: "858,000 lines, 280 model architectures, 23 attention backends of which six do not compute attention, 17 speculative-decoding files three of which are named after individual models. vLLM is still described as 'PagedAttention and continuous batching', which stopped being true some time ago. A read of the v1 engine — the block pool, the content-addressed prefix cache, the null block, and the environment variable that exists because Python hashes strings differently in every process."
+description: "858,000 lines of Python, 280 model architectures, 23 attention backends of which six do not compute attention, and — new this year — a 110,000-line Rust workspace quietly replacing the serving frontend. vLLM is still described as 'PagedAttention and continuous batching', which stopped being true some time ago. A read of the v1 engine from the source: the block pool, why a prefix-cache hash has to chain its parent, the token budget that replaced the prefill/decode distinction, the swap path that got deleted, and the environment variable that exists because Python hashes strings differently in every process."
 date: 2026-08-26
+updated: 2026-08-26
 interest: 4
 helpful: 5
 tags:
@@ -14,24 +15,57 @@ tags:
 
 import { BlockLedger } from "@/components/articles/vllm/block-ledger"
 import { BackendSprawl } from "@/components/articles/vllm/backend-sprawl"
+import { KvArithmetic } from "@/components/articles/vllm/kv-arithmetic"
+import { HashChain } from "@/components/articles/vllm/hash-chain"
+import { StepBudget } from "@/components/articles/vllm/step-budget"
 
 The sentence everyone uses for vLLM is "PagedAttention and continuous batching." It was a good description in 2023. Today those are two ideas inside **858,189 lines of Python across 2,265 files**, and neither of them is where the work is.
 
-This is a read of the repo at `17da485`, and specifically of `vllm/v1/` — the rewritten engine that is now the engine. The interesting thing is not how much there is. It is *what* there is a lot of, and what that says about who is actually driving the design.
+This is a read of the repo at `17da485`, and specifically of `vllm/v1/` — the rewritten engine that is now the *only* engine. The interesting thing is not how much there is. It is *what* there is a lot of, and what that says about who is actually driving the design.
 
 | | |
 |---|---|
 | Scale | **2,265** Python files · **858,189** lines · Apache 2.0 |
+| The engine | `vllm/v1/` — **360** files, **149,937** lines |
+| V0 | deleted. `vllm/engine/llm_engine.py` is now **7 lines** aliasing the v1 class |
 | Model architectures | **280** files in `vllm/model_executor/models/` |
 | Attention backends | **23** in `vllm/v1/attention/backends/` — six of which are not attention |
 | Speculative decoding | **17** files in `vllm/v1/spec_decode/`, three named after specific models |
-| KV transfer connectors | **15**, including third-party systems (LMCache, Mooncake, hf3fs) |
+| KV transfer connectors | **19** entries, including third-party systems (LMCache, Mooncake, NIXL, hf3fs) |
+| Quantization | **30** method names in one `Literal`, two already deprecated |
+| Kernels | **251** CUDA/C++ files, **104,377** lines under `csrc/` |
+| New this year | `rust/` — **309** `.rs` files, **110,352** lines, **15** crates |
 | Block size | **16** tokens, content-addressed by **SHA-256** |
-| The engine | `v1/` — block pool, KV cache coordinator, scheduler, CUDA-graph dispatcher, fault tolerance |
+
+## The problem PagedAttention was actually solving
+
+The paper (arXiv 2309.06180) is usually remembered for the attention kernel. The kernel is the least interesting part. The argument is a memory-accounting one, and it is worth restating precisely because the whole design follows from it.
+
+A KV cache entry is per token, per layer, per KV head. If you allocate it as one contiguous run per request, you have to size that run before you know how long the answer will be — so you reserve the worst case. Everything you reserved and did not use is dead for the life of the request. The paper measured it:
+
+<Figure src="/articles/vllm/fig1.png" alt="Stacked bar chart of KV cache usage for four systems. Orca (Max) puts 20.4% into token states, 13.3% reservation, 57.3% internal fragmentation, 8.9% external. Orca (Pow2) reaches 26.8% token states, Orca (Oracle) 38.2%. vLLM reaches 96.3% token states with the remainder barely visible." caption="Of the KV cache region, the share actually holding live token state. The three left-hand bars are the same system with progressively better guesses at the output length (PagedAttention, Figure 2)." />
+
+Note what the middle bars are. "Orca (Oracle)" is the same allocator given the *true* output length in advance — a cheat no real server gets — and it still only reaches 38.2%. The waste is not a bad heuristic. It is the contiguity requirement.
+
+<KvArithmetic />
+
+The fix is the operating-systems one: fixed-size blocks and a table that maps a request's logical block *i* to some physical block anywhere in the pool.
+
+<Figure src="/articles/vllm/fig2.png" alt="Diagram showing a request's logical KV blocks on the left, a two-column block table in the middle mapping logical block numbers to physical block numbers and a filled count, and physical KV blocks scattered across GPU DRAM on the right, with arrows showing the non-contiguous mapping." caption="Logical blocks, a block table, and physical blocks that need not be adjacent or in order. Everything vLLM does with prefix sharing is a consequence of this indirection (PagedAttention, Figure 6)." />
+
+In the v1 worker that table is not a Python structure. `vllm/v1/worker/block_table.py` allocates a dense `int32` tensor of shape `[max_num_reqs, max_num_blocks_per_req]` plus an `int64` `slot_mapping` of length `max_num_batched_tokens`, both pinned and mirrored to the device. The block table is a tensor the kernel indexes, which is the only way this is cheap enough to redo every step.
+
+The block size is 16, and it has been 16 since the paper. `vllm/config/cache.py:79` still reads `DEFAULT_BLOCK_SIZE: ClassVar[int] = 16`, and the paper's own justification survives verbatim in §7.2: block sizes 16–128 tie on ShareGPT, larger sizes hurt on Alpaca because the sequences get shorter than the block, and "accordingly, vLLM sets its default block size as 16." Three years and one full rewrite later, nobody found a reason to move it.
+
+### Checking the 96.3%
+
+That figure is the paper's headline and it is the sort of number worth doing the arithmetic on. With 16-token blocks, the only waste vLLM has left is the tail of the last block — on average about 7.5 tokens per sequence. So utilisation should be $u = L/(L + 7.5)$ for an average sequence of $L$ tokens. Solve for $u = 0.963$ and you get $L \approx 195$ tokens, which is the right order for a ShareGPT/Alpaca mix. The number is arithmetic, not marketing, and it checks out.
+
+What it *isn't* is a statement about memory efficiency. It measures the share of the KV region holding live token state, at saturation. Two things make it a strange metric to carry into 2026. First, vLLM pre-allocates the whole pool at startup — `gpu_memory_utilization` defaults to 0.92 and the engine divides the profiled free memory by the per-block cost once (`kv_cache_utils.py:1362`), so under light load that pool sits mostly empty regardless. Second, prefix caching is now on by default, and a cached block with refcount zero holds KV that belongs to no running request. By the paper's accounting that is waste. In practice it is the single largest throughput win the engine has. The metric that motivated the design would now score its best feature as fragmentation.
 
 ## The block pool, and the two tricks in it
 
-Paged KV cache is the original idea and still the foundation: allocate the cache in fixed-size blocks so a request does not need one contiguous reservation sized for its worst case. What that indirection *became* is more interesting than what it was for.
+Paged KV cache is the original idea and still the foundation. What that indirection *became* is more interesting than what it was for.
 
 <BlockLedger />
 
@@ -47,7 +81,7 @@ def make_block_hash_with_group_id(block_hash, group_id):
 
 Two implementation details in `block_pool.py` are worth more than the concept.
 
-**Freed blocks keep their hash.** A block whose refcount hits zero goes back into `free_block_queue` — an eviction-ordered queue — while staying in `cached_block_hash_to_block`. So a cached prefix remains reusable right up until something else actually takes the memory. "Free" and "evicted" are different states, and conflating them is how naive implementations throw away cache they were still holding.
+**Freed blocks keep their hash.** A block whose refcount hits zero goes back into `free_block_queue` — an eviction-ordered queue — while staying in `cached_block_hash_to_block`. Eviction happens lazily, in `get_new_blocks`, at the moment something else actually takes the memory (`_maybe_evict_cached_block`). So a cached prefix remains reusable right up until it is overwritten. "Free" and "evicted" are different states, and conflating them is how naive implementations throw away cache they were still holding.
 
 **There is a null block.** At construction:
 
@@ -57,6 +91,53 @@ self.null_block.is_null = True
 ```
 
 A real block, deliberately burned, so that "this slot has no block" is an ordinary block id rather than a sentinel threaded through every kernel and index computation. The comment notes its refcount is not maintained and "needs special care." Spending 16 tokens of KV cache to delete a special case from the hot path is a good trade, and the kind of thing you only find by reading.
+
+Two more things in the queue itself, which is where the taste is. `FreeKVCacheBlockQueue` is a hand-rolled doubly linked list built out of `prev_free_block` / `next_free_block` fields on the blocks themselves, with fake head and tail nodes, and its docstring says why: it needs O(1) removal from the middle, and "this class does not allocate any Python objects when manipulating the linked list." Somebody profiled the allocator and found the garbage collector.
+
+And `free_blocks` sorts what it is given into two piles:
+
+```python
+if block.block_hash is None or not self.enable_caching:
+    # LIFO reuse of non-cached blocks for better GPU locality.
+    blocks_to_evict_first.append(block)
+else:
+    # FIFO reuse of cached blocks for LRU eviction behavior.
+    blocks_to_evict_last.append(block)
+```
+
+A block with no hash can never produce a cache hit, so it is worthless to keep and goes to the *front* of the free queue, LIFO, where it will be reused immediately and stay warm. A block with a hash goes to the back, FIFO, where it survives as long as possible. One queue, two policies, chosen per block by whether the block is capable of being useful later.
+
+The caller then hands blocks over in reverse: `free_blocks(reversed(pop_blocks_for_free(request_id)))`. The last block of a request is offered for eviction first, its parent last — which is exactly right, and the reason is the next section.
+
+## What a block hash actually is
+
+<HashChain />
+
+`hash_block_tokens` does not hash a block:
+
+```python
+def hash_block_tokens(hash_function, parent_block_hash, curr_block_token_ids, extra_keys):
+    if not parent_block_hash:
+        parent_block_hash = NONE_HASH
+    return BlockHash(hash_function((parent_block_hash, curr_block_token_ids_tuple, extra_keys)))
+```
+
+It hashes a triple, and `get_request_block_hasher` walks the request one window at a time carrying the result forward (`prev_block_hash_value = block_hash`). So a block hash identifies **a prefix ending at a boundary**, not sixteen tokens.
+
+The reason is the obvious one and worth stating anyway: KV is position-dependent and context-dependent. The same sixteen tokens after "you are a helpful assistant" and after "you are a pirate" have different K and V, and a content-only hash would happily serve one for the other with nothing downstream able to notice.
+
+The chaining also buys the optimisation that makes lookup cheap. From `single_type_kv_cache_manager.py:733`:
+
+```python
+# Phase 1: longest run of cached full blocks from the start. A missing
+# block implies every later block misses too (chained hashes).
+```
+
+That early exit is only sound *because* the hashes chain. It also explains the reversed free order above: since a child hash can only be hit through its parent, a surviving child whose parent has been evicted is unreachable memory. Evicting the tail first keeps the free list honest.
+
+`extra_keys` is where the multi-tenancy lives. LoRA ids, multimodal input hashes, and a per-request `cache_salt` are folded into the key, the salt only on the first block. Two tenants sending an identical prompt with different salts cannot read each other's cache — or time it.
+
+This is the exact point where vLLM and [SGLang](/articles/sglang) diverge. SGLang keeps a radix tree over token prefixes; vLLM keeps a flat hash map of chained block hashes. For matching a prefix the two are equivalent, and vLLM's is cheaper. The tree wins on **divergence**: when a request forks, SGLang splits one node and keeps one refcount, while vLLM's map has no notion of "below" a prefix and so cannot cascade an eviction up the trunk. vLLM's answer to forking is narrower and lives in `single_type_kv_cache_manager.py`: a partial prefix-cache hit redirects the shared tail block into a private **copy-on-write** block (`_apply_cow`), retaining both endpoints until the worker has run the copy. That handles a sequence that shares part of a block, not a conversation that forks five ways.
 
 ## The environment variable that shouldn't have to exist
 
@@ -78,28 +159,109 @@ Click through those four groups, because the shape is the whole argument.
 
 There are 23 files in `v1/attention/backends/`, and among them are `gdn_attn.py`, `linear_attn.py`, `mamba1_attn.py`, `mamba2_attn.py`, `short_conv_attn.py` and an `mla/` directory. None of those compute attention. They are gated delta networks, linear attention, two generations of Mamba, short convolutions, and latent-KV attention — and they live in the attention directory because from the engine's point of view the question is not "what is the maths" but "what state does this layer need me to hold, and how does it grow."
 
-That is a direct consequence of what shipped this year. A model like [GLM-5.3-Flash](/articles/glm-5-3-flash) has 34 linear layers and 11 sparse ones; [Qwen3.8-Flash-Next](/articles/qwen3-8-flash-next) has 36 gated-delta layers and 12 sparse ones. A serving engine now has to hold a growing KV cache for some layers of a model and a fixed-size recurrent state for others, **in the same forward pass**, and schedule memory for both. The `kv_cache_coordinator.py` and `single_type_kv_cache_manager.py` files in `v1/core/` exist for exactly that reason.
+That is a direct consequence of what shipped this year. A model like [GLM-5.3-Flash](/articles/glm-5-3-flash) has 34 linear layers and 11 sparse ones; [Qwen3.8-Flash-Next](/articles/qwen3-8-flash-next) has 36 gated-delta layers and 12 sparse ones. A serving engine now has to hold a growing KV cache for some layers of a model and a fixed-size recurrent state for others, **in the same forward pass**, and schedule memory for both. The `kv_cache_coordinator.py` (979 lines) and `single_type_kv_cache_manager.py` (1,972 lines) files in `v1/core/` exist for exactly that reason.
+
+The seams show in the block-size code. `resolve_kv_cache_block_sizes` has to compute *two* block sizes for a hybrid model — an LCM over the groups for the scheduler's token alignment, and a GCD for the granularity at which block hashes are taken — then backs off entirely if a Mamba group is not in `"align"` cache mode, because that breaks divisibility. There is a `prefix_match_unit` config knob whose whole job is to let a prefix hit land *inside* a 1024-token hybrid block. Paging assumed every layer wanted the same page size, and 2026 broke that assumption.
 
 The speculative-decoding directory tells the same story from a different angle. Seventeen files, including `ngram_proposer.py` *and* `ngram_proposer_gpu.py`, `eagle.py`, `medusa.py`, `suffix_decoding.py`, `draft_model.py` — and then `gemma4.py`, `step3p5.py`, `dflash.py`. Named after individual models. Speculative decoding stopped being a technique and became a per-architecture integration surface, because MTP heads now ship with the weights and every lab draws the draft path slightly differently.
 
 ## The scheduler, and what it has to balance now
 
-`v1/core/sched/` holds the scheduler, and reading it is a good cure for thinking continuous batching is simple. The state is three queues — `waiting`, `skipped_waiting` (requests deferred for async dependencies or constraints), and a `running` list — plus preemption bookkeeping (`reset_preempted_req_ids`), a `long_prefill_token_threshold` for chunking long prompts, and a separate multimodal encoder budget with its own cache size.
+`v1/core/sched/` holds the scheduler, and `scheduler.py` alone is 3,056 lines. The comment at the top of `schedule()` is the single most useful thing in the file:
 
-That last one is worth pausing on. A multimodal request needs vision-encoder compute *and* an encoder output cache, and neither is interchangeable with KV cache. So the scheduler is balancing at least three budgets — token slots, KV blocks, encoder capacity — against a queue whose items have wildly different costs. There is also an `async_scheduler.py`, because the obvious next move once your scheduler is this complex is to stop letting it block the model runner.
+```python
+# NOTE(woosuk) on the scheduling algorithm:
+# There's no "decoding phase" nor "prefill phase" in the scheduler.
+# Each request just has the num_computed_tokens and num_tokens_with_spec.
+```
+
+That is the V1 unification, and everything downstream is arithmetic on a budget.
+
+<StepBudget />
+
+The step is: take `token_budget = max_num_scheduled_tokens`, walk the `running` list first giving each request the tokens it needs to catch up (one, for a plain decode), then walk the waiting queue spending what is left. A queued prompt gets `min(num_tokens - num_computed_tokens, remaining_budget)`, capped further by `long_prefill_token_threshold` if it is set. Chunked prefill is not a mode; it is what happens when the subtraction runs out mid-prompt. `enable_chunked_prefill` defaults to `True` in v1, and turning it off restores the V0 behaviour where an oversized prompt hits a bare `break` and waits for a step with room for all of it.
+
+There are at least four budgets in flight, not one. `token_budget` and a separate `input_budget` (they differ by the slots reserved for speculative draft tokens), a KV-block budget enforced by `allocate_slots` returning `None`, and `encoder_compute_budget` with its own `encoder_cache_size` for multimodal requests — vision-encoder compute and encoder output cache are not interchangeable with KV cache, so they get their own accounting. The queue is three-way too: `waiting`, `skipped_waiting` for requests deferred on async dependencies like a pending remote KV load, and `running`.
+
+### Preemption, and the path that got deleted
+
+When `allocate_slots` cannot find blocks, the scheduler preempts. `_preempt_request` frees the request's blocks, sets `num_computed_tokens = 0`, and prepends it to the waiting queue. That is the whole recovery mechanism. Grep `vllm/v1/` for `swap_out` and there are no hits — the CPU-swap path the paper describes is gone.
+
+The paper measured why, and the answer is more interesting than "recompute is faster":
+
+<Figure src="/articles/vllm/fig3.png" alt="Line chart of recovery overhead in milliseconds against block size from 1 to 256. Recompute is flat at roughly 38 milliseconds. Swap in plus swap out starts near 137 milliseconds at block size 1 and falls to about 33 milliseconds at 256, crossing the recompute line just after block size 16." caption="Recovery overhead against block size. Swapping is bandwidth-bound and small blocks mean many small PCIe transfers; recompute is flat because it never touches the KV blocks. The lines cross a hair above vLLM's own default of 16 (PagedAttention, Figure 19a)." />
+
+Read off that figure at block size 16 — vLLM's default, chosen for unrelated reasons — recompute costs roughly 38 ms and swap-in-plus-out roughly 40 ms. It is a tie. So the engine did not delete swapping because recompute won; it deleted swapping because at its own operating point the two were indistinguishable and one of them was a whole second code path with a CPU-side allocator and a transfer schedule.
+
+The other half of the reason is prefix caching. Because freed blocks keep their hashes, a preempted request that comes back before its blocks are actually taken will hit its own prefix and recompute nothing. Being honest about it: the situation that caused the preemption is the pool being full, so those blocks are precisely the ones about to be handed out, and a preempted request should expect a real re-prefill more often than not. The cheap case is real, it is just not the common one.
+
+Also worth noting, because it is easy to miss: `if not preempted_reqs` gates the entire waiting-queue loop. A step that had to preempt admits nobody new. Preemption is treated as evidence that the machine is over-committed, not just as a local failure.
+
+## What the V1 rewrite actually was
+
+`vllm/engine/llm_engine.py` is seven lines:
+
+```python
+from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+
+LLMEngine = V1LLMEngine  # type: ignore
+```
+
+`vllm/core/` does not exist. The docs are blunt about the motive — "as new features were developed independently, the system grew increasingly complex… revealing the need for a more streamlined and unified design" — and about the goals: a hackable core, near-zero CPU overhead, features on by default rather than behind flags.
+
+The structural change is a process boundary. V1 splits the API server from the **EngineCore**, which owns the scheduler, the KV cache manager and the workers, and talks to the frontend over ZMQ with MessagePack. One API server process by default (scaling with data parallelism), one EngineCore per DP rank, one worker process per GPU. `docs/design/metrics.md` states the rule explicitly: *"EngineCore is the inner loop. Performance is most critical here. AsyncLLM is the outer loop… so this is where any overheads should be if possible."* Tokenization, detokenization, multimodal loading and metrics were moved out of the loop that dispatches forward passes.
+
+The busy loop itself is four lines, and `step()` is six:
+
+```python
+scheduler_output = self.scheduler.schedule(...)
+future = self.model_executor.execute_model(scheduler_output, non_block=True)
+grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+model_output = future.result()
+...
+engine_core_outputs = self.scheduler.update_from_output(scheduler_output, model_output)
+```
+
+### Checking "near-zero CPU overhead"
+
+The mechanism is `AsyncScheduler`, and it is a good trick: schedule step *n+1* before step *n*'s output exists, by tracking `num_output_placeholders` — a count of tokens the request is going to have, whose ids are not known yet — and filling `spec_token_ids` with a reusable list of `-1` placeholders. The scheduler stops waiting on the GPU.
+
+It is on by default. It is also disabled, silently, in six situations, all in `vllm/config/vllm.py:1276-1324` and `vllm/platforms/cpu.py:203`: pooling models, any speculative-decoding method outside EAGLE/MTP/draft-model/n-gram-GPU/DSpark, `disable_padded_drafter_batch`, executor backends that do not support it, ROCm DeepEP high-throughput DBO (where the combination "can corrupt DP+EP generation accuracy"), and the CPU platform unconditionally. Medusa and suffix decoding are in the repo and both fall outside the supported set. So the claim holds for the mainline path and quietly does not for several configurations people actually run — and the only way you find out is a `warning_once` in the log.
+
+## The frontend is being rewritten in Rust
+
+This is the thing I did not expect to find, and it is the largest recent structural change in the repo. `rust/` is a Cargo workspace of 15 crates, 309 `.rs` files and 110,352 lines, and it is a drop-in replacement for the Python serving frontend:
+
+```
+rust/src/server/               67 files   24,602 lines   OpenAI-compatible HTTP API (axum)
+rust/src/parser/               63 files   19,638 lines   tool-call and reasoning parsers
+rust/src/chat/                 52 files   19,330 lines   chat templates, structured events
+rust/src/engine-core-client/   36 files   12,512 lines   ZMQ + MessagePack to the engine
+rust/src/text/, tokenizer/     25 files    8,467 lines   tokenizer and incremental detokenizer
+```
+
+`VLLM_USE_RUST_FRONTEND=1 vllm serve …` and Python launches `vllm-rs` as a supervised worker, handing it the inherited listening socket. Default is off (`vllm/envs.py:164`), it is explicitly experimental and not feature-complete, and you can already find the seams — `mm_device_do_normalize` is force-disabled under the Rust frontend, with a warning.
+
+The reason this is possible at all is the V1 rewrite. The process boundary that was drawn in 2025 to keep Python off the critical path is the same boundary that now lets the entire northbound half be replaced in another language without touching the scheduler. That is the payoff of a rewrite showing up three years late, and it is a better argument for V1 than any throughput number.
+
+It also says something about where the remaining time goes. If the frontend — chat templating, tool-call parsing, detokenization, HTTP — is worth 110,000 lines of Rust, then per-request CPU work in Python was measurably eating GPU utilisation. That matches what [SGLang](/articles/sglang) found when it moved its radix tree into C++.
 
 ## Prefill and decode as separate machines
 
-`vllm/distributed/kv_transfer/kv_connector/v1/` has fifteen entries, and the notable thing is how many of them are other people's systems: `lmcache_connector.py` (plus a multiprocess variant and an integration directory), `mooncake/`, `moriio/`, `flexkv_connector.py`, `hf3fs/`, and a `multi_connector.py` for composing them.
+`vllm/distributed/kv_transfer/kv_connector/v1/` has nineteen entries, and the notable thing is how many of them are other people's systems: `lmcache_connector.py` (plus a multiprocess variant and an integration directory), `mooncake/`, `moriio/`, `nixl/`, `flexkv_connector.py`, `hf3fs/`, an `offloading/` tier, and a `multi_connector.py` for composing them.
 
-This is the substrate for disaggregated serving — running prefill and decode on different hardware, sized independently, with KV cache shipped between them. The architectural statement is in the plurality: vLLM did not ship one blessed KV transport, it shipped an interface and let LMCache, Mooncake and others plug in. That is what a project does when it has decided it is a platform.
+This is the substrate for disaggregated serving — running prefill and decode on different hardware, sized independently, with KV cache shipped between them. The architectural statement is in the plurality: vLLM did not ship one blessed KV transport, it shipped an interface and let LMCache, Mooncake, NIXL and others plug in. That is what a project does when it has decided it is a platform.
+
+The scheduler is aware of them, which is where it stops being a clean abstraction. `WAITING_FOR_REMOTE_KVS` is a request status; `skipped_waiting` exists partly to hold requests whose KV is still in flight; and `_preempt_request` takes a `drop_stale_output` flag specifically for "connectors with a pending KV hand-off, which the preemption's block free would leave without valid KV." Pluggable memory transports leak into the scheduling loop, because they have to.
 
 ## What I'd take from reading it
 
-**The good.** The v1 engine is a genuine rewrite and it shows — the block pool is clean, the free/evicted distinction is right, the null block is a real piece of taste. Content-addressed prefix caching with a documented, seedable hash is the correct design and the `PYTHONHASHSEED` handling shows someone got burned and fixed it properly. And the KV connector interface is an act of restraint by a project that could easily have shipped only its own.
+**The good.** The v1 engine is a genuine rewrite and it shows — the block pool is clean, the free/evicted distinction is right, the two-policy free queue and the null block are real pieces of taste. Content-addressed prefix caching with chained hashes and a documented, seedable hash function is the correct design, and the `PYTHONHASHSEED` handling shows someone got burned and fixed it properly. The unified token budget is the right abstraction: chunked prefill, prefix caching and speculative decoding all fall out of it instead of being three modes. And the KV connector interface is an act of restraint by a project that could easily have shipped only its own.
 
-**The cost.** 858,000 lines and 280 model files is not a codebase anyone holds in their head. Three speculative-decoding proposers named after individual models is a maintenance surface that grows with the field, not with the project's own ambitions. The same is true of the attention directory: every new architectural fashion is a new file someone has to keep working across 280 models and a dozen hardware backends.
+**The cost.** 858,000 lines and 280 model files is not a codebase anyone holds in their head. Three speculative-decoding proposers named after individual models is a maintenance surface that grows with the field, not with the project's own ambitions. The same is true of the attention directory: every new architectural fashion is a new file someone has to keep working across 280 models and a dozen hardware backends. And the defaults documentation is now the source — "async scheduling is on" is true until you read the six branches where it isn't.
 
-**The thing worth saying out loud.** vLLM's design is now substantially determined by other people's release schedules. `gdn_attn.py` exists because labs started shipping gated delta networks; `gemma4.py` in the spec-decode directory exists because Gemma 4 drafts differently. When people say the inference stack has become infrastructure, this is the concrete form of it — a codebase whose job is to absorb whatever the model builders decide next, fast enough that day-zero support is the expectation rather than an achievement.
+**The thing worth saying out loud.** vLLM's design is now substantially determined by other people's release schedules. `gdn_attn.py` exists because labs started shipping gated delta networks; `gemma4.py` in the spec-decode directory exists because Gemma 4 drafts differently; `prefix_match_unit` exists because a hybrid model's block size stopped being one number. When people say the inference stack has become infrastructure, this is the concrete form of it — a codebase whose job is to absorb whatever the model builders decide next, fast enough that day-zero support is the expectation rather than an achievement.
 
-Which makes the two ideas in the elevator pitch a strange thing to still be leading with. PagedAttention was 2023's problem. The 2026 problem is that no two models agree on what a layer is any more, and something has to serve all of them.
+**What I'd watch.** The Rust frontend. Not because rewriting an HTTP server is interesting, but because of what it implies: the engine boundary is now stable and load-bearing enough that half the system can be swapped out behind it. If `vllm-rs` becomes the default, the Python in vLLM will be the scheduler, the KV cache manager, and the model definitions — which is roughly the set of things that should have been Python all along.
+
+Which makes the two ideas in the elevator pitch a strange thing to still be leading with. PagedAttention was 2023's problem, and it was solved so thoroughly that the default block size hasn't moved in three years. The 2026 problem is that no two models agree on what a layer is any more, and something has to serve all of them.
