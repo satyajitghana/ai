@@ -82,7 +82,7 @@ export function ScaleFold() {
         >
           {exact
             ? "k·wⱼ = 1 for every expert — reconstruction exact"
-            : `loudest expert ×${maxC.toFixed(2)} · quietest ×${minC.toFixed(2)} · rms error ${(100 * rms).toFixed(0)}%`}
+            : `loudest expert ×${maxC.toFixed(2)} · quietest ×${minC.toFixed(2)} · coefficients ${(100 * rms).toFixed(0)}% off, rms`}
         </span>
       </div>
 
@@ -217,7 +217,7 @@ export function ScaleFold() {
 
         <div className="mt-2 flex items-center gap-2">
           <span className="w-24 shrink-0 whitespace-nowrap font-mono text-[10px] text-muted-foreground">
-            router softmax
+            router confidence
           </span>
           <Range
             min={0}
