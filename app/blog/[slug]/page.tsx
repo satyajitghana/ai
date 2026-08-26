@@ -55,7 +55,7 @@ export default async function Page({
       <JsonLd data={blogPostingJsonLd(post)} />
       <article>
         <header className="mb-10">
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between sm:gap-4">
             <h1 className="font-heading text-3xl font-bold tracking-tight text-balance">
               {post.title}
             </h1>

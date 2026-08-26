@@ -93,7 +93,7 @@ export default function Page() {
         <ul className="mt-4 space-y-5">
           {CHANNELS.map((c) => (
             <li key={c.label}>
-              <div className="flex items-baseline justify-between gap-4">
+              <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
                 <h3 className="font-mono text-sm text-foreground">{c.label}</h3>
                 <a
                   href={c.href}
