@@ -62,13 +62,26 @@ function markdownTarget(pathname: string): string | null {
   return null
 }
 
-// Paths the proxy must never answer itself: build output, static assets, and the
-// route namespaces that own their own 404 representations.
+// Next's file-based metadata (opengraph-image.tsx, icon.tsx, …) compiles to a
+// route handler that hangs off the segment it sits in — so the card for one
+// article lives at `/articles/<slug>/opengraph-image`, three segments deep and
+// with no file extension. Both of those make it look exactly like a path this
+// site does not serve, which is how every per-item share card came to be
+// answered with the markdown 404 instead of a PNG. Next appends a generated id
+// when a segment holds more than one such file, hence the optional suffix.
+const METADATA_ROUTE =
+  /^(opengraph-image|twitter-image|icon|apple-icon|manifest|sitemap|robots)(-[a-z0-9]+)?$/i
+
+// Paths the proxy must never answer itself: build output, static assets, the
+// route namespaces that own their own 404 representations, and the generated
+// metadata routes above.
 function isReserved(pathname: string): boolean {
   if (pathname.startsWith("/_next/")) return true
   if (pathname.startsWith("/api/")) return true
   if (pathname.startsWith("/md/")) return true
   if (pathname.startsWith("/.well-known/")) return true
+  const last = pathname.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean).at(-1)
+  if (last && METADATA_ROUTE.test(last)) return true
   // Anything with a file extension is a static asset or a machine-readable
   // document — including the `.md` twins, which next.config.ts rewrites.
   return /\.[a-z0-9]+$/i.test(pathname)
