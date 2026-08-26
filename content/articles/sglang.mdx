@@ -1,0 +1,106 @@
+---
+title: "SGLang: the tree, and the language nobody remembers"
+description: "1.3 million lines, 219 model architectures, and a KV cache that is a radix tree rather than a hash map — which matters exactly when a request diverges from a prefix instead of matching it. Read from the source: how lock_ref makes a prefix structurally un-evictable rather than merely recent, why eviction pops from a heap and cascades up the trunk, and what became of the frontend language the project is named after."
+date: 2026-08-26
+interest: 4
+helpful: 5
+tags:
+  - inference
+  - systems
+  - sglang
+  - serving
+  - open-source
+---
+
+import { RadixTree } from "@/components/articles/sglang/radix-tree"
+import { FrontendIr } from "@/components/articles/sglang/frontend-ir"
+
+The name is the giveaway and almost nobody uses it that way. **SGLang** — *structured generation language* — began as a language for writing LLM programs, with `gen`, `select`, `fork` and `join` as primitives, and the fast runtime existed to execute those programs well. Today it is deployed overwhelmingly as an OpenAI-compatible server, and the language is the part people have forgotten.
+
+Both halves are still in the repo, and the connection between them is the most interesting thing about it: **RadixAttention exists because of the language.** If your programs fork, the cache should be a tree.
+
+This is a read of the repo at `e27a7fa`.
+
+| | |
+|---|---|
+| Scale | **3,485** Python files · **1,324,609** lines · **219** model architectures |
+| The cache | a **radix tree** over token prefixes, not a hash map of blocks |
+| Eviction | priority **heap** (`heapq`), cascading up the trunk, with lock-based protection |
+| Frontend | `python/sglang/lang/` — `api.py`, `ir.py`, `interpreter.py`, `tracer.py` |
+| IR nodes | `SglGen`, `SglSelect`, `SglFork`, `SglGetForkItem`, `SglVariable`, `SglCommitLazy`, `SglSeparateReasoning` |
+| Cache variants | `radix_cache`, `radix_cache_cpp`, `swa_radix_cache`, `pure_swa_radix_cache`, `unified_radix_cache`, `chunk_cache` |
+
+## A tree, not a map
+
+The headline mechanism is RadixAttention: keep the KV cache indexed by a radix tree over token prefixes, so requests that share a prefix share the path through the tree.
+
+<RadixTree />
+
+The distinction from a hash-map prefix cache is narrower than the marketing suggests and shows up in one specific place: **divergence**. vLLM hashes fixed-size blocks and looks them up; a shared prefix is a run of separately-hashed blocks that happen to match. SGLang keeps it as one node with one refcount, and when a request diverges the tree **splits the node** at the divergence point. For a workload that forks a conversation five ways, the tree is the natural shape and the map is an approximation of it.
+
+The accounting in `radix_cache.py` is what turns that from a diagram into a cache. Each `TreeNode` carries `lock_ref`, `last_access_time` and `priority`, and:
+
+```python
+def inc_lock_ref(self, node: TreeNode):
+    if node.lock_ref == 0:
+        self.evictable_size_ -= len(node.key)
+        self.protected_size_ += len(node.key)
+```
+
+A prefix that an in-flight request still needs is moved out of the evictable pool entirely. It is not *recent*; it is **ineligible**. That distinction is the difference between a cache that occasionally evicts a prefix it is about to need again and one that structurally cannot.
+
+Eviction itself is not LRU either. It runs off a heap:
+
+```python
+heapq.heapify(eviction_heap)
+...
+if len(x.parent.children) == 0 and x.parent.lock_ref == 0:
+    heapq.heappush(eviction_heap, (new_priority, x.parent))
+```
+
+Priority-ordered rather than strictly least-recent, and **cascading**: when a leaf goes and leaves its parent childless and unlocked, the parent becomes an eviction candidate too. That is exactly right — an interior prefix is only worth keeping while something below it is — and it is the kind of behaviour a flat block map cannot express, because it has no notion of "below."
+
+There is also a `radix_cache_cpp.py` alongside a `cpp_radix_tree/` directory. The tree is hot enough on the scheduling path that a Python implementation became the bottleneck, which is a small but real signal about how much work the cache does per step.
+
+## The language, still there
+
+<FrontendIr />
+
+`python/sglang/lang/` is not vestigial. `api.py` exposes `gen`, `gen_int`, `gen_string`, `select`, `image`, `video` and the role helpers; `ir.py` defines the node types a traced program becomes — `SglGen`, `SglSelect`, `SglFork`, `SglGetForkItem`, `SglVariable`, `SglVarScopeBegin`/`End`, `SglConcateAndAppend`, `SglSeparateReasoning`; and `interpreter.py` and `tracer.py` run or trace them.
+
+The load-bearing node is `SglCommitLazy`. Because a program is an **IR** rather than a sequence of blocking HTTP calls, the runtime can defer, batch and schedule the generations. Four chat-completions calls are four independent requests that each re-send and re-prefill the shared prefix, and the server can only recover the waste afterwards by recognising it in the cache. A forked SGLang program *declares* the sharing, so the prefix is prefilled once by construction.
+
+Being fair about it: now that prefix caching is universal, most of that benefit is recoverable without the language. What the language still buys is programs with genuine control flow — forks and joins, constrained choice between named options, multi-turn state held across generations. For a single completion it buys nothing, which is presumably why most users never meet it.
+
+`SglSeparateReasoning` is a nice marker of when this was updated. It exists to split a reasoning trace from the answer — a primitive that would have made no sense when the project started.
+
+## What the cache directory says about 2026
+
+`python/sglang/srt/mem_cache/` is worth listing, because the file names are a record of what the last year did to inference:
+
+```
+radix_cache.py            swa_radix_cache.py        pure_swa_radix_cache.py
+radix_cache_cpp.py        unified_radix_cache.py    chunk_cache.py
+cpp_radix_tree/           evict_policy.py           allocation_sizing.py
+deepseek_v4_memory_pool.py  deepseek_v4_compress_state.py  dsa_cache_layer_split.py
+mamba_slot_fused.py       swa_memory_pool.py        memory_pool_host.py
+multi_ended_allocator.py  embedding_cache_controller.py   storage/  sparsity/
+```
+
+Four things in there are not general-purpose. `swa_radix_cache` and `pure_swa_radix_cache` exist for sliding-window attention, where a prefix match does not imply a reusable cache because old positions have fallen out of the window. `deepseek_v4_memory_pool.py`, `deepseek_v4_compress_state.py` and `dsa_cache_layer_split.py` are named after one model family. `mamba_slot_fused.py` is for recurrent state, which is not a KV cache at all.
+
+That is the same pressure I found in [vLLM](/articles/vllm): the models stopped being uniform stacks of full-attention layers, and the cache — the one component that assumed uniformity hardest — is where the bill arrives. A radix tree over *token prefixes* quietly assumes that matching tokens implies matching state. For a sliding window or a recurrent layer that is false, and you can watch the codebase discovering it one file at a time.
+
+## The overlap that pays for itself
+
+The other piece of engineering worth naming is that SGLang works hard to keep the CPU off the critical path. The scheduler has an overlap mode that runs CPU-side work for step *n+1* while the GPU is executing step *n*, and the C++ radix tree exists because the tree walk itself was showing up. In a serving loop that dispatches every few milliseconds, Python's interpreter overhead is a real term — and the fix is either to overlap it or to leave Python, and SGLang does both.
+
+## The ledger
+
+**What is genuinely distinctive.** The radix tree is not a marketing reskin of prefix caching: node splitting, cascading eviction up the trunk, and lock-based protection are all things a flat block map cannot express. The `lock_ref` design — moving a prefix out of the evictable pool rather than merely marking it recent — is the correct answer to a bug most caches have. And the frontend language is a real IR with a tracer, not a wrapper.
+
+**What is convergent.** Everything else. 219 model architectures, structured-output backends, EAGLE and MTP speculative decoding, disaggregated prefill/decode, quantization formats. SGLang and vLLM are solving the same problem with the same techniques and increasingly the same file names; the interesting differences are in the cache and the frontend, and nowhere else.
+
+**What I would watch.** Whether the tree survives contact with hybrid models. Six of the files in that cache directory exist because a prefix match no longer implies a reusable state, and each one is a special case bolted onto a data structure whose whole appeal was that it was the general case. That is not a criticism — it is the honest cost of having picked a strong abstraction early, and it is the same story the attention-backend directory tells in the other engine.
+
+The thing I would keep is the smaller observation. SGLang's cache is shaped like its language: a tree, because programs fork. That the language went out of fashion and the tree stayed is a decent argument that the tree was the better idea all along.

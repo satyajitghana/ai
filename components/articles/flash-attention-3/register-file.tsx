@@ -99,17 +99,15 @@ export function RegisterFile() {
             <rect x={10} y={20} width={Math.max(2, px(loadRegs))} height={30} rx={4} fill={LOAD} fillOpacity={0.8} />
             <rect x={10 + px(loadRegs)} y={20} width={Math.max(2, px(mmaRegs))} height={30} rx={4} fill={MMA} fillOpacity={0.8} />
 
-            <text x={14} y={14} fontSize={8.5} fill={LOAD} fontFamily="ui-monospace, monospace">
-              producer · 1 warpgroup × {c.load} regs = {loadRegs.toLocaleString()}
+            {/* the producer segment is under 5% of the bar, so anchoring these to
+                their own segments guarantees a collision — pin them to the ends */}
+            <text x={10} y={14} fontSize={8.5} fill={LOAD} fontFamily="ui-monospace, monospace">
+              producer · 128 × {c.load} = {loadRegs.toLocaleString()}
             </text>
-            <text x={10 + px(loadRegs) + 6} y={14} fontSize={8.5} fill={MMA} fontFamily="ui-monospace, monospace">
-              consumers · {mmaThreads} threads × {c.mma} = {mmaRegs.toLocaleString()}
+            <text x={10 + BAR} y={14} fontSize={8.5} textAnchor="end" fill={MMA} fontFamily="ui-monospace, monospace">
+              consumers · {mmaThreads} × {c.mma} = {mmaRegs.toLocaleString()}
+              {spare > 1200 ? `  ·  ${spare.toLocaleString()} idle` : ""}
             </text>
-            {spare > 1200 ? (
-              <text x={10 + BAR - 4} y={14} fontSize={8.5} textAnchor="end" fill={FREE} fontFamily="ui-monospace, monospace">
-                {spare.toLocaleString()} idle
-              </text>
-            ) : null}
 
             {/* the line a uniform allocation would sit at */}
             <line x1={10} y1={62} x2={10 + BAR} y2={62} stroke="currentColor" strokeOpacity={0.15} />

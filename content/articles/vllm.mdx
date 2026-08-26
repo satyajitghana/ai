@@ -1,0 +1,105 @@
+---
+title: "vLLM: what PagedAttention turned into"
+description: "858,000 lines, 280 model architectures, 23 attention backends of which six do not compute attention, 17 speculative-decoding files three of which are named after individual models. vLLM is still described as 'PagedAttention and continuous batching', which stopped being true some time ago. A read of the v1 engine — the block pool, the content-addressed prefix cache, the null block, and the environment variable that exists because Python hashes strings differently in every process."
+date: 2026-08-26
+interest: 4
+helpful: 5
+tags:
+  - inference
+  - systems
+  - vllm
+  - serving
+  - open-source
+---
+
+import { BlockLedger } from "@/components/articles/vllm/block-ledger"
+import { BackendSprawl } from "@/components/articles/vllm/backend-sprawl"
+
+The sentence everyone uses for vLLM is "PagedAttention and continuous batching." It was a good description in 2023. Today those are two ideas inside **858,189 lines of Python across 2,265 files**, and neither of them is where the work is.
+
+This is a read of the repo at `17da485`, and specifically of `vllm/v1/` — the rewritten engine that is now the engine. The interesting thing is not how much there is. It is *what* there is a lot of, and what that says about who is actually driving the design.
+
+| | |
+|---|---|
+| Scale | **2,265** Python files · **858,189** lines · Apache 2.0 |
+| Model architectures | **280** files in `vllm/model_executor/models/` |
+| Attention backends | **23** in `vllm/v1/attention/backends/` — six of which are not attention |
+| Speculative decoding | **17** files in `vllm/v1/spec_decode/`, three named after specific models |
+| KV transfer connectors | **15**, including third-party systems (LMCache, Mooncake, hf3fs) |
+| Block size | **16** tokens, content-addressed by **SHA-256** |
+| The engine | `v1/` — block pool, KV cache coordinator, scheduler, CUDA-graph dispatcher, fault tolerance |
+
+## The block pool, and the two tricks in it
+
+Paged KV cache is the original idea and still the foundation: allocate the cache in fixed-size blocks so a request does not need one contiguous reservation sized for its worst case. What that indirection *became* is more interesting than what it was for.
+
+<BlockLedger />
+
+Once blocks are fixed-size and addressed through a table, they can be **content-addressed**. `vllm/v1/core/kv_cache_utils.py` defines `BlockHash` as raw bytes — SHA-256 — and packs the KV-cache group id into a key:
+
+```python
+BlockHash = NewType("BlockHash", bytes)
+BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
+
+def make_block_hash_with_group_id(block_hash, group_id):
+    return BlockHashWithGroupId(block_hash + group_id.to_bytes(4, "big", signed=False))
+```
+
+Two implementation details in `block_pool.py` are worth more than the concept.
+
+**Freed blocks keep their hash.** A block whose refcount hits zero goes back into `free_block_queue` — an eviction-ordered queue — while staying in `cached_block_hash_to_block`. So a cached prefix remains reusable right up until something else actually takes the memory. "Free" and "evicted" are different states, and conflating them is how naive implementations throw away cache they were still holding.
+
+**There is a null block.** At construction:
+
+```python
+self.null_block = self.free_block_queue.popleft()
+self.null_block.is_null = True
+```
+
+A real block, deliberately burned, so that "this slot has no block" is an ordinary block id rather than a sentinel threaded through every kernel and index computation. The comment notes its refcount is not maintained and "needs special care." Spending 16 tokens of KV cache to delete a special case from the hot path is a good trade, and the kind of thing you only find by reading.
+
+## The environment variable that shouldn't have to exist
+
+My favourite thing in the repo is a constant:
+
+```python
+DEFAULT_NONE_HASH_SEED = "vllm-none-hash"
+```
+
+with a comment pointing at issue #12621 and logic that reads `PYTHONHASHSEED` if it is set, falling back to a fixed seed otherwise. `ExternalBlockHash` is documented as existing "for reproducible prefix-cache block hashing."
+
+The reason is that Python randomises string hashing per process by default, as a hash-flooding defence. That is fine until your prefix cache key has to mean the same thing in two workers — at which point a security feature becomes a correctness bug, and the fix is to pin the seed and document why. It is a small thing that tells you a great deal about the difference between a research prototype and a system people run across processes.
+
+## Six of the attention backends are not attention
+
+<BackendSprawl />
+
+Click through those four groups, because the shape is the whole argument.
+
+There are 23 files in `v1/attention/backends/`, and among them are `gdn_attn.py`, `linear_attn.py`, `mamba1_attn.py`, `mamba2_attn.py`, `short_conv_attn.py` and an `mla/` directory. None of those compute attention. They are gated delta networks, linear attention, two generations of Mamba, short convolutions, and latent-KV attention — and they live in the attention directory because from the engine's point of view the question is not "what is the maths" but "what state does this layer need me to hold, and how does it grow."
+
+That is a direct consequence of what shipped this year. A model like [GLM-5.3-Flash](/articles/glm-5-3-flash) has 34 linear layers and 11 sparse ones; [Qwen3.8-Flash-Next](/articles/qwen3-8-flash-next) has 36 gated-delta layers and 12 sparse ones. A serving engine now has to hold a growing KV cache for some layers of a model and a fixed-size recurrent state for others, **in the same forward pass**, and schedule memory for both. The `kv_cache_coordinator.py` and `single_type_kv_cache_manager.py` files in `v1/core/` exist for exactly that reason.
+
+The speculative-decoding directory tells the same story from a different angle. Seventeen files, including `ngram_proposer.py` *and* `ngram_proposer_gpu.py`, `eagle.py`, `medusa.py`, `suffix_decoding.py`, `draft_model.py` — and then `gemma4.py`, `step3p5.py`, `dflash.py`. Named after individual models. Speculative decoding stopped being a technique and became a per-architecture integration surface, because MTP heads now ship with the weights and every lab draws the draft path slightly differently.
+
+## The scheduler, and what it has to balance now
+
+`v1/core/sched/` holds the scheduler, and reading it is a good cure for thinking continuous batching is simple. The state is three queues — `waiting`, `skipped_waiting` (requests deferred for async dependencies or constraints), and a `running` list — plus preemption bookkeeping (`reset_preempted_req_ids`), a `long_prefill_token_threshold` for chunking long prompts, and a separate multimodal encoder budget with its own cache size.
+
+That last one is worth pausing on. A multimodal request needs vision-encoder compute *and* an encoder output cache, and neither is interchangeable with KV cache. So the scheduler is balancing at least three budgets — token slots, KV blocks, encoder capacity — against a queue whose items have wildly different costs. There is also an `async_scheduler.py`, because the obvious next move once your scheduler is this complex is to stop letting it block the model runner.
+
+## Prefill and decode as separate machines
+
+`vllm/distributed/kv_transfer/kv_connector/v1/` has fifteen entries, and the notable thing is how many of them are other people's systems: `lmcache_connector.py` (plus a multiprocess variant and an integration directory), `mooncake/`, `moriio/`, `flexkv_connector.py`, `hf3fs/`, and a `multi_connector.py` for composing them.
+
+This is the substrate for disaggregated serving — running prefill and decode on different hardware, sized independently, with KV cache shipped between them. The architectural statement is in the plurality: vLLM did not ship one blessed KV transport, it shipped an interface and let LMCache, Mooncake and others plug in. That is what a project does when it has decided it is a platform.
+
+## What I'd take from reading it
+
+**The good.** The v1 engine is a genuine rewrite and it shows — the block pool is clean, the free/evicted distinction is right, the null block is a real piece of taste. Content-addressed prefix caching with a documented, seedable hash is the correct design and the `PYTHONHASHSEED` handling shows someone got burned and fixed it properly. And the KV connector interface is an act of restraint by a project that could easily have shipped only its own.
+
+**The cost.** 858,000 lines and 280 model files is not a codebase anyone holds in their head. Three speculative-decoding proposers named after individual models is a maintenance surface that grows with the field, not with the project's own ambitions. The same is true of the attention directory: every new architectural fashion is a new file someone has to keep working across 280 models and a dozen hardware backends.
+
+**The thing worth saying out loud.** vLLM's design is now substantially determined by other people's release schedules. `gdn_attn.py` exists because labs started shipping gated delta networks; `gemma4.py` in the spec-decode directory exists because Gemma 4 drafts differently. When people say the inference stack has become infrastructure, this is the concrete form of it — a codebase whose job is to absorb whatever the model builders decide next, fast enough that day-zero support is the expectation rather than an achievement.
+
+Which makes the two ideas in the elevator pitch a strange thing to still be leading with. PagedAttention was 2023's problem. The 2026 problem is that no two models agree on what a layer is any more, and something has to serve all of them.
