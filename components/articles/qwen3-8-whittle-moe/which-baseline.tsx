@@ -45,7 +45,7 @@ const ROWS: Row[] = [
   {
     id: "w16",
     label: "Whittle-16B v1 heal",
-    sub: "16.8B, depth-pruned, same author",
+    sub: "16.8B, 44L cut + width prune",
     score: 36,
     colour: BLUE,
   },
