@@ -143,8 +143,8 @@ export function Fp8Constraints() {
 
         <p className="mt-4 text-sm leading-6 text-muted-foreground">
           The story told about low precision is that it is a knob. In this kernel it is a
-          recompilation: three of these four differences are static type switches or
-          <span className="font-mono text-[11px] text-foreground"> static_assert</span>s, so an FP8
+          recompilation: three of these four differences are static type switches or a bare
+          <span className="font-mono text-[11px] text-foreground"> static_assert</span>, so an FP8
           FlashAttention-3 and an FP16 one are not the same code with a different accumulator. They
           are different kernels that happen to share a file.
           <br />
