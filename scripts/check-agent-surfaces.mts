@@ -751,6 +751,68 @@ await check("no-JS · homepage headings nest", async () => {
   return `h1×${count("h1")} h2×${count("h2")} h3×${count("h3")}`
 })
 
+// ── 9. share cards and icons ─────────────────────────────────────────────────
+//
+// Next compiles file-based metadata (opengraph-image.tsx, icon.tsx) into route
+// handlers that hang off the segment they sit in, so an article's card lives at
+// `/articles/<slug>/opengraph-image` — three segments deep, no file extension.
+// That is indistinguishable from a path the site does not serve unless the
+// proxy is told otherwise, and when it was not, every per-item share card
+// returned the markdown 404 instead of a PNG. Nothing on the page changes when
+// this breaks; you find out when someone pastes a link into a chat and gets a
+// favicon.
+
+for (const path of [
+  "/opengraph-image",
+  "/articles/opengraph-image",
+  "/articles/paint-with-code/opengraph-image",
+  "/blog/opengraph-image",
+  "/projects/opengraph-image",
+] as const) {
+  await check(`share card · ${path}`, async () => {
+    const res = await get(path)
+    assert(res.ok, `expected 2xx, got ${res.status}`)
+    const ct = res.headers.get("content-type") ?? ""
+    assert(ct.startsWith("image/"), `expected an image, got "${ct}"`)
+    const bytes = (await res.arrayBuffer()).byteLength
+    assert(bytes > 1000, `only ${bytes} bytes — that is not a rendered card`)
+    return `${ct}, ${Math.round(bytes / 1024)}KB`
+  })
+}
+
+await check("icons · every referenced icon resolves", async () => {
+  const html = await (await get("/articles/paint-with-code")).text()
+  const hrefs = [...html.matchAll(/<link[^>]+rel="(?:apple-touch-)?icon"[^>]+href="([^"]+)"/g)].map(
+    (m) => m[1],
+  )
+  assert(hrefs.length > 0, "no icon <link> in the document head")
+  for (const href of hrefs) {
+    const res = await get(href)
+    assert(res.ok, `${href} returned ${res.status}`)
+    const ct = res.headers.get("content-type") ?? ""
+    assert(ct.startsWith("image/"), `${href} served "${ct}", not an image`)
+  }
+  return `${hrefs.length} icon(s): ${hrefs.map((h) => h.split("?")[0]).join(", ")}`
+})
+
+await check("icons · favicon is not the framework default", async () => {
+  // The create-next-app placeholder is the Vercel triangle, and it shipped here
+  // for months because a favicon is the one asset nobody looks at until it turns
+  // up in a link preview. It is 25,931 bytes and starts with a BMP-in-ICO
+  // directory; ours is PNG-in-ICO at six sizes.
+  const res = await get("/favicon.ico")
+  assert(res.ok, `expected 2xx, got ${res.status}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  assert(buf.readUInt16LE(2) === 1, "not an ICO container")
+  const frames = buf.readUInt16LE(4)
+  assert(frames >= 4, `expected at least 4 sizes, found ${frames}`)
+  assert(buf.length !== 25931, "this is still the default Vercel favicon.ico")
+  // first frame's payload should be a PNG, not a BMP header
+  const offset = buf.readUInt32LE(6 + 12)
+  assert(buf.readUInt32BE(offset) === 0x89504e47, "frames are not PNG-encoded")
+  return `${frames} frames, ${Math.round(buf.length / 1024)}KB, PNG-encoded`
+})
+
 // ── report ───────────────────────────────────────────────────────────────────
 
 const failed = results.filter((r) => !r.ok)

@@ -1,0 +1,278 @@
+---
+title: "Breeze TTS 2: a Gemma encoder, a Qwen3 backbone, and 1.18 GiB that never runs"
+description: "An open-weight TTS model that emits 200 codec tokens per second of speech and claims a 0.32 real-time factor. Read from config.json and the safetensors headers: the text encoder is Gemma-3-1B, the backbone is Qwen3-1.7B's layer stack verbatim, the codec is Qwen3-TTS's 12.5 Hz tokenizer — none of them named in the model card. Plus a gigabyte of embedding table that no code path can reach, two numbers both called TTFA that differ by 3.3x, and a #1 chart that is a twelve-model subset of a board where the model sits sixth."
+date: 2026-08-26
+interest: 4
+helpful: 4
+tags:
+  - tts
+  - audio
+  - inference
+  - streaming
+  - open-weights
+---
+
+import { TokenBudget } from "@/components/articles/breeze-tts-2/token-budget"
+import { RvqStack } from "@/components/articles/breeze-tts-2/rvq-stack"
+import { StreamTimeline } from "@/components/articles/breeze-tts-2/stream-timeline"
+import { CodecLadder } from "@/components/articles/breeze-tts-2/codec-ladder"
+
+[Breeze TTS 2](https://github.com/breezeblue-ai/breeze-tts) shipped on 25 August 2026 with weights on [the Hub](https://huggingface.co/BreezeBlue/Breeze-TTS-2), a PyTorch streaming runtime, a Dockerfile pinned to four exact versions, and a README that leads with "under 40 ms time to first audio" and "#1 among open-weight models". The model card names no component of the architecture. `config.json` names all of them.
+
+So this is a read of the checkpoint and the runtime rather than the marketing: what the token stream is, what it costs to emit, where the latency actually goes, and which of the headline numbers survive being checked.
+
+| | |
+|---|---|
+| Checkpoint | `BreezeBlue/Breeze-TTS-2` · **3.47 B** parameters · **7.12 GiB** of weights on disk |
+| Text encoder | **Gemma-3-1B** as a bidirectional `T5Gemma2TextEncoder` — 26 layers, 1152 wide, ±256 sliding window, full attention every 6th layer |
+| Backbone | **Qwen3-1.7B's layer stack**, verbatim — 28 layers, 2048 wide, GQA 16/8, text embedding replaced |
+| Depth decoder | 12 layers, 1024 wide, 15 codebook heads of `[1024, 2051]` |
+| Codec | `qwen3_tts_tokenizer_12hz` — Mimi-shaped encoder, custom decoder · **12.5 Hz** · **16** RVQ codebooks × **2048** entries |
+| Token rate | **200 codec tokens / s** of audio · **2.20 kbit/s** · 24 kHz mono out |
+| Serial cost | **2,700** transformer-layer evaluations per second of speech |
+| Streaming | `chunk_frames` 1 (fast) or 2 (eager) · **zero lookahead** · ~11.6 MiB of state per stream |
+| Concurrency | the shipped API serves **one** request at a time — HTTP 409 otherwise |
+| Licence | code Apache-2.0 · weights research / non-commercial, no hosting, no distillation |
+
+## The stack, read off config.json
+
+Nothing in the README or the model card says what Breeze TTS 2 is made of. The config does, in three places.
+
+The text side is Gemma. `config.json` carries a `text_encoder_config` with `model_type: "t5gemma2_text"`, `architectures: ["T5Gemma2TextEncoder"]`, 26 layers, `hidden_size` 1152, `head_dim` 256, `intermediate_size` 6912, 4 attention heads over 1 KV head, `sliding_window` 512, and `query_pre_attn_scalar` 256 — Gemma-3-1B's shape, term for term. `tokenizer_config.json` removes any doubt: `"tokenizer_class": "GemmaTokenizerFast"`, `"processor_class": "Gemma3Processor"`, `<start_of_image>` at id 255999. The vocabulary is Gemma 3's 262,144 plus fourteen additions — `<|AUDIO|>`, `<|audio_eos|>`, ten speaker tags `[S0]`–`[S9]`, and `<ins_bos>`/`<ins_eos>`.
+
+The audio side is Qwen. `config.json` embeds a `backbone_config` block that is byte-for-byte [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B)'s own `config.json` — same 28 layers, same 2048/6144, same `head_dim` 128, same `rope_theta` 1000000, same `bos_token_id` 151643, same `transformers_version: "4.51.0"`. I summed the shipped tensors: `backbone_model.*` is **1,409,410,048** parameters, and Qwen3-1.7B's 28 layers plus final norm are 1,409,402,880 — the 7,168 difference is exactly `28 × 256`, the per-layer `q_norm` and `k_norm` vectors that Qwen3 has and my hand count did not. It is the same stack, with `BreezeBackboneFactory` swapping the text embedding for one that reads codec tokens.
+
+And the codec is Qwen's too. `audio_tokenizer/config.json` declares `Qwen3TTSTokenizerV2Model`, `model_type: "qwen3_tts_tokenizer_12hz"`, loaded at runtime out of the pip package `qwen-tts==0.1.1`. Its encoder is Mimi with the decoder deleted, and the deletion is the whole class body:
+
+```python
+class Qwen3TTSTokenizerV2Encoder(MimiModel):
+    def __init__(self, config: MimiConfig):
+        super().__init__(config)
+        self.upsample = None
+        self.decoder_transformer = None
+        self.decoder = None
+```
+
+So the analysis side is Kyutai's Mimi — all 32 of its quantizers still on disk, truncated to the first 16 at encode time by `encoder_valid_num_quantizers` — and the synthesis side is a separate ConvNeXt/Snake stack with its own quantiser weights: `encoder.quantizer` and `decoder.quantizer` are different tensors in the same file. Three organisations' models in one checkpoint, redistributed under a licence more restrictive than any of theirs.
+
+Two vestigial strings are worth noticing because they say what this was built from: `"backbone_flavor": "llama-1B"` and `"decoder_flavor": "llama-100M"`, alongside the Sesame copyright header on `models/breeze_base_config.py`. This is a CSM descendant — Sesame's backbone-plus-depth-decoder shape — with the two Llamas replaced by a Qwen3 and a bigger depth decoder, and a Gemma encoder bolted onto the front.
+
+## The token stream: 12.5 Hz is not 12.5 tokens
+
+The frame rate is the number everyone quotes, and on its own it tells you very little.
+
+`audio_tokenizer/config.json` gives `encode_downsample_rate: 1920` and `input_sample_rate: 24000`. That is 12.5 frames per second, and `decode_upsample_rate: 1920` means each frame decodes back to 1920 samples — 80 ms of audio. Twelve and a half hertz is the same frame rate [Qwen-Audio-3.0-TTS](/articles/qwen-audio-3-tts) uses, and that model emits 12.5 tokens per second of speech.
+
+Breeze emits 200, because each frame is **16 residual codebooks** deep at 2048 entries each.
+
+<TokenBudget />
+
+The arithmetic that saves it is the split. `models/fast_streaming.py` samples codebook 0 from the Qwen3 backbone, hands the backbone's hidden state to a 12-layer, 1024-wide depth decoder, and gets codebooks 1–15 back:
+
+```python
+depth_tokens = self._depth_decoder_graph.run(depth_hidden, token_batch, ...)
+frame = torch.cat([token.view(1), depth_tokens[0]], dim=0)   # 16 codes
+```
+
+So only 12.5 of those 200 tokens per second touch the 1.4 B-parameter model. The other 187.5 go through a model 3.2× smaller. That is the whole trick, and it is CSM's trick — Breeze's contribution is making the depth decoder three times deeper than Sesame's default (12 layers rather than 4) and then engineering around the cost.
+
+<Callout type="note">
+The model card's "0.32 real-time factor" is the only measured number in the release. At 12.5 Hz a frame is 80 ms of audio, so 0.32 RTF is 25.6 ms of wall time per frame — spread across one backbone step, fifteen depth steps and one codec decode, that is **1.51 ms per serial model invocation**. Everything in the widget above is that constant times a step count. I could not reproduce it; there is no benchmark script in the repo.
+</Callout>
+
+## Sixteen codebooks, and you cannot drop one
+
+RVQ's usual selling point is that depth is a dial. Keep the first four codebooks for a cheap coarse stream, all sixteen when you want fidelity. Breeze does not offer that, and the reason is one line.
+
+<RvqStack />
+
+`Qwen3TTSTokenizerV2Decoder.forward` opens with a shape check against `num_quantizers`, and the streaming runtime always stacks all sixteen before calling it. Depth here is a property of the checkpoint, not a knob.
+
+There is one loose thread in the codec config. `decoder_config.semantic_codebook_size` is `4096`, which would give the semantic codebook twice the vocabulary of the acoustic ones — but `SplitResidualVectorQuantizer` is constructed with `bins=config.codebook_size`, so every one of the sixteen gets 2048 entries. The field is dead, and the checkpoint agrees: `decoder.quantizer.rvq_first` weighs 0.79 M parameters, which is `2048 × 256` plus two 512↔256 projections, not `4096 × 256`.
+
+The language model's side of the boundary is slightly wider than the codec's. `lm_head` is `[2052, 2048]` — 2051 codebook classes plus one extra EOS class at index `vocab_size` — and the runtime permanently suppresses ids 2048, 2049 and 2050 on every sample:
+
+```python
+self._reserved_codec_token_ids = tuple(
+    range(self._codec_codebook_size, int(self.model.config.vocab_size))
+)
+```
+
+Three logits that can never be chosen, on every one of the 200 samples per second. Harmless, and a good tell that the vocabulary was inherited rather than designed.
+
+## Where the latency actually goes
+
+The interesting thing about this stack is that the big model is not the long pole.
+
+<StreamTimeline />
+
+Eighty milliseconds of speech costs 28 layer evaluations on the Qwen3 backbone and **180** on the depth decoder, because the depth decoder runs fifteen times per frame. At batch one, decode steps are launch- and bandwidth-bound rather than FLOP-bound, so 180 small serial steps hurt more than 28 large ones. That is why `--fast-depth-decoder` gets the most aggressive treatment in the whole repo — `models/cudagraph/depth_decoder_graph.py` unrolls the entire fifteen-step loop and captures it as **one** CUDA graph, with the sampling parameters and the CFG guidance scale living in pre-allocated tensor buffers so they can change without recapture.
+
+The other piece of latency engineering is a reordering, and the code says why:
+
+```python
+# A complete codec frame can be decoded immediately. Emit it
+# before computing the next backbone token so that one full
+# backbone decode step is no longer on the TTFA critical path.
+```
+
+That is a real 28-layer saving on the first chunk, and it is the kind of change you only make after staring at a profile.
+
+## The codec decoder is where streaming is won or lost
+
+A vocoder that needs future frames puts a floor under latency that no amount of graph capture can lift. Breeze's does not need them, and `models/stream_runtime/stream/lane.py` is 435 lines of making sure.
+
+<CodecLadder />
+
+Every causal convolution is rebuilt as a step function with an explicit left cache — `left_cache_len = conv.padding` for a normal conv, `(kernel - 1) // stride` for a transposed one — and the pre-transformer gets a `StaticShiftKVCache` whose window is the config's `sliding_window: 72`, i.e. 5.76 seconds of history and no future at all. Persistent state per stream is 528.25 KiB of convolution caches plus 4.50 MiB of KV; the scratch workspace at `chunk_frames=1` is 6.59 MiB. Call it 11.6 MiB per concurrent stream, in fp32, because every tensor in `audio_tokenizer/model.safetensors` is F32.
+
+The cost of that rewrite is coupling. `models/stream_runtime/core/compat.py` reaches into `qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2` for six internal modelling classes by name — `Qwen3TTSTokenizerV2CausalConvNet`, `Qwen3TTSTokenizerV2DecoderDecoderResidualUnit`, and friends. `requirements.txt` pins `qwen-tts==0.1.1` and the Dockerfile's smoke check asserts that exact version at build time, which is the honest way to ship something this brittle.
+
+## Voice cloning is a prompt prefix, not a speaker embedding
+
+There is no speaker encoder anywhere in this checkpoint. `breeze_infer/templates.py` builds the reference into the token sequence itself:
+
+```python
+def _ref_edit_tata_segments(request):
+    prefix = _speaker_prefix(request)          # "[S0]"
+    return [
+        {"type": "text", "text": f"{prefix}{request['ref_text']}"},
+        _ref_audio_segment(request),           # <|AUDIO|> × T frames, then <|audio_eos|>
+        {"type": "text", "text": f"{prefix}{INSTRUCTION_BOS}{request['instruction']}{INSTRUCTION_EOS}{request['text']}"},
+    ]
+```
+
+The reference wav goes through the Mimi encoder to `[T, 16]` codes, one `<|AUDIO|>` placeholder is emitted per frame, and `_merge_input_ids_with_input_values` replaces each placeholder's embedding with the sum of sixteen per-codebook lookups:
+
+```python
+self.embed_audio_tokens = nn.Embedding(config.num_codebooks * config.vocab_size, hidden_size)
+...
+input_embeds = self.embed_audio_tokens(input_ids + self.audio_tokens_offsets).sum(dim=2)
+```
+
+Text positions, meanwhile, are filled with the Gemma encoder's output projected 1152 → 2048 by a single bias-free `Linear`. One projected encoder state per text token, one summed codebook vector per audio frame, all in the same causal sequence. No cross-attention anywhere. The text encoder is bidirectional (`self.is_causal = False` in `models/t5gemma2_compat.py`), which means the whole utterance must be known before the first token can be sampled — this streams its output, not its input.
+
+The genuinely elegant piece is the guidance. For voice direction, the negative branch is not an empty prompt:
+
+```python
+def _ref_edit_tata_negative_segments(request):
+    return _ref_clone_tata_segments(request)   # same reference, no instruction
+```
+
+Positive is reference + instruction, negative is reference alone, so `uncond + scale × (cond − uncond)` amplifies exactly the instruction delta and leaves the speaker identity where it was. `--cfg-scale 4` is the README's recommendation, and it costs a `branch_batch_size` of 2 through both the backbone and the depth decoder.
+
+There is a third CFG mode in `templates.py` — `build_dual_branches` returns separate `uncond`, `ref` and `ins` branches with independent scales — and it is unreachable. `infer.py` and `breeze_infer/api.py` both hard-code `guidance_scale_ref=None`, and the fast runtime rejects it outright:
+
+```python
+def reject_dual_cfg(inputs):
+    ...
+    raise ValueError("fast streaming supports only no_cfg and single_cfg; ...")
+```
+
+## Checking the headline numbers
+
+Three claims are worth the arithmetic.
+
+**"Ranks #1 among open-weight models ... while outperforming frontier proprietary systems."** The repo ships its own chart of the Artificial Analysis TTS arena, drawn the day of release.
+
+<Figure
+  src="/articles/breeze-tts-2/fig1.png"
+  alt="A bar chart of twelve text-to-speech models ranked by Elo score. Breeze TTS 2 is first at 1,215 in dark blue, followed by Google Gemini 3.1 Flash TTS at 1,210, Cartesia Sonic 3.5 at 1,199, Inworld Realtime TTS-2 at 1,185 and ElevenLabs Eleven v3 at 1,177 in grey as closed-weight, then Fish Audio S2 Pro at 1,125, Mistral Voxtral TTS at 1,082, Kokoro 82M at 1,060, Higgs Audio V3 at 1,042, Chatterbox at 1,020, VibeVoice 7B at 969 and XTTS v2 at 920 in light blue as open weight."
+  caption="The repo's own leaderboard chart, twelve models, Breeze first by five Elo points. (breeze-tts, assets/tts-elo-leaderboard.svg.)"
+/>
+
+The Elo score is right — 1,215 is what the live board says. The ranking is a selection effect. On the board today Breeze TTS 2 sits **sixth**, behind Cartesia Sonic 3.6 (1,283), Qwen-Audio-3.0-TTS-Plus (1,238), Speechify Simba 3.2 (1,238), VUI Labs Luna TTS (1,223) and ElevenLabs v3 Conversational (1,219). Every one of those five is missing from the chart, including a newer Cartesia model when an older Cartesia model is shown. The narrower claim — first among *open-weight* entries — probably survives: the board does not label weight status, and I could not confirm it for every entry above. The picture does not.
+
+The five-point margin over Google is not a margin anyway. Five Elo points is an expected win rate of `1/(1 + 10^(-5/400))` = **50.7%**, and Breeze has 1,095 comparisons on the board, the smallest sample in the top fifteen. That gap is noise.
+
+**"Under 40 ms TTFA."** This one is true and it does not mean what a reader will assume.
+
+<Figure
+  src="/articles/breeze-tts-2/fig2.png"
+  alt="A dumbbell chart of nine hosted text-to-speech providers. For each, an open circle marks time-to-first-byte p50 and a filled circle marks time-to-first-audio p50, joined by a line, with a small faded marker for TTFA p95. Breeze TTS 2 is highlighted in blue at 119 milliseconds TTFB and 134 milliseconds TTFA, the fastest TTFA of the nine. Cartesia Sonic 3.5 has the lowest TTFB at 107 milliseconds but a TTFA of 242. A dashed red vertical rule near 40 milliseconds is annotated as the README's in-process number."
+  caption="BreezeBlue's own TTS Latency Benchmark, transcribed from breezeblue.ai/breeze-tts-2. The red rule is the open-weight README's local number; the dots are the same company measuring its hosted API over a network. (BreezeBlue, TTS Latency Benchmark.)"
+/>
+
+The only TTFA the repo actually computes is `ttfa_internal_ms`, and it is worth reading where its clock starts. In `iter_audio_chunks`:
+
+```python
+branch = self._build_branch_batch(inputs)      # line 755 — runs the text encoder
+...
+t_start = time.perf_counter()                  # line 770
+```
+
+`_build_branch_batch` is where the 26-layer Gemma encoder runs and where the prompt embeddings are assembled. The stopwatch starts fifteen lines after it finishes. So the measured window is backbone prefill, one sample, fifteen depth steps, one codec decode and the copy back to host — not tokenization, not reference-audio encoding, and **not the text encoder**. On the first-chunk path in the diagram above, that is 26 of 242 layer evaluations excluded from a number reported as time to first audio.
+
+Even taken at face value it is a compute figure for one warmed-up request on an H100 with every CUDA graph pre-captured. BreezeBlue's own latency benchmark — the same company measuring its own hosted service from a client, which is what a user experiences — reports **TTFA p50 of 133.6 ms**. Both numbers are theirs, both are called TTFA, and they differ by 3.3×. The 40 ms is a real engineering result about part of the model; it is not a latency anyone will observe.
+
+The Cartesia row is the reason the benchmark is interesting rather than self-serving. Sonic 3.5 has the *lowest* TTFB of the nine at 106.8 ms and the fifth-worst TTFA at 241.9 ms, because the benchmark subtracts leading silence — it measures when speech starts, not when bytes start. That is the right metric and it is the one that makes Breeze look good, which is worth holding both thoughts about at once.
+
+**"Bilingual: English and Chinese."** The model card and the HF metadata both say `en, zh`. BreezeBlue's launch post for Breeze TTS 2 — published 7 August, eighteen days before any weights existed — advertises **50 languages** with accent control. Those are different products sharing a name: the post is about the hosted API, the checkpoint is bilingual. The three benchmark tables in that post — Voice Design 78.02, Voice Direction 4.25, SIM 0.67 — were measured against the hosted service on BreezeBlue's own newly-published benchmarks, not against these weights. I would not carry any of them over.
+
+I also cannot evaluate the audio. There are no samples in the repo, no WER, no speaker-similarity number, no MOS, and no eval harness — the entire release is inference code. Whether it sounds good is not a question this checkout can answer, and I am not going to relay someone's arena score as if it were.
+
+## 1.18 GiB that never runs
+
+Summing the safetensors headers turns up something that has nothing to do with marketing.
+
+<Figure
+  src="/articles/breeze-tts-2/fig3.png"
+  alt="A horizontal bar chart of the checkpoint's modules by size on disk. backbone_model 2.625 gibibytes and 1409.4 million parameters, text_encoder 1.867 gibibytes and 1002.3 million, embed_text_tokens 1.000 gibibytes and 536.9 million shown in red and labelled unreachable, depth_decoder 0.809 gibibytes and 434.3 million, audio_tokenizer 0.635 gibibytes and 170.6 million in float32, codec_model 0.179 gibibytes and 96.2 million also in red and labelled unreachable, and lm_head 0.008 gibibytes."
+  caption="Every tensor in BreezeBlue/Breeze-TTS-2, grouped by top-level module. The two red rows are constructed, loaded and moved to the GPU, and never called. (Computed from the safetensors headers.)"
+/>
+
+`embed_text_tokens` is an `nn.Embedding(262158, 2048)` — 536,899,584 parameters, exactly **1.000 GiB** in bfloat16. It has one call site in the entire repository:
+
+```python
+if self.text_encoder is not None:
+    inputs_embeds, ... = self.convert_input_ids_to_embeds(...)
+else:
+    inputs_embeds = self.embed_text_tokens(input_ids)
+```
+
+This checkpoint ships a `text_encoder_config`, so `self.text_encoder` is never `None`, so the `else` never runs. The only other mention of the module is `self.embed_text_tokens.weight.dtype` in a branch that handles zero text segments. It is a fallback path for a configuration this checkpoint is not.
+
+`codec_model` is the same story with a different cause. `BreezeForConditionalGeneration.__init__` builds a full Mimi from `config.codec_config` — encoder, decoder, both transformers, 96.2 M parameters — but `breeze_infer/runtime.py` raises `FileNotFoundError` unless `audio_tokenizer/` is present, and every decode path prefers the tokenizer when it exists. The bundled Mimi is reachable only in a state the loader refuses to create. Its *config* is still load-bearing, which is the part I enjoyed: `codec_config.codebook_size` is where the streaming runtime gets 2048 for its suppression mask, and `codec_config.sampling_rate` is where it gets 24000 for the WAV header. A dead module read for two integers.
+
+Together: **1.18 GiB of the 7.12 GiB** is allocated, initialised from disk, moved to the device by `model.to(device)`, and never executed. The README asks for a 12 GB GPU and reports ~7.7 GiB of usage — which, given 7.12 GiB of weights, means almost the entire footprint *is* the weights, and 15% of it is inert. Deleting two modules would take the model comfortably under 6 GiB.
+
+<Callout type="tip">
+A smaller pleasure from the same headers: the index's `total_parameters` says 3,466,363,713 but the tensor shapes sum to 3,483,206,497. The 16,842,784 difference is exactly the Mimi quantiser's `cluster_usage`, `embedding_sum` and `initialized` tensors — registered buffers, not parameters. The accounting is correct; it just is not the number you get from `du`.
+</Callout>
+
+## Where the fast path falls over
+
+`configs/fast.json` sets `"freeze_after_warmup": true` and enumerates the CUDA graph shapes to pre-capture: text-encoder and backbone-prefill buckets in steps of 32 tokens, up to **256** at `branch_batch_size` 1 and up to **512** at `branch_batch_size` 2. After warmup the caches are frozen, and a shape that was not declared does not fall back to eager:
+
+```python
+if record is None:
+    if self._frozen:
+        raise RuntimeError(
+            f"backbone prefill CUDA graph {key} was not declared in the warmup profile"
+        )
+```
+
+The prefill bucket covers the *whole* merged prompt, audio placeholders included, and a reference clip contributes 12.5 placeholder tokens per second. Without CFG that gives you roughly 17 seconds of reference audio before the request raises instead of synthesising. With `--cfg-scale 4` the batch-2 buckets go to 512, so the ceiling roughly doubles — the fast path is more robust *with* guidance on than off, which is not an intuition anyone would arrive at from the README.
+
+Pre-capturing those graphs is also what turns the README's ~7.7 GiB eager footprint into **14.4 GiB** with `--fast-all` — nearly the whole weight budget again, spent on static input buffers, StaticCache tensors and graph memory pools. That is the trade the release makes and does not spell out: roughly 2× the memory and a warmup that captures fifty-odd graphs, in exchange for the latency number on the front page.
+
+The same file says `"concurrency": 1`, and `breeze_infer/api.py` enforces it with a non-blocking lock and a 409:
+
+```python
+if not _request_lock.acquire(blocking=False):
+    raise HTTPException(status_code=409, detail="An inference request is already running.")
+```
+
+Every performance number in this release is a batch-1, single-stream number, and the shipped server cannot produce any other kind.
+
+Two smaller notes from the sampling path. `MAX_NEW_TOKENS = 1500` frames caps a single utterance at 120 seconds, and `MAX_SEQ_LEN = 2048` matches `max_position_embeddings`, so prompt plus generation share a hard 2048-frame budget. And the default `repetition_penalty` of 1.1 is applied only to codebook-0 history — sensible, since the semantic codebook is where autoregressive TTS loops — but it is applied to `token_history.unique()` over the whole utterance, so its selectivity decays as the generation lengthens. Over a long take, most of the 2048-entry codebook has been visited at least once and the penalty stops discriminating.
+
+## The ledger
+
+**What is genuinely good.** The streaming codec decoder. Rebuilding every convolution in a pretrained vocoder as a cached-left-context step, verifying the chunk-to-sample ratio at startup against a theoretical value, and keeping the whole thing under 12 MiB of state is real work, and it is the piece that makes the latency claim mean anything. Unrolling the fifteen-step depth loop into a single CUDA graph is the right call for the right reason. And the voice-direction CFG — negative branch = same reference, no instruction — is the cleanest formulation of "amplify only the instruction" I have seen in a TTS repo.
+
+**What is convergent.** Everything else. The backbone-plus-depth-decoder shape is CSM's, down to the Sesame copyright header and the `llama-1B` flavour string. The 12.5 Hz RVQ codec is Mimi's frame rate with Qwen's decoder. A bidirectional text encoder projected into a decoder's embedding space is what half the field does now. Instruction tokens, speaker tags, inline `(laugh)` events — [Qwen-Audio-3.0-TTS](/articles/qwen-audio-3-tts) and [Nar TTS](/articles/nar-tts) have the same control surface. The assembly is competent; none of the pieces are new.
+
+**What I would watch.** Whether the depth decoder keeps growing. Sesame shipped four layers; Breeze ships twelve, which is where 180 of the 216 serial layer evaluations per frame come from and why the repo needs a CUDA-graph strategy per stage. There is an obvious ceiling: at some depth the 12.5-tokens-per-second saving the split was supposed to buy is entirely eaten by running the small model fifteen times. Either the codebook count comes down, or something replaces the sequential depth loop with a parallel head.
+
+**What I would not carry forward.** Any number from that launch post. The 40 ms, the Elo ranking, the 78.02, the 50 languages — each was measured on something that is not this checkpoint, or on a field that is not the whole field. The checkpoint is more interesting than its press release, which is a nicer problem to have than the reverse.
