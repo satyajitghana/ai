@@ -24,7 +24,7 @@ export default function Page() {
         {posts.map((p) => (
           <li key={p.slug}>
             <Link href={`/blog/${p.slug}`} className="group block">
-              <div className="flex items-baseline justify-between gap-4">
+              <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
                 <h2 className="font-heading text-lg font-semibold underline-offset-4 group-hover:underline">
                   {p.title}
                 </h2>

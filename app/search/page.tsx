@@ -49,7 +49,7 @@ export default async function Page({
             {results.map((r) => (
               <li key={`${r.kind}-${r.slug}-${r.field}`}>
                 <Link href={toPath(r.url)} className="group block">
-                  <div className="flex items-baseline justify-between gap-4">
+                  <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
                     <span className="underline-offset-4 group-hover:underline">
                       {r.title}
                     </span>

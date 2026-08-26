@@ -22,7 +22,10 @@ export function PageShell({
     >
       {title ? (
         <div className="mb-10">
-          <div className="flex items-baseline justify-between gap-4">
+          {/* The agent chip is a fixed ~140px and does not shrink, so on a
+              phone it was taking a third of the line and leaving the h1 to wrap
+              a word or two at a time. Stack until there is room for both. */}
+          <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
             <h1 className="font-heading text-3xl font-bold tracking-tight text-balance">
               {title}
             </h1>

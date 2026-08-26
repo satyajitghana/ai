@@ -104,9 +104,15 @@ export const mdxComponents: MDXComponents = {
       {...props}
     />
   ),
+  // `break-words` is scoped to inline code on purpose. A fully-qualified
+  // identifier — `qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer` —
+  // is one unbreakable 552px word, which on a phone pushes the whole page
+  // sideways. overflow-wrap: break-word only breaks a word that cannot fit on a
+  // line by itself, so ordinary short spans are untouched. Block code inside
+  // <pre> keeps its own overflow-x-auto and still scrolls rather than wrapping.
   code: (props: ComponentPropsWithoutRef<"code">) => (
     <code
-      className="font-mono text-[0.9em] [:not(pre)>&]:rounded [:not(pre)>&]:bg-muted [:not(pre)>&]:px-1.5 [:not(pre)>&]:py-0.5"
+      className="font-mono text-[0.9em] [:not(pre)>&]:rounded [:not(pre)>&]:bg-muted [:not(pre)>&]:px-1.5 [:not(pre)>&]:py-0.5 [:not(pre)>&]:break-words"
       {...props}
     />
   ),

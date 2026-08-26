@@ -156,6 +156,23 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
         : "cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted/50",
     )
 
+  // 1 … 6 [7] 8 … 15. Rendering every page number was fine at eight articles and
+  // is not at a hundred and seventy: fifteen buttons are ~500px, so the row grew
+  // past a phone viewport and made the whole page scroll sideways. The window is
+  // fixed-width, so this row costs the same whatever the archive grows to.
+  const pages: (number | "gap")[] = []
+  if (totalPages <= 7) {
+    for (let p = 1; p <= totalPages; p++) pages.push(p)
+  } else {
+    const lo = Math.max(2, current - 1)
+    const hi = Math.min(totalPages - 1, current + 1)
+    pages.push(1)
+    if (lo > 2) pages.push("gap")
+    for (let p = lo; p <= hi; p++) pages.push(p)
+    if (hi < totalPages - 1) pages.push("gap")
+    pages.push(totalPages)
+  }
+
   return (
     <div ref={topRef} className="scroll-mt-24">
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -194,8 +211,13 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
         {shown.map((a) => (
           <li key={a.slug}>
             <Link href={`/articles/${a.slug}`} className="group block">
-              <div className="flex items-baseline justify-between gap-4">
-                <h2 className="font-heading text-lg font-semibold underline-offset-4 group-hover:underline">
+              {/* On a phone the date is ~30 monospace characters, and as a
+                  shrink-0 sibling it left the title about 150px to wrap in —
+                  one or two words a line. Stack below the sm breakpoint so the
+                  title gets the full column, and only sit them on one baseline
+                  once there is room for both. */}
+              <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
+                <h2 className="font-heading text-lg font-semibold text-balance underline-offset-4 group-hover:underline">
                   {a.title}
                   {a.featured ? (
                     <StarIcon
@@ -207,14 +229,16 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
                     />
                   ) : null}
                 </h2>
-                <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                <span className="font-mono text-xs text-muted-foreground sm:shrink-0">
                   {a.date}
                   {a.updated && a.updated !== a.date ? (
                     <span className="text-muted-foreground/60"> · updated {a.updated}</span>
                   ) : null}
                 </span>
               </div>
-              <p className="mt-1 leading-7 text-muted-foreground">{a.description}</p>
+              {/* the date is a sibling line on mobile, so the description needs
+                  a little more air than it does beside it on one baseline */}
+              <p className="mt-2 leading-7 text-muted-foreground sm:mt-1">{a.description}</p>
               <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs text-muted-foreground">
                 <SignalBars level={a.signal} label={a.signalLabel} interest={a.interest} helpful={a.helpful} />
                 {a.signal ? <span className="text-muted-foreground/40">·</span> : null}
@@ -242,22 +266,33 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
           >
             <CaretLeftIcon size={14} weight="bold" />
           </button>
-          {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => goto(p)}
-              aria-current={p === current ? "page" : undefined}
-              className={cn(
-                "min-w-8 cursor-pointer rounded-md px-2 py-1 tabular-nums transition-colors",
-                p === current
-                  ? "bg-foreground text-background"
-                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
-              )}
-            >
-              {p}
-            </button>
-          ))}
+          {pages.map((p, i) =>
+            p === "gap" ? (
+              <span
+                key={`gap-${i}`}
+                aria-hidden="true"
+                className="px-1 text-muted-foreground/40 select-none"
+              >
+                …
+              </span>
+            ) : (
+              <button
+                key={p}
+                type="button"
+                onClick={() => goto(p)}
+                aria-current={p === current ? "page" : undefined}
+                aria-label={`Page ${p}`}
+                className={cn(
+                  "min-w-8 cursor-pointer rounded-md px-2 py-1 tabular-nums transition-colors",
+                  p === current
+                    ? "bg-foreground text-background"
+                    : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+                )}
+              >
+                {p}
+              </button>
+            ),
+          )}
           <button
             type="button"
             onClick={() => current < totalPages && goto(current + 1)}

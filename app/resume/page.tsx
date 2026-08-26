@@ -53,7 +53,7 @@ export default function ResumePage() {
     <PageShell agentPath={{ md: "/resume.md", json: "/api/resume" }}>
       {/* Header */}
       <header>
-        <div className="flex items-baseline justify-between gap-4">
+        <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
           <h1 className="font-heading text-3xl font-bold tracking-tight text-balance">
             {contact.name}
           </h1>
@@ -103,7 +103,7 @@ export default function ResumePage() {
         <ul className="space-y-8">
           {resume.experience.map((job) => (
             <li key={job.organization}>
-              <div className="flex items-baseline justify-between gap-4">
+              <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
                 <h3 className="font-medium">
                   {job.url ? (
                     <a
@@ -126,7 +126,7 @@ export default function ResumePage() {
                 {job.roles.map((role) => (
                   <li
                     key={role.title}
-                    className="flex items-baseline justify-between gap-4"
+                    className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4"
                   >
                     <span className="text-sm">{role.title}</span>
                     <span className="shrink-0 font-mono text-xs text-muted-foreground">
@@ -156,7 +156,7 @@ export default function ResumePage() {
         <ul className="space-y-4">
           {resume.education.map((edu) => (
             <li key={edu.institution}>
-              <div className="flex items-baseline justify-between gap-4">
+              <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
                 <h3 className="font-medium">{edu.institution}</h3>
                 <span className="shrink-0 font-mono text-xs text-muted-foreground">
                   {edu.end}
