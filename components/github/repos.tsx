@@ -8,7 +8,7 @@ export function Repos({ repos }: { repos: GitHubRepo[] }) {
     <ul className="space-y-4">
       {repos.map((repo) => (
         <li key={repo.name} className="group">
-          <div className="flex items-baseline justify-between gap-4">
+          <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
             <a
               href={repo.url}
               className="font-medium underline-offset-4 group-hover:underline"

@@ -29,7 +29,12 @@ const footerLinks = [
 
 export function SiteFooter() {
   return (
-    <footer className="mx-auto w-full max-w-3xl px-6 pt-20 pb-10">
+    // pb-24 on mobile clears the terminal launcher, which is fixed 16px off the
+    // bottom-right at 48px square. At pb-10 the last line of the colophon ran
+    // underneath it and the tail of "agent-readable: llms.txt" was unreadable
+    // and untappable. Above sm: the column is centred and the button sits well
+    // clear of the text, so the original spacing stands.
+    <footer className="mx-auto w-full max-w-3xl px-6 pt-20 pb-24 sm:pb-10">
       <div className="flex flex-wrap gap-x-4 gap-y-1 border-t pt-6 font-mono text-xs text-muted-foreground">
         {footerLinks.map((item) => (
           <Link

@@ -19,7 +19,7 @@ export default function PatentsPage() {
       <ul className="space-y-6">
         {patents.map((patent) => (
           <li key={patent.applicationNumber} className="rounded-md border p-5">
-            <div className="flex items-baseline justify-between gap-4">
+            <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
               <h2 className="font-heading text-lg leading-snug font-semibold text-balance">
                 {patent.title}
               </h2>

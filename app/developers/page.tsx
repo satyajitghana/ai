@@ -131,7 +131,7 @@ export default function Page() {
         <ul className="space-y-5">
           {SURFACES.map((s) => (
             <li key={s.name}>
-              <div className="flex items-baseline justify-between gap-4">
+              <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
                 <h3 className="font-mono text-sm text-foreground">{s.name}</h3>
                 <a
                   href={s.url}

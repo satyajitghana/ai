@@ -30,7 +30,7 @@ export default function ReadingPage() {
           )
           .map((item, i) => (
             <li key={i}>
-              <div className="flex items-baseline justify-between gap-4">
+              <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
                 <span className="font-medium underline-offset-4">
                   {item.url ? (
                     <a href={item.url} className="hover:underline">
