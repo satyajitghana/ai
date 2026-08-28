@@ -24,7 +24,7 @@ export default function NotesPage() {
           <li key={note.slug}>
             <Link
               href={`/notes/${note.slug}`}
-              className="group flex items-baseline justify-between gap-4"
+              className="group flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4"
             >
               <span className="underline-offset-4 group-hover:underline">
                 {note.title}

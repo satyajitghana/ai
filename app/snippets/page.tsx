@@ -36,7 +36,7 @@ export default function SnippetsPage() {
           const { intro, code } = splitSnippet(snippet.body)
           return (
             <li key={snippet.slug}>
-              <div className="flex items-baseline justify-between gap-4">
+              <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
                 <h2 className="font-heading text-lg font-semibold text-balance">
                   {snippet.title}
                 </h2>

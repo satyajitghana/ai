@@ -1,0 +1,148 @@
+---
+title: "DiffusionOPSD: a target, not just a reward"
+description: "Endpoint rewards tell a diffusion model whether the final image is good, not how an intermediate denoising prediction should change. DiffusionOPSD closes that gap by walking a frozen policy's clean-output anchor up and down the reward gradient inside a bounded trust region, then fitting the current policy to the result as a plain regression target. Read from the paper's own source and the reference implementation: the exact update, the ablation that proves the win is the gradient direction and not the perturbation, and what happens to the '19 of 20' claim when you throw out the three evaluators nobody outside ByteDance can run."
+date: 2026-08-27
+interest: 4
+helpful: 4
+tags:
+  - diffusion
+  - reinforcement-learning
+  - reward-models
+  - post-training
+  - explainer
+---
+
+import { TrustRegionStep } from "@/components/articles/diffusionopsd/trust-region-step"
+import { EvaluatorLedger } from "@/components/articles/diffusionopsd/evaluator-ledger"
+import { EfficiencyBars } from "@/components/articles/diffusionopsd/efficiency-bars"
+
+Reward-tune a diffusion model and the only signal you get is a single number at the very end of a multi-step denoising trajectory: is the finished image good. Everything in between — the sequence of noisy, half-formed latents the model actually produced the image from — gets no direct instruction. Existing methods turn that endpoint score into a policy-gradient weight and hope the credit propagates backward through the trajectory. **DiffusionOPSD** instead asks a more specific question at one intermediate point: *given where the policy currently is, in which direction should its clean-output prediction move, and by how much* — and turns the answer into an ordinary regression target.
+
+The paper is [arXiv:2608.24646](https://arxiv.org/abs/2608.24646), from a ByteDance Seed–led team (Wei Zhou et al., with NUS, UC San Diego, and seven other affiliations), and the reference code lives at [github.com/worldbench/DiffusionOPSD](https://github.com/worldbench/DiffusionOPSD). This is a read of that source (`README.md`, `scripts/train_opsd_ri_sd3.py`, `config/opsd_defaults.py`) alongside the paper's own LaTeX and figures — not a paraphrase of either.
+
+| | |
+|---|---|
+| Paper | [arXiv:2608.24646](https://arxiv.org/abs/2608.24646) · "On-Policy Self-Distillation in Diffusion Models" |
+| Code | [worldbench/DiffusionOPSD](https://github.com/worldbench/DiffusionOPSD) · Apache 2.0 |
+| Weights | [WeiChow/DiffusionOPSD](https://huggingface.co/WeiChow/DiffusionOPSD) · 3 rank-32 LoRA checkpoints |
+| Backbones | SD3.5-M (512², 10-step) and Z-Image-Turbo (1024², native 9-step) |
+| Headline | best final held-out score in **19 of 20** reward-matched settings, both backbones, 10 evaluators |
+| Cost | **40%** fewer GPU-hours than DiffusionNFT on SD3.5-M, **63%** fewer on Z-Image-Turbo |
+| Evaluator mix | 7 public checkpoints + 3 **internal** models (not distributed, not independently reproducible) |
+
+## The anchor, and the two targets built around it
+
+At an outer iteration, a frozen **behavior policy** $v_{\mathrm{old}}$ generates a rollout and hands over one low-noise query state $s=(c, z_q, \sigma_q)$. Its clean-output prediction at that state is the **anchor**:
+
+$$
+y_0 = z_q - \sigma_q\, v_{\mathrm{old}}(z_q, c, \sigma_q).
+$$
+
+That single equation is the whole trick: instead of scoring the final image and backpropagating through every step, DiffusionOPSD steps directly to what the *current, frozen* policy already believes the clean image looks like from this one state, and treats that as a fixed point to push around.
+
+From the anchor, a reward-gradient ascent step builds a **positive target** and a descent step builds a **negative target**, both clamped inside a trust region of radius $\rho\|y_0\|$:
+
+$$
+y_+ \leftarrow y_+ + h\,\frac{\nabla_y \widetilde R(y_+,c)}{\|\nabla_y \widetilde R(y_+,c)\|_2+\epsilon},
+\qquad
+y_- \leftarrow y_- - h\,\frac{\nabla_y \widetilde R(y_-,c)}{\|\nabla_y \widetilde R(y_-,c)\|_2+\epsilon}.
+$$
+
+Both targets are then **detached** — reward and decoder graphs are thrown away — and the trainable policy is fit to them with a plain weighted regression loss:
+
+$$
+\mathcal L_{\mathrm{OPSD}} = \omega\,\frac{\left\|y_\theta^+-\bar y_+\right\|_2^2}{\gamma_+} + (1-\omega)\,\frac{\left\|y_\theta^- -\bar y_-\right\|_2^2}{\gamma_-}.
+$$
+
+After the finite fitting budget is spent, an EMA folds the trained weights back into the behavior policy, which then produces the next round's anchors. That loop — collect on-policy, construct bounded targets, fit them as detached regression, refresh the behavior policy — is the entire method.
+
+<Figure
+  src="/articles/diffusionopsd/fig1.png"
+  alt="DiffusionOPSD overview diagram. A text prompt drives a frozen behaviour policy through a denoising trajectory to a low-noise query state z_q. The clean-output anchor y0 is computed from it. On a local reward landscape, bounded reward ascent produces a positive target and reward descent a negative target, both within a dashed trust-region circle. The trainable policy fits both detached targets through a finite-fit residual network, combined into the OPSD loss, and an EMA behaviour update feeds back into the next iteration."
+  caption="The anchor, the bounded ascent/descent targets, and the detached finite fit — the entire method in one diagram (DiffusionOPSD, arXiv:2608.24646, Figure 3)."
+/>
+
+The paper is careful to name three separate things it calls "reward": the **endpoint reward** that scores a finished rollout and sets the fitting weight $\omega$ (via a group-normalized advantage), the **local reward** $\widetilde R$ evaluated on a clean-output prediction that actually builds the targets, and a **fixed-suffix reward** used only to measure construction and realized gains at the same query, before and after fitting. Keeping these separate is what lets the paper ask a question most reward-tuning papers can't: did a bigger target-construction gain actually turn into a bigger realized gain after one update? Its answer, stated plainly in the abstract, is no — "larger target-construction gains do not necessarily translate into larger realized gains after a single fitting update."
+
+## Is the win the gradient, or just the perturbation?
+
+The obvious objection to any trust-region method is that displacing a prediction and fitting to the displacement might help regardless of which direction you pick — regularization by perturbation, not by reward. The repository's training script has a `dir_mode` ablation switch built directly into the target-construction function (`_opa_tr_step`, `scripts/train_opsd_ri_sd3.py`) that answers exactly this, with four real code paths rather than four config relabels:
+
+```python
+# dir_mode selects the step direction (ablation knob; 'grad' IS the method):
+#   'grad'     : the TRAINING reward's gradient at y0 — the method.
+#   'rand'     : a fixed random unit direction, same trust region, no reward info.
+#   'residual' : the denoising residual (x_end - y0) direction (ATC-style).
+#   'noop'     : no displacement (y+ = y- = y0) — a no-perturbation control.
+```
+
+<TrustRegionStep />
+
+The paper ran this exact ablation for 50 real optimizer updates and reported held-out CLIPScore on 512 held-out prompts: **0.3122** for the reward gradient, against **0.2363** for no displacement at all, **0.2303** for a random direction at the same radius, and **0.1256** for the rollout-residual direction — which is worse than doing nothing. That last number is the interesting one. The residual direction is the thing closest in spirit to a plain distillation target (move toward where the rollout actually ended up), and it is the one that actively hurts. The trust-region perturbation by itself buys nothing; the reward gradient is carrying the entire result.
+
+A second, smaller ablation checks the other half of "on-policy": does the query state need to come from an actual rollout, or would an offline forward-noised state work just as well? Swapping in a forward-noised control moved held-out CLIPScore from 0.3122 to 0.3089 — a 1.1% relative drop, against gaps above 7.5 percentage points for the direction controls above. On-policy query collection matters far less than the reward-gradient direction does, in this specific low-noise setting the paper evaluates.
+
+<Figure
+  src="/articles/diffusionopsd/fig3.png"
+  alt="Three panels. (a) CLIPScore over 50 optimizer updates: the reward-gradient direction rises to about 0.28 while the residual direction collapses toward 0.125 after update 10. (b) CLIPScore over the same updates comparing an on-policy rollout query state against a forward-noised control; the two curves stay close together, both rising to roughly 0.31-0.32. (c) On Z-Image-Turbo, a bar chart of how many of the ten reward objectives each reward-specific checkpoint finishes above the unadapted base model: ReFL and DiffusionOPSD both clear all ten, FlowGRPO clears eight, DiffusionNFT clears only two."
+  caption="The two ablations, plus the Z-Image-Turbo base-model comparison behind the claim above — recomputed independently from Table 1's own numbers, DiffusionNFT beats its own unadapted base on only 2 of 10 evaluators (DiffusionOPSD, arXiv:2608.24646, Figure 4)."
+/>
+
+## The result, and what "19 of 20" is actually made of
+
+Across SD3.5-M and Z-Image-Turbo, ten evaluators score every held-out image. Seven of them are public checkpoints anyone can download and run — PickScore, CLIPScore, HPSv2.1, an Aesthetic predictor, ImageReward, HPSv3, DeQA. The other three, the paper's appendix states outright, are **internal reward models**: an AltCLIP-architecture model "trained on our internal data," a scalar **VLM-Pointwise** preference model, and a **VLM-Pairwise** model that scores a generated image against a fixed reference image — itself generated by a different proprietary model, Seedream 5.0 Pro. None of the three ship with the code release.
+
+<EvaluatorLedger />
+
+Restricting the count to only the seven public evaluators barely moves the needle — 13 of 14 against 19 of 20 — so the internal columns are not quietly propping up an otherwise unremarkable result; the public subset alone shows almost the same dominance. But the single largest percentage anywhere in the paper, the "+44.0%" figure the abstract leads with, is the SD3.5-M VLM-Pairwise gain — the one column judged by an internal model against references from a different company's proprietary generator. Both facts survive being stated in the same sentence: the aggregate claim holds up under the strictest reasonable filter, and the biggest single number is on the one axis nobody outside ByteDance can independently check.
+
+<Figure
+  src="/articles/diffusionopsd/fig2.png"
+  alt="Twenty small plots of held-out reward against cumulative GPU-hours, arranged by backbone (SD3.5-M, Z-Image-Turbo) and evaluator (PickScore, CLIPScore, HPSv2.1, Aesthetic, ImageReward, HPSv3, DeQA, AltCLIP, PointWise, PairWise). DiffusionOPSD's curve traces the Pareto frontier — the highest held-out score at a given compute budget — on nineteen of the twenty panels; on SD3.5-M Aesthetic, ReFL's curve sits fractionally above it."
+  caption="Held-out quality against cumulative training compute, all ten evaluators, both backbones. DiffusionOPSD is the frontier everywhere except the one cell it concedes in the text (DiffusionOPSD, arXiv:2608.24646, Figure 8)."
+/>
+
+Held out from that count, and worth reading as its own result: on 100 held-out Z-Image-Turbo prompts, human annotators with STEM degrees, blinded and randomized, preferred DiffusionOPSD's outputs over the base model, FlowGRPO, DiffusionNFT, and ReFL on 64%, 71%, 90%, and 61% of prompts respectively. That is a genuinely independent check — VLM judges did not touch it — and it still clears the majority threshold against every baseline, including the strongest one.
+
+## The cost claim, read at the same precision
+
+<EfficiencyBars />
+
+The GPU-hour numbers are measured wall-clock on eight GPUs, not modelled, and they check out to the decimal: 28.2 against DiffusionNFT's 47.2 on SD3.5-M is a 40.3% cut, 149.8 against 405.8 on Z-Image-Turbo is 63.1%. The paper's own text adds a detail its headline figures don't: on Z-Image-Turbo, ReFL trains at 102.1 GPU-hours per 100 updates — a third cheaper than DiffusionOPSD's 149.8. DiffusionOPSD still wins every one of the ten Z-Image-Turbo reward-matched evaluator comparisons, ReFL included, so the result the paper is actually claiming there is quality at that cost, not lowest cost outright — and it says so explicitly. The "40% / 63%" framing is precise about its baseline being DiffusionNFT specifically; reading it as "cheapest available" would be over-reading the abstract, not a flaw in it.
+
+One number the paper flags rather than hides: peak VRAM is *not* uniformly lower under DiffusionOPSD — 50.0 GB against DiffusionNFT's 47.8 GB on SD3.5-M, 61.5 GB against 49.9 GB on Z-Image-Turbo. Fewer GPU-hours, more memory per GPU; the paper states this plainly rather than only quoting the number that favours it.
+
+## The paper's own baselines are built on it
+
+One more piece worth naming: the `opd/` directory in the repository implements three second-stage distillation baselines — **DanceOPD**, **DiffusionOPD**, **FlowOPD** — that don't compete with DiffusionOPSD so much as consume it. All three train a single shared student by distilling from *three frozen DiffusionOPSD specialists* (trained separately on PickScore, CLIPScore, and HPSv2.1), using different transfer objectives: DanceOPD matches velocity at one low-noise query, DiffusionOPD matches transition means across all ten denoising steps, and FlowOPD is a full clipped-PPO transition-log-probability objective. All three land below the jointly-trained DiffusionOPSD policy on all three shared objectives in the paper's Table 1 — which is a reasonable result, since none of them ever sees a reward signal directly; they only see what the three specialists already learned.
+
+## A repository that calls itself something the paper doesn't
+
+One detail is worth being precise about rather than papering over. The arXiv listing for 2608.24646 [links to `github.com/worldbench/DiffusionOPSD`](https://github.com/worldbench/DiffusionOPSD) as its code. That repository's own README opens with a line the paper's citation doesn't carry: *"Note: This is an external implementation of the algorithm in the following paper."* Every hyperparameter default, every baseline configuration, and every number in the README's results tables matches the paper's Table 1 to the decimal, including the OPD family described above — so whatever the disclaimer means, it isn't describing a loose or approximate reproduction. It might be standard scope language distinguishing a released reference implementation from an internal training stack that used different infrastructure to produce the same numbers, or it might mean something narrower. The paper's own citation treats the repository as its code; the repository's own first line hedges that. Both statements are on the record, and this is worth knowing before treating the released LoRA checkpoints as a byte-for-byte replica of whatever produced Table 1.
+
+## What ships, and what one released checkpoint can't do
+
+Three rank-32 LoRA adapters are on [Hugging Face](https://huggingface.co/WeiChow/DiffusionOPSD): `sd35-m-hpsv3` and `z-image-turbo-hpsv3`, both trained against the public HPSv3 evaluator, and `z-image-turbo-pointwise`. That third one is trained against VLM-Pointwise — one of the three internal evaluators above — and the README says so without hedging: *"The corresponding paper evaluator is not included in this repository."* You can load the checkpoint and generate images with it; you cannot independently re-score what it was optimized for, because the scorer that trained it was never released.
+
+```python
+import torch
+from diffusers import DiffusionPipeline
+
+pipe = DiffusionPipeline.from_pretrained(
+    "Tongyi-MAI/Z-Image-Turbo", dtype=torch.bfloat16, device_map="cuda"
+)
+pipe.load_lora_weights("WeiChow/DiffusionOPSD", subfolder="z-image-turbo-hpsv3")
+image = pipe("Astronaut in a jungle, cold color palette, muted colors, detailed, 8k").images[0]
+```
+
+The public installation path is unusually candid about its own rough edges, too — the README documents a `pip check` mismatch it says is intentional (ImageReward's package metadata pins an obsolete `timm`, while its actual inference code runs fine on the validated stack), and ships `scripts/smoke_reward_gradient.py` specifically to verify each of the seven public reward adapters produces a finite, nonzero image-space gradient before a multi-GPU job is launched on it.
+
+## The ledger
+
+**What is genuinely well-isolated.** The `dir_mode` ablation is the best thing in the release: a single flag in real training code, not a paper-only appendix number, that turns off the reward-gradient direction while holding every other piece of the pipeline fixed — same trust region, same detached fit, same EMA. The result (residual worse than no-op, both far behind the gradient) is exactly the kind of controlled comparison that most reward-tuning papers assert rather than demonstrate.
+
+**What holds up under scrutiny.** The 19-of-20 headline survives being restricted to the seven publicly checkable evaluators (13 of 14). The 40%/63% efficiency numbers check out to the decimal against their stated baseline. The human-preference win rates are a genuinely separate signal from the VLM judges and still clear a majority against every baseline.
+
+**What doesn't fully close.** The single largest number in the abstract sits on an internal, non-reproducible evaluator scored against a different company's proprietary model's outputs. One of three released checkpoints was trained against a scorer nobody outside the lab can rerun. And the repository the paper cites as its code describes itself, in its own first line, as an external implementation — a tension the paper's citation doesn't acknowledge and the repository doesn't resolve.
+
+**What I'd want to see next.** The same `dir_mode`-style ablation switch, but for the three internal evaluators — even a description of what VLM-Pointwise's training data looked like would let an outside reader judge how much of the win-count is generalizable preference and how much is a byproduct of that one judge's own training distribution. Until then, the honest summary is: the mechanism is real, checkable, and the ablations back it — the size of the win depends partly on evaluators only one lab can run.

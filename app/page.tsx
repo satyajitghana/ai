@@ -127,7 +127,7 @@ export default function Page() {
               <li key={a.slug}>
                 <Link
                   href={`/articles/${a.slug}`}
-                  className="group flex items-baseline justify-between gap-4"
+                  className="group flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4"
                 >
                   <h3 className="underline-offset-4 group-hover:underline">
                     {a.title}
@@ -157,7 +157,7 @@ export default function Page() {
         {projects.map((p) => (
           <li key={p.slug} className="group">
             <Link href={`/projects/${p.slug}`} className="block">
-              <div className="flex items-baseline justify-between gap-4">
+              <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
                 <h3 className="font-medium underline-offset-4 group-hover:underline">
                   {p.title}
                 </h3>
@@ -180,7 +180,7 @@ export default function Page() {
           <li key={p.slug}>
             <Link
               href={`/blog/${p.slug}`}
-              className="group flex items-baseline justify-between gap-4"
+              className="group flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4"
             >
               <h3 className="underline-offset-4 group-hover:underline">
                 {p.title}
@@ -200,7 +200,7 @@ export default function Page() {
           <li key={l.slug}>
             <Link
               href={`/logs/${l.slug}`}
-              className="group flex items-baseline justify-between gap-4"
+              className="group flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4"
             >
               <h3 className="underline-offset-4 group-hover:underline">
                 {l.title ?? l.slug}
@@ -218,7 +218,7 @@ export default function Page() {
         <>
           <SectionHeader path="arxiv" href="/arxiv" />
           <Link href={`/arxiv/${digest.slug}`} className="group block">
-            <div className="flex items-baseline justify-between gap-4">
+            <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
               <h3 className="underline-offset-4 group-hover:underline">
                 arXiv digest — {digest.papers.length} papers
                 {digest.papers.some((p) => p.standout) ? " · standout ★" : ""}
