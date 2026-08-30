@@ -1,0 +1,148 @@
+---
+title: "DART: the 15.8 FPS is a 4-class number wearing an 80-class AP"
+description: "A training-free framework that turns SAM3's single-prompt segmenter into a real-time multi-class detector — read from the paper's own tables and the repo's actual code. The architecture is genuinely clever (one backbone pass shared across every class, a batched decoder standing in for what used to be N forward passes) and the accuracy is real. The headline speed isn't measured at the headline's own class count, and the paper's own numbers say so once you read past the abstract."
+date: 2026-08-30
+interest: 5
+helpful: 4
+tags:
+  - computer-vision
+  - object-detection
+  - tensorrt
+  - quantization
+  - inference-optimization
+  - benchmarks
+---
+
+import { ClassCountCollapse } from "@/components/articles/dart-realtime-detection/class-count-collapse"
+import { StudentTradeoff } from "@/components/articles/dart-realtime-detection/student-tradeoff"
+
+SAM3 segments anything you can name, one name at a time. Give it a text prompt — "person" — and an image, and it returns every matching instance, masks included. Ask it for a second class and it runs the entire pipeline again from the top, backbone included, because the backbone was never told which class it's looking for and doesn't know how to skip that work. [DART](https://github.com/mkturkcan/DART) (Mehmet Kerem Turkcan, [arXiv 2603.11441](https://arxiv.org/abs/2603.11441)) turns that single-prompt segmenter into a multi-class detector without touching a single weight, by noticing that the expensive part of the pipeline — a 439M-parameter ViT-H/14 backbone — never looks at the prompt at all.
+
+| | |
+|---|---|
+| Repo | [mkturkcan/DART](https://github.com/mkturkcan/DART) · training-free, TensorRT-first |
+| Paper | [arXiv 2603.11441](https://arxiv.org/abs/2603.11441), "Detect Anything in Real Time: From Single-Prompt Segmentation to Multi-Class Detection" |
+| Weights | [huggingface.co/mehmetkeremturkcan/DART](https://huggingface.co/mehmetkeremturkcan/DART) — student backbones + pruned ViT-H checkpoints |
+| Base model | SAM3, ViT-H/14 backbone (439M), 6+6-layer cross-modal encoder-decoder, 200 object queries |
+| Headline (paper's own abstract) | "55.8 AP on COCO val2017 (80 classes) ... at 15.8 FPS (4 classes, 1008px)" |
+| Also in the repo | DARTF — an INT8 W8A8 port of the same detector to a Jetson AGX Orin, `dartf/` |
+| Runs on | a single RTX 4080 (DART) or a Jetson AGX Orin (DARTF), TensorRT 10.x |
+
+Both halves of that headline are true. They were never measured on the same run, and the paper's own class-count table makes that easy to see once you go looking. That's the finding this piece leads with — but it's worth saying up front that the rest of DART holds up well under the same scrutiny: the training-free conversion is a real, verifiable piece of engineering, and 55.8 AP with zero detection-specific training beats several purpose-built open-vocabulary detectors trained on millions of box annotations — the same prompt-driven, train-nothing posture [GLiNER 2.5](/articles/gliner-2-5) takes on the text side. The interesting part isn't that DART cheats. It's a well-built system whose one headline number was assembled from two different configurations, and the paper's own supporting tables disagree with its own abstract if you read them side by side.
+
+## From one prompt to eighty classes
+
+SAM3's scoring head is called `DotProductScoring`, and its job, in the original model, is to pool an entire text prompt into one embedding and produce one score per object query. That's the single-prompt design: the decoder has 200 learned queries, each gets a box and a presence score, and every one of those scores is a dot product against the same pooled vector. Ask for a second class and there is no way to fold it into that one vector — SAM3 runs the backbone, the encoder, the decoder, and the mask head again, from scratch, once per class name.
+
+DART's core change lives in `sam3/model/multiclass_head.py`, and it is small enough to read in a minute. `MultiClassScoring` replaces the pooled dot product with a per-class one:
+
+```python
+def forward(self, hs, per_class_text):
+    q = self.query_proj(hs)              # (L, B, Q, d_proj)
+    t = self.text_proj(per_class_text)    # (N, d_proj)
+    logits = torch.einsum("lbqd,nd->lbqn", q, t) * self.scale
+    return logits
+```
+
+Instead of one pooled text vector, keep `N` per-class pooled vectors and score every query against every class in one matrix multiply. And — this is the part that makes "training-free" a defensible claim rather than a marketing line — `MultiClassScoring.from_dot_product_scoring` initializes `query_proj` and `text_proj` by copying `DotProductScoring`'s own `hs_proj` and `prompt_proj` weights verbatim. No new weight is learned for this step. It's the same dot product SAM3 already computed, batched across classes instead of run once per class.
+
+That single change wouldn't be enough on its own — a batched decoder still needs `N` copies of the backbone's output to condition on, and the backbone is 78% of the per-class cost (87 of 112ms in the paper's own PyTorch baseline). The paper's real insight is that this 78% doesn't need to be paid more than once: the ViT-H backbone only ever looks at the image. It has no path to the text prompt at all, so its output is identical no matter which class you're about to ask about. Cache it once, batch the class-conditioned decoder over however many classes you want, and the backbone's cost — the expensive four-fifths of the pipeline — goes from `O(N)` to `O(1)`.
+
+<Figure src="/articles/dart-realtime-detection/fig1.png" alt="Three-panel diagram. Panel a: SAM3 per-class inference, three classes each running a full ViT-H backbone, encoder-decoder, and segmentation head in sequence, with a dashed red box marking the backbone as redundant across classes, labeled 78% of compute and N times 112 milliseconds per image. Panel b: DART's shared-backbone design, one ViT-H backbone feeding FPN features into a batched encoder-decoder across N classes with the mask head removed, followed by NMS, with a cached text encoder feeding class embeddings in on the side. Panel c: a timeline showing frame pipelining, where the encoder-decoder for frame t overlaps with the backbone computation for frame t+1 on a separate CUDA stream." caption="From SAM3's per-class loop to DART's shared backbone and batched decoder, plus the frame-pipelining timeline used for video (paper, Figure 1)." />
+
+## Five optimizations, none of them retraining
+
+The paper's Table 1 walks the optimization hierarchy one step at a time, all at 3 classes, 1008px, on an RTX 4080 — and every row after the first is training-free, in the literal sense that no gradient is computed anywhere in it:
+
+| Level | Optimization | ms/frame | Speedup |
+|---|---|---|---|
+| 0 | Naive: N full SAM3 passes | 336 | 1.0&times; |
+| 1 | Share the backbone across classes | 162 | 2.1&times; |
+| 2 | + batch the decoder, drop mask generation | 112 | 3.0&times; |
+| 3 | + restructure the attention graph, export backbone to TensorRT | 78 | 4.3&times; |
+| 4 | + TensorRT encoder-decoder, inter-frame pipelining | 60 | 5.6&times; |
+
+Level 3 is where the FP16 story gets interesting, because a naive TensorRT FP16 export of the backbone doesn't just lose a little accuracy — it breaks outright. TensorRT's fused scaled-dot-product-attention kernel accumulates FP16 error across all 32 transformer blocks; the paper's Table 4 measures the resulting feature cosine similarity against the true FP32 output at **0.058** — noise, not features:
+
+| Backbone deployment | Latency | Cosine vs. FP32 | Status |
+|---|---|---|---|
+| Fused-SDPA TRT FP16 | 26 ms | 0.058 | broken |
+| Fused-SDPA mixed (attention kept FP32) | 128 ms | 0.999 | correct, but slow |
+| **Explicit-attention TRT FP16 (used)** | **53 ms** | **0.999** | correct |
+| torch.compile FP16 | 75 ms | 1.000 | correct |
+| PyTorch eager FP16 | 87 ms | 1.000 | correct |
+
+The fix, in `scripts/export_hf_backbone.py`, is to export attention as explicit Q&middot;K<sup>T</sup>, softmax, and P&middot;V operations with real-valued RoPE instead of letting TensorRT auto-fuse it — that pattern-matches onto TensorRT's accumulation-safe kernels and recovers 0.999 cosine similarity at 53ms, roughly a third the latency of the fully-correct-but-unfused 128ms alternative. It's a genuinely useful, verifiable engineering result: the 0.999 (not 1.000) is disclosed candidly, and it turns out to matter later in this piece when DARTF's own numbers don't quite line up with DART's.
+
+Two more pieces round out the training-free hierarchy. A **text cache** (`--text-cache`) saves the per-class text embeddings to a `.pt` file after the first run, so switching which classes you're detecting is a cache load rather than a re-encode — with both TensorRT engines and a cache present, the full PyTorch model and its ~20-second load time never have to exist at all. And **block pruning** (`analyze_block_importance.py`, greedy sub-block search) can strip individual attention or MLP sub-blocks from the backbone for a further speed/quality trade — but at 80 classes, removing 16 sub-blocks only takes the full 80-class latency from 225ms to 220ms, because by then the backbone is a minority of the total cost. All the optimization leverage here lives in the backbone, and at high class counts the backbone stops being where the time goes. Which is the actual subject of this piece.
+
+<ClassCountCollapse />
+
+## The class count the headline doesn't share with the AP
+
+Here is the paper's own abstract, in full: "DART achieves 55.8 AP at 15.8 FPS (4 classes, 1008&times;1008) on a single RTX 4080." Read quickly, that sounds like one experiment. It's two. 55.8 AP is COCO val2017's 80-category evaluation protocol — it has to be; COCO only has one detection benchmark and it uses all 80 classes. 15.8 FPS pipelined is Table 2's `N=4` row. Nobody measured 55.8 AP at 15.8 FPS, because nobody ran an 80-class detector at 4 classes.
+
+The paper's own Table 2 is what makes this checkable — it reports both a `Sequential` and a `Pipelined` FPS at each class count, plus a `Gain` column for how much pipelining helps:
+
+| Classes | Backbone | Enc-dec | Sequential | Pipelined | Gain |
+|---|---|---|---|---|---|
+| 1 | 53.2 ms | 7.9 ms | 16.3 FPS | 18.7 FPS | +15% |
+| 2 | 53.2 ms | 11.4 ms | 15.5 FPS | 17.6 FPS | +14% |
+| 4 | 53.2 ms | 19.2 ms | 13.8 FPS | 15.8 FPS | +14% |
+| 8 | 53.2 ms | 34.7 ms | 11.5 FPS | 12.5 FPS | +9% |
+
+Backbone latency is exactly flat, as the class-agnostic-backbone claim requires. Encoder-decoder latency is not — it's linear in class count (a clean fit: 3.83ms per class plus a 4.07ms floor, reproducing the middle two rows to within 0.3ms), because the encoder-decoder is the part of the pipeline that does scale with `N`. Extend that line to 80 classes and the encoder-decoder alone costs roughly 310ms, next to a 53ms backbone that barely moves the total. Two class counts, two different bottlenecks: at 4 classes the backbone dominates and 15.8 FPS is a real, honestly-earned number; at 80 the encoder-decoder dominates by 6&times;, and nothing in the paper's Table 2 suggests the result would still say "FPS" with a double-digit number in front of it.
+
+The extrapolation isn't the only way to check this — there's a measured number for exactly this case, and it isn't in the paper. The GitHub README's COCO-evaluation table adds a column the paper's own Table 3 drops: `ms/img`. For the identical "Full TRT FP16, 1008px" configuration that produces the 55.8 AP headline — the same weights, the same 80 COCO categories, evaluated with `scripts/eval_coco_official.py`'s GPU-synced, per-image wall clock, averaged over all 5,000 val2017 images — that column reads **225 ms/img**. That's 4.4 FPS, and it isn't extrapolated; it's a real timed run of the exact configuration behind the AP number, chunked internally into 5 passes of 16 classes because a single 80-class batch doesn't fit a 16GB card's memory for the encoder-decoder engine. Two independent routes to the same answer — the paper's own linear scaling law, and the number already sitting in its own repository — agree to within a factor of two, and both are nowhere near 15.8.
+
+<Figure src="/articles/dart-realtime-detection/fig2.png" alt="Line chart of frames per second against number of detection classes from 1 to 8. Four series: 644px pipelined and 644px sequential cluster between about 28 and 41 FPS, both staying above a 30 FPS reference line through 4 classes and dipping slightly below it by 8. 1008px pipelined and 1008px sequential fall steadily from about 19 down to 12 FPS, crossing a 15 FPS reference line between 4 and 5 classes." caption="FPS against class count, pipelined and sequential, at both resolutions the paper tests. At 1008px — the resolution behind the 55.8 AP number — real time ends around 4 classes, a fraction of COCO's 80 (paper, Figure 2)." />
+
+One more nuance worth reading directly out of the code, because it changes what "real time" means here: the pipelining in Table 2 is a throughput optimization, not a per-request latency one. `sam3/video_pipeline.py`'s `PipelinedVideoProcessor` runs two TensorRT backbone instances on separate CUDA streams so that frame `t+1`'s backbone launches while frame `t`'s encoder-decoder is still running — it improves how often a new detection comes out of a live video stream, not how long it takes any single frame to go from capture to boxes, since that frame's own encoder-decoder still has to wait for that frame's own backbone. And the improvement it buys is smaller than "overlap the two stages entirely" would suggest: computing `Sequential ms − Pipelined ms` from Table 2 gives 7.6, 7.8, 9.1, and 7.9ms hidden at N=1, 2, 4, and 8 — a roughly constant handful of milliseconds, not a growing fraction of the encoder-decoder's own cost. That's consistent with a single GPU's compute units being shared between the two streams rather than truly running both stages in parallel; what pipelining hides is closer to fixed kernel-launch and copy overhead than actual compute overlap. It also explains why the paper's own "Gain" column shrinks from +15% to +9% as class count grows: a fixed number of milliseconds saved is a shrinking percentage of an enc-dec cost that keeps climbing.
+
+None of this makes the architecture less real. The backbone-sharing trick is exactly as advertised — flat at 53.2ms from 1 class to 8 — and 15.8 FPS at 4 classes is a genuine, useful operating point for anyone whose actual task has four or fewer classes (which, for a lot of real deployments — a specific set of objects on a specific line, a handful of species, a short vocabulary of vehicle types — is most of them). The problem is narrower and more specific than "the numbers are fake": one number in the headline was measured at a class count the other number was never run at, and the paper's own middle sections say so plainly if you keep reading past the abstract.
+
+## Training-free, except when it isn't
+
+The framing tension in "training-free" is real, and DART's own abstract states the resolution more precisely than the one-line summary suggests: "adapter distillation with a frozen encoder-decoder achieves 38.7 AP with a 13.9 ms backbone." The core claim — turning SAM3 into a multi-class detector — is training-free in the strict sense verified above: `MultiClassScoring` copies its predecessor's weights unchanged. Everything downstream of that claim, every distilled student backbone the repo ships, involved training something.
+
+The paper draws the line deliberately, and its own ablation shows why. Table 5 compares two ways to make the backbone cheaper:
+
+| Method | Backbone params | COCO AP | Backbone latency |
+|---|---|---|---|
+| ViT-H (teacher, training-free) | 439M | 55.8 | 53.0 ms |
+| RepViT-M2.3 (adapter-distilled) | 8.2M | 38.7 | 13.9 ms |
+| TinyViT-21M (adapter-distilled) | 21M | 30.1 | 12.2 ms |
+| EfficientViT-L2 (adapter-distilled) | 9.2M | 21.7 | 10.7 ms |
+| EfficientViT-L1 (adapter-distilled) | 5.3M | 16.3 | 10.4 ms |
+| ES-RV-L, full-pipeline distillation (competing method) | 8.2M | 5.5 | — |
+| ES-TV-M, full-pipeline distillation (competing method) | 11M | 4.3 | — |
+
+DART's own "adapter distillation" trains only a lightweight feature-projection layer while the encoder-decoder — the part of the network that actually does the detecting — stays frozen at its original SAM3 weights. That preserves 69% of teacher quality at the cheapest student (38.7 of 55.8 AP). A competing approach the paper cites, full-pipeline distillation, retrains the whole detection pipeline end to end against a new backbone; on the same replacement backbone, it retains only 10% of teacher quality (5.5 AP). Both approaches are "distillation." One keeps SAM3's own decoder as the source of truth for what a detection is and asks a small adapter to feed it comparable features; the other tries to relearn what a detection is from scratch on a smaller network, and — per this paper's numbers, on this task — that mostly fails. "Training-free" is precise about the conversion; the adapters are exactly as trained as their name says, and the paper is candid that they cost real accuracy for real speed.
+
+<Figure src="/articles/dart-realtime-detection/fig3.png" alt="Scatter plot of COCO AP against pipelined FPS. Three blue square points near AP 0.56, labeled 8, 4, and 1 classes, sit between about 12.5 and 18.7 FPS. Green triangles for RepViT-M2.3 and the 644px teacher variants cluster around AP 0.39 to 0.40 between 33 and 45 FPS. A purple diamond for TinyViT-21M sits near AP 0.30 at about 47 FPS, an orange square for EfficientViT-L2 near AP 0.22 at 49 FPS, and a red circle for EfficientViT-L1 near AP 0.16 at 51 FPS, with vertical reference lines at 15 and 30 FPS." caption="Speed-quality Pareto front: the teacher holds AP around 0.56 no matter how many classes are shown, while every distilled student trades AP for throughput along a steep, fairly linear curve (paper, Figure 4)." />
+
+It's also worth putting DART's zero-detection-training number in context, because the paper does this itself in Table 6: GLIP-L (49.8 AP), Grounding DINO-L (52.5 AP), and YOLO-World-X (46.7 AP) are all trained on Objects365 plus GoldG detection annotations — millions of labeled boxes — and all score below DART's 55.8, which involved retraining nothing beyond the copied-weight scoring head. That's the strongest evidence for the training-free claim actually earning its keep: it isn't just cheaper to build, it's more accurate than several purpose-built alternatives that spent a training run DART never needed.
+
+<StudentTradeoff />
+
+## DARTF: the same detector, on a Jetson, in INT8
+
+The repo's `dartf/` directory is a second, largely independent piece of engineering: a W8A8 INT8 port of the same ViT-H detector to a Jetson AGX Orin, with its own export pipeline, its own TensorRT plugins, and its own paper in preparation. The headline: **158ms per 1008px frame, versus DART's own FP16 engine at 275ms on the same hardware — a 1.74&times; throughput gain (42.5% latency cut) at "FP32-level detection quality."**
+
+The quantization is not a blunt cast-to-int8. `docs/METHOD.md` lists five exact graph rewrites, each verified against the PyTorch reference to a relative error of 5&times;10<sup>-6</sup>:
+
+- **Rotated residual stream.** SAM3 uses LayerNorm, and rotation-based quantization schemes normally need RMSNorm for the rotation to commute cleanly through the network. DARTF's insight: for an orthogonal rotation whose first row is the all-ones direction, `LayerNorm(x)&middot;Q` equals an RMSNorm over the rotated remaining coordinates with the first coordinate zeroed. So the rotation folds directly into the surrounding weight matrices and the network runs a masked RMSNorm instead — with a Walsh-Hadamard rotation, the activation crest factor (a proxy for how badly outliers wreck a single per-tensor INT8 scale) drops from 28.4 to 4.07.
+- **Per-head value rotation**, folded into the value and output projections, lowering the crest factor at the attention-output site specifically.
+- **RoPE fold** as a signed column permutation of the query/key weights — exact even under INT8 codes, absorbed into the GEMM epilogue.
+- **Window-major token layout**, making all 32 backbone blocks structurally identical so one set of plugins covers every block.
+- **Per-channel fc2 activation scales**, a SmoothQuant-style fix applied at the one site the rotation can't reach.
+
+Weight scales come from [activation-aware GPTQ](/articles/nemotron-nvfp4) with per-output-channel bias correction — quantizing blocks in sequence, feeding each block the fake-quantized output of the already-quantized prefix, and correcting each output channel's bias by its mean quantization error, so the deployed INT8 graph is exactly the one the calibration Hessians were computed against. Attention itself, softmax, GELU, RoPE, and the FPN neck all stay FP16; only the shared q/k/v projection, the attention-output projection, and the two MLP layers per block are quantized to INT8, with block 0 kept in FP16 by default (there's a faster variant that quantizes it too, at a small quality cost — 55.97 vs 56.01 AP).
+
+The energy numbers are as striking as the latency ones: **7.7 J per frame against DART FP16's 13.2 J** — a 1.71&times; reduction, tracking the 1.74&times; throughput gain closely, which is exactly what you'd expect if the power draw itself didn't change much and the win is almost entirely "finish sooner."
+
+Now the number that doesn't quite match the main repo: DARTF's README states "COCO val2017: 56.0 AP vs 56.1 for FP32," while DART's own headline is 55.8 AP. All three numbers describe the same ViT-H detector and none of them is wrong, but they aren't the same measurement. DART's 55.8 is the **FP16** TensorRT backbone from the explicit-attention restructuring above — Table 4 disclosed its cosine similarity to true FP32 as 0.999, not 1.000, and a small accumulated AP cost from that isn't surprising. DARTF's "FP32 reference" of 56.10 comes from a different export path entirely: its own ONNX graph, built in the rotated, window-major basis the quantization needs, run at genuine FP32 with no rounding at all — and the paper's rotation is stated to be exact, so 56.10 is a reasonable stand-in for the true unquantized number. The 0.3-AP gap between 55.8 and 56.10 lines up with the cost of going FP16 that DART's own precision table already flagged; DARTF's own INT8 quantization then costs a further 0.09 AP (56.10 &rarr; 56.01) against that same true-FP32 baseline — a smaller hit from 8-bit weights and activations than DART's headline path takes just going to FP16. (The two repos' AP tables were also run on different cards — DART's on an RTX 4080, DARTF's on an RTX 4090 — which shouldn't move a detection metric but is one more reason not to treat 55.8 and 56.1 as a strict before/after pair.) It's a real discrepancy, and reading the export code is what resolves it: two different precision baselines, not one number contradicting the other.
+
+## What I'd take from reading it
+
+The training-free reframing of SAM3 is the part of this repo I'd actually reuse: a class-agnostic backbone plus a scoring head that only needs a matrix multiply, not a retrain, to go from one prompt to many, is a genuinely portable idea for any promptable segmenter with the same structure. The explicit-attention TRT export and DARTF's exact INT8 rewrites are careful, disclosed, verifiable engineering — the kind that publishes its own failure cases (0.058 cosine similarity, right there in Table 4) rather than hiding them. What doesn't hold up is the single headline sentence, and only because it silently changes the experiment between its two halves. Read the class-count column before you read the FPS number; the paper's own Table 2 already told you which one you're getting.
