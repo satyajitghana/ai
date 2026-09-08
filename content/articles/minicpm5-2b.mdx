@@ -1,0 +1,379 @@
+---
+title: "MiniCPM5-2B: how 2 KV heads pay for a 131K window"
+description: "MiniCPM5-2B ships with no tech report of its own — the model repo's only arXiv tags are MiniCPM4's paper and a data-tiering paper, and the closing BibTeX block still cites MiniCPM4. What config.json shows instead: a plain LlamaForCausalLM, 2.52B parameters marketed as '2B,' and an 8:1 GQA ratio that is the entire reason a 131,072-token context fits in 8GB of VRAM. The KV-cache arithmetic reproduces a real report — Q4_K_M at 7.2GB, Q8_0 at 8.2GB — almost to the byte, alongside the 34-benchmark evaluation table, the RL+OPD training recipe, DSpark's speedup decay with context, and day-0 deployment across nine chip architectures."
+date: 2026-09-08
+tags:
+  - llm
+  - on-device
+  - gqa
+  - kv-cache
+  - quantization
+  - speculative-decoding
+  - long-context
+featured: true
+interest: 5
+helpful: 5
+---
+
+import { GqaGeometry } from "@/components/articles/minicpm5-2b/gqa-geometry"
+import { VramBudgetExplorer } from "@/components/articles/minicpm5-2b/vram-budget-explorer"
+import { BenchmarkExplorer } from "@/components/articles/minicpm5-2b/benchmark-explorer"
+import { DsparkDecay } from "@/components/articles/minicpm5-2b/dspark-decay"
+import { DeploymentMatrix } from "@/components/articles/minicpm5-2b/deployment-matrix"
+
+[`openbmb/MiniCPM5-2B`](https://huggingface.co/openbmb/MiniCPM5-2B) is a dense 2B-class language model that, per its own README, reaches "2B-class open-source SOTA" across 34 benchmarks, natively handles a 131,072-token context, and ships with an open speculative-decoding draft, a Q4/Q8/GPTQ/MLX/GGUF release matrix, and same-day recipes for vLLM, SGLang, llama.cpp, and five more inference backends. All of that is worth taking seriously. None of it comes with a tech report.
+
+Pull the model repo's own metadata and it lists exactly two arXiv citations: `2506.07900` — [MiniCPM4: Ultra-Efficient LLMs on End Devices](https://arxiv.org/abs/2506.07900) — and `2602.09003`, a data-tiering paper referenced once, for the pretraining data pipeline. Scroll to the bottom of the README and the BibTeX block still cites MiniCPM4. There is no MiniCPM5 paper. Every architectural and training claim this article makes about *MiniCPM5-2B specifically* rests on the model card, `config.json`, and the GitHub cookbooks — not a peer-reviewed report. Where the lineage runs through MiniCPM4's actual paper, this article says so explicitly and cites it as MiniCPM4, not MiniCPM5.
+
+<Callout type="note">
+This is a deliberate choice on OpenBMB's part, not an oversight — MiniCPM4 and MiniCPM3 both got full arXiv reports; MiniCPM5-1B and MiniCPM5-2B ship as README-only model cards, faster than a paper cycle allows. Treat every number below accordingly: card-verified, not report-verified.
+</Callout>
+
+## What's actually in the config
+
+Model cards can round; `config.json` cannot. Here are the fields that matter, fetched directly from the repo:
+
+```json
+{
+  "architectures": ["LlamaForCausalLM"],
+  "model_type": "llama",
+  "hidden_size": 2048,
+  "intermediate_size": 6144,
+  "num_hidden_layers": 42,
+  "num_attention_heads": 16,
+  "num_key_value_heads": 2,
+  "head_dim": 128,
+  "max_position_embeddings": 131072,
+  "rope_theta": 5000000,
+  "vocab_size": 130560,
+  "tie_word_embeddings": false,
+  "torch_dtype": "bfloat16"
+}
+```
+
+Two things worth stopping on before anything else:
+
+**It's `LlamaForCausalLM`.** Not a MiniCPM-specific architecture class, not InfLLM v2's trainable sparse attention from the MiniCPM4 paper — a stock Llama-style transformer with grouped-query attention. The README says this outright: "MiniCPM5-2B uses the standard `LlamaForCausalLM` architecture, so mainstream inference engines can load it directly: no custom kernels, no model-code fork." That is a real, useful engineering decision — every backend in this article works on day zero because of it — but it also means MiniCPM5 did **not** inherit MiniCPM4's headline sparse-attention mechanism. What it inherited is the *training philosophy*: the data pipeline, the tiered data management, the RL recipe. The architecture reverted to something engines already know how to run fast.
+
+**"2B" is 2.52B.** The Hugging Face API reports `2,516,756,480` BF16 parameters — 2.52 billion, 1.98B of them outside the embedding and LM head (`vocab_size=130560` at `hidden_size=2048` makes the embedding table alone about 267M parameters, doubled since `tie_word_embeddings: false` means input and output embeddings are separate weights). `usedStorage` on the repo is 5,033,557,096 bytes, which is 2,516,756,480 × 2 to within rounding — consistent with a straight BF16 release. None of this makes "2B" dishonest; every model in its comparison set rounds the same way. It's just worth naming once, in numbers, rather than letting the name do the rounding silently.
+
+| | |
+|---|---|
+| Repo | [`openbmb/MiniCPM5-2B`](https://huggingface.co/openbmb/MiniCPM5-2B) · Apache-2.0 · BF16 final release, post-trained with RL + OPD |
+| Params | **2,516,756,480** total (2.52B) · 1,981,982,720 non-embedding |
+| Shape | 42 layers · hidden 2048 · intermediate 6144 · 16 attention heads, **2 KV heads** (8:1 GQA) · head dim 128 |
+| Context | 131,072 tokens native, `rope_theta` 5,000,000 |
+| Siblings | `-SFT` (pre-RL), `-Midtrain`, `-Base`, `-GGUF`, `-MLX`, `-GPTQ`, `-DSpark` (draft model) — plus a smaller MiniCPM5-1B series |
+| Cited papers | MiniCPM4 ([2506.07900](https://arxiv.org/abs/2506.07900)) and a data-tiering paper ([2602.09003](https://arxiv.org/abs/2602.09003)) — no MiniCPM5 report |
+
+## The lineage, from a paper that isn't about this model
+
+Since MiniCPM5 doesn't have its own report, the honest way to talk about where it came from is to go read the paper it *does* cite and be careful about what transfers. MiniCPM4's abstract targets exactly this problem — efficient end-device LLMs — across four axes: architecture (InfLLM v2 trainable sparse attention), training data (the UltraFineWeb / UltraClean filtering lineage this site has [covered separately](/articles/ultra-fineweb)), training algorithms (a µP-style hyperparameter search called ModelTunnel v2, plus chunk-wise RL rollouts), and inference systems (speculative decoding via FR-Spec, a CPU/GPU inference framework called CPM.cu).
+
+<Figure
+  src="/articles/minicpm5-2b/fig2.png"
+  alt="Diagram of InfLLM v2's two-stage sparse attention: Stage 1 scores block-partitioned KV cache against semantic kernels and selects top-k relevant blocks per query group; Stage 2 computes exact attention only over the selected blocks."
+  caption="MiniCPM4's InfLLM v2 trainable sparse attention (paper, Figure 2) — the architecture MiniCPM4-8B shipped. MiniCPM5-2B does not use this; it runs plain GQA attention instead, for engine compatibility."
+/>
+
+That figure is here for contrast, not lineage. InfLLM v2 is what let MiniCPM4-8B post the speed numbers in its own headline chart:
+
+<Figure
+  src="/articles/minicpm5-2b/fig1.png"
+  alt="Bar charts comparing prefilling and decoding token/s at 32k, 64k, 96k, and 128k context on a Jetson AGX Orin and an RTX 4090, for Llama-3-8B, GLM-4-9B, Qwen-3-8B, and MiniCPM4-8B. MiniCPM4-8B leads every bar, with the gap widening at longer context."
+  caption="MiniCPM4-8B vs. three same-class open models on end-side hardware (paper, Figure 1) — this is a MiniCPM4-8B result, not MiniCPM5-2B; it establishes why sparse attention was worth building, not what MiniCPM5-2B's speed looks like."
+/>
+
+MiniCPM5-2B is a different model, a different size class, and — per the README's own words above — a different attention mechanism entirely. What plausibly *does* carry over from MiniCPM4 to MiniCPM5 is everything data- and training-shaped: the UltraFineWeb/UltraClean filtering approach, tiered data management (now formalized in the 2602.09003 paper cited on this repo), and the general end-device efficiency mandate. What does **not** carry over, on the model's own admission, is the sparse-attention architecture. If MiniCPM5-2B is fast and cheap to serve at long context, the mechanism is downstream of GQA and aggressive quantization support — covered next — not of InfLLM v2.
+
+## Why 2 KV heads is the whole story
+
+<GqaGeometry />
+
+Grouped-query attention doesn't change how many query heads compute attention outputs — it changes how many *distinct* key/value projections have to be cached. MiniCPM5-2B ships 16 query heads sharing only 2 KV heads, an 8:1 ratio that is aggressive even among GQA models (Llama-3.1-8B ships 8 KV heads for 32 query heads, a 4:1 ratio, for comparison). Every group of 8 query heads reads the same cached key and value at inference time. The compute cost of attention doesn't move; the *memory* cost of storing that cache for every generated token, in every layer, for the life of the request, drops in direct proportion to the KV-head count.
+
+## The KV-cache arithmetic
+
+This is the number the rest of the article turns on, so it's worth deriving instead of quoting. Per-token KV cache size, across the whole model, is:
+
+```python
+layers = 42
+kv_heads = 2
+head_dim = 128
+dtype_bytes = 2       # f16 — 2 bytes per element
+context = 131_072     # native max_position_embeddings
+
+per_token = layers * kv_heads * head_dim * 2 * dtype_bytes  # the "2" is K and V
+total = per_token * context
+
+print(per_token)        # 43,008 bytes/token
+print(total)             # 5,637,144,576 bytes
+print(total / 1e9)       # 5.637 GB
+```
+
+At the model's native 131,072-token context and f16 KV cache, that's **5,637,144,576 bytes — 5.637 GB — of KV cache alone**, before a single weight is loaded. Now check it against a real deployment report: someone running `MiniCPM5-2B-GGUF` on a single RTX 3060 with
+
+```bash
+llama-server -m MiniCPM5-2B-Q8_0.gguf -ngl 99 -c 131072 -fa on --jinja \
+  -np 1 -ctk f16 -ctv f16 -b 2048 -ub 1024 --temp 1.0 --top-p 0.95
+```
+
+measured Q4_K_M at **~163 tok/s decode, 7.2GB total VRAM**, and Q8_0 at **~113 tok/s decode, 8.2GB total VRAM**, both with prefill around 5,800 tok/s, and reported that "most of that VRAM is the 131K KV cache." The GGUF weight files are 1.56GB (Q4_K_M) and 2.68GB (Q8_0). Subtract:
+
+- Q4_K_M: 7.2 − 1.56 = **5.64GB** implied KV cache
+- Q8_0: 8.2 − 2.68 = **5.52GB** implied KV cache
+
+Both land within rounding of the derived 5.637GB. The claim checks out — not approximately, but to the byte on the Q4_K_M side. And the mechanism is exactly the 2-KV-head geometry above: an MHA model with 16 KV heads instead of 2 would need 8× that cache — **45,097,156,608 bytes, ~45GB** — before weights, which doesn't fit on any consumer GPU sold today regardless of how aggressively the weights themselves are quantized. The 131K window isn't cheap because the model is small. It's cheap because the cache is small, and the cache is small because of a single config field.
+
+<VramBudgetExplorer />
+
+The corollary the RTX 3060 report drew, and the slider above reproduces: drop the context window and the budget opens up fast, because weights barely move while the cache scales linearly with tokens. A Q8_0 build at 32K tokens instead of 131K needs roughly 2.68 + 1.41 ≈ 4.1GB — comfortable on an 8GB card with headroom to spare, or on a shared/multi-tenant box.
+
+## What 34 benchmarks actually say
+
+The README's evaluation table compares MiniCPM5-2B against eight other models: three in its own 2B class (LFM2.5-2.6B, Qwen3.5-2B, Gemma-4-E2B-it) and five larger ones listed for reference (Qwen3.5-4B, granite-4.2-3B, Nemotron-3-Nano-4B, Gemma-4-E4B-it, LFM2.5-8B-A1B). The card's claim is an average of **53.9** across 34 benchmarks spanning nine categories, ahead of every model in the comparison set including the 4B-class ones (highest there: 51.1). Averaging MiniCPM5-2B's own 34 column values by hand reproduces **53.88** — the card's number is not a rounding trick, it's the real mean of the rows below.
+
+<BenchmarkExplorer />
+
+The full table, transcribed as published (blue-bold-equivalent: **bold** marks the best result across all 9 models; a dagger † marks scores sourced from the official Artificial Analysis release rather than reproduced internally):
+
+| Benchmark | MiniCPM5-2B | LFM2.5-2.6B | Qwen3.5-2B | Gemma-4-E2B-it | Qwen3.5-4B | granite-4.2-3B | Nemotron-3-Nano-4B | Gemma-4-E4B-it | LFM2.5-8B-A1B |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Code Reasoning** | | | | | | | | | |
+| LiveCodeBench v6 | **69.1** | 42.1 | 20.2 | 42.9 | 56.4 | 58.9 | 50.7 | 53.9 | 39.8 |
+| LCB-Pro 25Q2 (Easy) | **68.0** | 30.9 | 10.3 | 27.1 | 58.3 | 54.6 | 51.6 | 45.8 | 27.8 |
+| LCB-Pro 25Q2 (Medium) | **17.5** | 0.0 | 0.0 | 0.0 | 7.0 | 5.3 | 5.3 | 1.8 | 0.0 |
+| OJBench | **32.5** | 11.2 | 2.6 | 11.6 | 24.8 | 21.8 | 20.0 | 19.0 | 8.2 |
+| SciCode (wbg) † | 26.3 | 14.2 | 2.8 | 20.9 | 16.1 | **24.9** | 16.4 | 24.4 | 7.8 |
+| **Math Reasoning** | | | | | | | | | |
+| AIME 2025 | 86.5 | 41.9 | 29.6 | 31.7 | 78.8 | **79.4** | 56.3 | 37.1 | 46.0 |
+| AIME 2026 | 86.5 | 45.2 | 29.0 | 39.8 | **82.7** | 83.5 | 62.1 | 45.0 | 56.7 |
+| HMMT Feb 2026 | **63.8** | 33.7 | 20.5 | 17.8 | 64.0 | 60.8 | 51.3 | 30.1 | 38.5 |
+| MATH-500 | 94.6 | 89.6 | 85.8 | 85.4 | **99.0** | 97.0 | 91.6 | 88.2 | 93.2 |
+| **Instruction Following** | | | | | | | | | |
+| IFBench | 66.3 | 59.0 | 46.0 | 25.7 | 59.0 | **73.0** | 58.3 | 28.3 | 51.0 |
+| IFEval | 86.7 | 93.4 | 77.5 | 31.4 | 90.2 | **93.7** | 88.0 | 44.4 | 90.8 |
+| Multi-IF | 71.8 | **76.8** | 57.1 | 40.3 | 73.6 | 75.9 | 65.9 | 45.9 | 71.4 |
+| **General Knowledge** | | | | | | | | | |
+| MMLU-Pro | 70.8 | 65.2 | 64.3 | 56.0 | **78.0** | 65.8 | 65.7 | 68.3 | 63.1 |
+| MMLU-Redux | 84.7 | 80.0 | 80.0 | 71.8 | **88.7** | 78.9 | 79.8 | 83.7 | 80.0 |
+| HLE † | 8.9 | 6.2 | 2.6 | 4.8 | **9.9** | 6.6 | 4.9 | 3.8 | 6.9 |
+| GPQA-Diamond † | 70.2 | 55.8 | 45.6 | 43.3 | **77.1** | 55.9 | 51.3 | 57.6 | 51.3 |
+| SuperGPQA | 40.8 | 26.2 | 38.6 | 30.3 | **52.8** | 39.9 | 37.8 | 38.7 | 34.5 |
+| **Long Context** | | | | | | | | | |
+| AA-LCR † | 59.0 | 5.3 | 28.7 | 17.0 | **61.0** | 24.3 | 17.3 | 33.0 | 0.0 |
+| NoLiMa | **68.1** | 0.7 | 17.1 | 3.9 | 43.5 | 5.1 | 1.1 | 2.3 | 0.5 |
+| LongBenchPro | 44.8 | 23.7 | 8.2 | 42.2 | **58.4** | 34.8 | 27.9 | 53.5 | 19.6 |
+| LongBench v2 | 43.7 | 30.3 | 24.9 | 33.2 | **47.3** | 36.0 | 32.0 | 42.7 | 30.4 |
+| **Tool Use** | | | | | | | | | |
+| τ³-Bench Banking † | **20.8** | 7.2 | 2.1 | 3.9 | 6.8 | 5.6 | 1.2 | 4.1 | 3.4 |
+| τ²-Bench Telecom | **97.1** | 90.4 | 69.0 † | 20.8 † | 92.1 † | 40.9 | 28.1 † | 20.8 † | 16.1 † |
+| BFCL v4 | **66.6** | 61.1 | 43.6 | 36.6 | 56.8 | 52.2 | 43.7 | 47.0 | 49.2 |
+| **Coding Agent** | | | | | | | | | |
+| SWE-bench Verified | **46.4** | 6.0 | 5.0 | 2.0 | 33.6 | 36.8 | 3.0 | 15.0 | 0.4 |
+| SWE-bench Pro | 14.4 | 0.6 | 0.8 | 0.0 | **28.2** | 12.3 | 0.1 | 3.3 | 0.4 |
+| Terminal-Bench v2.1 † | 8.6 | 4.5 | 3.0 | 0.4 | **25.8** | 13.9 | 3.8 | 1.9 | 1.9 |
+| **Search Agent** | | | | | | | | | |
+| BrowseComp-ZH | **43.5** | 9.8 | 18.2 | 4.7 | 39.6 | 21.1 | 3.3 | 7.0 | 13.2 |
+| BrowseComp Top100 | **39.7** | 13.7 | 19.3 | 6.0 | 33.3 | 19.0 | 4.7 | 6.3 | 9.7 |
+| GAIA Text-103 | **88.7** | 49.5 | 47.9 | 30.1 | 78.6 | 57.3 | 26.5 | 39.5 | 41.1 |
+| **General Agent** | | | | | | | | | |
+| GDPval-AA v2 † | **19.6** | 4.5 | 0.0 | 0.0 | 11.7 | 0.0 † | 0.0 | 0.0 | 0.0 |
+| Claw-Gym | 59.2 | 19.3 | 25.5 | 31.3 | 51.6 | **60.0** | 33.7 | 37.9 | 2.7 |
+| WildClaw | **23.9** | 10.2 | 9.2 | 8.9 | 17.0 | 20.0 | 8.9 | 14.3 | 4.5 |
+| QwenClaw | **42.9** | 19.3 | 18.2 | 14.5 | 37.1 | 36.4 | 16.8 | 16.7 | 4.5 |
+| **Average** | **53.9** | 33.2 | 28.0 | 24.6 | 51.1 | 42.7 | 32.6 | 31.2 | 28.4 |
+
+A pattern worth naming rather than skating past: MiniCPM5-2B doesn't win every row (Multi-IF, AIME 2025/2026, MMLU-Pro/Redux, MATH-500, several long-context and agentic rows go to a 4B-class model instead), but it wins the *average*, and wins it against models with meaningfully more parameters. On τ²-Bench Telecom and GAIA it leads the entire field, 2B-class or not. On AIME 2025/2026 it's within a point of the field-leading 4B model. That's a genuinely different shape than "small model wins on paper by cherry-picking benchmarks" — it's mid-pack-to-strong on most rows and exceptional on a handful, which is what actually moves an average that far above the next-best 2B model (33.2).
+
+## The training recipe: SFT, then RL teachers, then one distillation pass
+
+<Figure
+  src="/articles/minicpm5-2b/training-recipe.png"
+  alt="Flowchart of MiniCPM5-2B's training pipeline: Pre-Training (Stable Training, Short Decay 4K, Long Decay 32K to 128K to 512K) produces MiniCPM5-2B-Base; SFT stage runs Mid-Training at 32K (600B tokens) then 128K (400B tokens) producing MiniCPM5-2B-Midtrain, then Deep Thinking SFT (400B tokens) producing MiniCPM5-2B-SFT; RL+OPD stage trains parallel Reasoning Task RL, General Task RL, and Agentic RL teacher models from the SFT checkpoint, then Online Policy Distillation (OPD) merges them back into MiniCPM5-2B, using the SFT model as both source and distillation student."
+  caption="The full pipeline, as OpenBMB diagrams it (OpenBMB, MiniCPM5-2B model card)."
+/>
+
+Reading the diagram left to right: base pretraining runs stable training, a short 4K-context decay phase, then a long decay phase that extends context in stages up to 512K (a training-curriculum detail — the shipped model's documented, served context is 131,072, matching `max_position_embeddings`). Mid-training then runs two more context stages on top of that base — 600B tokens at 32K context, then 400B tokens at 128K context — before 400B tokens of "deep-thinking" SFT (released as `UltraData-SFT-2605`, with the agent-specific portion as `UltraData-SFT-Agent-2609`, ~500K samples).
+
+From the SFT checkpoint, training branches into parallel RL teachers — reasoning, general-task, and agentic tracks, each producing multiple expert checkpoints (16 total, 5 of them agentic) — using `UltraData-RL-2609` (80K+ samples spanning math, code, general knowledge, and long-context reasoning). The reasoning-RL reward design is explicitly credited to [JustRL](https://arxiv.org/pdf/2512.16649) ("Scaling a 1.5B LLM with a Simple RL Recipe," arXiv:2512.16649) — a real, citable paper. A *separate* piece of the recipe, the critic-based algorithm used specifically for the RL+OPD stage, is credited to something called "JustRL II," linked not to arXiv but to [a Notion writeup](https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic). That is the actual, verified link in the README — worth flagging because an arXiv id (`2511.05963`) has circulated attached to "JustRL II" in some launch commentary; that id resolves to an unrelated paper ("Next-Latent Prediction Transformers Learn Compact World Models"), not to this work. Cite the Notion page if you cite JustRL II at all, and treat it as an unreviewed writeup, not a paper.
+
+Then **On-Policy Distillation (OPD)** merges those 16 expert models back into one release checkpoint: at each response position, it computes full-vocabulary reverse KL divergence between student and teacher logits as the advantage estimate — replacing the usual verification-based advantage — and reuses each teacher's own RL training prompts as distillation data, so no separate distillation corpus had to be built.
+
+The README states the net effect in two numbers: RL + OPD improves reasoning/general benchmarks by an average of **+10.96 points** over the SFT-only checkpoint, and agentic benchmarks by **+6.96 points**. Here is the chart that number comes from:
+
+<Figure
+  src="/articles/minicpm5-2b/rl-opd-gains.png"
+  alt="Two horizontal bar-chart panels titled 'Score Gains from RL + OPD.' The top panel, Reasoning & General Capabilities, shows SFT-baseline bars in blue with a purple RL+OPD gain segment stacked on top, across Knowledge, Code, Instruction Following, Math Reasoning, and Long Context benchmarks — for example GPQA-Diamond rises from 48.59 to 70.2. The bottom panel, Agent Capabilities, shows the same treatment for Code Agent, Tool Use, Search Agent, and General Agent benchmarks — for example SWE-Bench-Verified rises from 29 to 46.4."
+  caption="RL + OPD's own before/after chart, benchmark by benchmark (OpenBMB, MiniCPM5-2B model card)."
+/>
+
+Reading those gains benchmark-by-benchmark off that chart, rather than trusting the two averages alone — this is the same benchmark explorer from earlier, opened straight to its "what RL+OPD bought" tab:
+
+<BenchmarkExplorer defaultTab="gain" />
+
+NoLiMa gains 8.9 points, GPQA-Diamond gains 21.6, SWE-bench Verified gains 17.4, and τ²-Bench Telecom — already near-saturated at 92.98 after SFT — gains a comparatively modest 4.1. The gains aren't uniform, which is what you'd expect from a distillation step reusing each teacher's own training distribution rather than a generic capability boost applied everywhere at once.
+
+One name from the release announcements that this article is **not** going to assert as fact: a training framework sometimes called "Meshy," described elsewhere as a scalable RL training system behind this release. It does not appear anywhere in the model card, the GitHub repository, or public documentation as far as this research could find — searched by name, directly, with nothing returned. If it's real, it shipped without a citable reference this article could locate; the RL-stack claims above are limited to what the README itself names and links.
+
+### The open release
+
+Alongside the weights, OpenBMB released the training data itself:
+
+| Dataset | Size | Role |
+|---|---|---|
+| [`UltraData-Code`](https://huggingface.co/datasets/openbmb/UltraData-Code) | ~550B tokens (L2 algorithmic-selection ~400B + L3 task-synthesis ~150B, from an L0 base of ~192M GitHub repos) | Tiered code data, L0–L3 |
+| [`UltraX-Preview`](https://huggingface.co/datasets/openbmb/UltraX-Preview) | ~100B tokens, 113,789,578 rows, English-only, 487GB | High-quality web pretraining corpus (5 sub-corpora, ~20B tokens each) |
+| [`UltraData-SFT-Agent-2609`](https://huggingface.co/datasets/openbmb/UltraData-SFT-Agent-2609) | ~500K samples | Agent-specific SFT data |
+| [`UltraData-RL-2609`](https://huggingface.co/datasets/openbmb/UltraData-RL-2609) | 80K+ samples | RL training data — math, code, general knowledge, long-context |
+| [`Ultra-FineWeb`](https://huggingface.co/datasets/openbmb/Ultra-FineWeb) | ~1T English + ~120B Chinese tokens | Core web pretraining data — see this site's [own measurement of what its filter costs and buys](/articles/ultra-fineweb) |
+
+## DSpark: speculative decoding, and a speedup that doesn't decay smoothly
+
+MiniCPM5-2B ships an open speculative-decoding draft, [`MiniCPM5-2B-DSpark`](https://huggingface.co/openbmb/MiniCPM5-2B-DSpark). Per the community GGUF conversion of that draft, its GGUF architecture string is literally `dflash` — DSpark is built as DFlash plus a Markov head, which puts it in the same family this site covered in [DFlash 2: the drafter already knew the answer, it just picked the wrong one](/articles/dflash2), and adjacent to the confidence-scheduled verifier approach in [DeepSeek's DSpark](/articles/deepseek-dspark) (a different, unrelated "DSpark" — DeepSeek and OpenBMB happened to land on the same name for different mechanisms). SGLang is the recommended serving path, with a purpose-built launch flag:
+
+```bash
+python -m sglang.launch_server \
+  --model-path openbmb/MiniCPM5-2B \
+  --trust-remote-code \
+  --speculative-algorithm DSPARK \
+  --speculative-draft-model-path openbmb/MiniCPM5-2B-DSpark \
+  --speculative-dspark-block-size 7 \
+  --port 30000
+```
+
+SGLang's own [day-0 cookbook](https://docs.sglang.io/cookbook/autoregressive/OpenBMB/MiniCPM5-2B) for this model publishes concrete single-GPU throughput numbers, reproduced in full below — worth being precise about what they do and don't establish, since a claim of "over 250 tok/s/user on coding tasks with DSpark enabled on a 5090" circulated around this release and this article could not confirm that specific framing against the cookbook page: the page's tables don't label whether DSpark was active for the runs, and don't mention a coding-specific workload — only a synthetic random benchmark (`isl=1024, osl=1024`).
+
+<DeploymentMatrix />
+
+| Hardware | Workload | TTFT | TPOT | Decode tok/s/GPU |
+|---|---|---:|---:|---:|
+| RTX 5090 (32GB) | bs=1, single user | 34 ms | 4.0 ms | 496 |
+| RTX 5090 (32GB) | concurrency=128 | 34 ms | 11.8 ms | 19,280 |
+| DGX Spark (128GB unified) | bs=1, single user | 85 ms | 27.7 ms | 72 |
+| DGX Spark (128GB unified) | concurrency=64 | 1,373 ms | 42.9 ms | 2,892 |
+
+Whatever the DSpark status of those specific runs, the community-built GGUF of the draft ([`aj9o9/MiniCPM5-2B-DSpark-GGUF`](https://huggingface.co/aj9o9/MiniCPM5-2B-DSpark-GGUF)) publishes a cleaner, fully-labeled comparison — same box, same target checkpoint, `llama-benchy`, decode-only, with and without the draft:
+
+```bash
+llama-server \
+  --model MiniCPM5-2B-F16.gguf \
+  -md MiniCPM5-2B-DSpark-F16.gguf \
+  --spec-type draft-dspark \
+  --spec-draft-n-max 7 \
+  --host 127.0.0.1 --port 8080 \
+  -ngl 999 -ngld 999 -fa on -np 1 -t 12 --jinja \
+  -ctk q8_0 -ctv q8_0
+```
+
+<DsparkDecay />
+
+| Depth | Baseline tok/s | + DSpark tok/s | Speedup |
+|---|---:|---:|---:|
+| 8k (inside 12,288-token training range) | 109.54 | 181.78 | 1.66× |
+| 16k | 90.62 | 134.47 | 1.48× |
+| 32k | 70.18 | 85.03 | 1.21× |
+| 64k | 46.22 | 69.96 | 1.51× |
+
+VRAM cost is predictable and small — baseline 8,317MB, +1.8GB with the F16 draft loaded, 10.1GB total. The speedup is the interesting part precisely because it *isn't* a clean monotonic decay: strongest at 8k, inside the draft's 12,288-token training range, then weakening through 16k and 32k as the draft extrapolates past what it saw during training — and then recovering somewhat at 64k in this specific run. The uploader's own framing, worth repeating exactly: wall-clock speedup and accept length "are related but not the same number" — the official DSpark card's accept-length figures (~5.5 at T=0, ~4.1 at T=1.0 on in-distribution prompts) are reported to collapse toward ~1.6 well past the training range, which is a more pessimistic signal than the throughput curve above shows even at 64k. Both are real measurements; they're just measuring slightly different things, and only one number ships in most marketing.
+
+For deeper context on why draft quality decays with distance from training data at all, and how other teams have addressed it, see this site's coverage of [DFlash 2](/articles/dflash2) and [DSpark's speculative-decoding cousin over at LFM2.5](/articles/lfm25-dspark) — the "does the speedup survive long context" question turns out to be a running theme across this entire family of drafters, not a MiniCPM5-specific quirk.
+
+## Deploying it: nine backends, nine chips, zero forks
+
+Because MiniCPM5-2B is a stock `LlamaForCausalLM`, the GitHub repo ships cookbooks and matching Claude-Code/Cursor-style Agent Skills for every mainstream backend, with no custom kernel work required:
+
+| Backend | Format / use case | Cookbook |
+|---|---|---|
+| Transformers | BF16/FP16 local Python inference, GPU + CPU | [`transformers.md`](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/transformers.md) |
+| vLLM | BF16/FP16 OpenAI server | [`vllm.md`](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/vllm.md) |
+| SGLang | BF16/FP16 OpenAI server, recommended for tool calling | [`sglang.md`](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/sglang.md) |
+| llama.cpp | GGUF local inference, CPU/GPU | [`llama_cpp.md`](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/llama_cpp.md) |
+| Ollama | GGUF local on-device runtime | [`ollama.md`](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/ollama.md) |
+| LM Studio | GGUF Mac desktop app + OpenAI server | [`lmstudio.md`](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/lmstudio.md) |
+| MLX | 4-bit local inference on Apple Silicon | [`mlx.md`](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/mlx.md) |
+| ArcLight | GGUF local on-device, CPU, desktop & server | [`arclight.md`](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/arclight.md) |
+| vLLM Ascend | BF16/FP16 OpenAI server on Huawei Ascend NPU | [`vllm_ascend.md`](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/vllm_ascend.md) |
+
+The released GGUF sizes, for reference — these are the numbers the VRAM budget explorer above uses:
+
+| File | Size | Use case |
+|---|---:|---|
+| `MiniCPM5-2B-F16.gguf` | 5.04GB | reference quality, uniform CPU/GPU performance |
+| `MiniCPM5-2B-Q8_0.gguf` | 2.68GB | very small quality drop vs. F16, half the disk |
+| `MiniCPM5-2B-Q4_K_M.gguf` | 1.56GB | edge/mobile-class hardware, minimal VRAM |
+
+Beyond the mainstream engines, OpenBMB partnered with the FlagOS Open Source Community to adapt the model across nine unrelated AI chip architectures via FlagRelease — Nvidia, Hygon, Metax, Iluvatar, Zhenwu, Mthreads, Kunlunxin, Ascend, and ARM-v9 — each getting its own published ModelScope/Hugging Face weights:
+
+| Vendor | Hugging Face |
+|---|---|
+| Nvidia | [`FlagRelease/MiniCPM5-2B-nvidia-FlagOS`](https://huggingface.co/FlagRelease/MiniCPM5-2B-nvidia-FlagOS) |
+| Hygon | [`FlagRelease/MiniCPM5-2B-hygon-FlagOS`](https://huggingface.co/FlagRelease/MiniCPM5-2B-hygon-FlagOS) |
+| Metax | [`FlagRelease/MiniCPM5-2B-metax-FlagOS`](https://huggingface.co/FlagRelease/MiniCPM5-2B-metax-FlagOS) |
+| Iluvatar | [`FlagRelease/MiniCPM5-2B-iluvatar-FlagOS`](https://huggingface.co/FlagRelease/MiniCPM5-2B-iluvatar-FlagOS) |
+| Zhenwu | [`FlagRelease/MiniCPM5-2B-zhenwu-FlagOS`](https://huggingface.co/FlagRelease/MiniCPM5-2B-zhenwu-FlagOS) |
+| Mthreads | [`FlagRelease/MiniCPM5-2B-mthreads-FlagOS`](https://huggingface.co/FlagRelease/MiniCPM5-2B-mthreads-FlagOS) |
+| Kunlunxin | [`FlagRelease/MiniCPM5-2B-kunlunxin-FlagOS`](https://huggingface.co/FlagRelease/MiniCPM5-2B-kunlunxin-FlagOS) |
+| Ascend | [`FlagRelease/MiniCPM5-2B-ascend-FlagOS`](https://huggingface.co/FlagRelease/MiniCPM5-2B-ascend-FlagOS) |
+| ARM-v9 | [`FlagRelease/MiniCPM5-2B-Armv9-FlagOS`](https://huggingface.co/FlagRelease/MiniCPM5-2B-Armv9-FlagOS) |
+
+That ARM-v9 row is the one honest gap in this section worth naming directly: launch commentary around this release cited specific edge-hardware performance multipliers — Intel Core Ultra with OpenVINO, Arm Armv9 with SME2 giving roughly 1.7× prefill and 1.2× decode on mobile, and Rockchip RK3588/RK1828 numbers. This research checked the model card, the full GitHub repository (including every deployment doc and Agent Skill), and public search, and could not find those specific multipliers attached to MiniCPM5-2B anywhere verifiable. OpenVINO support for the MiniCPM5 *family* is real and documented by Intel — but for MiniCPM5-1B specifically in the material this research could locate, not confirmed for the 2B model at the cited multipliers. The FlagOS ARM-v9 row above is the verified edge-ARM claim this article can stand behind; the SME2 percentages are not repeated here because they couldn't be traced to a primary source.
+
+## Quickstart
+
+```bash
+# vLLM
+pip install "vllm>=0.21"
+vllm serve openbmb/MiniCPM5-2B --port 8000
+```
+
+```bash
+# SGLang
+pip install "sglang[srt]>=0.5.16"
+python -m sglang.launch_server --model-path openbmb/MiniCPM5-2B --port 30000
+```
+
+```python
+# Transformers
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_id = "openbmb/MiniCPM5-2B"
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype="auto", device_map="auto")
+
+messages = [{"role": "user", "content": "Who are you? Please briefly introduce yourself."}]
+inputs = tokenizer.apply_chat_template(
+    messages, tokenize=True, add_generation_prompt=True,
+    enable_thinking=True, return_dict=True, return_tensors="pt",
+).to(model.device)
+
+outputs = model.generate(**inputs, max_new_tokens=128)
+print(tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
+```
+
+Recommended sampling for the "Think" mode: `temperature=1.0, top_p=0.95`. Tool calling emits XML-style calls; SGLang's built-in `minicpm5` parser converts them to OpenAI-compatible `tool_calls` natively — start the server with `--tool-call-parser minicpm5` (or `auto`), then send a standard OpenAI-style `tools=[...]` request and it just works, no custom parsing required on the client side. For the engines this site has covered end to end, see [SGLang: the tree, and the language nobody remembers](/articles/sglang) and [vLLM: what PagedAttention turned into](/articles/vllm) — both apply directly here, since nothing about MiniCPM5-2B asks either engine to do anything model-specific.
+
+## Beyond the card: what Artificial Analysis independently measured
+
+Everything above comes from the model card or a GitHub repo commit MiniCPM5-2B ships in. One more data point circulates around this release that deserves its own section precisely *because* it is not in the card: [Artificial Analysis](https://artificialanalysis.ai/models/minicpm5-2b) independently benchmarked the model and published its own Intelligence Index score, separate from anything OpenBMB self-reports.
+
+<Callout type="note">
+Searching the full model card for the word "index" returns zero matches. Everything in this section comes from artificialanalysis.ai directly, not from the Hugging Face README — it's included because it's a real, independently-run evaluation, not because the card claims it.
+</Callout>
+
+Per Artificial Analysis's own published article on the release: MiniCPM5-2B scores **15** on their Intelligence Index — "the highest Intelligence Index of any open weights model under 4B total parameters," 4 points clear of Granite 4.2 3B (11), and 1 point ahead of Qwen3.5 4B (14, estimated) "with 44% fewer parameters." It sits "level with Qwen3.5 9B (Reasoning, 15, estimated) at roughly 4x its size" — level with, not above, which is a meaningfully more modest claim than "beats models 4x its size" and worth stating precisely rather than rounding up. On token efficiency: MiniCPM5-2B used **19k output tokens per Intelligence Index task** (11k of them reasoning tokens), "joint-lowest in the comparison model set with Granite 4.2 3B (19k)" — tied for lowest, not uniquely lowest, and notably *not* the 21k-vs-19k framing that has circulated for this comparison; by Artificial Analysis's own published figure, MiniCPM5-2B and Granite 4.2 3B post the identical 19k token budget. On agentic evaluation specifically, GDPval-AA v2 Elo of 831 "leads &lt;4B models," about 110 points ahead of Ling 3.0 Tiny (718) and about 180 ahead of Granite 4.2 8B (647). OpenBMB's own launch post on X separately states a score of 20 on an "Agentic Index" — that specific figure comes from OpenBMB's own announcement, not from Artificial Analysis's article, and this research could not retrieve the full post to check its surrounding context (it returned an access-restricted response rather than the page).
+
+## What this article can and can't stand behind
+
+To close where it opened: there is no MiniCPM5 tech report, and everything specific to *this* model in this article traces back to a model card, a GitHub repo, or an independent third-party benchmark — never a peer-reviewed source. Reproduced and verified directly against a primary source: the config shape, the 2.52B parameter count, the KV-cache arithmetic (to the byte), the 34-benchmark average (recomputed, not just quoted), the RL+OPD gain figures, the DSpark GGUF throughput table, the SGLang single-GPU numbers, the FlagOS nine-chip list, and the UltraData/UltraX dataset sizes. Explicitly **not** verifiable from anything this research could locate: the "Meshy" training-framework name, the specific Arm SME2 / Intel OpenVINO / Rockchip RK3588+RK1828 performance multipliers, and the full text of OpenBMB's own Agentic Index claim. Both categories are listed here on purpose — a model card this detailed deserves to be read exactly as carefully as it was written.
+
+```bibtex
+@article{minicpm4,
+  title={Minicpm4: Ultra-efficient llms on end devices},
+  author={MiniCPM, Team},
+  journal={arXiv preprint arXiv:2506.07900},
+  year={2025}
+}
+```
+
+That's the citation the MiniCPM5-2B README itself asks you to use — for MiniCPM4, still, in 2026.
