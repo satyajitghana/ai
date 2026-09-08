@@ -17,6 +17,7 @@
  *
  *   pnpm check:mobile                 # every route, both widths
  *   pnpm check:mobile /articles       # just these routes
+ *   pnpm check:mobile some-slug       # bare word = /articles/some-slug
  */
 
 const BASE = process.env.BASE ?? "http://localhost:3000"
@@ -76,8 +77,12 @@ type Offender = {
 }
 
 async function routesToCheck(): Promise<string[]> {
-  const argv = process.argv.slice(2).filter((a) => a.startsWith("/"))
-  if (argv.length) return argv
+  // A bare word is taken as an article slug, so `check:mobile <slug>` matches
+  // how check:spacing is invoked. Silently dropping it — the old behaviour —
+  // fell through to the full default crawl and reported a pass that had never
+  // loaded the page the caller named.
+  const args = process.argv.slice(2)
+  if (args.length) return args.map((a) => (a.startsWith("/") ? a : `/articles/${a}`))
 
   // one representative of each dynamic collection, plus a paginated list page
   const { getArticles, getBlogPosts, getProjects, getArxivDigests, getNotes, getSnippets } =
