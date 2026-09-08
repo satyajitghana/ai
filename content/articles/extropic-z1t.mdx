@@ -1,0 +1,330 @@
+---
+title: "Z1T: sparse transformers for a chip that samples, not multiplies — and what 100x actually measures"
+description: "Extropic's Z1T pairs a probabilistic sampling chip with an FPGA to run transformer-like models, leading with 'over 100x energy efficiency gains vs GPUs' while a rounder 140x circulated separately — both numbers trace to one cell in a three-row table, the row where the H100 baseline runs at 10% utilization, well below the ~40% Extropic's own citation gives for real LLM serving. A walk through what a 'sample' costs on hardware whose physical primitive is a stochastic pbit with 16 fixed neighbors rather than a dense multiply-accumulate, what survives of a transformer once its primitives are rebuilt around that constraint, why every Z1-side number in the post is a projection anchored to a different, earlier chip rather than a measurement on Z1 silicon, and what the scaling law actually is — and isn't yet."
+date: 2026-09-08
+interest: 5
+helpful: 4
+featured: true
+tags:
+  - hardware
+  - scaling-laws
+  - efficiency
+  - architecture
+  - explainer
+cover: /articles/extropic-z1t/fig1.png
+---
+
+import { EnergyPerToken } from "@/components/articles/extropic-z1t/energy-per-token"
+import { SamplingVsMatmul } from "@/components/articles/extropic-z1t/sampling-vs-matmul"
+
+[Z1T](https://extropic.ai/writing/z1t) is Extropic's first attempt at running transformer-like models on Z1,
+the sparse probabilistic chip the company [launched earlier this year](https://extropic.ai/writing/from-one-to-one-billion).
+The post's own lede claims "over 100x energy efficiency gains vs GPUs, and a corresponding scaling law." A
+rounder number — up to 140x — has circulated separately from the post itself. Both trace back to the same
+place: a single cell in a three-row table, the row where the comparison GPU is running at 10% of its
+theoretical peak utilization. At the other two rows in that same table the multiplier is 28x and 14x. None of
+those numbers are measured on Z1 silicon.
+
+That's the shape of this piece: what Z1 actually computes with, what a transformer becomes once its
+primitives are rebuilt around that computation, and exactly what "over 100x" turns out to describe once the
+table it comes from is read in full.
+
+## Z1: sampling as the computational primitive
+
+Z1 is not a matrix-multiply accelerator with a lower clock and a smaller die. It computes by sampling. The
+chip is a graphical model of **pbits** — probabilistic bits, binary stochastic CMOS circuits whose state is
+biased by the pbits wired to them — programmed as an [Ising model](https://en.wikipedia.org/wiki/Ising_model),
+the same energy function statistical physics uses for coupled spins:
+
+$$
+E_{\mathcal{G}}(z) = \sum_{j\in\mathcal{V}} h_j\, z_j + \sum_{\{j,k\}\in\mathcal{E}} J_{jk}\, z_j\, z_k, \qquad z_j \in \{-1,+1\}
+$$
+
+Every pbit sits at a node of a fixed hardware graph $\mathcal{G}$, wired into the die at 16 couplings per
+node — not a configurable width, a physical constant. A single Z1 die has 8 cores, 269,568 pbits, and
+2,135,904 of those hardwired coupling edges, running under one watt at a 50 MHz internal update clock. (One
+of the post's own image captions gives that edge count as 215,904 — evidently a dropped digit, since
+2,135,904 is what appears twice elsewhere, including the footnote the energy numbers are built on.) The chip
+runs Gibbs sampling in place: each pbit repeatedly redraws its own value conditioned on its 16 neighbors,
+"executing a chromatic Gibbs sampling algorithm in-memory," in the post's words. There is no instruction
+stream computing a product — there is a physical system relaxing toward a distribution, and what you read out
+is a sample from it.
+
+That has two consequences a GPU comparison has to sit with. First, a coupling can only be nonzero where the
+hardware graph actually has an edge — sparsity isn't a software choice on Z1, it's the shape of the silicon.
+A GPU gets its all-to-all reach from a cache hierarchy every core can address; Z1 has no such hierarchy, so
+16 fixed neighbors is the entire radius of one pbit's computation. Second, a single readout of a pbit is one
+stochastic bit, not a number. Getting a usable real value means drawing repeatedly and averaging, and that
+average has finite precision that improves — slowly — with more samples.
+
+Extropic's own encoding math makes the second point precise. For one **tanh-linear unit** — a visible pbit
+$v$ conditioned on 16 hidden neighbors $h_j$ — the conditional expectation is a tanh of the local field:
+
+$$
+\mathbb{E}[v \mid h] = \tanh\!\Big(b_v + \sum_{j=1}^{16} J_j\, h_j\Big)
+$$
+
+which is exactly the nonlinearity a neural network wants, sampled instead of computed. Recovering a real
+number from $N$ draws gives an empirical mean with a standard error that shrinks as $1/\sqrt{N}$, which the
+post turns into an explicit bits-of-precision bound: $k \le \tfrac12 \log_2 N - \log_2 \sigma$. Every extra
+bit of precision costs roughly four times the samples of the bit before it — and every sample has a
+publishing energy cost, 1.3&times;10<sup>-14</sup> J, that a GPU's one-shot deterministic multiply never
+pays.
+
+<SamplingVsMatmul />
+
+Continuous weights and activations get onto this substrate through **dy4p** encoding: four pbit streams,
+weighted 1/4, 1/8, 1/16 and 1/32, whose weighted sum approximates a 4-bit number, refined by exactly the
+same sample-averaging as above. A sparse matrix-vector product then becomes a layout problem — each output
+pbit spends its 16 physical couplings on 4 input values times 4 dy4p pbits per value — rather than a
+scheduling problem the way a GPU kernel is.
+
+## What "transformer-like" survives the substrate
+
+A standard transformer block is self-attention, a norm, and a feed-forward network, and every one of those is
+built from dense matrix operations that assume the GPU's all-to-all reach. Z1T keeps the block-shaped,
+residual-connected structure of a transformer — stack these units, add the input back around each one — and
+rebuilds every primitive inside that shape around 16-way sparsity and sampling instead of dense linear
+algebra.
+
+RMSNorm becomes **Dynamic Tanh**, a direct substitution the post justifies by noting each component of
+RMSNorm already resembles a tanh activation empirically:
+
+$$
+\operatorname{DyT}(x) = \gamma \tanh(\alpha x) + \beta
+$$
+
+The feed-forward network becomes exactly the tanh-linear unit above, with a sparse weight row laid out across
+the fabric rather than a dense matmul. Attention is the part that changes the most. Classic softmax attention
+needs a dense $QK^\top$ score matrix and $O(T^2 D)$ work — nothing about that maps onto a fixed-degree graph.
+Z1T instead adapts **gated convolutional attention (GCA)**, using 4-sparse projections and a running,
+convolution-based accumulation instead of an explicit attention matrix:
+
+```text
+Y_t^i = tanh(Q_t^i) ⊙ (N_t^i / D_t^i)
+N_t^i = conv1d(exp(K^i) ⊙ V^i, exp(w^i) − 1) + Σ_{j≤t} exp(K_j^i) ⊙ V_j^i
+D_t^i = conv1d(exp(K^i), exp(w^i) − 1) + Σ_{j≤t} exp(K_j^i)
+```
+
+There is no softmax anywhere in this — the normalization is a running ratio instead — and every projection
+into it is sparse by construction. What's preserved is the shape of a transformer block and its residual
+stream; what's necessarily different is every operation that used to assume dense, all-to-all connectivity.
+
+Z1 can't run all of this alone. The chip has no efficient way to do embeddings, residual adds, positional
+information, pooling, or the final projection to vocabulary logits, so Z1T runs as a **disaggregated**
+pipeline: sparse tanh-linear layers and attention gates on Z1, everything else on an FPGA co-processor
+riding the same board.
+
+<Figure
+  src="/articles/extropic-z1t/fig3.png"
+  alt="A frame from Extropic's animated per-token energy trace: on the left, a gold starburst of lines fans out from a single Z1 pbit into its fixed neighbors on a dotted lattice, labeled Z1 TSU with DyT and QVK operations; on the right, a copper grid of tiles labeled XPU / FPGA for embedding and positional work; a block tracker across the top marks progress through four transformer blocks, with a running Z1/FPGA/total nanojoule tally below, captured partway through one token's pass."
+  caption="One captured frame of Extropic's own animated trace of a token crossing the Z1 + FPGA pipeline — the gold starburst is Z1's fixed 16-neighbor fan-out, the copper grid is the FPGA doing everything Z1 cannot (Extropic, “Z1T: Sparse Transformer-Like Models for Probabilistic Hardware”)."
+/>
+
+That split matters more than it sounds, because the post's own accounting shows the FPGA doing the vast
+majority of the energy work in this first version — more on that below.
+
+## The energy claim: what's actually measured, and what's a projection
+
+This is the part worth being exact about, because the two sides of the headline comparison were produced by
+two different methods.
+
+The **H100 throughput** numbers were genuinely measured: "we evaluated the speed with batch-1 sequential
+decoding of the model," on real hardware, dated in the post's own footnotes.
+
+```text
+H100 baseline: NVIDIA H100 80GB HBM3, torch 2.7.0, dense-equivalent model,
+D=512, L=4, 11.55M body parameters in fp16, measured 2026-08-12
+```
+
+The **energy** numbers on both sides of the comparison, though, are analytical models, not a wattmeter
+reading. The post's own words: "the following projections are based on **theoretical** chip energy
+consumption of Z1 based on our **best estimates**, which are anchored to reality from our experiments with
+similar pbits in X0" — X0 being a different, earlier prototype chip, not Z1 itself. The FPGA side of Z1T's
+number is labeled the same way:
+
+```text
+Z1 sampling energy: 1.3e-14 J per sample
+FPGA estimate: 0.2 pJ/matrix-multiply op, 3.0 pJ/scalar op, 1.5 W assumed static power
+H100 reference: 32-bit floating-point peak energy 0.177 pJ per floating-point operation,
+the same next-token step run densely, with no sparsity exploited,
+model FLOPs utilization varied above
+```
+
+Even the H100 side of the *energy* figure is a peak-energy-per-FLOP constant multiplied through, divided by
+an assumed utilization — not a measured power draw either. What differs is what each side is anchored to: the
+H100 numbers rest on a shipping, extensively characterized chip; the Z1 numbers rest on Extropic's own
+internal estimate of a chip that, by the post's own description, hasn't yet run this workload for real.
+There is no reported measurement anywhere in this post of Z1T actually running on Z1 silicon.
+
+<Callout type="warn">
+The post's own aside undercuts the comparison further. The *measured* H100 benchmark run — the one behind
+"702 µs eager, 102 µs compiled" — was batch-1 decoding of an 11.55M-parameter model, small enough relative to
+an H100 that "this model achieves 0.006% MFU." That's far below even the 10% row the energy table uses for
+its headline ratio. "If we were to batch on the GPU, H100s would be substantially more efficient," the post
+adds — meaning the swept 10/50/100% MFU energy table isn't describing this benchmark's own measured
+utilization at all; it's a separate, hypothetical sweep layered on top of it.
+</Callout>
+
+With that framing in place, here is the table the "over 100x" and "up to 140x" numbers both come from,
+reproduced in full rather than as one cell:
+
+| H100 utilization (MFU) | H100 energy / token | H100 / Z1T (system) | H100 / Z1 layers only |
+|---|---|---|---|
+| 10% | 40.9 µJ | ≈139× | ≈4,680× |
+| 50% | 8.17 µJ | ≈28× | ≈935× |
+| 100% | 4.09 µJ | ≈14× | ≈468× |
+
+Z1T's own total is 294.52 nJ per token — 8.74 nJ of Z1 sampling plus 285.78 nJ of FPGA work, meaning the FPGA
+this version leans on for everything Z1 can't do is already responsible for more than 95% of the system's
+energy. "Z1 layers only" strips the FPGA out of the denominator entirely, which is why that column runs
+30&ndash;35 times higher than the system-wide one at every row — it's comparing an H100 to a component, not to
+a system that could serve a request end to end today.
+
+<EnergyPerToken />
+
+Read the table this way and the two headline numbers stop looking like a discrepancy and start looking like
+the same number described two ways. The post's own citation for real-world GPU utilization is Llama 3's own
+paper: "in LLMs such as Llama 3, MFU is around 40%." At that utilization the system-wide multiplier is
+roughly 35x — nowhere near "over 100x." The only row that clears 100x is the one where the H100 is running at
+a quarter of Llama 3's own cited real-world figure. "Over 100x" is the post's own conservative phrasing of
+that 139x cell; the "140x" that circulated separately doesn't appear anywhere in the post's text at all — the
+nearest real number is 139, and 140 reads like a round-number sanding of it, not a distinct measurement.
+
+One more number belongs in this section, and it's arguably the most consequential one in the whole post. Both
+sides of every ratio above exclude the final dense logit-readout layer — the projection from hidden state to
+vocabulary, the one part of a forward pass no sparse trick here touches, because it runs entirely on the
+FPGA. Include it and the post says Z1T's own total rises to approximately 136.4 µJ per token — about 463
+times higher than the 294.52 nJ headline figure, from adding back exactly one operation. The layer this
+comparison leaves out is not a rounding error; on the FPGA-heavy pipeline Z1T ships today, it would be most of
+a token's real cost.
+
+## The scaling law: what it actually is
+
+The post claims "a corresponding scaling law," and runs two separate experiments to back it.
+
+The first is Z1T-specific: sweep model size for the actual GCA architecture matched to Z1's constraints
+(4-bit weights, 4 incoming edges per output node), train on OpenWebText with the GPT-2 byte-pair tokenizer,
+and plot validation loss against training FLOPs.
+
+<Figure
+  src="/articles/extropic-z1t/fig1.png"
+  alt="A scatter plot of validation loss against training FLOPs on a log-log axis, points colored from pale yellow to dark orange by parameter count. A gold line traces a compute-optimal frontier descending from about loss 6.5 near 2×10^14 FLOPs to about 4.3 near 2×10^18 FLOPs. A dashed line continues that fit to an open circle near 9.5×10^19 FLOPs, level with a horizontal guide to GPT-2 small's loss of about 3.4. Red stars mark GPT-2 small and GPT-2 XL as baselines."
+  caption="Validation loss against training FLOPs for the Z1T GCA model — measured points from about 2×10^14 to 2×10^18 FLOPs, with a dashed log-log extrapolation carrying the fit roughly two more orders of magnitude out to the GPT-2-small comparison point (Extropic, “Z1T: Sparse Transformer-Like Models for Probabilistic Hardware”, Figure 1)."
+/>
+
+Two things worth being precise about here. First, the "GPT-2-small" star on that plot is 85 million
+parameters, which the caption is careful to note is "under the same convention" Extropic uses elsewhere —
+their own body-parameter count, excluding the embedding-to-vocabulary matrix, not the 124M figure GPT-2-small
+is usually cited at. Second, the headline claim built on this figure — "about an order of magnitude more
+FLOPs with our sparser Z1T model to achieve the same loss as a GPT-2 model," at an extrapolated 9.5&times;10<sup>19</sup>
+FLOPs — sits past the right edge of the actually measured range. The dashed segment of that line is a fit
+continued forward, not a run that was executed and plotted.
+
+The second experiment is more general and, by the post's own account, the one meant to establish the
+scaling *law* rather than just Z1T's own curve: a standard GPT-2-style decoder with one added knob,
+connectivity $c$, controlling both the sparsity of every projection matrix and the width of a windowed
+attention mask. $c \in \{4, 16, 32, 64, 128\}$ plus a fully dense baseline, sequence length 256, swept from
+3&times;10<sup>14</sup> to 10<sup>18</sup> training FLOPs — a run that, as width increases, moves from about
+5% sparse toward 99.8% sparse even though the node degree stays fixed, because a fixed-degree graph becomes
+proportionally sparser as the matrix around it grows.
+
+<Figure
+  src="/articles/extropic-z1t/fig2.png"
+  alt="A six-panel grid of final validation loss against parameter count, one panel per connectivity level (4, 16, 32, 64, 128, dense), each showing several U-shaped quadratic fits at different fixed compute budgets with a diamond marking each fit's minimum — the compute-optimal model size at that budget."
+  caption="Iso-FLOP curves across the connectivity sweep — the classic Chinchilla-style method applied separately at each sparsity level, with the fitted-minimum diamonds tracing how the compute-optimal model size shifts as connectivity changes (Extropic, “Z1T: Sparse Transformer-Like Models for Probabilistic Hardware”, Figure 3)."
+/>
+
+This is genuine scaling-law methodology — iso-FLOP curves with fitted minima, the same technique
+[Hoffmann et al.'s Chinchilla paper](https://arxiv.org/abs/2203.15556) used across 400+ models to fix
+model/data allocation. What's missing is the thing that usually follows that methodology: a printed
+functional form. Chinchilla published $L(N,D) = E + A/N^\alpha + B/D^\beta$ with fitted exponents; the
+[Skaling law this site covered separately](/articles/skaling-law) publishes an explicit correction to that
+form with its own fitted $k$. Z1T's post states, in prose, that connectivity "parallels" the standard
+scaling trend and shows the frontier and iso-FLOP curves that would support fitting one — but no equation, no
+exponent for connectivity itself, appears anywhere in the piece. [The fuller walk through what a scaling law
+claim looks like when the functional form is the point](/articles/scaling-laws-2026) is a useful contrast:
+this post has the plots a scaling law needs and stops one step short of publishing the law itself.
+
+## Model sizes, benchmarks, and what's released
+
+The featured Z1T configuration is small by any current standard: 4 layers, 512-dimensional hidden state,
+1024-token context, 4 GCA heads, kernel size 4, sparse degree 4 — a shape chosen, per the post, because it
+was "our best-performing configuration for Z1 from our fairly broad agentically-driven explorations," not
+because it targets any particular deployment scale. Every quantitative result in the post is a validation
+loss curve on OpenWebText; there is no downstream task benchmark anywhere in it — no accuracy number on any
+standard eval, only the loss-versus-compute curves above.
+
+What is genuinely released is real. Extropic states plainly that they are "open sourcing our training
+recipes for the sparse transformers used to produce our scaling laws, as well as open sourcing the weights
+for one of the larger training runs for Z1T," with working links to both a
+[Hugging Face weights repository](https://huggingface.co/extropic-ai) and a
+[GitHub training recipe](https://github.com/extropic-ai/sparse-transformers). For a first release built on
+pre-production hardware, shipping both is a real commitment, not just a claim — it's checkable independent of
+anything else in this piece.
+
+## What Extropic itself says isn't finished
+
+The post's own outlook section is unusually direct about where the current numbers stop being representative
+of Z1's ceiling: "our energy estimates indicate that the FPGA consumes the vast majority (&gt;95%) of the
+energy," and removing that bottleneck with a chip designed around Z1T from the start could, in their words,
+"potentially reach up to 1000x greater energy efficiency than GPUs" — a number that sits alongside the
+"Z1 layers only" column above (468&ndash;4,680x depending on MFU) as the aspirational ceiling if the FPGA
+dependency goes away, not a claim about the system that exists now. This is the fourth Extropic paper in a
+lineage of probabilistic-hardware work rather than a first attempt at the substrate itself, and the post
+frames Z1T explicitly as "an initial study in sparse neural-network and hardware co-design," with the current
+FPGA split described as a starting point Extropic expects future silicon to remove rather than a permanent
+architecture.
+
+## Checked, in one table
+
+| Claim | Status |
+|---|---|
+| "Over 100x energy efficiency gains vs GPUs" (the post's lede) | Holds for exactly one row of the published table — 10% H100 utilization, ≈139×. Drops to ≈28× at 50% and ≈14× at 100%, both under 100x |
+| "Up to 140x" (circulated separately from the post) | Doesn't appear anywhere in the post's own text — the nearest real number is ≈139×, at the same 10%-MFU row above |
+| Z1's energy and latency figures are measured on Z1 silicon | Does not hold — explicitly "theoretical chip energy consumption... based on our best estimates," anchored to a different, earlier chip (X0), not Z1 running Z1T. The H100 throughput numbers are real measurements; the H100 *energy* figures are also a peak-energy-per-FLOP model, not a wattmeter reading |
+| A "corresponding scaling law" | Real iso-FLOP methodology and a fitted compute-optimal frontier exist, but no closed-form equation or fitted connectivity exponent is published — unlike Chinchilla or the Skaling law this site covered separately |
+| The GPT-2-small match point (9.5×10¹⁹ FLOPs) is a measured result | Does not hold — it's a log-log fit extrapolated roughly two orders of magnitude past the actually measured FLOP range (~2×10¹⁴–2×10¹⁸) |
+| GCA and DyT are real architectural substitutions, not relabeled dense ops | Holds — both are specified in full, with equations, and matched to the hardware's 16-way degree constraint |
+| Training recipe and weights are genuinely open | Holds — working Hugging Face and GitHub links, for one of the larger training runs |
+| The excluded final logit layer is a minor omission | Does not hold — the post's own number for including it is ≈136.4 µJ/token, about 463× the 294.52 nJ headline Z1T figure |
+
+## The take
+
+Z1's substrate is worth taking seriously on its own terms: a chip that computes by relaxing a physical system
+toward a distribution rather than executing an instruction stream is a genuinely different kind of machine,
+and the post explains it in real detail — the Ising energy function, the tanh-linear derivation, the dy4p
+encoding, the exact degree-16 constraint every operation has to respect. Z1T's response to that constraint is
+a legitimate piece of co-design, not a relabeling: gated convolutional attention and Dynamic Tanh are
+specific, motivated substitutions for the parts of a transformer that assumed dense, all-to-all reach, and
+they're documented precisely enough to check.
+
+The efficiency numbers built on top of that substrate deserve the same precision the substrate itself gets.
+"Over 100x" and the "140x" that traveled without it are both one cell of a table whose other two cells say
+28x and 14x, describing a hardware comparison built entirely from projected energy models rather than a
+measurement of Z1T running on Z1, at a GPU utilization four times below what the post's own citation gives
+for real LLM serving, excluding the one layer — vocabulary logits — that the post's own numbers say would
+dominate the total by nearly three orders of magnitude if it were counted. None of that makes the substrate
+uninteresting. It makes "over 100x" a number that describes a best case worth stating precisely, not a
+system-wide result worth repeating without its row.
+
+For more on what a scaling law needs to actually claim, see [the Skaling law's additive-form
+critique](/articles/skaling-law) and [the wider walk through 2026 scaling
+practice](/articles/scaling-laws-2026); for the attention-mechanism landscape GCA is joining, [a field guide
+to the family](/articles/attention-mechanisms) covers where softmax-free, linear-time variants like this one
+sit relative to sliding-window and low-rank alternatives.
+
+---
+
+*Sources: the [Z1T post itself](https://extropic.ai/writing/z1t), including its full text, published energy
+and throughput tables, "Model details" and "Latency model details" footnotes, and referenced figures;
+Extropic's [Z1 launch post, "From One to One Billion"](https://extropic.ai/writing/from-one-to-one-billion);
+the [Z1T weights on Hugging Face](https://huggingface.co/extropic-ai) and the
+[open training recipe on GitHub](https://github.com/extropic-ai/sparse-transformers); Hoffmann et al.'s
+[Chinchilla paper](https://arxiv.org/abs/2203.15556) and Zhai et al.'s
+[Attention Free Transformer](https://arxiv.org/abs/2105.14103), both cited by the post itself for the
+scaling-law methodology and the GCA lineage respectively; Grattafiori et al.'s
+[Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783), the post's own source for real-world GPU
+utilization. The energy-per-token and sampling-versus-matmul diagrams are original, built from the numbers
+and equations the post publishes; the three embedded figures are Extropic's own, downloaded and hosted
+locally for this piece.*
