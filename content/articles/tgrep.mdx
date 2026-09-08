@@ -1,0 +1,816 @@
+---
+title: "tgrep: what a trigram index actually buys you"
+description: "Microsoft's tgrep pre-builds a trigram index so regex search only touches files that could match, and it now powers grep inside GitHub Copilot CLI. The README says up to 52x faster than ripgrep — in fine print, 'index pre-built.' A full read of tgrep-core's Rust source: the trigram-to-regex query planner and exactly where it degrades to a full scan, the client/server architecture and file watcher, the fuzz suite, and — since neither BENCHMARKS.md nor the README does this math — the actual number of queries it takes for the one-time index build to pay for itself, computed from BENCHMARKS.md's own numbers."
+date: 2026-09-08
+interest: 4
+helpful: 4
+tags:
+  - systems
+  - rust
+  - search
+  - information-retrieval
+  - explainer
+draft: false
+---
+
+import { TrigramDecomposer } from "@/components/articles/tgrep/trigram-decomposer"
+import { BreakevenChart } from "@/components/articles/tgrep/breakeven-chart"
+
+[tgrep](https://github.com/microsoft/tgrep) is a trigram-indexed grep with a client/server
+architecture, and Microsoft says it now powers grep search inside
+[GitHub Copilot CLI](https://github.com/github/copilot-cli). Its pitch is the one every code-search
+tool eventually makes: `grep`/`ripgrep` re-scan every file on every query — O(total bytes) per
+search — and in a 100k+ file monorepo that's slow enough to matter. tgrep pre-builds an index once
+so a query only touches the small set of files that could possibly match.
+
+The README's headline is **up to 52x faster than ripgrep**, and the benchmark table right under it
+is captioned, in tgrep's own words, "avg latency **per query, index pre-built**." That qualifier is
+the whole story compressed into three words, and it's honest — but it also means the number is not
+a like-for-like comparison with ripgrep, which does zero setup and scans cold every time. tgrep
+amortizes an index build and keeps a server resident between queries. Whether that's a good trade
+depends entirely on how many queries you're about to run against a tree that isn't changing out from
+under you — which is exactly the regime a coding agent or an editor lives in, and exactly the
+regime a one-shot CI grep does not. This piece reads the actual Rust — `tgrep-core`, `tgrep-cli`,
+the fuzz targets, `BENCHMARKS.md` — to find the real mechanism, the real limits, and the number
+neither document publishes: how many queries it takes for the index to pay for itself.
+
+## Index once, search forever
+
+```bash
+tgrep index .            # build the trigram index
+tgrep serve .            # start server (watches for file changes)
+tgrep "fn main" .        # instant — auto-connects to running server
+```
+
+Three commands, three separate concerns. `index` is a one-shot batch build. `serve` keeps that
+index resident in memory, watches the filesystem for changes, and listens on a local TCP port.
+Every subsequent `tgrep <pattern>` is a short-lived client process that finds the running server
+(via a `serve.json` discovery file) and asks it a question over the wire — the query itself pays
+almost nothing beyond process startup and a round trip, because the expensive part already
+happened. The project's own architecture diagram makes the two-layer index explicit:
+
+```text
+tgrep <pattern> ---TCP---> tgrep serve (multi-client)
+    (client)                   |
+                          HybridIndex
+                          /         \
+                   IndexReader    LiveIndex
+                   (mmap disk)   (in-memory overlay)
+                        ^              ^
+                        |              |
+                  Periodic Flush  File Watcher (notify)
+                  (50K files /    Background Indexer
+                   5 min)         (rayon parallel)
+```
+
+`IndexReader` is the durable, mmap'd on-disk index built by `tgrep index`. `LiveIndex` is a
+mutable in-memory overlay for anything that has changed — or is still being indexed — since the
+server started. `HybridIndex` merges both and lets the overlay win on conflict. Everything below
+is either "how the on-disk half works" or "how the two halves stay in sync while files churn under
+a running server" — the two questions that decide whether a persistent index is actually the right
+design for a given workload.
+
+## The idea: bytes you can rule out without reading them
+
+The mechanism is the one Russ Cox described in [*Regular Expression Matching with a Trigram
+Index*](https://swtch.com/~rsc/regexp/regexp4.html) — tgrep's own source and docs never cite it by
+name, but the code is a textbook implementation. A **trigram** is every overlapping 3-byte window
+in a string. "mutex_lock" has eight of them: `mut`, `ute`, `tex`, `ex_`, `x_l`, `_lo`, `loc`,
+`ock`. The insight is that if a file matches the literal string `mutex_lock`, it necessarily
+contains *every one* of those eight trigrams somewhere — so an inverted index from trigram →
+files-that-contain-it turns "which files contain `mutex_lock`" into an eight-way set intersection,
+answerable without opening a single file whose posting lists don't all agree.
+
+`tgrep-core/src/trigram.rs` packs each 3-byte window into a `u32` — three bytes is 24 bits, so the
+packing is exact and collision-free by construction:
+
+```rust
+pub type TrigramHash = u32;
+
+/// Pack three bytes into a single u32 trigram hash.
+#[inline]
+pub fn hash(a: u8, b: u8, c: u8) -> TrigramHash {
+    (a as u32) << 16 | (b as u32) << 8 | c as u32
+}
+
+/// Extract all unique trigrams from a byte slice.
+pub fn extract(data: &[u8]) -> Vec<TrigramHash> {
+    if data.len() < 3 {
+        return Vec::new();
+    }
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for window in data.windows(3) {
+        let h = hash(window[0], window[1], window[2]);
+        if seen.insert(h) {
+            result.push(h);
+        }
+    }
+    result
+}
+```
+
+Because the key *is* its own hash, tgrep swaps out `HashMap`'s default SipHash — which exists to
+resist adversarial collisions that can't happen here — for one multiply-xorshift mix, and the
+crate's own comment on why is worth quoting directly:
+
+```rust
+/// A trigram key *is* its own hash: packing three bytes into 24 bits is
+/// injective, so there is nothing for a cryptographic hash to protect against.
+/// The default SipHash is not free, though, and extraction hashes once per
+/// input byte — twice for a file containing any uppercase — which put it
+/// directly on the critical path of every index build.
+```
+
+That's a small, disciplined optimization, and it's representative of the codebase: BENCHMARKS.md's
+trigram-extraction microbenchmarks show it and a fused case-folding pass cutting extraction time on
+mixed-case 256 KiB inputs from 8.44ms to 2.28ms — a real, measured 3.7x, not a guess.
+
+Each trigram also carries two 8-bit masks per (trigram, file) pair, computed once during
+extraction and stored alongside the posting entry — cheap **pre-filters** that reject some false
+positives before a candidate file is even opened:
+
+```rust
+/// Per-trigram masks for a single file.
+pub struct TrigramMasks {
+    /// Positional mask: bit i is set if the trigram occurs at offset where offset % 8 == i.
+    pub loc_mask: u8,
+    /// 8-bit Bloom filter of bytes that immediately follow this trigram in the file.
+    pub next_mask: u8,
+}
+```
+
+`loc_mask` lets the query engine cheaply check whether two trigrams from the same literal could
+plausibly be *adjacent* in the file (rotate one mask by a bit, AND with the next), and `next_mask`
+is an 8-bucket Bloom filter of what byte actually follows each trigram occurrence — so a query for
+`mutex_lock` can reject a file that has the trigram `tex` followed only by, say, `t` (as in
+`text_lock`) without ever reading the file's bytes. Both are approximations that can only produce
+false positives, never false negatives — consistent with the two-stage design the rest of this
+piece keeps coming back to: **narrow cheaply, verify exactly**.
+
+## From bytes to files: the on-disk format
+
+The index is three flat files, documented directly in `tgrep-core/src/ondisk.rs`:
+
+```rust
+/// ## `lookup.bin` — sorted trigram → postings pointer
+/// Fixed-size 16-byte entries sorted by trigram hash for binary search.
+/// ┌────────────────┬────────────────┬────────────────┐
+/// │ trigram_hash   │ offset         │ length         │
+/// │ u32 (4B LE)   │ u64 (8B LE)    │ u32 (4B LE)    │
+/// └────────────────┴────────────────┴────────────────┘
+///
+/// ## `index.bin` — concatenated posting lists
+/// Each entry is 6 bytes: `file_id(u32) + loc_mask(u8) + next_mask(u8)`.
+///
+/// ## `files.bin` — file ID → path mapping
+/// Variable-length records: `file_id(u32 LE) + path_len(u16 LE) + path_bytes`.
+pub(crate) const LOOKUP_ENTRY_SIZE: usize = 16;
+pub(crate) const POSTING_ENTRY_SIZE: usize = 6;
+
+pub struct PostingEntry {
+    pub file_id: u32,
+    pub loc_mask: u8,
+    pub next_mask: u8,
+}
+```
+
+`lookup.bin` is sorted by trigram hash, so a lookup is a binary search over fixed-size records —
+`reader.rs`'s `binary_search` is the textbook loop, `mid = lo + (hi - lo) / 2`, over an mmap'd
+slice with no deserialization step. `index.bin` is nothing but posting lists back to back, sorted
+by file ID within each trigram — which matters at query time, because it means an AND across
+several trigrams' posting lists is a linear merge-intersection, not a sort-then-intersect:
+
+```rust
+fn intersect_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let mut result = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Equal => { result.push(a[i]); i += 1; j += 1; }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+    result
+}
+```
+
+`IndexReader` mmaps all three files, so opening an index is a syscall, not a parse, and every
+lookup is zero-copy against kernel-managed pages. `HybridIndex::open` explicitly checks for a
+"degenerate" reader — mmap sections present but a zero entry count — because on Windows a stale
+metadata write once produced exactly that shape and silently returned zero candidates for every
+query.
+
+## Building the index without blowing up memory
+
+The naive way to build this — collect every `(trigram, file_id)` pair for the whole repo, sort
+once, write once — has peak memory that grows linearly with repo size, and on a repo the size of
+Chromium that's genuinely a problem. tgrep's default strategy is an external merge sort instead:
+
+```rust
+pub enum IndexStrategy {
+    /// Hold every posting in heap, sort once, write once. Peak memory grows
+    /// linearly with repository size and is unbounded.
+    InMemory,
+    /// Bound peak memory with an external merge sort. Postings accumulate in
+    /// a fixed-size arena that spills sorted, compact segments to disk when
+    /// full; the segments are then k-way merged straight into the index.
+    /// Peak heap is independent of repository size.
+    #[default]
+    External,
+}
+```
+
+Measured on the Linux kernel tree (94,634 files, 990 MB index), the difference isn't marginal:
+
+| Strategy | Spill segments | Peak working set | Build time |
+| --- | ---: | ---: | ---: |
+| `memory` (in-heap sort) | – | 2.20 – 3.76 GiB | 23 – 32 s |
+| `external --index-buffer 256` | 8 | 430.6 MiB | ~24 s |
+| `external` (64 MiB arena, **default**) | 31 | **151 – 160 MiB** | ~23 s |
+| `external --index-buffer 16` | 122 | 109.6 MiB | ~23 s |
+| `external --index-buffer 1` | 1,946 | 98.9 MiB | ~29 s |
+
+*(BENCHMARKS.md, "Index build strategies")*
+
+That's a ~17x reduction in peak memory for **no time cost** at the default arena size — in several
+runs the external strategy was measurably *faster* than the in-heap one, because sorting one giant
+posting vector (with the doubling reallocations that come from growing a `Vec`) costs more than
+encoding and merging spill segments. The same bounded builder now backs a cold `tgrep serve`
+bootstrap too, which used to walk the repo into an unbounded in-memory overlay and flush once at
+the end:
+
+| Bootstrap path | Peak working set | Wall time |
+| --- | ---: | ---: |
+| in-heap overlay (before) | 1,569.7 MiB | 73.6 s |
+| external builder (after) | **148.6 MiB** | **28.7 s** |
+
+*(BENCHMARKS.md, "Server bootstrap" — Linux kernel tree, 94,181 files)* — a 10.6x memory cut and a
+2.6x speedup, and the old path had a second problem worth naming: because it wrote nothing until
+one end-of-build flush, killing the server at 99% left an empty index behind. The bounded builder
+leaves a usable partial index if interrupted.
+
+## From regex to trigram query
+
+A regex isn't a trigram, so the first job at query time is decomposing the pattern into the
+literal fragments it *requires* — an occurrence trigram query can only assert "this file contains
+these bytes somewhere," never anything about ordering across fragments or repetition count. That
+decomposition lives in `tgrep-core/src/query.rs`, built on `regex-syntax`'s parsed HIR (the same
+crate ripgrep itself uses to plan its own literal-prefilter optimizations):
+
+```rust
+/// A node in the query plan tree.
+pub enum QueryPlan {
+    /// All trigrams must match (intersection of posting lists).
+    And(Vec<TrigramQuery>),
+    /// Any branch can match (union of results).
+    Or(Vec<QueryPlan>),
+    /// No trigrams could be extracted — must scan all files.
+    MatchAll,
+}
+```
+
+Three cases, and `MatchAll` is the honest one: it means the planner found nothing indexable, and
+every candidate file has to be opened and run through the real regex engine — the same thing
+ripgrep always does, for every query. A plain literal decomposes into an `And` of every trigram it
+contains:
+
+```rust
+fn literals_to_query_plan(bytes: &[u8]) -> QueryPlan {
+    if bytes.len() < 3 {
+        return QueryPlan::MatchAll;
+    }
+    let queries: Vec<TrigramQuery> = (0..bytes.len() - 2)
+        .map(|i| {
+            let hash = trigram::hash(bytes[i], bytes[i + 1], bytes[i + 2]);
+            let expected_next = if i + 3 < bytes.len() { Some(bytes[i + 3]) } else { None };
+            TrigramQuery { hash, expected_next }
+        })
+        .collect()
+}
+```
+
+For anything more than a bare literal, `decompose_hir` walks the parsed regex tree. Its `Concat`
+arm is *forgiving* — it accumulates literal text and only flushes it into a checked run when it
+hits something non-literal, so one unindexable fragment doesn't cost the fragments around it:
+
+```rust
+HirKind::Concat(subs) => {
+    let mut all_queries = Vec::new();
+    let mut current_literal = String::new();
+    for sub in subs {
+        if let HirKind::Literal(Literal(bytes)) = sub.kind() {
+            current_literal.push_str(&String::from_utf8_lossy(bytes));
+        } else {
+            if !current_literal.is_empty() {
+                // flush current_literal into all_queries, then clear it
+            }
+            let sub_plan = decompose_hir(sub, case_insensitive);
+            if let QueryPlan::And(queries) = sub_plan {
+                all_queries.extend(queries);
+            }
+            // MatchAll or Or children don't contribute AND trigrams
+        }
+    }
+    // flush any trailing literal, then:
+    if all_queries.is_empty() { QueryPlan::MatchAll } else { QueryPlan::And(all_queries) }
+}
+```
+
+Its `Alternation` arm is the opposite — **not forgiving at all**:
+
+```rust
+HirKind::Alternation(alts) => {
+    let plans: Vec<QueryPlan> = alts.iter().map(|a| decompose_hir(a, case_insensitive)).collect();
+    // If any branch is MatchAll, the whole alternation is MatchAll
+    if plans.iter().any(|p| p.is_match_all()) {
+        QueryPlan::MatchAll
+    } else {
+        QueryPlan::Or(plans)
+    }
+}
+```
+
+One indexable-free branch in an `A|B|C` poisons the whole OR, even if the other branches are clean
+literals — because a file could match *only* through that one ungoverned branch, so no candidate
+set built from the other branches is safe to trust. The same poisoning rule applies one level up,
+across `-e`/multi-pattern searches (`build_multi_pattern_plan` unions every supplied pattern's
+plan the same way, for the same reason).
+
+### Try it: type a pattern, watch it decompose
+
+The interactive below reimplements these exact rules — verified line-for-line against the real
+`regex-syntax` 0.8.11 crate, not guessed — so you can see which trigrams a pattern actually yields,
+and which of a tiny six-file demo repo survive the resulting filter. It also runs a real regex
+against each demo file afterward, the same "narrow, then verify" pipeline tgrep itself runs, so a
+genuine false positive (the trigram filter honestly can't rule it out) shows up as one.
+
+<TrigramDecomposer />
+
+## Where a trigram index always gives up
+
+Every trigram engine degrades to a full scan somewhere, and the honest version of "why tgrep is
+fast" has to include exactly where. Five separate mechanisms in the source produce a `MatchAll`,
+and each one is worth naming precisely rather than hand-waved as "short patterns and wildcards":
+
+1. **Under 3 literal bytes.** `literals_to_query_plan` bails the instant a contiguous literal run
+   is shorter than 3 bytes — there's no 3-byte window to hash. This is the sharpest edge case in
+   the whole system: `a{2,3}` looks like it should narrow on three occurrences of `a`, but
+   `regex-syntax`'s HIR represents the *repeated unit* as the single-byte literal `"a"`, not
+   `"aaa"`, so even a `{2,3}` repetition of a one-byte literal still only ever contributes one
+   byte to trigram planning. Verified directly against `regex-syntax::parse("a{2,3}")`.
+
+2. **A character class with nothing else around it.** `[abc]`, `\d`, `\w`, `\p{L}` — any bare
+   `HirKind::Class` node — maps straight to `MatchAll`. But because `Concat` only flushes and
+   discards the class itself rather than poisoning its neighbors, `[Ee]rror` still keeps `rror`'s
+   two trigrams (`rro`, `ror`); only the fully bare form loses everything.
+
+3. **Inline `(?i)`, specifically — not `-i`.** This is the sharpest, least obvious edge in the
+   whole design, and it's worth stating precisely because it's easy to get backwards. tgrep's own
+   `-i`/`-S` flags lowercase the pattern *string* in Rust before it ever reaches `regex-syntax`, so
+   the parser still sees a plain `Literal` and the query stays fully indexed. But writing
+   `(?i)hello` directly into the pattern hits `regex-syntax`'s own case-folding at parse time,
+   which does not preserve `Literal` at all — verified directly:
+
+   ```text
+   regex_syntax::parse("(?i)hello")
+   => Concat([Class('Hh'), Class('Ee'), Class('Ll'), Class('Ll'), Class('Oo')])
+   ```
+
+   Every letter becomes its own one-off character class, never a `Literal`, so `decompose_hir`'s
+   Class arm swallows the whole thing — `(?i)hello` is a full scan, even though `-i hello` on the
+   exact same corpus is fully indexed. It's not all-or-nothing, either: only the *alphabetic* bytes
+   get case-folded away. `regex_syntax::parse("(?i)v1_2")` returns
+   `Concat([Class('Vv'), Literal("1_2")])` — the digits and underscore survive as a real literal,
+   so `(?i)v1_2` still yields one trigram (`1_2`) even though `(?i)hello` yields none.
+
+4. **An optional element wrapping the whole pattern.** `Repetition` with `min == 0` — `x?`, `x*`,
+   or a `{0,n}` — is `MatchAll` for that node. Buried inside a `Concat` (`error?`) this only costs
+   the optional tail; as the entire pattern (`(?:TODO)?`, `.*`) there's nothing left to flush and
+   the whole query reverts to a full scan.
+
+5. **One bad branch in an alternation, or in a multi-pattern search.** Covered above — `Or`
+   poisoning is not forgiving, unlike `Concat`.
+
+Two more only apply under `-P`/`--pcre2`, the backtracking engine (`fancy-regex`, not real PCRE2 —
+more on that below). The default `regex` crate doesn't support lookaround or backreferences *at
+all*, so a pattern using either fails outright as a parse error before query planning runs, exit
+code 2 — the same thing ripgrep does with `default`. `-P` recovers something from lookaround: a
+relaxer, `relax_for_indexing`, deletes lookaround text from the pattern outright and re-parses
+what's left, on the argument that deletion can only *widen* the matched language, never narrow it:
+
+```rust
+/// Every rewrite only ever *widens* the matched language, so
+/// `L(pattern) ⊆ L(relaxed)`:
+///
+/// * deleting a zero-width lookaround removes a constraint on the match;
+/// * turning `(?>…)` into `(?:…)` only restores backtracking paths.
+///
+/// That direction is the one the index needs. A trigram the relaxed pattern
+/// requires is therefore required by the original too, so no file that really
+/// matches can be filtered out. Narrowing would be a correctness bug.
+pub fn relax_for_indexing(pattern: &str) -> Option<String> {
+```
+
+So `(?<!//)ExchangePrincipal` relaxes to plain `ExchangePrincipal` and stays fully indexed under
+`-P`. But the function returns `None` — full scan — the instant it sees a backreference (`\1`,
+`\k<name>`), `\K`, `\G`, or a conditional `(?(1)...)`, *anywhere in the pattern*, even next to a
+perfectly good mandatory literal — because widening those away risks silently dropping a real
+match, and tgrep's own comment is explicit that correctness wins that trade every time.
+
+**And several CLI flags bypass the index outright, regardless of what the pattern says**, because
+they need information the trigram filter structurally can't provide — an inverted index of "files
+that contain X" has no way to answer "files that do *not* match" or "files that were never in the
+index to begin with." From `tgrep-cli/src/search.rs`:
+
+```rust
+let plan = if opts.effective_passthru() || opts.encoding.may_differ_from_index() {
+    QueryPlan::MatchAll
+} else if matcher.is_standard() || opts.fixed_string {
+    query::build_multi_pattern_plan(&opts.all_patterns()?, opts.fixed_string, ci)?
+} else {
+    query::build_relaxed_multi_pattern_plan(&opts.all_patterns()?, ci)
+};
+// ...
+let candidate_ids = if is_match_all || opts.files_without_match || opts.invert_match || opts.include_zero {
+    reader.all_file_ids()   // even a perfectly narrowed plan is discarded here
+} else {
+    query::execute_plan_with_masks(&plan, &|tri| reader.lookup_trigram_with_masks(tri))
+};
+```
+
+| Flag | Why it bypasses |
+| --- | --- |
+| `-v` / `--invert-match` | Trigrams assert presence, never absence |
+| `--files-without-match` | Same — needs files that *lack* a match |
+| `--include-zero` | Needs to see files the plan would have excluded |
+| `-E` / `--encoding` (non-default) | Re-decodes bytes the index never saw |
+| `-a` / `--text`, `--binary` | The index only covers text files |
+| `-.` / `--hidden`, every `--no-ignore*` | Widens the file set past what was indexed |
+| A single file named on the command line | Reading one file is cheaper than a lookup |
+
+That's the honest boundary of the design: a trigram AND/OR filter over "definitely contains bytes
+X" is a narrow, one-directional tool, and every one of these cases is a query that isn't shaped
+like that. None of it is a bug — the failure mode in every single case is "scan and verify
+everything," which is exactly ripgrep's normal, correct behavior. A trigram index cannot silently
+produce a false negative in this design; it can only fail to help.
+
+## Client/server: staying warm without going stale
+
+The part of the pitch that's easy to undersell is that `tgrep serve` isn't just "the index, but in
+RAM" — it's a whole small system for keeping that index correct while a real, actively-edited
+repository changes underneath it. `HybridIndex` is the seam:
+
+```rust
+/// **Concurrency**: the on-disk `IndexReader` is held inside an internal
+/// `RwLock<Arc<IndexReader>>`, which lets the publish path swap the reader
+/// **without** the caller having to hold an exclusive (`&mut`) reference to
+/// the `HybridIndex`. This means `tgrep serve` can safely keep search
+/// queries running with only an outer read lock during a flush — the brief
+/// inner write lock around the `Arc` swap takes microseconds and the old
+/// reader's mmap is released only after the last in-flight query drops its
+/// `Arc<IndexReader>`.
+pub struct HybridIndex {
+    reader: RwLock<Arc<IndexReader>>,
+    pub live: LiveIndex,
+    pub root: PathBuf,
+}
+```
+
+`LiveIndex` is the in-memory half — every trigram it holds gets its file IDs tagged with a high bit
+(`OVERLAY_BIT: u32 = 1 << 31`) so overlay entries and on-disk entries never collide in the same ID
+space, and the merge is simply "overlay wins":
+
+```rust
+pub struct LiveIndex {
+    inverted: HashMap<u32, HashSet<u32>>,           // trigram -> overlay file IDs
+    masks: HashMap<(u32, u32), trigram::TrigramMasks>,
+    file_paths: HashMap<u32, String>,
+    path_to_id: HashMap<String, u32>,
+    deleted_paths: HashSet<String>,
+    next_id: AtomicU32,
+    dirty_count: u32,
+}
+```
+
+Filesystem changes reach `LiveIndex` through the `notify` crate — the same watcher library
+ripgrep-adjacent tooling generally reaches for — and the hand-off between the OS notification
+thread and the actual indexing work is deliberately decoupled, with the reasoning spelled out in
+the source:
+
+```rust
+// Hand events to a worker thread instead of indexing inside the callback.
+// The callback runs on the platform's notification thread, which on Windows
+// owns a fixed-size `ReadDirectoryChangesW` buffer; doing file I/O and
+// trigram extraction there stalls it, and everything arriving meanwhile is
+// dropped by the OS with no error we can see. The queue is bounded so a
+// burst (a branch switch, a build) can't grow it without limit.
+let (tx, rx) = std::sync::mpsc::sync_channel::<Event>(queue_cap);
+```
+
+A monorepo where files change constantly — the adversarial case for any index — is exactly what
+this is built to survive, but the design is explicit that OS-level file-change notifications are
+*lossy by nature*: a full queue, a network filesystem that silently declines to report a change, a
+branch switch that replaces half the tree. tgrep doesn't pretend otherwise:
+
+> Once the index is built, everything that changes it arrives as an OS notification, and a
+> notification can go missing... nothing else in the server revisits a file it believes it already
+> knows. A missed change would otherwise last until that file happened to change again, which for a
+> deleted file is never.
+>
+> So a watching server also reconciles on a timer: about once an hour it walks the tree and
+> compares it against the index... It waits for a two-minute gap in queries first, and gives up
+> waiting after four hours so a continuously busy server still reconciles.
+
+That reconciliation pass — an hourly tree-walk-and-diff, deliberately timed around query traffic
+rather than fighting it — is the belt to the file watcher's suspenders, and it's the detail that
+makes "the server watches for changes" a credible claim on a busy monorepo rather than an
+aspiration. Memory during churn is bounded the same way index builds are: the overlay flushes to
+disk **every 50K files or 5 minutes**, whichever comes first, swapping in a fresh `IndexReader`
+under that brief write lock above. `--max-memory` (default: 50% of RAM, clamped 512 MB–16 GB)
+caps the overlay before that scheduled flush if churn outpaces it.
+
+### The wire protocol
+
+The server binds an ephemeral TCP port on localhost and speaks newline-delimited JSON-RPC 2.0, one
+thread per connection:
+
+```rust
+/// Server discovery info, written to `serve.json`.
+pub struct ServerInfo {
+    pub pid: u32,
+    pub port: u16,
+}
+
+fn handle_connection(stream: TcpStream, state: &Arc<ServerState>) -> Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut writer = stream;
+    let mut line = String::new();
+    while reader.read_line(&mut line)? > 0 {
+        let response = process_request(&line, state);
+        writeln!(writer, "{response}")?;
+        writer.flush()?;
+        line.clear();
+    }
+    Ok(())
+}
+
+fn process_request(request: &str, state: &Arc<ServerState>) -> String {
+    let req: serde_json::Value = serde_json::from_str(request)
+        .unwrap_or_else(|e| return json_rpc_error(None, -32700, &format!("Parse error: {e}")));
+    match req.get("method").and_then(|m| m.as_str()).unwrap_or("") {
+        "search" => handle_search(id, &params, state),
+        "files" => handle_files(id, state),
+        "status" => handle_status(id, state),
+        "reload" => handle_reload(id, state),
+        other => json_rpc_error(id, -32601, &format!("Method not found: {other}")),
+    }
+}
+```
+
+And the client side of a search is exactly the mirror — connect to the discovered port, write one
+line of JSON, read one line back:
+
+```rust
+let mut stream = TcpStream::connect(format!("127.0.0.1:{}", info.port))?;
+writeln!(stream, "{}", serde_json::json!({
+    "jsonrpc": "2.0", "method": "files", "id": 1,
+}))?;
+```
+
+BENCHMARKS.md is explicit that its own numbers include this round trip, not just the search:
+"Every query is run through a fresh `tgrep` client process, so each measurement includes process
+startup and the TCP round trip, exactly as a shell user or editor integration would pay them."
+That's the right thing to measure — it's the actual cost an agent calling `tgrep` as a subprocess
+would pay on every single call.
+
+## Correctness over speed: what the fuzz suite actually checks
+
+A trigram prefilter that produces a false negative is worse than useless — it would make tgrep
+*silently* miss real matches, which is a much worse failure than being slow. The `fuzz/` crate's
+four targets are aimed almost entirely at the boundary where that could happen: the on-disk format
+and the code that has to trust bytes it didn't write.
+
+```rust
+// fuzz_reader.rs — the sharpest of the four
+//
+// `fuzz_ondisk` only round-trips `PostingEntry` encode/decode, so nothing
+// reaches `IndexReader` itself — yet that is where untrusted values do
+// damage. The `offset` (u64) and `length` (u32) fields of a `lookup.bin`
+// entry are the loop bound and the slice base for decoding `index.bin`, so a
+// corrupt pair there is what turns a bad file into a panic, an out-of-range
+// slice, or a multi-gigabyte reservation.
+fuzz_target!(|data: &[u8]| {
+    // ...carves `data` into synthetic lookup.bin/index.bin/files.bin files...
+    let Ok(reader) = IndexReader::open(&dir) else { return };
+    for i in 0..reader.num_trigrams().min(MAX_ENTRIES_DECODED) {
+        let (trigram, entries) = reader.trigram_posting_at(i);
+        assert!(entries.len() <= max_decodable, "decoded postings not bounded by file size");
+    }
+});
+```
+
+The other three: `fuzz_trigram` checks that `extract` never panics and that
+`extract_with_masks` produces the identical trigram set as plain `extract` on arbitrary bytes;
+`fuzz_query` throws arbitrary UTF-8 at `build_query_plan` and `build_literal_plan` at both
+case sensitivities, asserting only that it never panics (a bad regex is `Err`, not a crash);
+`fuzz_ondisk` round-trips `PostingEntry` and pins that every extracted trigram hash re-decodes to
+the same three bytes.
+
+Worth being precise about what this buys, and what it doesn't. This is **not** fuzzing regex
+correctness — that job belongs entirely to whichever regex engine is doing the actual matching
+(`regex` by default, `fancy-regex` under `-P`), both mature crates with their own, much larger,
+independent test and fuzz histories that predate tgrep by years. What tgrep's own fuzz suite is
+defending is narrower and, for this specific piece of software, more important: that a
+maliciously or accidentally corrupt on-disk index — the one thing tgrep adds to a codebase that
+plain ripgrep doesn't have at all — can't crash the reader or corrupt a search, and that the
+trigram layer's own transformations (extraction, hashing, masking) are lossless. Confidence in
+tgrep's *matching* is inherited from upstream `regex`/`fancy-regex`; confidence in tgrep's *index*
+is what this suite is actually testing.
+
+## Whose regex engine is this, anyway
+
+`tgrep-core`'s dependencies answer the "is this built on ripgrep's own ecosystem" question
+directly:
+
+```toml
+[dependencies]
+regex = "1"
+regex-syntax = "0.8"
+ignore = "0.4"
+globset = "0.4.18"
+memmap2 = "0.9"
+rayon = "1"
+```
+
+`regex`, `regex-syntax`, `ignore`, and `globset` are all crates from the same ecosystem that powers
+ripgrep — `regex`/`regex-syntax` are Andrew Gallant's (BurntSushi's) core matching engine and its
+parser/HIR, `ignore` is the same `.gitignore`-aware directory walker ripgrep itself uses (tgrep's
+own `walker.rs` says so directly in its doc comment: *"`.gitignore`-aware file walker using the
+`ignore` crate (same as ripgrep)"*), and `globset` backs `-g`/`--glob`. So for the **default**
+matching path, the regex engine that actually decides whether a candidate file's bytes match is
+*the same engine ripgrep runs* — tgrep's contribution isn't a faster matcher, it's a narrower set
+of files handed to that matcher. `tgrep-cli` adds `fancy-regex` for `-P`/`--pcre2`, which is worth
+flagging precisely because the flag name invites a wrong assumption: `-P`/`--pcre2` is ripgrep's
+own naming convention for "the backtracking engine that supports lookaround and backreferences,"
+but neither ripgrep nor tgrep links real libpcre2 — both use a pure-Rust backtracking engine
+instead (`fancy-regex` here; ripgrep uses the same crate for its own `-P`). "PCRE2" names the
+*feature set*, not the library.
+
+## The headline number, qualified
+
+Here is the table the README leads with, reproduced in full — six repos, three platforms each,
+eighteen cells:
+
+| Repo | Files | Queries | Windows | macOS | Linux |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| chromium/chromium | 504,351 | 30 | **17.6x** | **15.8x** | **3.81x** |
+| mozilla/gecko-dev | 387,841 | 122 | **38.6x** | **51.9x** | **7.36x** |
+| torvalds/linux | 95,831 | 102 | **34.8x** | **21.0x** | **9.38x** |
+| rust-lang/rust | 62,326 | 102 | **7.69x** | **2.69x** | **1.61x** |
+| kubernetes/kubernetes | 31,300 | 97 | **7.08x** | **2.81x** | **0.93x** |
+| golang/go | 15,833 | 103 | **7.53x** | **3.12x** | **1.29x** |
+
+*(BENCHMARKS.md, "At a glance" — 24 Aug 2026 sweep, commit `82b88a1`, GitHub-hosted runners)*
+
+Geometric mean across the six repos: **14.6x on Windows, 8.61x on macOS, 2.82x on Linux.** The
+single highest cell is Gecko on macOS at 51.9x — the source of "up to 52x." The single lowest is
+Kubernetes on Linux at **0.93x — a loss**, the one cell in the whole sweep where ripgrep wins
+(101.8ms vs. 94.4ms per query, on a warm page cache with generic high-match-volume queries where
+tgrep pays more to *deliver* results over the wire than the index saved by narrowing candidates).
+You relayed this as "7x–50x faster," and that phrase is defensible only as a splice of two
+different platforms' numbers — "never below 7.08x" is specifically the Windows floor, and "up to
+52x" is specifically a macOS cell — stitched together while dropping the one Linux cell that's
+actually a loss and the Linux geometric mean (2.82x) that's the honest floor of the whole sweep.
+The repo's own "up to 52x" is the more careful of the two claims: it's a real number from a real
+cell, explicitly framed as a ceiling rather than a typical case.
+
+**Does BENCHMARKS.md disclose index build time and size, or only steady-state query latency?**
+Both — but not in the same table, which is exactly how "avg latency per query, index pre-built"
+ends up doing the headline-compressing work it does. The at-a-glance table above is pure
+steady-state query latency. Build time and index size are real, disclosed numbers — they just live
+in each repo's own prose section further down the document, never joined to the latency table:
+
+| Repo | Files | Index build (Linux / Windows / macOS) | Index size |
+| --- | ---: | --- | ---: |
+| chromium/chromium | 504,351 | ~52s / ~73s / ~248s | ~2,584 MB |
+| mozilla/gecko-dev | 387,841 | ~35s / ~58s / ~165s | ~1,952 MB |
+| torvalds/linux | 95,831 | ~21s / ~26s / ~37s | ~1,000 MB |
+| rust-lang/rust | 62,326 | ~4s / ~6s / ~8s | ~199 MB |
+| kubernetes/kubernetes | 31,300 | ~4s / ~7s / ~5s | ~215 MB |
+| golang/go | 15,833 | ~2s / ~3s / ~3s | ~113 MB |
+
+*(reassembled from the per-repo "Index build time" / "Index size" lines BENCHMARKS.md states for
+each repo — the source never puts this next to the latency table above)*
+
+The indexer's peak memory during that build is disclosed too, in the same scattered way, this time
+in its own separate table further down:
+
+| Repo | Windows | macOS | Linux |
+| --- | ---: | ---: | ---: |
+| chromium/chromium | 402.9 MiB | 462.6 MiB | 332.2 MiB |
+| mozilla/gecko-dev | 347.8 MiB | 416.3 MiB | 256.9 MiB |
+| torvalds/linux | 135.4 MiB | 216.7 MiB | 129.6 MiB |
+| rust-lang/rust | 114.7 MiB | 150.8 MiB | 109.4 MiB |
+| kubernetes/kubernetes | 109.1 MiB | 145.3 MiB | 110.7 MiB |
+| golang/go | 108.0 MiB | 137.2 MiB | 108.7 MiB |
+
+*(BENCHMARKS.md, "Index-build peak memory in the latest sweep")* — bounded well under 470 MiB even
+for Chromium's 504K files and 2.6 GB index, consistent with the external-merge-sort design above.
+
+One more honest caveat BENCHMARKS.md states about itself, worth repeating rather than smoothing
+over: these are shared GitHub-hosted runners, not controlled hardware, and the document says
+outright that a single ripgrep column can move meaningfully between runs — five identical runs of
+the kernel query suite measured macOS ripgrep at 385s, 388s, 495s, 500s, and 550s, a 1.4x spread
+from runner variance alone. Compare tgrep and ripgrep *within a row* of a given run, not across
+different sweeps' absolute milliseconds.
+
+(One thing worth naming plainly: BENCHMARKS.md compares tgrep only against ripgrep. There's no
+`ugrep` column anywhere in the source — not in the benchmark suite, the README, or the repo's
+history — so any three-way comparison would have to be run independently; it isn't something this
+repository publishes.)
+
+## What per-query latency doesn't tell you: the break-even
+
+Every number above describes steady state — the index already exists, and every following query
+is nearly free. What it doesn't answer is the question that actually decides whether building the
+index was worth it for a given session: **how many queries does it take before the one-time index
+build has paid for itself against ripgrep's zero-setup cold scan?** BENCHMARKS.md gives both halves
+of that arithmetic — the build time table above and the per-query latency table above it — and
+never combines them. Doing the division across all eighteen cells:
+
+| Repo | Platform | Index build | ripgrep/query | tgrep/query | Break-even |
+| --- | --- | ---: | ---: | ---: | ---: |
+| chromium/chromium | Linux | 52.0s | 2,404.2ms | 631.4ms | ~29 queries |
+| chromium/chromium | Windows | 73.0s | 24,575.8ms | 1,396.1ms | ~3.1 queries |
+| chromium/chromium | macOS | 248.0s | 41,806.2ms | 2,643.1ms | ~6.3 queries |
+| mozilla/gecko-dev | Linux | 35.0s | 1,194.9ms | 162.4ms | ~34 queries |
+| mozilla/gecko-dev | Windows | 58.0s | 17,841.2ms | 462.6ms | ~3.3 queries |
+| mozilla/gecko-dev | macOS | 165.0s | 33,401.8ms | 643.0ms | ~5.0 queries |
+| torvalds/linux | Linux | 21.0s | 426.9ms | 45.5ms | ~55 queries |
+| torvalds/linux | Windows | 26.0s | 3,280.0ms | 94.2ms | ~8.2 queries |
+| torvalds/linux | macOS | 37.0s | 5,390.3ms | 256.1ms | ~7.2 queries |
+| rust-lang/rust | Linux | 4.0s | 144.2ms | 89.4ms | ~73 queries |
+| rust-lang/rust | Windows | 6.0s | 1,489.4ms | 193.7ms | ~4.6 queries |
+| rust-lang/rust | macOS | 8.0s | 654.6ms | 243.6ms | ~19.5 queries |
+| kubernetes/kubernetes | Linux | 4.0s | 94.4ms | 101.8ms | **never** |
+| kubernetes/kubernetes | Windows | 7.0s | 1,342.3ms | 189.5ms | ~6.1 queries |
+| kubernetes/kubernetes | macOS | 5.0s | 285.9ms | 101.9ms | ~27 queries |
+| golang/go | Linux | 2.0s | 44.1ms | 34.1ms | **~200 queries** |
+| golang/go | Windows | 3.0s | 591.7ms | 78.6ms | ~5.8 queries |
+| golang/go | macOS | 3.0s | 204.6ms | 65.6ms | ~21.6 queries |
+
+*(computed as `index_build_ms / (ripgrep_ms_per_query - tgrep_ms_per_query)` from the two tables
+above — this arithmetic appears nowhere in BENCHMARKS.md or the README)*
+
+Two things stand out. First, the range is enormous — **from about 3 queries (Chromium on Windows)
+to about 200 (Go on Linux)** — and it tracks the same two variables the rest of BENCHMARKS.md
+names as deciding the margin: repo size (bigger repos have more for the index to skip, so
+ripgrep's cold-scan cost is higher and the payback is faster) and platform (Windows's high
+per-file I/O overhead makes ripgrep's cold scan disproportionately expensive, so the index earns
+its keep almost immediately; Linux's warm page cache makes brute force cheap, so payback is slow
+even where tgrep eventually wins on every query). Second, Kubernetes on Linux — the one cell
+BENCHMARKS.md already flags as ripgrep's sole win — never breaks even at all: tgrep's own
+per-query cost there (101.8ms) is already higher than ripgrep's cold scan (94.4ms), so the index
+is behind from the first query and the gap only widens.
+
+<BreakevenChart />
+
+## The regime this is actually built for
+
+None of this is an argument against tgrep — it's an argument for naming the regime the design
+targets, which the README's headline number quietly assumes rather than states. A persistent,
+watched index is the *right* architecture when the same tree gets queried many times between
+changes and the caller can afford to keep a server resident — which is precisely the shape of an
+editor's "find all references," or a coding agent making dozens of grep calls per task against a
+repository that isn't being rewritten between them. That's exactly the GitHub Copilot CLI
+integration the README names as tgrep's reason for existing, and inside that regime the 3–200
+query break-even table above resolves in tgrep's favor almost immediately, because a single agent
+task or editor session routinely issues far more than a few dozen searches.
+
+It is close to the wrong architecture for a one-shot CI grep, a single ad-hoc terminal search, or
+any workload where the tree is rewritten between almost every query — a build watcher constantly
+touching thousands of files is close to the adversarial case the whole file-watcher-plus-hourly-
+reconciliation design exists to survive, not the case it makes free. ripgrep's zero-setup cold
+scan is the right tool exactly where tgrep's amortization can't apply: when there's no second
+query coming.
+
+---
+
+*Everything in this piece is read directly from [microsoft/tgrep](https://github.com/microsoft/tgrep)
+at the commit its `BENCHMARKS.md` sweep cites (`82b88a1`) — `tgrep-core/src/{trigram,query,ondisk,
+builder,reader,hybrid,live}.rs`, `tgrep-cli/src/{search,serve}.rs`, `fuzz/fuzz_targets/*.rs`,
+`Cargo.toml`, `README.md`, and `BENCHMARKS.md`. The `regex-syntax` HIR outputs quoted for `(?i)`
+were independently verified against `regex-syntax` 0.8.11 rather than inferred, and the underlying
+mechanism traces to Russ Cox's [Regular Expression Matching with a Trigram
+Index](https://swtch.com/~rsc/regexp/regexp4.html), which the tgrep repository itself does not
+cite. This is an interactives-only piece — there's no paper and, unlike an article built around a
+research release, no diagrams or figures in the source repository to responsibly reproduce, so the
+mechanism above is explained entirely through the real Rust and the two components on this page,
+following the precedent already set by [BM25](/articles/bm25) on this site.*
+
+For the retrieval side of this — how BM25's inverted index compares to a trigram one, and how
+[TurboVec](/articles/turbovec) makes the same "amortize a one-time cost, then stay fast" trade for
+vector search instead of text — and for why an agent harness cares about tool latency like this in
+the first place, see [Agent harnesses: engineering the loop around the model](/articles/agent-harness).
