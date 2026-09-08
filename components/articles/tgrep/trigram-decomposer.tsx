@@ -264,7 +264,14 @@ function fileTrigramSet(content: string): Set<string> {
   return new Set(extractTrigrams(content))
 }
 
-type FileState = "confirmed" | "false_positive" | "excluded" | "scanned_match" | "scanned_no_match" | "unverifiable"
+type FileState =
+  | "confirmed"
+  | "false_positive"
+  | "excluded"
+  | "scanned_match"
+  | "scanned_no_match"
+  | "unverifiable"
+  | "not_run"
 
 function toJsRegex(pattern: string): { source: string; flags: string } | null {
   let flags = ""
@@ -306,6 +313,11 @@ export function TrigramDecomposer() {
   }, [verdict])
 
   const fileStates = useMemo(() => {
+    if (verdict.kind === "parse_error") {
+      // A parse error means the pattern never compiles at all — tgrep exits 2
+      // before touching a single file, indexed or not. No file gets scanned.
+      return FILES.map((): FileState => "not_run")
+    }
     return FILES.map((f): FileState => {
       const isMatch = compiled ? new RegExp(compiled.source, compiled.flags).test(f.line) : null
       if (verdict.kind !== "plan" || !verdict.indexed) {
@@ -492,7 +504,10 @@ export function TrigramDecomposer() {
 
         <div className="mt-3 rounded-lg border">
           <div className="border-b bg-muted/20 px-3 py-1.5 font-mono text-[10px] text-muted-foreground">
-            six-file demo repo · trigram filter, then real regex verification
+            six-file demo repo ·{" "}
+            {verdict.kind === "parse_error"
+              ? "nothing runs — the pattern never compiles"
+              : "trigram filter, then real regex verification"}
           </div>
           <div className="divide-y">
             {FILES.map((f, i) => {
@@ -504,6 +519,7 @@ export function TrigramDecomposer() {
                 scanned_match: { label: "match (full scan)", color: GOOD, icon: "✓" },
                 scanned_no_match: { label: "no match (full scan)", color: NEUTRAL, icon: "–" },
                 unverifiable: { label: "n/a", color: NEUTRAL, icon: "?" },
+                not_run: { label: "never reached — exit 2", color: NEUTRAL, icon: "×" },
               }
               const m = meta[state]
               return (
