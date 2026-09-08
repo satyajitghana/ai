@@ -1,0 +1,412 @@
+---
+title: "NextLat: a transformer graded on its own next hidden state"
+description: "Next-Latent Prediction adds one auxiliary loss to ordinary next-token training: predict your own next hidden state, from the current one plus the next token, with a stop-gradient — not an EMA target, not a VQ codebook, no separate encoder anywhere — preventing collapse. Checked against the paper's own Table 1: 'compact' means a 3x lower effective-latent-rank than GPT on a Manhattan-taxi world-modeling benchmark (52.7 vs. 160.1), but MTP is a much closer second (57.7) than the headline comparison suggests, and the strongest evidence for an actual world model is a metric most readers will skip past — how often two different routes to the same place produce identical continuations. Plus what changed between the November 2025 submission and the current revision, and a paper id that circulated attached to an unrelated claim."
+date: 2026-09-08
+interest: 5
+helpful: 4
+tags:
+  - world-models
+  - representation-learning
+  - transformers
+  - self-supervised-learning
+  - explainer
+draft: false
+featured: false
+cover: /articles/next-latent-world-models/fig1.png
+---
+
+import { ObjectiveBottleneck } from "@/components/articles/next-latent-world-models/objective-bottleneck"
+import { CompactnessExplorer } from "@/components/articles/next-latent-world-models/compactness-explorer"
+
+<Callout type="note">
+One housekeeping note before the paper itself: this arXiv id circulated online attached to an
+unrelated claim, about a reinforcement-learning credit-assignment framework. That is not this paper.
+Everything below is checked directly against arXiv 2511.05963's own text, tables, and figures.
+</Callout>
+
+A recurrent network is forced to compress. Whatever happened ten steps ago has to fit through the
+same fixed-width hidden state as whatever happened one step ago, so an RNN that wants to predict well
+has no choice but to keep only what still matters. A transformer has no such pressure — self-attention
+gives it ad-hoc lookup over every past token, so its "memory" grows with the sequence rather than
+staying fixed, and next-token cross-entropy rewards it for reading the right token off that unbounded
+context, not for summarizing anything. **Next-Latent Prediction (NextLat)**, from Jayden Teoh, Manan
+Tomar, Kwangjun Ahn, Edward S. Hu, Tim Pearce, Pratyusha Sharma, Akshay Krishnamurthy, Riashat Islam,
+Alex Lamb, and John Langford ([arXiv 2511.05963](https://arxiv.org/abs/2511.05963), code at
+[github.com/JaydenTeoh/NextLat](https://github.com/JaydenTeoh/NextLat)), adds the recurrent-style
+pressure back in without touching the architecture: alongside ordinary next-token prediction, train the
+transformer's hidden state to predict its *own next value*. This piece checks what "compact" and
+"world model" concretely mean in the paper's own tables, where the evidence for an actual world model
+is stronger than raw prediction accuracy, and where it's thinner than the title implies.
+
+<Figure
+  src="/articles/next-latent-world-models/fig1.png"
+  alt="Diagram comparing four predictive mechanisms at timestep t=3: Next/Prev-Token Prediction (BST) uses two separate hidden states h3 and h(T-2) to predict tokens forward and backward; Multi-Token Prediction predicts x4, x5, x6 directly from h3; Joint-Token Prediction predicts the same three tokens from h3 but with teacher-forced x4, x5 as dashed inputs; Next-Latent Prediction instead chains h3 to a predicted hidden state h-hat-4, decodes x4 from it, then chains to h-hat-5 to decode x5, with x4 and x5 shown as teacher-forced inputs to the latent dynamics model."
+  caption="Four ways to supervise a transformer beyond plain next-token prediction. The first three all attach their extra supervision directly to token-level outputs; NextLat routes it through a predicted hidden state instead, with the latent acting as the bottleneck (paper, Figure 2)."
+/>
+
+## What the objective actually is
+
+NextLat's hidden state is not a separate encoder's output, a VQ codebook lookup, or anything with its
+own weights independent of the transformer — it is literally $h_t$, the transformer's own final-layer
+hidden state at position $t$, the same vector that already feeds the language-modeling head. There is
+no frozen target network and no pretraining phase to freeze afterward: the whole thing — transformer
+parameters $\theta$ and a small MLP dynamics model $p_\psi$ — trains jointly, in one combined loss,
+from initialization. $p_\psi$ takes the current hidden state and the *actual* next token (teacher-forced,
+not sampled) and predicts a distribution over the next hidden state:
+
+$$
+\hat{\mathbf{h}}_{t+1} \sim p_\psi(\cdot \mid \mathbf{h}_t, x_{t+1})
+$$
+
+Three terms make up the total loss. The first is ordinary next-token cross-entropy — nothing new here:
+
+$$
+\mathcal{L}_{\text{next-token}}(\theta) = \mathbb{E}_t\!\left[-\log p_\theta(x_{t+1} \mid \mathbf{h}_t)\right]
+$$
+
+The second regresses the predicted hidden state toward the transformer's *actual* future hidden
+state, rolled out up to $d$ steps ahead with a Smooth L1 loss and, critically, a stop-gradient on the
+target:
+
+$$
+\mathcal{L}_{\text{next-h}}(\theta, \psi; d) = \mathbb{E}_t\!\left[\frac{1}{d}\sum_{i=1}^{d}
+\text{SmoothL1}\big(\text{sg}[\mathbf{h}_{t+i}],\ \hat{\mathbf{h}}_{t+i}\big)\right]
+$$
+
+The third is a distillation term: it decodes both the true and predicted hidden states through the
+(stop-gradded) language-modeling head and matches the resulting token distributions with KL
+divergence, so the predicted latent is graded on whether it *decodes* correctly, not only on whether
+it matches the true vector coordinate-for-coordinate:
+
+$$
+\mathcal{L}_{\text{KL}}(\theta, \psi; d) = \mathbb{E}_t\!\left[\frac{1}{d}\sum_{i=1}^{d}
+D_{\text{KL}}\big(p_\theta^{\text{sg}}(\cdot \mid \text{sg}[\mathbf{h}_{t+i}]) \,\big\|\,
+p_\theta^{\text{sg}}(\cdot \mid \hat{\mathbf{h}}_{t+i})\big)\right]
+$$
+
+and the full objective is a weighted sum of all three:
+
+$$
+\mathcal{L}_{\text{NextLat}} = \mathcal{L}_{\text{next-token}}(\theta) +
+\lambda_{\text{next-h}}\,\mathcal{L}_{\text{next-h}}(\theta, \psi; d) +
+\lambda_{\text{KL}}\,\mathcal{L}_{\text{KL}}(\theta, \psi; d)
+$$
+
+As pseudocode, one training step looks like this — the part worth noticing is that `h_hat` is produced
+*recursively*, chaining $d$ applications of the small dynamics MLP, each one conditioned on the
+*real* next token rather than its own previous guess:
+
+```python
+# theta = transformer (produces h_t and decodes tokens); psi = small MLP dynamics model
+h = transformer.encode(x[: t + 1])              # h_t, theta's own hidden state
+loss_token = cross_entropy(decode(h, theta), x[t + 1])
+
+h_hat = h
+loss_next_h, loss_kl = 0.0, 0.0
+for i in range(1, d + 1):
+    h_hat = psi(h_hat, x[t + i])                 # teacher-forced next token, not sampled
+    h_true = transformer.encode(x[: t + i + 1])  # theta's actual hidden state at t+i
+    loss_next_h += smooth_l1(stop_grad(h_true), h_hat)
+    loss_kl += kl_div(decode(stop_grad(h_true), stop_grad(theta)),
+                       decode(h_hat, stop_grad(theta)))
+
+loss = loss_token + lambda_h * (loss_next_h / d) + lambda_kl * (loss_kl / d)
+```
+
+At inference, `psi` never runs — the transformer decodes autoregressively exactly as it would without
+any of this. Nothing about the model's forward pass, its parameter count at inference, or its
+parallel training changes; the only thing that changes is what the training signal shapes.
+
+<ObjectiveBottleneck />
+
+## Why it needs a stop-gradient at all
+
+Readers of [this site's LeVJEPA piece](/articles/levjepa) will recognize the shape of the problem:
+any objective that grades a model against its own output risks a trivial fix, where the model
+satisfies the loss by making every output identical rather than by predicting anything real. LeVJEPA
+sidesteps that risk entirely — no stop-gradient, no target network, because SIGReg's isotropic-Gaussian
+regularizer makes the collapsed solution structurally unreachable. NextLat takes the more conventional
+route: the `sg[·]` in $\mathcal{L}_{\text{next-h}}$ and $\mathcal{L}_{\text{KL}}$ blocks gradient from
+flowing into $\mathbf{h}_{t+i}$ through its role as a *target*, so the dynamics model has to move to
+match the transformer's real trajectory rather than the trajectory drifting to meet a lazy prediction.
+It's the same asymmetry BYOL and SimSiam rely on for image self-supervision, applied across time
+instead of across two augmented views. The two papers land on opposite sides of the same design
+question — predict in latent space to sidestep pixel detail — for a reason worth being precise about:
+LeVJEPA's "target" is a different augmented view of the *same* input, so collapsing to a constant
+still has to explain away real visual variation the regularizer is watching for; NextLat's target is a
+future timestep of the *same trajectory*, where a constant hidden state would still decode correctly
+at each step if the model routed all its real work around the latent instead of through it — a more
+direct collapse path, and the reason the paper reaches for the older tool.
+
+## Provably a belief state — under one condition
+
+The paper's theoretical claim (Theorem 3.2) is a backward-induction argument, not a training result:
+*if* a hidden state can (a) decode the true next-token distribution exactly, given the history, and
+(b) predict the true distribution over its own next value exactly, given the next token, then $h_t$
+must already be a **belief state** — a sufficient statistic of the history, in the sense used in
+POMDPs and stochastic control, that carries everything needed to predict the future and nothing an
+observer with the full history could add. The proof composes these two guarantees recursively: decode
+a token from $h_t$, use it to predict $h_{t+1}$, decode the next token from that, and so on — if every
+step is exact, $h_t$ could not have discarded anything load-bearing. A standard transformer only gets
+pressure toward condition (a); NextLat is what happens when you add pressure toward (b) as well.
+
+Two baselines in the paper's own comparisons chase the same theoretical object by different routes,
+and the differences are concrete rather than cosmetic. The **Belief State Transformer** (BST, Hu et
+al. 2025) gets a belief-state guarantee by training two encoders — one reading forward, one backward —
+and paying for it with $O(T^2)$ gradient signals per sequence; on TinyStories it trains at 0.19
+iterations per second against NextLat's 3.26, over 10x slower, and needs both encoders again at
+inference. **Joint-Token Prediction** (JTP, Ahn et al. 2025) can learn belief states too, but the
+paper is specific about the catch: JTP's guarantee only holds once the prediction horizon $d$ is at
+least the data-generating process's *observability horizon* — how many future tokens you'd need to
+see to fully disambiguate the current state. For short synthetic tasks that's a small number; for
+open-ended language modeling the paper argues it's effectively unbounded, which makes the condition
+impractical to satisfy by simply cranking up $d$. NextLat's guarantee is stated independent of $d$ —
+larger $d$ gives a richer gradient signal, not a different guarantee.
+
+## Where "compact" gets measured
+
+The clearest test in the paper is **Manhattan Taxi Rides** (Vafa et al. 2024): 91M sequences, 4.7B
+tokens of random 100-step traversals of Manhattan's real one-way street grid (4,580 intersections,
+9,846 edges), where the model never sees the map directly — only sequences of turns — and has to infer
+the underlying graph from traversal statistics alone. Every model here reaches 100% next-token test
+accuracy, which the paper is upfront about being close to useless as a diagnostic: **a model that gets
+every token right can still hold an internal map that's structurally wrong**, and next-token accuracy
+alone can't tell the two apart. Four other metrics can:
+
+| Method | Valid trajectories | Sequence compression | Effective latent rank ↓ | Detour robustness |
+|---|---|---|---|---|
+| GPT | 97.0% | 65% | 160.1 | 85.0% |
+| MTP | 98.1% | 64% | 57.7 | 95.0% |
+| JTP | 97.1% | 32% | 215.8 | 87.0% |
+| **NextLat** | **98.7%** | **71%** | **52.7** | **95.0%** |
+| true world model | 100% | 100% | — | 100% |
+
+<Figure
+  src="/articles/next-latent-world-models/fig2.png"
+  alt="Four reconstructed street maps of Manhattan, one per method (GPT, MTP, JTP, NextLat), each overlaid on the true map with black edges where the model's inferred connections match reality and red edges where they don't. The GPT, MTP, and JTP maps show dense clusters of red error edges throughout, especially in Midtown; the NextLat map has visibly sparser, more localized red edges and a cleaner overall street grid."
+  caption="Each model's internal map, reconstructed from generated traversals using the algorithm from Vafa et al. (2024). Black edges are consistent with the true graph; red edges are not. NextLat's inconsistencies are sparser and more local than the other three (paper, Figure 3)."
+/>
+
+Effective latent rank — the exponentiated Shannon entropy of the hidden-state matrix's singular
+values, lower meaning more compact — is the number the title leans on: NextLat's 52.7 against GPT's
+160.1 is a genuine 3x-plus reduction. But it's worth reading the full row rather than just the two
+ends of it: **MTP's 57.7 is a much closer second than "3x more compact than everything else" would
+suggest**, within 10% of NextLat despite MTP having no belief-state guarantee behind it at all. And a
+methodology note the paper states plainly in its appendix but not in the main table: effective rank
+isn't read from the same point in every architecture. GPT and NextLat use the final-layer hidden
+state; JTP uses the state immediately before self-attention in its own "Fetch" head; MTP uses the
+output of its next-token prediction head. These are reasonable choices, but they aren't the same
+object, which means the rank column is more directly comparable between GPT and NextLat than it is
+across all four.
+
+**Sequence compression** is the metric that comes closest to testing state abstraction rather than
+raw accuracy, and it's the one most likely to get skipped past: it's the percentage of cases where two
+*different* routes that happen to arrive at the same intersection, heading to the same destination,
+produce *identical* continuations from that point on. A model that has genuinely learned "you are
+here, heading there" as a state — rather than memorizing route-specific continuations — should answer
+identically regardless of how it got there. NextLat wins this one by more than its rank lead would
+predict (71% vs. GPT's 65%), and JTP's collapse here is the sharpest number in the whole table: 32%,
+*worse* than plain GPT. JTP's extra token-level supervision didn't just fail to help compression — it
+measurably hurt it.
+
+<CompactnessExplorer />
+
+## Discards nuisance detail, or changes the optimization?
+
+This is the question the paper doesn't cleanly separate. There are two live explanations for why
+next-latent prediction helps, and they point in different directions. One is representational: the
+latent target is compressible in a way pixels or discrete tokens aren't, so the objective structurally
+permits (even rewards) discarding whatever doesn't help predict the future — the belief-state argument
+above. The other is about the shape of the optimization landscape: Section 5.1 of the paper argues
+that plain token-level supervision is *myopic* — early training on next-token objectives tends to
+resemble $n$-gram modeling, which the paper cites prior work as showing can delay or trap models in
+local minima that undermine long-horizon planning, independent of anything about representation size.
+NextLat's own explanation for its Countdown and Path-Star results leans on this second story as much
+as the first.
+
+**The paper does not run the ablation that would cleanly separate the two.** There's no experiment
+here that forces representational compression through some other mechanism — a narrow bottleneck
+layer, say — without the next-latent prediction objective, to see whether compression alone
+reproduces the planning gains; nor is there one that keeps the multi-step gradient signal but removes
+the pressure toward a *self-consistent* latent, to see whether the optimization-dynamics story
+survives on its own. What the paper does establish is that JTP and MTP — which also add multi-step
+gradient signal on top of the same token-level structure, without NextLat's latent bottleneck — get
+smaller and less consistent gains, and in JTP's compression score, an outright regression. That's
+evidence the specific *routing* through a latent target matters, not just the presence of
+extra gradient signal, but it's evidence by comparison across methods, not a controlled decomposition
+within one.
+
+## Is this actually a world model, or just better prediction?
+
+The paper's title makes a strong claim, and the honest answer is that some of its evidence supports it
+more directly than others. Downstream accuracy — solving Countdown, planning Path-Star routes — is
+consistent with a good learned model, but consistent with a lot of things; a model can get better at a
+task through reasons that have nothing to do with internal coherence. Three pieces of evidence here are
+stronger, because they're designed to fail if the model is merely predicting well without an underlying
+consistent structure:
+
+**Sequence compression**, described above, is close to a direct probe for state abstraction — it asks
+whether the model treats two different histories that reach the same state as *the same state*, which
+is closer to "does an internal representation of location exist" than any accuracy number could be.
+
+**Detour robustness** is the closest thing to an intervention in this paper: on out-of-distribution
+pickup-dropoff pairs, the evaluation *overrides* the model's own top-1 prediction with a random (but
+legal) detour 75% of the time, then checks whether the resulting trajectory still reaches a valid
+state. This is testing something accuracy can't: whether the model can recover a coherent continuation
+after being forced off the path it would have chosen — which requires the model to have something like
+a map it can re-plan from, not just a policy tuned to its own typical trajectories. NextLat ties MTP
+here at 95.0%, both well ahead of GPT's 85.0% and JTP's 87.0%.
+
+**Linear probing on frozen hidden states** (TinyStories) tests something orthogonal to both: whether
+information about tokens *far* in the future is linearly recoverable from the current hidden state at
+all, independent of whether the model ever needs to use it during ordinary decoding.
+
+<Figure
+  src="/articles/next-latent-world-models/fig3.png"
+  alt="Bar chart of cross-entropy loss difference relative to GPT, from linear probes trained on frozen hidden states to predict tokens at offsets 1 through 20 ahead. At offset 1, BST, MTP, and JTP all show positive (worse than GPT) bars; NextLat's offset-1 bar is close to zero. At larger offsets, MTP and JTP's bars shrink back toward zero as offset increases, while NextLat's d=8 bars stay strongly negative (better than GPT) out to offset 20."
+  caption="Cross-entropy loss of linear probes trained on frozen hidden states, relative to probes on GPT's hidden states, at token offsets 1 through 20 ahead — lower (more negative) is better. NextLat is the only method that neither sacrifices next-token probe accuracy (offset 1) nor loses its long-horizon advantage by offset 20 (paper, Figure 8, selected offsets shown)."
+/>
+
+The pattern here is the most direct evidence for "compact, predictive representation" in the whole
+paper: BST, MTP, and JTP all *degrade* next-token probe accuracy relative to plain GPT — the extra
+supervision at future offsets measurably hurts the thing the model is supposed to be best at — and
+JTP and MTP's advantage at longer offsets shrinks back toward zero as the offset grows. NextLat is the
+only method that matches GPT's next-token probe accuracy *and* keeps a real advantage out to 20 tokens
+ahead. That's the strongest single piece of evidence that something durable, rather than a training
+artifact, is encoded in the hidden state.
+
+None of this is proof of a full world model in the sense of, say, being able to simulate arbitrary
+counterfactual rollouts — the paper doesn't run latent-space interventions (perturbing $\hat{h}$ directly
+and checking whether the decoded continuation changes in the way a real state change would) or test
+transfer to a structurally different map. The evidence is real and multi-pronged, but it is all
+downstream-task and probing evidence, not a demonstration that the latent supports arbitrary planning
+queries the way, say, an explicit transition model would.
+
+## Reasoning and planning, briefly
+
+On **Countdown** (combine four numbers via arithmetic to hit a target, following Gandhi et al. 2024),
+NextLat beats MTP and JTP at the same shallow horizon ($d=1$) by more than 38%. The paper's more
+specific finding is about *where* errors happen: most invalid equations occur in the *final* step of a
+solution, which the paper — borrowing a term from Ye et al. (2025) — calls "the regretful compromise":
+a model realizes only at the last step that its plan doesn't work, and is forced into an invalid
+final equation to match the target anyway, unable to revise earlier choices. NextLat gets the final
+equation right 54.2% of the time at $d=1$, against 42.3% for the next-best baseline — evidence read as
+better lookahead, not just better arithmetic.
+
+On **Path-Star graphs** (Bachmann and Nagarajan 2024) — a center node with disjoint arms, where the
+model must generate the correct arm from start to end — NextLat holds close to 100% solve rate across
+all three tested topologies ($G_{2,10}$, $G_{5,5}$, $G_{7,7}$), while BST solves the two smaller graphs
+but "begins to fail at the larger graph $G_{7,7}$," in the paper's own words. Worth flagging: the
+paper's own setup here is deliberately harder than BST's and JTP's original papers (a fixed 200k-sample
+training set and node values up to $N=100$, versus a smaller $N=50$ with fresh graphs generated every
+batch), which the paper states plainly rather than hiding — a fair replication difference to know about
+before comparing these numbers to the original BST or JTP papers directly.
+
+## What this costs, and who it's compared against
+
+| Method | Train params (d=1 / d=8) | Inference params | Train it/s (d=1 / d=8) | Gradient cost |
+|---|---|---|---|---|
+| GPT | 57M | 57M | 3.72 | $O(T)$ |
+| BST | 114M | 57M / 114M | 0.19 | $O(T^2)$ |
+| MTP | 64M / 114M | 57M | 3.12 / 1.81 | $O(Td)$ |
+| JTP | 60M | 60M | 3.33 / 2.61 | $O(Td)$ |
+| NextLat | 66M | **57M** | 3.26 / 1.89 | $O(Td)$ |
+
+NextLat's inference parameter count matches GPT's exactly — 57M, the same number, because $p_\psi$
+never runs after training — while training is only slightly slower than plain GPT (3.26 vs. 3.72
+iterations/second at $d=1$) and far cheaper than BST's dual-encoder setup. All models here are small:
+this table's largest model is BST at 114M training parameters, and the Manhattan GPT/NextLat models —
+the ones with the compactness numbers above — are 89M-parameter, 48-layer transformers, deliberately
+made deep rather than wide, since the paper found depth mattered for the state-tracking demands of
+the task and width didn't (MTP's Manhattan variant runs larger still, per the paper's own appendix,
+though it doesn't state the exact count).
+
+## Toy domains at submission, real scale in a later revision
+
+Every experiment above — Manhattan, Countdown, Path-Star, TinyStories — is synthetic or
+semi-synthetic, and every model involved is small (114M parameters at the largest, BST's dual-encoder
+TinyStories setup). That's the honest scope of the paper as it was submitted (arXiv v1, November 8,
+2025), and the figures and tables in
+this piece are drawn from that version specifically. As of this writing, the current revision on
+arXiv adds something the original didn't have: a **1.3B-parameter language model, pretrained on 100B
+tokens of FineWeb-Edu**, evaluated on zero-shot multiple-choice benchmarks and — the more novel
+addition — self-speculative decoding, where NextLat's latent dynamics model drafts multiple tokens by
+recursively chaining $\hat{h}_{t+1} \to \hat{h}_{t+2} \to \dots$, each drafted token verified in
+parallel against the base transformer using standard speculative sampling. Because the draft comes
+from latent-space rollout rather than a fixed number of token-prediction heads, the draft length isn't
+capped by the training horizon $d$ the way MTP's or JTP's is:
+
+| Method | Wikipedia | Books | Code | Math |
+|---|---|---|---|---|
+| MTP ($d{=}2$) | 1.68x | 1.72x | 1.75x | 1.72x |
+| JTP ($d{=}2$) | 1.88x | 1.90x | 1.88x | 1.89x |
+| NextLat ($d{=}1$) | 2.68x | 2.72x | 2.29x | 2.30x |
+| **NextLat ($d{=}2$)** | **3.21x** | **3.32x** | **2.38x** | **2.87x** |
+
+Inference speedup relative to standard autoregressive decoding, measured on 8x NVIDIA B200 GPUs. This
+is a real and useful result — it's the first evidence in the paper that NextLat's latent dynamics stay
+coherent well past the training horizon, since a model trained only to predict one or two steps ahead
+($d{=}1,2$) is drafting sequences several tokens longer than that and still getting them accepted. But
+it's worth being precise about what it does and doesn't extend: this is a decoding-speed result at
+1.3B scale, not a compactness or probing result at that scale. Whether effective latent rank still
+drops 3x, or whether the sequence-compression and detour-robustness gap holds up, at a billion-plus
+parameters and on real language rather than a synthetic taxi grid, is not something the current
+revision demonstrates — it's a real gap between what's been shown small and what's been shown large,
+and it's the single most useful piece of due diligence a reader should carry forward.
+
+## Where this sits next to the rest of the latent-prediction landscape
+
+NextLat and [LeVJEPA](/articles/levjepa) agree on the core move — predict in a representation you get
+to shape, rather than in raw observation or token space, precisely to avoid spending capacity on
+nuisance detail — but they're solving different collapse problems in different geometries: LeVJEPA
+predicts *across space*, one view of a clip against another, with no target network and no
+stop-gradient because SIGReg's Gaussian-matching constraint forbids the collapsed solution outright;
+NextLat predicts *across time*, one hidden state against its own future self, and reaches for the more
+classical stop-gradient fix because a constant hidden state genuinely can satisfy its loss if nothing
+stops it. [Multi-token prediction](/articles/multi-token-prediction) is the most direct point of
+comparison in NextLat's own tables — MTP is close on effective rank and clearly behind on sequence
+compression and probing, which is the paper's own case for *why* routing supervision through a latent
+bottleneck beats simply adding more token-level heads. And [LOTUS](/articles/lotus-latent-reasoning)
+makes a related bet from the reasoning side — that computation belongs in hidden states rather than in
+an emitted token stream — worth reading against NextLat's belief-state framing, since both are
+arguments that a transformer's internal state, not just its output, is where the interesting
+representational work should happen.
+
+## Checked, in one table
+
+| Claim | Status |
+|---|---|
+| "Compact" is measured, not asserted | Holds — effective latent rank (exponentiated entropy of singular values), sequence compression, and detour robustness are all named, defined precisely in the paper's appendix, and reported with numbers |
+| The latent is the transformer's own hidden state, jointly trained | Holds — no separate encoder, no VQ codebook, no EMA target; $\theta$ and $\psi$ train together from initialization; $p_\psi$ is discarded at inference (57M params either way, matching GPT exactly) |
+| "3x more compact than baselines" | True against GPT (52.7 vs. 160.1) and JTP (215.8), but MTP is much closer (57.7) than that framing implies — worth reading the full row, not the extremes |
+| The paper separates "discards nuisance detail" from "changes the optimization" | Does not — both explanations are argued for, but no ablation isolates compression achieved from optimization dynamics changed |
+| Evidence of an actual world model, not just good prediction | Real and multi-pronged — sequence compression (state-merging test), detour robustness (an intervention-like recovery test), and long-horizon probing all point the same direction — but it's all probing/downstream evidence, not latent-space interventions or transfer to new dynamics |
+| Results hold beyond toy domains | Not at submission — every v1 experiment is synthetic or semi-synthetic, largest model 89M params. A later revision adds a 1.3B/100B-token FineWeb-Edu result, but for decoding speed, not for the compactness/probing metrics this piece leans on |
+| Self-speculative decoding, "up to 3.3x" | Confirmed in the current revision (not present in v1) — 3.21-3.32x on Wikipedia/Books at $d{=}2$, a smaller 2.38-2.87x on Code/Math, all exceeding MTP and JTP at the same horizon |
+
+## The take
+
+NextLat's actual contribution is narrower and more checkable than "transformers learn world models"
+suggests on its own: one auxiliary loss, one stop-gradient, one small MLP discarded before inference,
+and a specific theoretical guarantee — belief-state convergence, independent of prediction horizon —
+that its closest rivals either pay far more to get (BST) or only get conditionally (JTP). The paper's
+own tables hold up to scrutiny: MTP really is a closer competitor on raw compactness than the headline
+suggests, JTP really does make its own internal map *less* consistent despite added supervision, and
+the strongest evidence for "world model" over "good prediction" is a metric — sequence compression —
+that's easy to read past in favor of the flashier effective-rank number. The evidence earns the claim
+more than most papers with "world model" in the title manage, largely because the paper reaches for
+probing and intervention-adjacent tests rather than resting on downstream accuracy alone. What it
+hasn't yet shown is that any of this survives the jump past 89M parameters and synthetic domains — a
+gap this piece's later revision starts to close on inference speed, and hasn't yet closed on
+compactness.
+
+---
+
+*Sources: [NextLat (arXiv 2511.05963v1)](https://arxiv.org/abs/2511.05963), read via its arXiv HTML
+rendering, for every table, equation, and figure in this piece; the current arXiv revision, read the
+same way, for the self-speculative decoding results and Table 3 (Section 3.3, Section 4.4); the
+[NextLat GitHub repository](https://github.com/JaydenTeoh/NextLat); [Belief State Transformers (Hu et
+al., 2025)](https://arxiv.org/abs/2410.23506); [Vafa et al. (2024)](https://arxiv.org/abs/2406.03689)
+for the Manhattan Taxi Rides benchmark and its reconstruction algorithm. Figures 1-3 are the paper's
+own, fetched from its v1 arXiv HTML rendering and shown for commentary. The objective-comparison and
+compactness-explorer diagrams are original, built from the sources above.*

@@ -4,6 +4,7 @@ import type { ComponentPropsWithoutRef } from "react"
 import { BenchBars } from "@/components/mdx/bench-bars"
 import { CodeCollapse } from "@/components/mdx/code-collapse"
 import { Diagram } from "@/components/mdx/diagram"
+import { ModelCard } from "@/components/mdx/model-card"
 import { Plot } from "@/components/mdx/plot"
 import { StepThrough } from "@/components/mdx/step-through"
 import { Video } from "@/components/mdx/video"
@@ -151,6 +152,7 @@ export const mdxComponents: MDXComponents = {
   BenchBars,
   CodeCollapse,
   Diagram,
+  ModelCard,
   Plot,
   StepThrough,
   Video,
