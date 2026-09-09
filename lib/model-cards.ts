@@ -18,6 +18,8 @@ import path from "node:path"
 export type ModelCardSnapshot = {
   /** Canonical `owner/name` as the Hub reports it. */
   id: string
+  /** Org or user that owns the repo. */
+  author?: string
   /** `safetensors.parameters`, keyed by dtype (BF16, F8_E4M3, U8, …). */
   parameters?: Record<string, number>
   /** `safetensors.total` — not always the sum of `parameters` for packed formats. */
@@ -36,6 +38,25 @@ export type ModelCardSnapshot = {
   likes?: number
   /** Number of files in the repo, when the sibling list was reachable. */
   fileCount?: number
+  /** Count of `*.safetensors` shards — the weights, as distinct from configs. */
+  shardCount?: number
+  /** Count of `*.gguf` files, for quant repos that ship no safetensors. */
+  ggufCount?: number
+  /** Largest single file in bytes — the practical "can I download one shard" number. */
+  largestFile?: number
+  /** `cardData.base_model` — set when the repo declares a parent. */
+  baseModel?: string
+  /** "finetune" / "quantized" / "merge" / "adapter", from the base_model:<kind>: tag. */
+  baseModelRelation?: string
+  /** Languages the card declares. */
+  languages?: string[]
+  /** Curated card tags, with the machine-generated prefixes stripped. */
+  topics?: string[]
+  /** ISO timestamps from the Hub. */
+  createdAt?: string
+  lastModified?: string
+  /** Short commit sha the snapshot describes — the numbers are pinned to this. */
+  revision?: string
   /** ISO date the snapshot was taken. */
   fetchedAt: string
   /** Set when the API call failed; the card still renders as a link. */
