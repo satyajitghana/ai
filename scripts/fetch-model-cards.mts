@@ -78,16 +78,49 @@ async function fetchOne(repo: string): Promise<ModelCardSnapshot> {
     const config = d.config as
       | { architectures?: string[]; model_type?: string }
       | undefined
-    const siblings = d.siblings as { rfilename: string }[] | undefined
-    const cardData = d.cardData as { license?: string } | undefined
+    const siblings = d.siblings as
+      | { rfilename: string; size?: number }[]
+      | undefined
+    const cardData = d.cardData as
+      | {
+          license?: string
+          base_model?: string | string[]
+          language?: string | string[]
+          tags?: string[]
+        }
+      | undefined
+    const tags = (d.tags as string[] | undefined) ?? []
 
     // `license:mit` shows up as a tag even when cardData omits it.
-    const licenseTag = (d.tags as string[] | undefined)?.find((t) =>
-      t.startsWith("license:")
+    const licenseTag = tags.find((t) => t.startsWith("license:"))
+
+    // The Hub emits both `base_model:<id>` and `base_model:<kind>:<id>`; the
+    // three-part form is the one that carries the relation.
+    const relTag = tags.find(
+      (t) => t.startsWith("base_model:") && t.split(":").length >= 3
     )
+    const baseModelRelation = relTag?.split(":")[1]
+    const rawBase = cardData?.base_model
+    const baseModel = Array.isArray(rawBase) ? rawBase[0] : rawBase
+
+    const asArray = (v: string | string[] | undefined) =>
+      Array.isArray(v) ? v : v ? [v] : undefined
+
+    // Card topics minus the machine-generated namespaces, which are noise on a
+    // card that already shows licence, library and pipeline as their own fields.
+    const topics = (cardData?.tags ?? [])
+      .filter((t) => !t.includes(":") && t.length < 28)
+      .slice(0, 8)
+
+    const named = (ext: string) =>
+      siblings?.filter((s) => s.rfilename.toLowerCase().endsWith(ext)).length
+    const largestFile = siblings?.length
+      ? Math.max(...siblings.map((s) => s.size ?? 0))
+      : undefined
 
     return {
       id: (d.id as string) ?? repo,
+      author: d.author as string | undefined,
       parameters: safetensors?.parameters,
       totalParameters: safetensors?.total,
       usedStorage: d.usedStorage as number | undefined,
@@ -100,6 +133,16 @@ async function fetchOne(repo: string): Promise<ModelCardSnapshot> {
       downloads: d.downloads as number | undefined,
       likes: d.likes as number | undefined,
       fileCount: siblings?.length,
+      shardCount: named(".safetensors") || undefined,
+      ggufCount: named(".gguf") || undefined,
+      largestFile: largestFile || undefined,
+      baseModel,
+      baseModelRelation,
+      languages: asArray(cardData?.language)?.slice(0, 6),
+      topics: topics.length ? topics : undefined,
+      createdAt: d.createdAt as string | undefined,
+      lastModified: d.lastModified as string | undefined,
+      revision: (d.sha as string | undefined)?.slice(0, 7),
       fetchedAt,
     }
   } catch (err) {

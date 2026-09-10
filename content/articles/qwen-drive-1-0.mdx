@@ -1,0 +1,206 @@
+---
+title: "Qwen-Drive-1.0: the driving VLM that doesn't touch the VLM"
+description: "Qwen-Drive-1.0 bolts a 1.04B-parameter flow-matching Planning Expert and a 250M-parameter BEV head onto an unmodified Qwen3.5-4B backbone -- verified in the released code down to the class name and the exact eight attention caches the planner reads. The Hub's headline 4.54B is the backbone alone; attach a planner and you're running closer to 5.6B. Its perception head is only a real 'probe' in one ablation table, not in the numbers it ships with -- and across the four planning benchmarks it reports, reinforcement learning's gains look monotonic right up until the one benchmark that actually closes the loop, where they turn into a trade."
+date: 2026-09-09
+interest: 4
+helpful: 4
+tags:
+  - vision-language-models
+  - robotics
+  - 3d
+  - benchmarks
+  - open-weights
+draft: false
+cover: /articles/qwen-drive-1-0/fig2.png
+---
+
+import { ThreeHeadedArchitecture } from "@/components/articles/qwen-drive-1-0/three-headed-architecture"
+import { LoopClosureLadder } from "@/components/articles/qwen-drive-1-0/loop-closure-ladder"
+
+Qwen-Drive-1.0 is Qwen's first attempt at one vision-language model that also drives: a single shared backbone for visual question answering, 3D perception, and motion planning, from the Qwen team with Huazhong University of Science and Technology ([arXiv:2609.00111](https://arxiv.org/abs/2609.00111)). The pitch is specific enough to check against the released code: keep the pretrained VLM's architecture untouched, bolt on an external BEV perception head that acts as "a probe of the 3D information accessible from the shared representations," and attach a Planning Expert that reads those same representations to generate trajectories. I cloned [the repo](https://github.com/QwenLM/Qwen-Drive-1.0), read the model definition end to end against the paper, and pulled the Hub's own metadata for the release. Most of it holds up to the letter. A couple of things don't hold up quite the way the abstract's phrasing implies, and one number the Hub reports isn't the number you're actually running.
+
+Start with the easiest thing to get wrong: the name. `Qwen-Drive-1.0-4B` reports a Hub `safetensors.total` of 4,539,265,536 parameters -- 4.54B, not 4B, and that's a specific tensor count, not a rounding error (BF16: 4,539,261,696; F32: 3,840, for the embedding-adjacent bits that need full precision). As I'll get to, it's also less than half the story once you attach anything to it.
+
+<ModelCard
+  repo="Qwen/Qwen-Drive-1.0-4B"
+  claimed="4B"
+  note="4.54B is the root model.safetensors alone -- the shared VLM backbone. The repo ships three more safetensors files beside it (planner-sft, planner-rl, perception) that the Hub's total doesn't count. See the breakdown below."
+/>
+
+## An unmodified backbone, checked in the code
+
+The paper's architecture claim has three parts, and each one is falsifiable against `src/qwen_drive/modeling_qwen_drive.py`. First:
+
+```python
+class QwenDriveForPlanning(PreTrainedModel):
+    def __init__(self, config: QwenDriveConfig) -> None:
+        super().__init__(config)
+        self.vlm = AutoModelForImageTextToText.from_config(config.vlm_config)
+        self.planning_expert = PlanningExpert(config.expert_config, ...)
+```
+
+`self.vlm` is loaded through `AutoModelForImageTextToText`, and `config.vlm_config.architectures` resolves to `Qwen3_5ForConditionalGeneration` -- the stock class, not a driving-flavored subclass. Nothing under `qwen_drive/` monkey-patches its forward pass. The docstring for `InferenceMode.VQA` says as much directly: "Text only, through the unmodified vision-language interface... the model behaves exactly like its Qwen3.5 VLM." That line is the whole architecture claim, and the code backs it.
+
+Second, the VLM itself is a hybrid: 32 decoder layers arranged as 8 repeats of one grouped-query-attention (GQA) layer followed by three linear-attention (gated-delta) layers -- the same hybrid design Qwen3.5 ships generally, unrelated to driving. Only the 8 GQA layers produce a standard key/value cache; the Planning Expert reads exactly those, and nothing else:
+
+```python
+def _scene_cache(self, past_key_values) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Post-rotary keys/values of the VLM's grouped-query attention layers."""
+    cache = []
+    for index in self.config.full_attention_layers:
+        layer = past_key_values.layers[index]
+        cache.append((layer.keys.transpose(1, 2), layer.values.transpose(1, 2)))
+    return cache
+```
+
+That's a read of an attention cache the backbone was already computing for its own forward pass -- not a hook that changes what the backbone computes, and not new layers spliced into the stack. The Planning Expert is its own 32-layer diffusion transformer, living entirely in `planning_expert.py`, with its own QKV projections, its own RMSNorm, its own SwiGLU feed-forward. Every layer does joint attention over `[scene_key ; key]` and `[scene_value ; value]` -- the trajectory's own tokens attending to themselves and to the borrowed cache in one pass -- then gets shifted, scaled, and gated by AdaLN conditioning built from the flow time, the navigation command, and the current ego state:
+
+```python
+condition = (
+    time_condition + self.nav_mlp(nav_onehot) + self.ego_mlp(ego_status.to(dtype))
+)
+```
+
+Third, the BEV Perception Head reads two *different* taps, neither of which requires changing the VLM's own forward call. It registers a forward hook on the vision tower's patch merger to grab pre-merge ViT patch features, runs the VLM forward once with `output_hidden_states=True`, and takes the final layer's post-norm hidden state for the language side:
+
+```python
+def _hook(module, args, output=None):
+    captured["patches"] = args[0]
+
+visual = self._vlm.model.visual
+handle = visual.merger.register_forward_hook(_hook)
+try:
+    outputs = self._vlm(..., output_hidden_states=True)
+finally:
+    handle.remove()
+hidden_states = self._vlm.model.language_model.norm(outputs.hidden_states[-1])
+```
+
+A hook that reads an intermediate activation and removes itself immediately after is about as close to "doesn't touch the architecture" as an external module can get. I went looking for a counterexample -- an injected adapter layer, a modified attention mask, anything -- and didn't find one. The paper's figure for this (below) draws the same picture the code executes.
+
+<Figure
+  src="/articles/qwen-drive-1-0/fig2.png"
+  alt="Unified architecture diagram: a vision encoder feeds a Qwen3.5 language model; the BEV Perception Head reads both the raw vision-encoder tokens and the language model's output tokens to produce 3D detection, occupancy, and map segmentation; the Planning Expert reads the language model's tokens conditioned by AdaLN on time and ego state to produce a clean trajectory; a shared 'unified architecture' banner ties 3D perception, VQA, and planning to one backbone."
+  caption="The shared backbone with two external heads attached. Neither head is drawn inside the language-model box, because neither reads from inside it (paper, Figure 2)."
+/>
+
+<Figure
+  src="/articles/qwen-drive-1-0/fig3.png"
+  alt="Two architecture diagrams side by side. (a) BEV Perception Head: vision-encoder patch features go through a view transform into voxel features, which concatenate with a pooled version and feed a BEV Transformer alongside multi-scale features from the language model, producing an occupancy head, a detection decoder, and a map head. (b) Planning Expert: the pretrained VLM's 8 repeated blocks of 1 grouped-query-attention layer plus 3 gated-linear-attention layers produce keys and values from the GQA layer only, which feed 8 repeated groups of 4 GQA layers each inside the Planning Expert via cross-attention, conditioned by AdaLN on time and ego state, consuming a noisy trajectory and observed images plus a prompt, and producing a clean 5-second, 10 Hz trajectory and an optional text response."
+  caption="Both heads at tap-point resolution. (a) the perception head's two feature streams; (b) the expert's 8 GQA-layer taps feeding its own 8 groups of 4 layers, one cache per group (paper, Figure 3)."
+/>
+
+Toggle the modes below to see what's actually resident for each of the three ways you can call this model -- and notice that the parameter count changes with the mode, which the Hub's single number can't express.
+
+<ThreeHeadedArchitecture />
+
+**Does the arithmetic work?** The Planning Expert is described as "~1.1B parameters" in the paper's prose and "a separate 1.0 B parameter network" in the repo's own docs -- neither is wrong, both are rounding. `planner-sft/model.safetensors` and `planner-rl/model.safetensors` are each 2,079,739,550 bytes; at BF16 that's 1,039,869,775 parameters, 1.04B, which rounds down to "1.0B" or up to "~1.1B" depending on which side of the coin you're standing on. The BEV head's `model.safetensors` is 500,368,384 bytes, 250,184,192 params, 0.25B. Add the backbone (4.54B) to the expert and you get 5.58B for a planning call -- close to, and independently consistent with, the paper's own Table 7, which lists "Params. 5.0B" for the planning configuration "excluding the LLM token embeddings." Two different countings, in the same neighborhood, neither one "4B."
+
+## Where the other 4.6 GB went
+
+The Hub reports `usedStorage: 13,769,270,430` bytes -- 13.77 GB -- for a model whose headline parameter count implies about 9.1 GB of BF16 weights (4.54B params &times; 2 bytes). That's a real gap, and the file manifest closes it exactly:
+
+| File | Size | What it is |
+| --- | --- | --- |
+| `model.safetensors` | 9.08 GB | the VLM backbone (4.54B params, BF16) |
+| `planner-rl/model.safetensors` | 2.08 GB | Planning Expert, after reinforcement learning |
+| `planner-sft/model.safetensors` | 2.08 GB | Planning Expert, imitation-only |
+| `perception/model.safetensors` | 0.50 GB | BEV Perception Head |
+| tokenizer, configs, README assets | ~0.04 GB | everything else |
+
+That sums to 13.78 GB, within 0.1% of the Hub's reported figure -- close enough that the residual is bookkeeping noise, not a mystery file. The "missing" 4.6 GB isn't overhead. It's two task heads and, specifically, *two full copies of the Planning Expert* -- SFT and RL, identical in size, different weights. `QwenDriveForPlanning.from_pretrained` only ever loads one planner at a time (`planner="Qwen-Drive-1.0-4B/planner-rl"`, or swap it later with `load_planner(...)`), so if you only ever want the RL planner, roughly 2 GB of the download is a checkpoint you will never load. That's a reasonable thing to ship -- SFT is a legitimate ablation baseline in its own right, not dead weight -- but it does mean the repo's advertised size and the size of any single inference configuration are two different numbers, and the gap is entirely explained by choices, not by anything hidden.
+
+## A probe, tested honestly -- but not the probe that ships
+
+"Probe" is a precise word in interpretability, and this paper uses it correctly in exactly one place: an ablation. Freeze the ViT and the VLM, train only the BEV head on top of the frozen features, and see how much 3D structure was already there. The paper runs that experiment (Table 1, "Head-only") and reports the result plainly: it's bad.
+
+| Method | Backbone state | nuScenes mAP | nuScenes RayIoU |
+| --- | --- | --- | --- |
+| BEVFormerV2\* (dedicated multi-task baseline) | trained from scratch, same SigLIP-Qwen encoder | 41.94 | 43.89 |
+| Head-only, nuScenes-only data | **frozen** | 35.60 | 36.98 |
+| Head-only, mixed nuScenes+OpenScene data | **frozen** | 33.49 | 29.54 |
+| Qwen-Drive-1.0-SFT (released) | **unfrozen, jointly adapted** | 43.95 | 37.02 |
+
+A frozen backbone, probed by a head trained on the same mixed data the released model uses, trails BEVFormerV2\* by 6.34 mAP and 6.91 RayIoU, and trails the released Qwen-Drive-1.0-SFT by 10.46 mAP -- I checked that subtraction myself (43.95 minus 33.49 is exactly 10.46, and 60.99 minus 51.15 on map mIoU is exactly 9.84, both matching the paper's own stated deltas to the second decimal). The paper is straightforward about what this means: "vision-language-pretrained features support visual-text alignment but do not directly expose the 3D structure required for driving perception." The probe experiment finds the pretrained backbone wanting.
+
+The released head does not run in that condition. To hit 43.95 mAP, the ViT and the VLM are unfrozen and trained jointly with the head -- which is a perfectly reasonable design decision, and the paper says so in the same breath ("joint adaptation is therefore important for realizing the 3D perception capability of the external head"). But it means "probe" describes the diagnostic that justified building the head, not a property of the head you'd actually download. The shipped `perception/model.safetensors` sits on top of a backbone that has been fine-tuned specifically to make its features legible to that head. Calling the *deployed* system "an inspectable probe of the shared representations" is generous; calling the *ablation* that motivated it a probe is exactly right. Worth keeping those two claims separate when you read the abstract.
+
+## General capability, itemized
+
+The other half of that same sentence -- "largely preserving general vision-language capability" -- is checkable line by line, because the README publishes the base-model row next to the driving-adapted one. I averaged the columns myself rather than trust the paper's stated aggregate, and it holds: across the ten knowledge/reasoning/recognition benchmarks (MMBench, MMStar, MMMU, MMMU-Pro std/vis, CharXiv, OCRBench, RealWorldQA, SimpleVQA, CountQA), Qwen3.5-4B averages exactly 67.40 and Qwen-Drive-1.0-SFT averages exactly 66.41 -- a 0.99-point loss, "within one point" as claimed. Across the five spatial/grounding benchmarks (EmbSpatial, ERQA, RefSpatial, Omni3D, ODinW13), the base model averages 53.0 and the driving model averages 53.98 -- it doesn't just preserve this group, it improves on it.
+
+The aggregate hides real spread underneath, though:
+
+| Benchmark | Qwen3.5-4B | Qwen-Drive-1.0-SFT | Δ |
+| --- | --- | --- | --- |
+| CountQA | 35.9 | 31.7 | &minus;4.2 |
+| RefSpatial | 54.5 | 50.8 | &minus;3.7 |
+| MMMU-Pro (std) | 64.9 | 62.7 | &minus;2.2 |
+| MMMU-Pro (vis) | 61.3 | 59.7 | &minus;1.6 |
+| **10-benchmark average** | **67.40** | **66.41** | **&minus;0.99** |
+| **5-benchmark average** | **53.0** | **53.98** | **+0.98** |
+| RealWorldQA | 76.3 | 79.0 | +2.7 |
+| EmbSpatial | 76.0 | 78.9 | +2.9 |
+| ODinW13 | 40.8 | 45.9 | +5.1 |
+
+Object counting takes the biggest single hit; open-vocabulary grounding (ODinW13) gets the biggest single lift, plausibly downstream of all the 3D-box and BEV supervision the model now sees. "Largely preserving" is a fair summary of a mix that's mostly small losses, occasionally real gains, and one benchmark (CountQA) that moves enough to be worth naming if you're picking this model for a counting-heavy task.
+
+## Four benchmarks, three definitions of the loop
+
+Planning is where I expected to find the sharpest gap between what's claimed and what's measured, because open-loop planning metrics on driving datasets have a well-known failure mode: a model that never looks at the camera can still score well by extrapolating the ego vehicle's own current velocity and command, because in most driving data the near future looks like the recent past. This paper is unusually careful about naming its own evaluation tiers -- "two open-loop benchmarks, one pseudo-closed-loop benchmark, and one closed-loop simulator," in that order -- and it is honest, in prose, about what each tier can and can't show. Where it says nothing is whether its own model can be gamed by exactly that shortcut, because the Planning Expert conditions every layer on precisely the vector the shortcut needs:
+
+```
+docs/data.md: "The ego status handed to the expert is the eight numbers
+`[vx, vy, ax, ay, *driving_command]`, in that order."
+```
+
+That's current velocity, current acceleration, and a one-hot driving command, injected through AdaLN at all 32 Planning Expert layers, on every benchmark below, in addition to a *separate* one-hot encoding of the same navigation command fed through its own MLP. Nothing in the paper ablates or perturbs `ego_status` to measure how much of NAVSIM's PDMS or WOD-E2E's RFS comes from that path alone versus the camera. The paper also never evaluates on the specific nuScenes open-loop L2/collision protocol where the ego-status shortcut was originally demonstrated -- its nuScenes numbers are 3D-perception metrics (mAP, occupancy, map mIoU), not planning ones. Sidestepping the benchmark where the shortcut is famous isn't the same as testing whether the shortcut is present in the benchmarks actually used, and this paper does the former, not the latter.
+
+<LoopClosureLadder />
+
+| Benchmark | Loop closure | Metric | SFT | RL |
+| --- | --- | --- | --- | --- |
+| WOD-E2E, test split | open (queried once) | RFS &uarr; | 7.78 | 7.91 |
+| PAI-AV, leakage-free 700-frame subset | open (queried once, 6 samples) | ADE @ 3s (m) &darr; | 0.42 | 0.47 |
+| NAVSIM v1.1 navtest | pseudo-closed (queried once, propagated through a vehicle model) | PDMS &uarr; | 88.2 | 90.7 |
+| AlpaSim, 916 scenarios | closed (re-queried as its own actions change the scene) | AlpaSim score, at-fault &uarr; | 0.27 | 0.37 |
+
+Read that table left to right and reinforcement learning looks like a clean, monotonic win. On WOD-E2E's held-out test split, SFT-with-reasoning edges the next-best published baseline (MindVLA-U1, non-RL) by 0.01 RFS -- 7.78 to 7.77, a margin so thin it's barely a claim -- and RL widens it to 7.91 versus MindVLA-U1's reinforced 7.87. On NAVSIM, RL's 90.7 PDMS leads every single-sample baseline in the paper's own table, though not by much: the next-best (EponaV2 and ExploreVLA, both RL-tuned) score 90.4. The paper is explicit that the validation-split RFS gain (7.95 &rarr; 8.45, "exceeding the human-driver reference of 8.13") is in-sample, because that split supplied the RL reward -- it flags this itself rather than letting the number stand unqualified. It's also explicit that PDMS "should not be treated as a direct proxy for interactive driving quality" once you're near the top of the scale, because NAVSIM's background agents never react to the ego vehicle and can't show compounding error.
+
+AlpaSim is the one benchmark built to show exactly that, by re-running the planner as its own trajectory changes what it sees next -- and there, the story changes. RL does cut the at-fault close-encounter rate to match Alpamayo-1.5 (11.0%) and halves the off-road rate (24.0% &rarr; 12.0%), which is a genuine safety improvement. But progress drops alongside it, 54.0% &rarr; 48.0%, and the *all-event* AlpaSim score (0.16) still trails Alpamayo-1.5's (0.23) even though the at-fault numbers are tied. Every earlier benchmark in the table reports a single number that only ever goes up under RL; AlpaSim reports the trade that number was hiding. None of the open-loop or pseudo-closed-loop settings can show a progress/safety trade even in principle, because none of them let the plan change what happens next turn -- that's the entire distinction the paper's own three-tier framing is pointing at, and the released numbers bear it out.
+
+<Figure
+  src="/articles/qwen-drive-1-0/fig1.png"
+  alt="Circular bar chart comparing Qwen-Drive-1.0 against seven baseline models across Driving VQA, General VQA, 3D Perception, and Motion Planning benchmark groups, with Qwen-Drive-1.0 shown in dark purple leading or near-leading on nearly every axis, including NAVSIM PDMS 90.7, WOD-E2E RFS 7.91, and 3D detection mAP 43.95."
+  caption="The paper's own summary across all four evaluation groups at once -- useful for seeing that no single benchmark carries the whole headline (paper, Figure 1)."
+/>
+
+## Sampling, concretely
+
+One more piece worth reading in the code rather than taking on faith: how a trajectory actually gets produced. Training uses flow matching with a clean-endpoint parameterization -- the network predicts the finished trajectory at every step, not a velocity -- and sampling turns that into 10 Euler steps from Gaussian noise:
+
+```
+v = (x1_hat - x_t) / max(1 - t, 0.1)
+x_t+dt = x_t + v * dt
+```
+
+The floor on the divisor (`0.1`) keeps the last step from dividing by something close to zero and amplifying whatever error is left in the prediction. Six samples costs one VLM forward pass plus six cheap expert rollouts, not six full passes, because the scene cache is computed once and broadcast -- which is why `--num-samples 6` is affordable enough that every benchmark above reports it, and also why `minADE`/`best-of-N` numbers need the flag on them that the code itself supplies:
+
+```python
+"""...the best candidate are reported. The latter (min*) is an oracle
+upper bound, since picking it needs the ground truth."""
+```
+
+That docstring, from `qwen_drive/metrics.py`, is doing real work: every `minADE` and every best-of-6 PDMS in this piece and in the paper is explicitly an oracle-selected number, not something available at real inference time without the answer key.
+
+## Two smaller things worth flagging
+
+The repo's README and the paper disagree, quietly, on which competitor backs the headline causal-reasoning claim. The paper's prose says Qwen-Drive-1.0-SFT's Chain-of-Causation accuracy (41.26) is "more than seven times that of the much larger Cosmos-Reason2-32B (5.73)." The README's own comparison table, which otherwise sticks to models in Qwen-Drive-1.0's own size class, swaps in Cosmos-Reason2-**8B** for that row instead (CoC score: 1.7). Both numbers are real and both citations are accurate to their own source -- it's just that a reader skimming the README table and then quoting the paper's "7x" claim would be comparing against two different model sizes without realizing it.
+
+<Callout type="note">
+None of this changes the headline result. Qwen-Drive-1.0-SFT beats every general-purpose and driving-specialized comparison model on causal reasoning in both tables, by a wide margin either way -- the swap only matters if you're citing the exact multiplier.
+</Callout>
+
+## What I'd trust this number for
+
+The architecture claim is the strongest part of this release, and it's strong because it's checkable in a few hundred lines of code: the backbone genuinely doesn't change, the two heads genuinely attach by reading, not by rewriting. The "probe" language is honest as an experiment and generous as a product description -- know which one you're citing. The general-capability claim holds almost exactly as stated, itemized deltas and all. And the planning results are real wins on real benchmarks, reported with unusually candid caveats about what each benchmark can't see -- right up until the one benchmark built to see it, where the win is a trade the earlier three couldn't have shown you either way. That last part isn't a flaw unique to this paper. It's what happens whenever "beats the baseline" gets measured on three benchmarks that can't move the goalposts and one that can.

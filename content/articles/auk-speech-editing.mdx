@@ -1,0 +1,199 @@
+---
+title: "AuK: 6.12 GB, an empty Hub config, and a parameter count that only balances in FP32"
+description: "Tencent's open speech foundation model reports no safetensors metadata on the Hub, so the only way to get a parameter count is to do it yourself: divide the checkpoint's byte size by a dtype and see which one lands on the paper's own '~1.5 billion.' bf16 — what the model actually runs inference in — misses by 2x. FP32 matches to within 880 parameters of a from-scratch count built off the released config and source. Also checked: a 4.5x speedup that a naive step-count argument says should be 16x, a '1.95 million hours of effective supervision' figure the paper never defines, and exactly where the model loses to specialist enhancement baselines instead of just being vaguely 'competitive.'"
+date: 2026-09-09
+interest: 5
+helpful: 5
+tags:
+  - speech
+  - tts
+  - audio
+  - diffusion
+  - open-weights
+  - explainer
+draft: false
+---
+
+import { DualStreamFlow } from "@/components/articles/auk-speech-editing/dual-stream-flow"
+import { StepBudget } from "@/components/articles/auk-speech-editing/step-budget"
+
+[AuK](https://huggingface.co/tencent/AuK) is Tencent's open-source speech foundation model — one model for zero-shot TTS, instruction-controlled TTS, content and acoustic editing, emotion/timbre/accent editing, and speech enhancement and separation, all through natural-language instructions. Two links landed on my desk for this: the Hugging Face repo and a PapersWithCode page pointing at arXiv 2609.08936. They're the same artifact — "AuK Technical Report: An Open-Source Foundational Model for Speech Generation and Editing" (Ma, Niu, et al., Tencent, submitted 8 Sep 2026) is the paper behind the weights, and both the model card and the paper cite each other. One article, then, covering both.
+
+| | |
+|---|---|
+| Paper | [arXiv 2609.08936](https://arxiv.org/abs/2609.08936) |
+| Weights | [huggingface.co/tencent/AuK](https://huggingface.co/tencent/AuK) (base) · [tencent/AuK-Flash](https://huggingface.co/tencent/AuK-Flash) (4-step distilled, separate repo) |
+| Code | [github.com/Tencent-Hunyuan/AuK](https://github.com/Tencent-Hunyuan/AuK) — MIT |
+| Repo (base) | 8 files, `usedStorage` 6,762,642,715 bytes; `auk_base.safetensors` 6,122,209,092 B; `vae.safetensors` 637,322,604 B; not gated; created 2026-08-18, last modified 2026-09-09 |
+| Backbone | Flux2Edit — 10 dual-stream MMDiT blocks + 20 single-stream DiT blocks, dim 1536, 24×64 heads, ff×2 |
+| Semantic encoder | Qwen2.5-Omni-3B (frozen, downloaded separately — not in the base repo) |
+
+<ModelCard repo="tencent/AuK" />
+
+The Hub's own metadata for this repo is unusually thin: `config` comes back as an empty object and there's no `safetensors` field in the API response at all, which means no Hub-computed parameter count anywhere on the model page. That's normally where I'd paste in the Hub's number and move on. Here there isn't one, so I built it myself two independent ways — and it's the most interesting thing in this piece.
+
+## The parameter count, from bytes and from source
+
+The README calls AuK "a 1.5B foundation model." The technical report's architecture section says the backbone has "approximately 1.5 billion" parameters. Neither says at what precision the released checkpoint is stored, and the Hub can't tell you either. So: `auk_base.safetensors` is 6,122,209,092 bytes. Divide by a dtype size and see which one the paper agrees with.
+
+```text
+6,122,209,092 bytes ÷ 2 (bf16) = 3,061,104,546 params  ≈ 3.06B   — 2x too many
+6,122,209,092 bytes ÷ 4 (fp32) = 1,530,552,273 params  ≈ 1.53B  — matches "~1.5B"
+```
+
+bf16 is the natural first guess — it's the model's own default inference dtype (`--dtype bf16` in the CLI, `torch_dtype=torch.bfloat16` for the frozen text encoder in `infer_auk.py`). It's off by almost exactly 2x. FP32 matches. And the code explains why: `AukInfer.__init__` builds the model, then runs `model = model.to(torch.float32)` *before* loading the checkpoint weights, and only casts to bf16 at compute time via `torch.autocast("cuda", dtype=self.dtype, ...)` inside the sampling loop. The EMA checkpoint was exported at full precision; the bf16 you actually run it in is an autocast decision made at load time, not a property of the file on disk. Tencent shipped a 6.12 GB file for a model that only ever computes in bf16 — a bf16 export would have been 3.06 GB, half the download, for identical inference behavior.
+
+I didn't want to stop at "the arithmetic is consistent with the paper's rounded number," so I counted the backbone from scratch, using nothing but the released `config.yaml` and the actual `nn.Linear` shapes in `src/auk/model/modules.py`:
+
+```yaml
+# ckpts/AuK/config.yaml — model.arch, verbatim
+arch:
+  dim: 1536
+  heads: 24
+  ff_mult: 2
+  text_hidden_dim: 2048
+  num_layers: 10          # dual-stream (MMDiT) block count
+  num_single_layers: 20   # single-stream (DiT) block count
+```
+
+With `dim=1536`, `heads×dim_head = 24×64 = 1536 = dim`, and `ff_mult=2`, every `nn.Linear` in `DiTBlock` and `MMDiTBlock` has a fixed, computable shape:
+
+```text
+AdaLayerNorm:     dim → 6·dim         = 1536×9216 + 9216        = 14,164,992
+Attention (self): to_qkv dim→3·dim, to_out dim→dim, 2 RMSNorms  =  9,443,456
+SwiGLU FFN:       dim → 2·(dim·2), (dim·2) → dim, no bias       = 14,155,776
+                                                    DiT block   = 37,764,224
+```
+
+`MMDiTBlock` duplicates every one of those — separate `AdaLN`, separate `to_qkv`/`to_qkv_c`, separate output projections, separate FFN per stream — and because `context_dim` is set equal to `dim` here, each duplicate is an *exact* copy of its DiT-block counterpart, not an approximation: **75,528,448 params, exactly 2× a DiT block.** Ten MMDiT blocks and twenty DiT blocks then land at precisely the same total —
+
+```text
+10 × 75,528,448  =  755,284,480   (dual-stream stack)
+20 × 37,764,224  =  755,284,480   (single-stream stack)
+                    ───────────
+                  1,510,568,960   core transformer
+```
+
+— plus the small peripheral modules the two stacks share (`time_embed`, `txt_proj`/`txt_norm`, `audio_embed`'s linear + two grouped 1D convs, the final `AdaLayerNorm_Final`, `proj_out`, and the 33-parameter ELMo-style layer-fusion weights), which add up to **≈19,982,433** more. Total: **1,530,551,393**.
+
+That's a from-scratch count, built entirely from the shapes in the released config and source, landing **880 parameters away from the byte-count-at-fp32 estimate** (1,530,552,273) — a difference of 0.00006%, from two methods that share no code and no assumption except "the file is fp32." I'm comfortable calling the backbone's parameter count settled at ≈1.531B, and the checkpoint's storage dtype settled at fp32.
+
+<DualStreamFlow />
+
+What "1.5B foundation model" doesn't include: the frozen Qwen2.5-Omni-3B semantic encoder — a separate, required download (`hf download Qwen/Qwen2.5-Omni-3B`), not bundled in `tencent/AuK` at all — and AuK-Flash, which lives in its own repo (`tencent/AuK-Flash`) with its own checkpoint. `vae.safetensors` (637,322,604 bytes, ≈159.3M params at the same fp32 convention) is bundled and does count toward the 6.76 GB `usedStorage`, but it's a separate module the README explicitly calls out: *"The model checkpoint contains the diffusion transformer and layer-fusion weights. The MLLM encoder and VAE are loaded from separate files at runtime, so missing `text_encoder.*` keys during checkpoint loading are expected."* Running AuK end to end means loading roughly 1.69B parameters from the `tencent/AuK` repo plus a further ~3B-parameter encoder you have to fetch yourself — a materially bigger footprint than the headline number suggests, none of it wrong, all of it worth knowing before you plan a deployment around "1.5B."
+
+## What 1.95 million hours actually means
+
+The abstract's data claim: "approximately 3.03 billion instruction–audio instances and 1.95 million hours of effective supervision" across five task families. 1.95M hours is 222 years of audio — the kind of number that's supposed to make you stop reading and be impressed, so it's worth doing the denominator check the number deserves.
+
+3.03 billion instances over 1.95 million hours averages to about 2.3 seconds of audio per instance (1.95M × 3600 ÷ 3.03B). That's a plausible average for short TTS/editing utterances, so the two headline numbers aren't obviously inconsistent with each other. What I couldn't find anywhere in the paper is a definition of "effective supervision hours" itself: does an hour of real speech that gets reused across, say, a zero-shot-TTS instance, a pitch-edit instance, and an enhancement instance count as one hour, or three? The paper states the two headline numbers and moves on. I looked for the defining sentence and didn't find one — which matters, because "1.95 million hours of *unique* audio" and "1.95 million hours of *task-instance* audio, summed across every augmentation of the same underlying clips" are very different claims about how much real speech went into this model, and only one of the two supports "222 years of audio" as a statement about data collection rather than data multiplication.
+
+The task-family split (paper's Table 1, pre-training stage 2 sampling probabilities) does check out arithmetically — it sums to exactly 100%:
+
+| Task family | Share |
+|---|---|
+| Speech Generation | 28.10% |
+| Enhancement & Separation | 23.17% |
+| Content Editing | 23.02% |
+| Paralinguistic Editing | 21.75% |
+| Acoustic Editing | 3.96% |
+
+The paper is candid, if qualitative, about how much of this is synthetic: emotion editing is trained on `Qwen3-TTS-CustomVoice`-synthesized pairs, timbre editing on the `X-VC` corpus, nonverbal editing on `F5-TTS`-generated audio, content editing on masked-infilling targets, and enhancement/separation on "independently sampled degradations" applied to clean speech. That's most of the five families built at least partly from another model's output rather than from a microphone. No numeric real-vs-synthetic split is given anywhere I could find — another place where "if you could not verify something, write that" applies directly.
+
+## AuK-Flash: 4 steps, no CFG, and a 4.5x that should have been bigger
+
+AuK-Flash is a distilled release for fast inference: 4 fixed sampling steps, classifier-free guidance switched off (`CFG=0`), versus the full model's default of 32 steps with `CFG=2.0` — both defaults are the actual code's, not paraphrased:
+
+```python
+# src/auk/model/cfm_edit.py — CFMEdit.sample()
+def sample(
+    self,
+    cond, text, duration, *,
+    steps=32,
+    cfg_strength=1.0,
+    ...
+```
+
+```bash
+# src/auk/infer/infer_cli.py — CLI defaults
+--nfe    32     # number of function evaluations (ODE steps)
+--cfg    2.0     # classifier-free guidance strength
+```
+
+```text
+# README.md
+AuK-Flash use 4 fixed time steps and set CFG=0.
+```
+
+CFG at inference isn't a second forward pass bolted on afterward — `flux2_edit.py`'s `cfg_infer` path concatenates the conditional and unconditional inputs into one batch (`x = torch.cat((x_cond, x_uncond), dim=0)`) and runs one forward over twice the batch, which costs about 2× a non-CFG step. So the naive accounting for "how much cheaper is Flash" is steps × CFG-multiplier on both sides: 32×2 = 64 units for the full model, 4×1 = 4 units for Flash — a **16× step-cost ratio**. The paper's abstract states a **4.5× wall-clock speedup "under matched conditions,"** without saying what those conditions are (no batch size, no hardware, no sequence length disclosed for that specific number). 4.5× is real work and a genuine win. It's also a third of what the step math alone predicts, and the paper doesn't say where the rest goes.
+
+<StepBudget />
+
+My reconstruction, not the paper's: something has to cost the same regardless of step count or CFG for a 16× ratio to land at 4.5×, and `cfm_edit.py` shows exactly one thing built that way. `encode_text()` runs the frozen Qwen2.5-Omni-3B thinker exactly once per request — *before* the ODE loop starts — and its output is threaded through every subsequent step via the transformer's `cache=True` argument, never recomputed. VAE decode is likewise one pass at the end. Solving "what fixed cost, added to 64 units and to 4 units, turns a 16× ratio into a measured 4.5×" gives roughly 13.1 units of fixed cost relative to one non-CFG backbone step — plausible for a full forward pass through a 3B-parameter encoder plus a VAE decode, both amortized over just 4 diffusion steps instead of 64. That's an estimate built to match the disclosed 4.5×, not an independently measured number; I'm flagging it as reconstruction because the paper gives no latency breakdown to check it against directly.
+
+## Leading on generation and editing, and where "competitive" is doing real work
+
+The abstract's own phrasing: "leading performance on zero-shot and instruction-controlled speech generation... [and] general speech editing... while remaining **competitive** on signal-level restoration tasks." That's three different verbs for three different task groups in one sentence, and the paper's own figures back the distinction up with real numbers rather than just softening the tone for the harder category.
+
+**Generation and editing — AuK leads outright**, against strong, named baselines:
+
+| Benchmark | Metric | AuK | AuK-Flash | Best specialist baseline |
+|---|---|---|---|---|
+| Seed-TTS-Eval | WER ↓ | **2.65%** | 2.85% | Qwen3-TTS 3.07% |
+| Seed-TTS-Eval | SIM ↑ | **0.795** | 0.790 | Seed-TTS 0.778 |
+| InstructTTSEval (DSD, ZH) | acc. ↑ | **83.37%** | 78.80% | Qwen3-TTS-VD 81.10% |
+| MMAE-Speech | EMR ↑ | **13.85** | 12.44 | Ming-UniAudio 7.04 |
+| SpeechEditBench | score ↑ | **49.73** | 46.66 | Ming-UniAudio 28.70 |
+| Ming-Freeform-Audio-Edit | score ↑ | **88.54** | 87.55 | Ming-UniAudio 76.99 |
+
+**Signal-level restoration is where "competitive" earns its precision.** On DNSMOS-OVRL — the automatic perceptual-quality metric an enhancement specialist is built to optimize — AuK loses to a dedicated enhancement model on both datasets where the comparison is made directly:
+
+| Benchmark | Metric | AuK | RE-USE (specialist) | Who wins |
+|---|---|---|---|---|
+| DNS Challenge | DNSMOS-OVRL ↑ | 3.35 | **3.38** | RE-USE |
+| DNS Challenge | UTMOS ↑ | **3.86** | 3.69 | AuK |
+| CHiME-4 | DNSMOS-OVRL ↑ | 3.28 | **3.33** | RE-USE |
+| CHiME-4 | WER ↓ | **7.98%** | 10.71% | AuK |
+| Libri2Mix (separation) | DNSMOS-OVRL ↑ | **3.28** | 3.24 (MossFormer2-SS) | AuK |
+| Libri2Mix (separation) | WER ↓ | **9.12%** | 9.34% (MossFormer2-SS) | AuK |
+
+That's the honest shape of "competitive": on the two enhancement benchmarks, AuK loses the automatic-MOS metric to the specialist by a small but real margin (0.03–0.05 DNSMOS-OVRL) while winning decisively on intelligibility (WER) and a second naturalness metric (UTMOS) — a real, disclosed trade rather than a clean win dressed down for modesty. On the one separation benchmark shown, AuK actually edges the specialist on every visible metric, so "competitive" undersells that particular comparison if anything. Both figures come straight off the paper's own bar chart (`assets/performance.png`), reproduced below.
+
+<Figure src="/articles/auk-speech-editing/fig2.png" alt="Grouped bar charts across three panels. Panel a, Speech Generation Capability: AuK and AuK-Flash lead Qwen3-TTS, Seed-TTS, VoxCPM2, MOSS-VoiceGenerator, Mimo-Audio and Qwen3-TTS-VD on Seed-TTS-Eval WER and SIM and on InstructTTSEval DSD. Panel b, Speech Editing Capability: AuK and AuK-Flash lead Ming-UniAudio and Step-Audio-EditX on MMAE-Speech EMR, SpeechEditBench, and Ming-Freeform-Audio-Edit by a wide margin. Panel c, Speech Enhancement and Separation Capability: paired DNSMOS-OVRL and UTMOS bars for AuK, AuK-Flash, SAM-Audio-Large, RE-USE, and MossFormer2-SS across DNS Challenge, CHiME-4, and Libri2Mix, where AuK's DNSMOS-OVRL bar sits slightly below the specialist RE-USE on the first two benchmarks and slightly above MossFormer2-SS on the third." caption="Every headline benchmark panel from the model card, reproduced at full resolution — including the two DNSMOS-OVRL bars where AuK sits below its specialist baseline (paper, performance figure)." />
+
+## Architecture: an MLLM for meaning, a shared VAE, an SD3-shaped backbone
+
+**Semantic conditioning.** AuK doesn't use Qwen2.5-Omni-3B's text output — it uses its *hidden states*, aggregated ELMo-style: every one of the encoder's internal layers gets a learned softmax weight and a per-layer LayerNorm, and the weighted sum (times one more learned scalar) becomes the conditioning signal. That's a real, small piece of code, not a paraphrase of the paper's Equation 2:
+
+```python
+# src/auk/model/cfm_edit.py — CFMEdit.encode_text()
+stacked = torch.stack([F.layer_norm(h, [d_llm]) for h in all_hidden_states[1:]], dim=0)
+weights = F.softmax(self.layer_weights, dim=0)
+hidden = (stacked * weights[:, None, None, None]).sum(dim=0) * self.layer_scale
+```
+
+The rationale for using an LLM at all rather than a text-only encoder: the same interface has to carry a spoken-language instruction ("replace X with Y"), a free-text voice description, and reference audio, and a multimodal model already knows how to attend across all three without three separate encoders.
+
+**The VAE** is trained jointly on speech, general audio, and music at a stated 6:3:1 sampling ratio — one shared latent space instead of a speech-only codec, which is what lets one model do TTS, music source separation, and target-speaker extraction without swapping representations. It maps 24 kHz waveform to 64-dimensional latents at 50 Hz (a 480× time-domain downsample: `downsample_rate: 480` in `config.yaml`, confirmed by the encoder's `downsample_rates: [2,2,2,3,4,5]` product), and decodes through a BigVGAN-style stack of six transposed-convolution blocks.
+
+**The backbone's dual-stream-then-single-stream shape is the SD3/FLUX MMDiT pattern**, and it shows up here for the same reason it shows up in image diffusion: text and audio start with different statistics and need their own normalization and feed-forward transforms early on, but attention is what actually lets one modality condition the other, so the joint-attention call is shared from block one — only the surrounding per-stream layers (AdaLN, projections, FFN) stay separate. Once ten blocks of that have let the two streams settle into a shared representation, there's no more reason to keep them apart, so the remaining twenty blocks run as one sequence through cheaper, shared weights. The interactive above walks through why that 10-then-20 split isn't arbitrary: a dual-stream block costs exactly 2× a single-stream one here (because `context_dim == dim`), so 10 of the expensive kind and 20 of the cheap kind spend exactly the same *total* parameters on each half — a genuinely balanced design, not a round number.
+
+<Figure src="/articles/auk-speech-editing/fig1.png" alt="Three-panel architecture diagram. Panel a: the overall AuK pipeline, showing text semantic condition tokens, optional audio semantic condition tokens, optional reference audio condition tokens, and noisy VAE condition tokens feeding through a stack of Dual Stream MMDiT blocks repeated M times, then Single Stream DiT blocks repeated N times, into a frozen VAE decoder that outputs generated audio; a frozen large language model with per-layer hidden states h_i feeds a learned layer-wise weight sum and learned scale into the text condition tokens. Panel b: the internal structure of a Dual Stream MMDiT block, with separate layer norm, scale-and-shift, and SwiGLU FFN branches for a semantic stream x and an acoustic stream y, joined by one joint attention module over concatenated Q, K, V. Panel c: the internal structure of a Single Stream DiT block, with one layer norm, self attention, and SwiGLU FFN operating on the concatenated semantic and acoustic streams." caption="AuK's full architecture: the frozen LLM and VAE stages, the dual-stream MMDiT block's separate-but-jointly-attending design, and the single-stream DiT block that follows it (paper, architecture figure)." />
+
+## Two post-training methods for two different problems
+
+AuK's post-training splits by task family, and the split is deliberate rather than incidental: **editing gets human-feedback preference optimization; generation gets automatic-reward reinforcement learning.** The paper's own reasoning is that these two task families fail differently. Zero-shot TTS has a cheap, reliable way to score a candidate automatically — did the ASR transcript match, does the speaker embedding match the reference — so a reward model can be built and RL can run at scale. Whether an edit "sounds natural" or "changed the right amount" has no such automatic proxy, and the paper states plainly that neither a broad-enough preference dataset nor a ready-made reward model existed for it, so they collected human ratings directly instead.
+
+**Editing: Diffusion-DPO with a listwise (LiPO) objective.** For each editing instruction, annotators rate 10–20 candidate outputs on a 3-level scale (0 = failure, 1 = partial, 2 = success); groups where every candidate got the same rating are discarded as carrying no signal. What's left: **818 informative groups, 9,080 rated candidates.** The loss compares candidates pairwise within `{1≻0, 2≻0, 2≻1}` relations, weights the strongest relation (`2≻0`) at 1.0 and the other two at 0.5, and trains for 104 optimizer updates from the pre-training checkpoint.
+
+**Generation: Flow-GRPO with two different automatic reward models**, one per generation sub-task. Zero-shot TTS's reward blends a *tolerant* word-error-rate (homophone substitutions forgiven — a Chinese homophone swap isn't a pronunciation failure) with a *strict* WER, plus cosine similarity between speaker embeddings, standardized only among candidates that already got the content right (so a good voice match can't paper over wrong words). Instruction-controlled TTS's reward is a dedicated style-consistency judge — a Qwen2.5-Omni-7B model trained on 30,000 balanced positive/negative examples, queried by majority vote. Both run for 500 optimizer updates, 16 candidates sampled per prompt, with rollout sampling stochastic only in a 6-step low-SNR window and deterministic everywhere else, to keep variance and cost down.
+
+<Callout type="note">
+Both post-training stages, and the RL rollouts specifically, use CFG at guidance scale 2.0 — the same setting the base model ships with by default. AuK-Flash's CFG-off, 4-step recipe is a separate distillation step layered on top of this pipeline, not an alternate post-training path.
+</Callout>
+
+## What checks out, plainly
+
+Not every number here needed a caveat. The task-family percentages sum to exactly 100%. The zero-shot and instruction-TTS benchmark numbers in the bar chart match the paper's own tables to two decimal places, and where the chart shows an averaged ZH/EN score I couldn't find broken out anywhere else, recomputing the average from the paper's per-language numbers reproduces the chart's bar to the hundredth (82.49 from 83.37/81.60, 81.75 from 81.10/82.40, and so on — five-for-five across the InstructTTSEval panel). The default sampling config in the actual inference code (`--nfe 32 --cfg 2.0`) matches what the paper describes as the full model's setting, so the benchmark numbers weren't measured on a different configuration than what ships. And the backbone's parameter count — the thing with no Hub metadata to check against — turned out to be the most verifiable number in the whole report, once you're willing to read the checkpoint's own byte count against its own released source.
+
+What doesn't check out cleanly: no stated definition for "effective supervision hours," no numeric real-vs-synthetic data split, no disclosed hardware or batch size for the one benchmark (the 4.5× speedup) where "matched conditions" is the entire methodology section, and a released repo whose headline parameter count describes roughly half of what you actually need in memory to generate anything.
