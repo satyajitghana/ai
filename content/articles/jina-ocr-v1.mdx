@@ -1,0 +1,188 @@
+---
+title: "Jina-OCR-v1: 570M active parameters assumes an embedding tie that isn't in the checkpoint"
+description: "Jina-OCR-v1 pairs DeepSeek-OCR's 3.4B-parameter vision-language backbone with a FastMTP speculative-decoding head that recursively shares one draft block over three steps, and the tech report states 570M active parameters per token. Reading the safetensors headers directly shows that figure only works if the embedding and the output head share one 165M-parameter matrix -- but the released config sets tie_word_embeddings to false and ships two separate matrices, putting real per-token decoder compute near 740M, about 30% above the advertised number. The paper's own measured 1.95x FastMTP speedup holds only in eager PyTorch on an NVIDIA L4; under vLLM's CUDA graphs, the K=3 setting the marketing implies is the one to use actually lands at 1.09x, the worst of the three depths tested, because K=1 is faster once the non-speculative baseline is already 3.7x quicker. Benchmarked against a dozen current specialized OCR systems, Jina-OCR-v1 places third on both olmOCR-Bench and OmniDocBench, and its weakest category isn't tables or reading order but degraded historical scans, where it barely clears the DeepSeek-OCR backbone it post-trains."
+date: 2026-09-18
+interest: 4
+helpful: 5
+tags:
+  - ocr
+  - speculative-decoding
+  - mixture-of-experts
+  - vision-language-models
+  - document-parsing
+cover: /articles/jina-ocr-v1/fig1.png
+---
+
+import { FastMTPTradeoff } from "@/components/articles/jina-ocr-v1/fastmtp-tradeoff"
+import { CategoryBreakdown } from "@/components/articles/jina-ocr-v1/category-breakdown"
+
+Jina AI's `jina-ocr-v1` ships with a specific pair of numbers attached to almost every mention of it: 3.4B total parameters, 570M active. It's an MoE ratio of roughly 6:1, and it's the same pairing on the [Hugging Face card](https://huggingface.co/jinaai/jina-ocr-v1), the [model page](https://jina.ai/models/jina-ocr-v1), and the [tech report](https://arxiv.org/abs/2609.03181) (arXiv:2609.03181). It also ships a speculative-decoding head baked into the checkpoint, which is unusual for a released OCR model -- most ship a decoder and let you bring your own serving tricks. I pulled the actual weights' tensor headers, the config, the two other primary sources, and the paper's own measurement tables to see whether both of those claims hold at the byte level, not just in the prose.
+
+<ModelCard repo="jinaai/jina-ocr-v1" claimed="3.4B total / 570M active" />
+
+|  |  |
+|---|---|
+| Model | [jinaai/jina-ocr-v1](https://huggingface.co/jinaai/jina-ocr-v1), CC BY-NC 4.0, released 2026-09-01 |
+| Tech report | [arXiv:2609.03181](https://arxiv.org/abs/2609.03181), Jina AI by Elastic |
+| Backbone | [DeepSeek-OCR](https://arxiv.org/abs/2510.18234) (Wei et al., 2025) -- inherited, not reimplemented |
+| Decoding | FastMTP (Cai et al., 2025, [arXiv:2509.18362](https://arxiv.org/abs/2509.18362)), one shared dense draft block, K=3 |
+| Benchmarks | olmOCR-Bench 83.4, OmniDocBench v1.6 91.14, 2.57 pages/s (A100, concurrency 32) |
+
+## It's DeepSeek-OCR's own code, with an MTP head bolted on
+
+The tech report doesn't hide this -- it says it outright, in the second sentence of the abstract: *"It combines the compressed-vision encoder and the 3B mixture-of-experts decoder of DeepSeek-OCR ... with a FastMTP speculative decoding head."* Section 3 repeats it: *"Jina-OCR-v1 follows the encoder-decoder architecture of DeepSeek-OCR and extends it with a multi-token prediction head."* What's less obvious until you look at the repository's file manifest is exactly how literal that inheritance is. The Hugging Face repo ships `modeling_deepseekv2.py`, `configuration_deepseek_v2.py`, and `modeling_deepseekocr.py` -- DeepSeek's own module names, not Jina's -- and the model's `config.json` declares `"architectures": ["DeepseekOCRForCausalLM"]` with `"model_type": "deepseek_vl_v2"`. This is DeepSeek-OCR's architecture and modeling code, running under a Jina badge, with one new component added on top.
+
+<Figure
+  src="/articles/jina-ocr-v1/fig1.png"
+  alt="Architecture diagram: a document page and up to n local tiles feed a DeepEncoder vision encoder, which outputs 256+100n tokens into a MoE decoder (3B total, 570M active) alongside a user instruction, producing Markdown. A dashed arrow carries the decoder's hidden state into a FastMTP box, where a shared draft block recursively proposes three tokens (x-hat t+1, t+2, t+3) for verification."
+  caption="DeepEncoder feeds a 3B-parameter MoE decoder; the FastMTP head recursively proposes K=3 draft tokens from one shared block for the target model to verify (tech report, Figure 2)."
+/>
+
+That inherited piece is `DeepEncoder`: a window-attention SAM encoder cascaded into a global-attention CLIP-L encoder through a 16x convolutional compressor, representing a 1024x1024 page as 256 tokens for the global view plus up to nine 100-token local tiles in "Gundam" mode -- at most 1,156 visual tokens per page. The decoder is a 12-layer DeepSeek-V2-style MoE: hidden size 1280, 64 routed experts plus 2 shared experts, top-6 routing, `first_k_dense_replace: 1` (only the first layer is a plain dense FFN; the other 11 are MoE). The one genuinely new component is `mtp_module` -- a single shared transformer block, reused recursively for three draft steps, matching the FastMTP scheme from Cai et al. (2025) rather than anything invented for this release.
+
+## Checking 3.4B / 570M against the tensor shapes
+
+`safetensors.total` on the Hub API is `3,372,238,080` -- 3.372B, which rounds cleanly to the advertised "3.4B." That part checks out immediately. Where it gets interesting is breaking that total down by component, which the safetensors file headers let you do exactly, without downloading the 6.7 GB of weights -- just the two shard headers (`8` bytes for the length prefix, then that many bytes of JSON listing every tensor's name, shape, and dtype):
+
+```text
+vision encoder (CLIP + SAM + projector) :   401,369,600
+decoder (12 layers + embed + lm_head)   : 2,934,736,640
+FastMTP draft block (mtp_module.*)      :    36,131,840
+                                    total: 3,372,238,080
+```
+
+`401.4M + 2,934.7M + 36.1M = 3,372.2M` -- exactly the reported total, and it matches the paper's own Table 1 breakdown (`~380M` vision, `~3B` decoder) to within rounding. So far, everything reconciles.
+
+The active-parameter figure doesn't. Per-token active compute for the decoder means: the one dense layer (always active), plus, for each of the 11 MoE layers, attention + the 2 always-on shared experts + only the 6 of 64 routed experts the router actually selects (`num_experts_per_tok: 6`) -- plus the embedding table and the output head, which run on every token regardless of routing. Summing that from the tensor shapes:
+
+```text
+dense layer 0 (always active)         :    32,852,480
+11 MoE layers, active experts only    :   375,795,200
+embed_tokens.weight  (129,280 x 1,280):   165,478,400
+lm_head.weight       (129,280 x 1,280):   165,478,400
+final norm + misc                     :         3,840
+                             decoder active: 739,608,320
+```
+
+That's 739.6M, not 570M -- about 30% higher. The gap is exactly one embedding matrix. `config.json` sets `"tie_word_embeddings": false`, and the safetensors index confirms it: `model.embed_tokens.weight` and `lm_head.weight` are two separate 165,478,400-parameter tensors, not one shared between input and output. Subtract one of them from my total and you get 574.1M -- which rounds to "570M." That's the arithmetic the paper's number matches: a single tied embedding/head matrix counted once. The checkpoint actually shipped doesn't tie them, so both run on every decode step, and the real per-token decoder compute is closer to 740M.
+
+This also settles the brief's other question: is the vision encoder counted in that "3.4B," and is it active on every forward pass? Yes to both, but not on the *same* pass as the 570M/740M figure. `DeepEncoder` runs once, at prefill, to turn a page into visual tokens -- it doesn't re-run on every subsequent decode step, so it's a separate cost, paid once per page, not per token. Table 1 of the paper reports a "whole model" active figure of "under 1B" by adding its own 570M decoder number to the ~401M vision encoder (971M, just inside the boundary) -- but that's already mixing a decode-time figure with a prefill-time one into a single scalar, and once you use the corrected 739.6M decoder number instead, that sum is 1.14B: over the boundary the paper's own table draws.
+
+## FastMTP: a shared draft block, not a separate model
+
+"Speculative decoding built into a released OCR model" turns out to mean something specific and fairly conservative: FastMTP (Cai et al., 2025) is not a separate draft model, not self-speculation off the target's own weights, not an n-gram lookup, and not Medusa-style independent heads. It's **one dense transformer block**, reused recursively three times. `config.json` spells this out: `"mtp_num_speculative_steps": 3`, `"mtp_recursive": true`, `"mtp_share_embedding_weights": true`, `"mtp_share_lm_head": true`. The safetensors index backs it up -- `mtp_module` is exactly 12 tensors (one block's attention, MLP, two layernorms, plus `eh_proj`/`enorm`/`hnorm` for feeding the hidden state back in), not the 36 tensors three independent heads would need. Draft-block parameter count stays flat as K grows, because it's the same block run three times, each time consuming its own previous output.
+
+Verification is greedy: the target model checks the drafted tokens and accepts the longest prefix that matches what greedy decoding would have produced anyway, so the output is provably identical to plain autoregressive decoding -- "lossless" in the sense that matters, not a quality tradeoff.
+
+<FastMTPTradeoff />
+
+Table 8 of the tech report measures this on an NVIDIA L4, vLLM 0.20.1, batch size 1, on olmOCR-Bench, in both eager PyTorch and CUDA-graph execution. Both modes see essentially the same acceptance rate at every K (82.6% vs. 82.9% at K=1, 57.6% vs. 57.9% at K=3) -- acceptance is a property of the draft block and the document, not the serving backend. What differs completely is the payoff, because the two modes have wildly different non-speculative baselines: eager decodes at 42.7 tok/s, CUDA graphs at 158.3 -- a 3.71x gap from graph capture alone, before any speculation. Against the slow eager baseline, three extra draft tokens per round are cheap enough to be worth it, and K=3 wins at 1.95x -- the number behind "FastMTP nearly doubles decoding speed." Against the fast graph baseline, that same fixed per-round draft-and-verify cost stops paying for itself past K=1: speedup peaks at 1.17x (K=1) and *falls* to 1.09x at K=3. The deepest, most-quoted setting is the worst of the three depths tested once you turn CUDA graphs on.
+
+One more mismatch worth flagging under the house rule of checking whether the released artifact is the one the benchmark came from: Table 8's FastMTP numbers were measured on **vLLM 0.20.1**. The model's own README, in the section that shows you how to actually run FastMTP, says plainly: "Requires vLLM &ge; 0.21." The exact serving-stack version behind the headline speedup numbers is older than the minimum version the released integration code supports today.
+
+## Where it lands against what people would actually reach for
+
+The tech report's own comparison set is worth naming precisely, because the brief's obvious candidates -- olmOCR, Nougat, GOT-OCR, Marker -- don't all show up. Nougat and GOT-OCR2.0 are cited exactly once each, in the related-work section, as the systems that established end-to-end document OCR in 2023-2024; neither appears in any benchmark table. Marker doesn't appear anywhere in the paper at all. The actual comparison pool across Tables 5-7 is current 2025-2026 specialized systems -- olmOCR-2, dots.mocr (a two-pass variant the paper explicitly keeps in this "specialized" category), LightOnOCR-2, chandra-ocr-2, Surya OCR 2, MinerU2.5(-Pro), PaddleOCR-VL-1.6, HunyuanOCR-1.5, GLM-OCR, Infinity-Parser-7B, and the DeepSeek-OCR / DeepSeek-OCR-2 backbones -- plus exactly two general VLMs, Gemini 3 Flash and Qwen3-VL-235B. If "the models people would otherwise use" means Nougat/GOT-OCR/Marker specifically, there is no head-to-head number here; the paper isn't measuring against them.
+
+<CategoryBreakdown />
+
+Aggregate scores hide exactly the kind of split the brief asks about. On OmniDocBench v1.6, Jina-OCR-v1's Table TEDS (table structure fidelity) is 84.68 -- close to the DeepSeek-OCR-2 backbone's 83.89, but a real 9-10 point gap behind the two strongest specialized systems in the table, PaddleOCR-VL-1.6 (94.76) and HunyuanOCR-1.5 (93.67). Reading order (RO Edit, lower is better) is more competitive: 0.142, ahead of DeepSeek-OCR-2's 0.144 and both general VLMs, though still behind PaddleOCR-VL-1.6 (0.128) and HunyuanOCR-1.5 (0.129). Formula rendering (Formula CDM, 93.28) sits closer to the frontier than either of those.
+
+| OmniDocBench v1.6 | Overall &uarr; | Text Edit &darr; | Formula CDM &uarr; | Table TEDS &uarr; | RO Edit &darr; |
+|---|---|---|---|---|---|
+| PaddleOCR-VL-1.6 (0.9B) | **96.34** | **0.033** | **97.53** | **94.76** | **0.128** |
+| HunyuanOCR-1.5 (1B) | 94.74 | 0.039 | 94.50 | 93.67 | 0.129 |
+| Gemini 3 Flash | 92.62 | 0.066 | 95.16 | 89.29 | 0.172 |
+| **Jina-OCR-v1 (3.4B/570M)** | 91.14 | 0.046 | 93.28 | 84.68 | 0.142 |
+| Qwen3-VL-235B (235B/22B) | 89.78 | 0.063 | 92.55 | 83.07 | 0.166 |
+| DeepSeek-OCR-2 (3B/570M) | 90.25 | 0.050 | 91.84 | 83.89 | 0.144 |
+
+*Overall averages text edit distance, formula CDM, and table TEDS under the v1.6 protocol; TEDS-S (structure-only) and per-category olmOCR-Bench numbers are in the categories chart above. Params column is the paper's own total/active pair.*
+
+Table TEDS is where the weakness above shows up in aggregate; the categories chart shows where it shows up per-category. As flagged there, **old and degraded scans**, not tables or reading order, is the widest gap to the frontier -- 42.6 on olmOCR-Bench's OldScans category, ahead of the DeepSeek-OCR backbone (33.1) but behind chandra-ocr-2 (51.1), olmOCR-2 (48.3), and dots.mocr (48.2). Multi-column layout, the category the brief specifically flags as a likely weak point, is the opposite: 85.5, second only to Qwen3-VL-235B in the whole table.
+
+Serving throughput is a separate measurement from the FastMTP numbers above, and the paper is careful to say so: Table 7's 2.57 pages/s is measured on one A100 SXM4 40GB at concurrency 32, batched -- a different device, batch regime, and (implicitly) decoding mode from Table 8's L4/batch-1/FastMTP numbers. The report's own footnote on Table 8 says the two "are not comparable." Whether Table 7's headline throughput number used FastMTP at all isn't stated either way.
+
+<Figure
+  src="/articles/jina-ocr-v1/fig3.png"
+  alt="Three horizontal bar charts ranking fourteen OCR systems on olmOCR-Bench (one A100, concurrency 32): output tokens per second, output tokens per page, and pages per second. Jina-OCR-v1 is third on tokens/second (2,792), emits the fewest tokens per page (1,085) among systems scoring above 83, and is first on pages per second (2.57)."
+  caption="Same 14-system pool, ranked three ways -- Jina-OCR-v1 wins pages/s by pairing mid-pack token throughput with the shortest outputs of any system scoring above 83 overall (tech report, Figure 5)."
+/>
+
+| Serving throughput, olmOCR-Bench (1,403 pages, 1x A100 SXM4 40GB, concurrency 32) | olmOCR-Bench overall | Pages/s | Output tok/page | Output tok/s |
+|---|---|---|---|---|
+| chandra-ocr-2 | 85.8 | 0.38 | 1,917 | 730 |
+| dots.mocr | 83.9 | 0.55 | 1,711 | 934 |
+| **Jina-OCR-v1** | **83.4** | **2.57** | **1,085** | 2,792 |
+| LightOnOCR-2 | 83.2 | 1.33 | 1,208 | 1,606 |
+| olmOCR-2 | 82.4 | 1.22 | 1,128 | 1,374 |
+| DeepSeek-OCR | 76.0 | 2.10 | 1,366 | 2,871 |
+| Surya OCR 2 | 83.3 | 1.05 | 3,568 | 3,760 |
+
+*Full pool is 14 systems; this is the subset with a published olmOCR-Bench overall. Surya OCR 2 leads raw token throughput but emits over 3x the tokens per page, so it finishes pages slower than Jina-OCR-v1 despite the higher tok/s.*
+
+<Figure
+  src="/articles/jina-ocr-v1/fig2.png"
+  alt="Three panels: (a) pixels per visual token on a log scale, with Jina-OCR-v1 at 3,887, the highest of eight labeled systems; (b) page throughput on olmOCR-Bench, Jina-OCR-v1 highest at 2.57 pages per second; (c) two scatter plots of benchmark overall score against active parameters on a log scale, olmOCR-Bench and OmniDocBench, with a Pareto frontier line -- Jina-OCR-v1 sits on the frontier near the low end of the active-parameter axis on both."
+  caption="Jina-OCR-v1 (star) on three deployment-cost axes: visual compression, page throughput, and accuracy against the paper's own active-parameter figure (tech report, Figure 1)."
+/>
+
+## Licence, languages, resolution
+
+The released weights carry `CC BY-NC 4.0` (non-commercial; Jina points commercial users to contact sales), which matches both the Hub's `cardData.license` and the config's licence tag exactly. Resolution: `config.json`'s `candidate_resolutions` lists exactly one entry, `[[1024, 1024]]` -- the model's base/global view is fixed at 1024x1024, with the Gundam mode's local tiles adding resolution rather than the base view scaling. Context length is 32,768 positions (RoPE, &theta;=1e6), matching the model page's "32K" figure.
+
+Languages are the one place I could not fully verify the specific counts against a primary technical source. The [jina.ai model page](https://jina.ai/models/jina-ocr-v1) states "Trained Languages: 25 languages" and "Supported Languages: 108 languages," and separately notes that "language coverage is inherited from the base model" and that "DeepSeek-OCR was pretrained on 30M PDF pages spanning about 100 languages." Neither the tech report's text nor the Hub's `README.md`/`config.json` states an explicit language count anywhere I could find -- both just tag the model `multilingual`. The 25-vs-108 split (languages with dedicated training data vs. languages the model is claimed to handle via the inherited base model's broader pretraining) is a real distinction worth keeping separate, but it rests on the marketing page rather than the report or the checkpoint metadata, so I'm reporting it as stated rather than as independently confirmed.
+
+On whether the benchmarked weights are the released ones: the Hub snapshot I read carries `lastModified: 2026-09-18`, the same day as this piece, against a `createdAt` of 2026-09-01 and a blog-stated release date of 2026-09-14 -- three different dates for creation, announced release, and last update, which is ordinary repo housekeeping rather than a red flag, but it does mean "the weights I fetched" and "the weights the paper measured three weeks ago" are not guaranteed to be an identical bit-for-bit snapshot, only the same named release.
+
+## Running it
+
+Locally, through Transformers, FastMTP isn't in the loop at all -- the README is explicit that `generate()` here is plain autoregressive decoding over the 3B MoE decoder, and the MTP keys are loaded and ignored:
+
+```python
+# example.py (jinaai/jina-ocr-v1)
+import torch
+from PIL import Image
+from transformers import AutoModelForCausalLM, AutoProcessor
+
+MODEL_ID = "jinaai/jina-ocr-v1"
+processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID, dtype=torch.bfloat16, trust_remote_code=True,
+).to("cuda")
+
+image = Image.open("document.png").convert("RGB")
+inputs = processor.prepare_ocr_inputs(image, device="cuda")
+output = model.generate(**inputs, max_new_tokens=4096, do_sample=False)
+print(processor.decode_ocr(output, inputs["input_ids"]))
+```
+
+FastMTP only exists on the vLLM path, and needs a one-time architecture registration from the checkpoint's own `deepseek_ocr_mtp.py` before the engine starts:
+
+```python
+# vLLM >= 0.21 required (see README) -- register() maps EagleDeepSeekMTPModel,
+# since method="eagle" is what actually re-uses FastMTP's recursive hidden state;
+# vLLM's default method="mtp" re-grounds every draft step on the target instead.
+from deepseek_ocr_mtp import DEFAULT_OCR_PROMPT, register, vllm_llm_kwargs
+from vllm import LLM
+
+register()
+llm = LLM(**vllm_llm_kwargs(
+    "jinaai/jina-ocr-v1", num_speculative_tokens=3, mtp_heads=1, mtp_recursive=True,
+))
+```
+
+And through [Jina Reader](https://jina.ai/reader), the model is a header value, not a deployment -- `x-respond-with` (documented in the [reader repo](https://github.com/jina-ai/reader) alongside the built-in `markdown`/`html`/`text`/`readerlm-v2` response shapes) also accepts the model's own name, which routes a fetched URL or PDF straight through `jina-ocr-v1` and back as Markdown:
+
+```bash
+curl "https://r.jina.ai/https://example.com/document.pdf" \
+  -H "Authorization: Bearer $JINA_API_KEY" \
+  -H "X-Respond-With: jina-ocr-v1" \
+  -H "X-Page: 2"
+```
+
+`X-Page` (1-indexed) picks a single page out of a multi-page upload; drop it to run the whole document.
+
+## What holds up
+
+The 3.4B total is exactly right, down to the last few hundred thousand parameters, and it matches the sum of the safetensors headers component by component. The benchmark scores (91.14, 83.4) are real and check out against the model-index metadata baked into the repo itself. FastMTP is exactly what it's described as -- one shared draft block, recursive, greedy-verified, lossless by construction -- and its acceptance rate genuinely is close to backend-invariant, which is a clean, checkable claim that holds. What doesn't hold is the "570M active" figure, which is off by about 30% against the checkpoint actually released, for a specific and findable reason: the arithmetic assumes a tied embedding this config explicitly turns off. And "FastMTP nearly doubles decoding speed" is true for exactly one of the two serving modes the paper itself measured -- under the other, the setting that claim implies you should use is the worst of the three it tested.
