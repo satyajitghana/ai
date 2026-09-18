@@ -10,7 +10,7 @@ The agent map for this repo. An **AI-native personal site** (Next.js 16, App Rou
 - `content/**` — MDX content (blog, logs, projects, papers, snippets, notes).
 - `data/*.ts` — typed, hand-curated records (profile, resume, etc.) — single sources of truth for pages, `/api/*`, JSON-LD, the resume PDF, and `llms.txt`.
 - `scripts/` — `validate-content.mts` (the safety net), `build-resume-pdf.mts`, `fetch-arxiv.mts` (arXiv candidate fetcher — dedups against ids already in `content/arxiv/`, and anchors its date window to arXiv's newest returned paper so a fast local clock never empties the results).
-- `brand-crew/` — the installable plugin: `skills/`, `commands/`, `agents/`, `hooks/`, `brand/voice.md` (the brand DNA every author reads), `.claude-plugin/plugin.json`.
+- `brand-crew/` — the installable plugin: `skills/`, `commands/`, `agents/`, `hooks/`, `brand/voice.md` (the brand DNA every author reads), `.claude-plugin/plugin.json`. One skill is vendored rather than ours — `skills/hand-drawn-canvas-animation/` (MIT, Alexey Fateev); see its `VENDORED.md` for the upstream commit, the two local deltas, and the render + ffmpeg recipe.
 - `plans/` — `00-ai-site-master-plan.md` (the site) and `01-brand-crew.md` (the crew). Read these for the full design.
 
 ## Content-layer contract
@@ -39,6 +39,14 @@ Rules for paper figures:
 - **Flatten transparent figures onto white** before committing (many arXiv figures are transparent RGBA and vanish in dark mode) and cap width ~1600px. PIL: `bg=Image.new('RGBA',im.size,(255,255,255,255)); bg.alpha_composite(im.convert('RGBA'))`.
 - **Pick the important ones** (usually 1–3): the method/architecture diagram + the key quantitative result. Skip decorative, appendix, and pure-text-table figures. Interactives and paper figures are complementary — keep both even when they overlap.
 - Fetch figures from `arxiv.org/html/<id>vN/…` (or `ar5iv.labs.arxiv.org/html/<id>` when arXiv HTML 404s). Figures are treated as academic/commentary use. (This is the one exception to papers' "no PDFs/assets stored" rule — that rule governs the daily **digest**, not flagship articles.)
+
+## Article films (`public/articles/<slug>/*-film.*`)
+Some articles open with a short hand-drawn film. They are built with the vendored **hand-drawn-canvas-animation** skill (`brand-crew/skills/hand-drawn-canvas-animation/`, read its `VENDORED.md` first), rendered outside the Next.js tree, and **only the output is committed** — an `.mp4`, a `.webm` and a `-poster.jpg`, never the `.html` source. Embed with `<Video src poster alt caption />` (globally registered), where `src` omits the extension.
+
+- **Look at the contact sheet before the full render** (`node render.mjs film.html --grid 28`). Layout collisions — a label under a caption rule, a grid running off-frame — are obvious there and invisible in code.
+- **Derive geometry, don't eyeball it.** Arrows that start near a hand instead of at it, and stacks that don't share a centre line with the character pointing at them, are the tell. Compute the anchor position from the puppet's own body plan and lay everything off it.
+- **Compress before committing.** The player is `muted` + `loop`, so drop the audio track; x264 `-crf 33 -tune animation` and VP9 `-crf 46` are invisible on flat vector art. The `.webm` is listed first in `<Video>`, so that is the file most browsers fetch — it is the one that has to be small.
+- **The caption must say what the film is not.** These are drawn explanations, not recordings: if a film shows a distribution or a benchmark, the caption states plainly that the figures are illustrative and points at where the measured numbers are.
 
 ## data/*.ts records (typed, hand-curated)
 `profile` (identity + `seedStats`), `resume` (feeds `/resume`, the PDF, `/resume.json`), `publications`, `patents`, `health` (Zod-validated **inline** at import — bad edit throws), `now` (bump `updated`), `uses`, `reading`, `interests` (arXiv categories + keyword weights driving the digest). Edit through the skills below; `pnpm typecheck` catches shape errors.
