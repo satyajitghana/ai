@@ -8,9 +8,17 @@ import { ShareButtons } from "@/components/site/share-buttons"
 import { getArticle, getArticles } from "@/lib/content"
 import { articleJsonLd, breadcrumbJsonLd, JsonLd } from "@/lib/jsonld"
 
-// Unknown slugs still 404 via notFound() below; `true` (a static literal, as
-// Next requires) lets newly-added content resolve in dev without a restart.
-export const dynamicParams = true
+// MUST stay false. This route's body does a template-literal dynamic import
+// (`@/content/articles/${slug}.mdx`), so the bundler cannot know which article
+// is needed and pulls every one of them — plus everything they import — into
+// this route's server bundle. With dynamicParams = true that whole bundle has
+// to ship as a runtime function able to render an arbitrary slug, and at 238
+// articles it reached 266 MB against Vercel's 250 MB function limit and failed
+// the deploy. With it false, generateStaticParams below prerenders every slug
+// at build time, unknown slugs get Next's static 404, and no function is
+// emitted at all. Dev is unaffected: `next dev` compiles routes on demand and
+// does not enforce dynamicParams.
+export const dynamicParams = false
 
 export function generateStaticParams() {
   return getArticles({ includeDrafts: true }).map((a) => ({ slug: a.slug }))
