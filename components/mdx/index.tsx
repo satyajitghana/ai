@@ -23,16 +23,19 @@ function Callout({
   type = "note",
   children,
 }: {
-  type?: "note" | "warn" | "tip"
+  // CLAUDE.md spells the warning variant "warning" and sixteen articles were
+  // written against that spelling; "warn" is the internal key. Accept both.
+  type?: "note" | "warn" | "warning" | "tip"
   children: React.ReactNode
 }) {
-  const label = { note: "note", warn: "warning", tip: "tip" }[type]
+  const kind = type === "warning" ? "warn" : type
+  const label = { note: "note", warn: "warning", tip: "tip" }[kind]
   return (
     <aside
-      data-callout={type}
+      data-callout={kind}
       className={cn(
         "my-6 border-l-2 pl-4",
-        type === "warn" ? "border-destructive" : "border-foreground/30"
+        kind === "warn" ? "border-destructive" : "border-foreground/30"
       )}
     >
       <span className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
