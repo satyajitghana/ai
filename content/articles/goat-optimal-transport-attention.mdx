@@ -1,0 +1,378 @@
+---
+title: "GOAT: entropic optimal transport, minus the transport"
+description: "GOAT reframes attention as an entropic-optimal-transport problem and claims to solve attention sinks with a continuous, trainable prior — but the transport here is one-sided: each query balances against its own mass-one constraint, with no budget on keys, so nothing here is the two-sided Sinkhorn machinery (used elsewhere on this site, and by prior OT-attention work) that would actually forbid a sink by construction. What the paper proves instead is that a sink is the mathematically optimal response to a low-signal query, then relocates it from an entangled, high-norm content key into an explicit position-only bias — decoupling sink behavior from token content. Checked against the paper, the released package, and the figures themselves: the perplexity win over the strongest prior baseline is real but modest (1.55 points, in-distribution only), the retrieval-task wins are larger and more convincing, the whole thing rides for free inside one ordinary FlashAttention call, and every experiment tops out at 125M parameters with no quantization or KV-cache-eviction test — which is exactly where sinks hurt in production."
+date: 2026-09-18
+interest: 4
+helpful: 4
+tags:
+  - attention
+  - optimal-transport
+  - attention-sinks
+  - positional-encoding
+  - long-context
+  - explainer
+draft: false
+---
+
+import { SinkVsTransport } from "@/components/articles/goat-optimal-transport-attention/sink-vs-transport"
+import { SinkhornStepper } from "@/components/articles/goat-optimal-transport-attention/sinkhorn-stepper"
+
+GOAT — Generalized Optimal transport Attention with Trainable priors — says it redefines attention
+through entropic optimal transport and "materializes a solution" for attention sinks. Both halves of
+that sentence are true. What surprised me reading the paper (Litman & Guo, Stanford, arXiv 2601.15380,
+accepted to ICML 2026) is *which* half of optimal transport it uses. If you already know Sinkhorn-based
+attention — this site covered a doubly-stochastic Sinkhorn loss in [Marigold V2](/articles/marigold-v2) —
+you'll expect row-and-column balancing, iterative projections, a real algorithmic cost. GOAT has none of
+that. It is one softmax call with a smarter bias, dressed in optimal-transport language because the
+derivation genuinely comes from there. That is not a knock — the derivation is the useful part — but the
+"we fixed attention sinks with OT" framing undersells how narrow the fix actually is.
+
+I'm assuming you know what queries, keys, and softmax attention are — see
+[how self-attention works](/articles/how-transformers-attention-works) if not — and I'm not re-deriving
+the mask/KV-cache taxonomy from [the attention field guide](/articles/attention-mechanisms). This piece
+picks up where that guide's one line on sinks leaves off, and goes through GOAT's actual math, its actual
+released code, and what its figures actually show.
+
+## Why a sink is a real problem, briefly
+
+[The attention field guide](/articles/attention-mechanisms) already covered the canonical sink story:
+softmax weights must sum to 1 even when a query has nothing worth attending to, so
+models learn to dump the leftover mass somewhere — usually the first token. Xiao et al.'s StreamingLLM
+(arXiv 2309.17453) showed evicting that token from a rolling KV cache collapses perplexity, and keeping
+just four sink tokens fixes it. Gu et al. (arXiv 2410.10781, ICLR 2025) went further empirically: sinks
+emerge reliably during pretraining, they act "more like key biases" than genuine content, and — the part
+that matters for production — that same behavior is exactly what makes quantization hard, because a key
+vector that has to dominate every query's softmax regardless of content ends up with a permanently
+huge norm, and huge-norm outliers are what break low-bit quantization schemes. Three real costs, then:
+wasted representational capacity, a KV cache you can't safely prune, and an activation outlier that
+survives every input. GOAT's whole pitch is aimed at the middle failure mode — the entanglement between
+"be a sink" and "be a normal content vector" — not at the KV-cache-eviction or quantization failure modes
+directly, and it doesn't test either of the latter two. More on that below.
+
+## The general argument: two-sided OT actually forbids a sink
+
+Before GOAT, here's the argument that motivates using optimal transport for attention at all, and it's
+worth building from scratch because GOAT's own machinery is a deliberate departure from it.
+
+Treat attention as a transport plan: mass from each query has to go somewhere among the keys. Softmax
+attention imposes exactly one constraint on that plan — each **row** (each query's outgoing weights)
+sums to 1. Nothing constrains a **column**. So if key 0 has a large enough dot product with every query
+(the classic "generic, high-norm key" StreamingLLM and Gu et al. describe), every row can dump its mass
+there simultaneously, and the column sum for key 0 grows without bound as more queries pile on. That's
+the sink, mechanically: an unconstrained column.
+
+Entropic optimal transport, in its classic two-sided form — the one behind Sinkformers (Sander, Ablin,
+Blondel & Peyré, 2022) and the SinkLoss mechanism in [Marigold V2](/articles/marigold-v2) — adds the
+missing constraint. Solve for a transport plan that satisfies *both* a row marginal and a column marginal
+(each key gets a fixed capacity too), regularized by entropy, and the closed-form solution is no longer
+plain softmax: it's a matrix you reach by alternately rescaling rows and then columns of an
+`exp(score / τ)` kernel until both marginals hold — Sinkhorn–Knopp. That alternation is doing real work.
+No single key can absorb more than its column budget, no matter how large its score gets, because the
+column-normalize step at each iteration forcibly redistributes the excess.
+
+<SinkVsTransport />
+
+Both grids above start from the same content scores. Slide the bias up and softmax's column 0 climbs
+toward its ceiling (every query dumping essentially all its mass on one key) while the OT plan's column 0
+stays pinned at exactly 1.0 — the fixed budget makes a sink structurally impossible, not just
+unlikely. Notice the sharper thing this actually buys you, though: at high bias, the OT plan doesn't just
+cap key 0 — *every* column gets forced to exactly its 1.0 share, including keys that might genuinely
+deserve more attention across the batch on content grounds. Two-sided OT doesn't distinguish "an
+undeserved sink" from "a key the content scores say is broadly useful"; it flattens both. That bluntness
+is a real cost of the two-sided fix, and it's one honest reason production attention doesn't do this.
+
+Getting there costs a pass over the score matrix per iteration, alternating which axis you normalize:
+
+<SinkhornStepper />
+
+Step 1 above is exactly softmax — one row-normalize, nothing else — and you can watch column 0 sitting at
+several times its fair share right there. Each further half-step squeezes the other axis without fully
+undoing the one just fixed, and the two marginals converge together. That's the mechanical cost real
+two-sided OT attention pays that plain softmax doesn't: not one extra pass, but one extra pass *per
+Sinkhorn iteration*, and convergence to a tight doubly-stochastic matrix generally takes several.
+
+## What GOAT actually does instead
+
+Here's the pivot. GOAT does not use any of the above. Its own Appendix A is titled, plainly, "Proof of
+Attention as **One-Sided** Entropic Optimal Transport" — and that one-sidedness is the paper's real
+starting point, first established in a solo preprint by the same first author (Litman, arXiv 2508.08369,
+2025). Fix a single query as a unit mass, add one Lagrange multiplier for the one constraint (its own
+weights sum to 1), solve the stationarity condition, and you get back exactly softmax:
+
+$$
+\bm{p}^{\star}=\arg\min_{\bm{p}\in\Delta^{L-1}}\Big\{\langle\bm{p},-\bm{s}\rangle-\tau H(\bm{p})\Big\}
+\quad\Longrightarrow\quad
+p_j^{\star}=\frac{\exp(s_j/\tau)}{\sum_k \exp(s_k/\tau)}
+$$
+
+There is no column constraint anywhere in this derivation — it's one query at a time, against a fixed
+total-mass-one budget on itself. Standard attention, in other words, *already is* an entropic OT
+solution; it's just the entropy term equals a KL divergence against an implicit **uniform** prior over
+keys (Shannon entropy is negative KL against uniform, up to a constant). GOAT's actual move is
+generalizing that one fixed term, not adding a second constraint:
+
+$$
+p_{j}^{\star}=\arg\min_{\bm{p}}\Big\{-\langle\bm{p},\bm{s}\rangle+\tau\,\mathrm{KL}(\bm{p}\,\|\,\bm{\pi})\Big\}
+\;\Longrightarrow\;
+p_{j}^{\star}=\mathrm{softmax}\!\big(s_j/\tau+\log\pi_j\big)
+$$
+
+Swap the flat prior $\pi$ for a learned one and you get softmax over content scores *shifted by a
+learned log-prior* — additively, per key. That's the entire mechanism. Every positional encoding you
+already know — RoPE, ALiBi, sinusoidal — is reframed here as a hand-picked approximation to this one
+missing term, and GOAT's contribution is parameterizing it properly and training it.
+
+## The prior, precisely
+
+GOAT builds the log-prior $\mathcal{K}_{ij}$ from two learned pieces, added together, both engineered to
+be **additive logit biases** — never multiplicative, unlike RoPE's rotation — so a sink can be created
+without inflating any content vector's norm:
+
+**A relative, shift-invariant term.** A truncated Fourier series in the distance $i-j$, with *learnable*
+amplitudes $\alpha_r,\beta_r$ per frequency and *fixed* geometric frequencies $\omega_r$:
+
+$$
+\mathcal{K}^{\text{rel}}_{ij}=\sum_{r=1}^{R}\Big[\alpha_r\cos(\omega_r(i-j))+\beta_r\sin(\omega_r(i-j))\Big]
+$$
+
+Trainable means exactly this: the frequencies are the fixed geometric ladder every Fourier-feature
+positional scheme uses, but how much each frequency contributes — and whether it attracts or actively
+suppresses (negative $\alpha_r,\beta_r$ are allowed) — is learned from data, not hand-set the way RoPE's
+rotation angles or ALiBi's linear slope are.
+
+**An absolute, key-only sink term.** A small MLP over each key's normalized position, feeding a single
+learned bias $u(j)$ that every query sees identically:
+
+$$
+\mathcal{K}_{ij}=\mathcal{K}^{\text{rel}}_{ij}+u(j), \qquad
+\langle\bm{q}_{\text{sink},i},\bm{k}_{\text{sink},j}\rangle=u(j)\ \ \forall i
+$$
+
+Both pieces are linearized into extra query/key dimensions via angle-sum identities (the relative term)
+and a broadcast constant channel (the sink term), then concatenated onto the *content* query/key vectors
+before the usual dot product — Algorithm 1 in the paper. That's the trick that keeps this a drop-in: the
+composite vectors go straight into an ordinary `scaled_dot_product_attention` call, so the prior rides
+for free inside whatever fused kernel PyTorch picks (FlashAttention, mem-efficient, cuDNN). No extra
+passes, no materialized L×L bias matrix — the opposite of what the Sinkhorn machinery above requires.
+
+<Figure
+  src="/articles/goat-optimal-transport-attention/fig1.png"
+  alt="Four heatmaps on a toy copy-mixture task: (a) the key-only sink component, a warm gradient concentrated at key position 0; (b) the translation-equivariant relative component, a diagonal periodic band; (c) their sum, the row-centered total log-prior; (d) the resulting causal attention probabilities after masking and softmax, showing mass concentrated at the first token and along the query-equals-previous-token diagonal."
+  caption="GOAT's log-prior decomposes cleanly into a key-only sink term and a translation-equivariant relative term; summing and softmaxing recovers a first-token sink plus a local-copy diagonal on a synthetic task built to need exactly both (paper, Figure 1)."
+/>
+
+## Sinks are optimal, not eliminated
+
+This is the part the "materializes a solution" framing can mislead you on. GOAT does not make sinks go
+away. Its own Theorem 5.1 ("Collapse to Prior") proves the opposite: as a query's content signal weakens
+($\omega_i \to 0$, the score spread across keys), its attention distribution provably converges to
+whatever the prior says — sink included. A sink is the *correct* response to an uninformative query under
+this objective, not a bug to be optimized out.
+
+What GOAT changes is *where the sink lives*. Decompose the margin that makes key $j^\star$ a sink into a
+content part and a prior part: $z_{ij^\star}-z_{ik} = (s_{ij^\star}-s_{ik}) + (\mathcal{K}_{ij^\star} -
+\mathcal{K}_{ik})$. Standard attention has no prior term to spend, so the entire margin has to come from
+content — the model is forced to learn a generic, high-norm key vector, exactly the outlier Gu et al.
+found empirically. GOAT can spend the *prior's* budget instead, via the unconstrained bias $u(j^\star)$,
+leaving the content key free to represent whatever the token actually is.
+
+The paper backs this with a stability bound (Theorem 5.4) that I found genuinely clarifying: define
+"context sensitivity" as the total probability mass *not* on the sink — how much a query's output can be
+perturbed by noise elsewhere in the context. Under a uniform prior (standard attention), that sensitivity
+provably converges to 1 as context length grows — the sink's relative share shrinks, and noise
+resistance decays away — *unless* the content margin keeps growing with it. Under a peaked, prior-driven
+sink, the same sensitivity stays bounded for any margin $\delta$, and $\delta$ only needs to grow
+logarithmically with length to hold the line. That's a plausible first-principles account of something
+StreamingLLM and Gu et al. only observed empirically: why a sink token's activation magnitude tends to
+grow with how much context it has to keep suppressing, and therefore why it's such a persistent outlier
+for quantization. I want to be precise about what's tested and what's argued, though — **GOAT runs no
+quantization experiment and no KV-cache-eviction experiment.** The stability theorem is a real,
+checkable piece of math; whether a disentangled sink actually behaves better under 4-bit quantization or
+mid-stream cache eviction is a plausible prediction from it, not a result in this paper.
+
+## Does it actually generalize length?
+
+Three different evaluations, and they tell different stories.
+
+**Perplexity (125M params, C4, 4B tokens, trained at 2,048, tested to 32,768 — 16×).** The in-distribution
+number is exact and real: GOAT 30.95 vs. ALiBi 32.49 vs. RoPE 33.24 — a genuine but modest 1.55-point win
+over the stronger baseline. RoPE's extrapolation is where "catastrophic" earns its word: perplexity
+climbs from about 30 at 2,048 to roughly 500 by 32,768. But reading the actual extrapolation curve (no
+exact numbers are given past the in-distribution point, so these are chart reads): ALiBi stays close to
+flat, in the low-to-mid 30s across the whole range, while GOAT's own line drifts up too — to somewhere
+around 55–65 by 32,768. GOAT is dramatically better than RoPE and still meaningfully worse than ALiBi at
+the longest length tested, despite winning in-distribution. "Combines the fidelity of a learned prior
+with the robustness of a fixed encoding" is the paper's framing; the more precise version is that GOAT
+trades a little of ALiBi's flatness for a real in-window improvement, not a strict improvement on both
+axes simultaneously.
+
+<Figure
+  src="/articles/goat-optimal-transport-attention/fig2.png"
+  alt="Three panels. Left: perplexity vs. context length from 2,048 to 32,768 tokens — RoPE (grey, dashed) climbs from about 30 to 500, ALiBi (blue, dotted) stays flat in the low 30s, GOAT (black, solid) rises gently to the 50s-60s; an inset shows the exact in-distribution numbers at L=2048: RoPE 33.24, ALiBi 32.49, GOAT 30.95, a gap of 1.55. Middle: the learned bias u(j) against key position from 0 to 2048, a sharp spike near j=0 and a rise near j=2000. Right: default (prior) mass vs. content signal strength, GOAT's curve falling from 1.0 to near 0 fastest, ALiBi staying elevated, RoPE partially disengaging."
+  caption="The exact numbers exist only at the in-distribution point (inset): GOAT 30.95 vs. ALiBi 32.49 vs. RoPE 33.24. Past that, no data table is given — the extrapolation curve (left) has to be read off the chart (paper, Figure 2)."
+/>
+
+**Passkey retrieval (trained at 1,024, tested to 16,384 — 16×, span-token accuracy).** This is where GOAT
+looks strongest, and where I'd trust perplexity least as a proxy — perplexity averages over a whole
+sequence; passkey retrieval asks whether one specific fact survives. Reading the figure (again, no data
+table given): GOAT stays around 0.90–1.00 across the *entire* range. ALiBi degrades steadily from about
+0.88 to 0.49 — more than half its accuracy gone — which is worth sitting with, because ALiBi looked
+essentially flat on perplexity over the same range. Flat perplexity does not mean flat retrieval; they're
+measuring different things, and a model can average well while still losing a specific fact. RoPE with
+position interpolation is the biggest surprise: it starts near 1.0 at the training length and falls to
+about 0.30 by *2×* — collapsing faster than plain rotary RoPE, despite position interpolation existing
+specifically to help extrapolation. Sinusoidal absolute encoding is worst throughout, roughly 0.10–0.15
+past training length.
+
+**Needle-in-a-haystack (same models, context 512–16,384 × depth 0.1–0.9, span-token accuracy heatmap.)**
+GOAT's heatmap is close to uniformly yellow (roughly 0.85–1.0) across the whole grid. But all four
+baselines look uniformly mediocre — not "fine at short context, collapsing with length" the way passkey
+showed, but flatly teal-to-dark (roughly 0.2–0.5 by the color scale) *even at 512 tokens*, shorter than
+their own training length. I can't fully reconcile that with the passkey plot's baselines starting near
+1.0 at comparable lengths, and the paper doesn't discuss it — worth flagging as something I could not
+independently verify rather than something I can explain away.
+
+**Vision (ViT-Small, ImageNet-1k, trained at 224×224, evaluated up to higher resolutions, zero-shot).**
+The learned-PE baseline degrades sharply past its training resolution; GOAT holds up substantially
+better, and the 2D log-prior it learns is visibly local and shift-invariant despite starting from a
+uniform initialization. This is the one modality where the paper doesn't compare against a strong,
+already-extrapolation-robust baseline like ALiBi — the comparison is against ordinary learned absolute
+position embeddings, which is a lower bar to clear.
+
+| Task | Train length | Test length | Metric | GOAT | Strongest baseline |
+|---|---|---|---|---|---|
+| C4 language modeling | 2,048 | 2,048 (in-dist.) | Perplexity ↓ | **30.95** | ALiBi 32.49 · RoPE 33.24 |
+| C4 extrapolation | 2,048 | 32,768 (16×) | Perplexity ↓ | ~55–65 (chart read) | ALiBi ~30s (chart read) · RoPE ~500 |
+| Passkey retrieval | 1,024 | 16,384 (16×) | Span-token acc. | ~0.90 (chart read) | ALiBi ~0.49 · RoPE(rotary) ~0.11 |
+| Needle-in-a-haystack | 1,024 | 512–16,384 | Span-token acc. | ~0.85–1.0 | all 4 baselines ~0.2–0.5, incl. at 512 |
+| DNA (Human Ref. Genome) | not stated | not stated | Validation NLL ↓ | **1.1294** nats/tok | RoPE 1.2054 nats/tok |
+| DNA generative GC% fit | — | 200-nt continuations, N=3 | Pearson r ↑ | 0.466 | RoPE 0.320 |
+| ImageNet-1k | 224×224 | up to higher res., zero-shot | Top-1 acc. | flat, higher | learned-PE ViT degrades sharply |
+
+## What it costs
+
+The design is genuinely clever on cost: because the prior is injected as extra dimensions on the query
+and key vectors rather than an added L×L bias matrix, GOAT's forward pass is one call to
+`torch.nn.functional.scaled_dot_product_attention` — the same call a plain-softmax implementation makes,
+just with a few extra lanes in the head dimension. It is not Sinkhorn, so the "how many iterations, and
+what does that cost" question that matters for real two-sided OT attention (the machinery in the stepper
+above) simply doesn't apply here — there are zero iterations, by construction.
+
+The one place the paper measures this is the DNA task, RoPE vs. GOAT, same training budget:
+
+<Figure
+  src="/articles/goat-optimal-transport-attention/fig4.png"
+  alt="Two bar charts. Left: validation NLL in nats per token and bits per base, RoPE at 1.2054 / 1.7390 vs GOAT at 1.1294 / 1.6294, GOAT lower on both. Right: training throughput in tokens per second and peak CUDA memory allocation in GB, RoPE at 139,886 tokens/sec and 2.86 GB vs GOAT at 138,171 tokens/sec and 1.83 GB."
+  caption="The only wall-clock and memory numbers in the paper: GOAT trains at 138,171 tok/s vs. RoPE's 139,886 (about 1.2% slower) while using 1.83 GB peak CUDA memory vs. 2.86 GB (36% less) (paper, Figure 4)." 
+/>
+
+That memory drop is a genuinely interesting side effect — plausibly because GOAT's prior replaces a
+separate learned/rotary positional pipeline with a few extra head-dim lanes computed inline, rather than
+because of anything OT-specific — and the throughput hit is close to noise. Both baselines here run
+through the same optimized SDPA call, so this is a fair fused-kernel-vs-fused-kernel comparison, not
+GOAT-optimized-versus-baseline-naive. But it's also the *only* throughput or memory number in the whole
+paper. The flagship C4 language-modeling experiment — the one carrying the length-generalization
+headline — reports zero wall-clock numbers. I'd want that filled in before trusting "minimal computational
+overhead" as a general claim rather than a DNA-task-specific one.
+
+## Scale, and what's not tested
+
+Every experiment here is small: 125M-parameter decoder-only transformers for both the C4 and DNA tasks,
+ViT-Small (roughly 22M parameters) for ImageNet. Trained on 4B tokens (C4) — the DNA task's context
+length and token count aren't stated in the paper at all, which is its own small gap next to the detailed
+hyperparameter tables C4 and ImageNet get in the appendices. There is no scaling curve — one operating
+point per modality, no test at 350M, 1B, or beyond. That's a real limitation on how far any of this
+extrapolates, not a scandal; it puts GOAT in the same boat as most attention-replacement papers, which
+also rarely clear a billion parameters before publication. The paper is peer-reviewed (ICML 2026, per the
+released package's own citation), which at least means these specific numbers passed a review pass — it
+doesn't substitute for a scale test.
+
+More importantly for the sink story specifically: no quantization experiment, no KV-cache-eviction
+experiment. Given that Xiao et al.'s streaming-eviction result and Gu et al.'s quantization link are
+*the* two production-relevant reasons sinks matter — cited in GOAT's own introduction — their absence from
+the evaluation is the biggest gap between what the framing promises and what's actually measured. The
+stability theorem gives a good reason to expect GOAT would help on both; expecting is not measuring.
+
+## The code
+
+The package is real, installable, and does not require the paper's training setup to try:
+
+```bash
+pip install goat-attention
+```
+
+```python
+# what GOAT actually ships — one SDPA call, no Sinkhorn
+# (trimmed from src/goat/attention.py, GoatAttention.forward)
+q_total[..., :D_c] = q_content / math.sqrt(D_c)   # content lane, scaled as usual
+k_total[..., :D_c] = k_content
+q_total[..., D_c:] = q_pos                         # prior lane: spectral rotation + sink bias
+k_total[..., D_c:] = k_pos                         # prior lane: raw Fourier features + u(j)
+
+attn_output = F.scaled_dot_product_attention(
+    q_total * math.sqrt(D_total), k_total, v_total,
+    attn_mask=merged_mask, is_causal=use_internal_causal,
+)
+```
+
+Next to plain softmax attention, for scale — this is the entire operation GOAT is replacing the *cost
+model* of, not the interface:
+
+```python
+# standard scaled dot-product attention — one softmax, one constraint (rows sum to 1)
+weights = torch.softmax(q @ k.transpose(-2, -1) / math.sqrt(d_k), dim=-1)
+out = weights @ v
+```
+
+And the generic two-sided entropic-OT attention GOAT deliberately does *not* implement — this is the
+exact update the stepper above walks through, spelled out as code, the kind of thing Sinkformers-style
+attention actually runs per layer:
+
+```python
+# generic two-sided entropic-OT attention (Sinkhorn–Knopp) — NOT what GOAT does.
+# Illustrative background, not from any repo: what a real column-constrained
+# OT attention layer pays per forward pass, on top of the same score matrix.
+K = torch.exp(scores / tau)                 # scores: (queries, keys)
+for _ in range(n_iters):                    # each iteration = one more full pass
+    K = K / K.sum(dim=-1, keepdim=True)     # row-normalize  (row marginal = 1)
+    K = K / K.sum(dim=-2, keepdim=True)     # col-normalize  (col marginal = 1)
+plan = K                                    # doubly stochastic: no column can dominate
+```
+
+One more thing worth knowing if you're picking hyperparameters: the same knob has three different
+recommended values depending on where you look. The README suggests `pos_rank=4` as "a good starting
+point" for GPT-style models; the package's own `GoatAttention.for_gpt()` factory defaults to
+`pos_rank=0` (the spectral relative term disabled entirely, leaving only the sink bias and an
+ALiBi-seeded recency slope); the paper's own Appendix G reports the actual C4 experiment ran with
+`pos_rank=2`. None of these is wrong, exactly — research code drifts after a paper ships — but it's the
+kind of "does the shipped default match the paper's own config" mismatch worth checking before trusting a
+factory default. No pretrained weights are released either way; the repository ships the module, not a
+checkpoint that reproduces any number in this article.
+
+## The take
+
+The derivation is the best part of this paper, and it's worth taking on its own terms: attention already
+was a one-sided entropic-OT solution with an implicit uniform prior, every positional encoding you use is
+already an ad-hoc stand-in for a prior term this framing makes explicit, and generalizing that one term is
+a clean, cheap, kernel-compatible move. The sink theory is real math with a real, if untested,
+implication. What I'd push back on is the packaging: "entropic optimal transport" reads, to anyone who
+knows Sinkformers or this site's own SinkLoss, like the two-sided machinery that *structurally* forbids a
+sink — and GOAT is careful, in its own proofs, to say the opposite: a sink is optimal, and what's being
+fixed is where it lives, not whether it exists. The perplexity win is real but modest and doesn't hold at
+the longest length tested; the retrieval wins are larger and more convincing; the cost story is genuinely
+good but measured on one task out of three; and the two experiments that would tell you whether any of
+this matters where sinks actually hurt — quantization, KV-cache eviction — aren't in the paper. Read the
+math, use the package if the prior sounds useful, and don't expect it to have quietly solved the
+production problems StreamingLLM and Gu et al. described.
+
+---
+
+*Primary source: "You Need Better Attention Priors" (Litman & Guo; Stanford, 2026, arXiv 2601.15380),
+accepted to ICML 2026. The one-sided EOT framing originates in Litman's solo preprint (arXiv 2508.08369,
+2025). Code: [github.com/elonlit/goat](https://github.com/elonlit/goat) /
+[`goat-attention` on PyPI](https://pypi.org/project/goat-attention/). Background: StreamingLLM (Xiao et
+al., 2023, arXiv 2309.17453); "When Attention Sink Emerges in Language Models" (Gu et al., ICLR 2025,
+arXiv 2410.10781); Sinkformers (Sander, Ablin, Blondel & Peyré, 2022, arXiv 2110.11773). Figures are
+reproduced from the paper's own assets and PDF; chart values not given exact numbers in the text are
+called out as such above. The interactive diagrams are original, illustrative implementations of the
+general Sinkhorn–Knopp algorithm, not GOAT's own code.*
