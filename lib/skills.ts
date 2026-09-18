@@ -12,6 +12,11 @@ import matter from "gray-matter"
 // agent can discover and verify them without cloning anything: the index
 // carries a sha256 of each SKILL.md, and the same bytes are served at the URL
 // the digest describes.
+//
+// Vendored skills are deliberately left out. A directory holding a VENDORED.md
+// is somebody else's work kept here for reproducibility, and publishing it from
+// this endpoint would put their SKILL.md under our name and our digest. It
+// still installs with the plugin; it is just not advertised as ours.
 
 const SKILLS_DIR = join(process.cwd(), "brand-crew", "skills")
 
@@ -29,6 +34,7 @@ function read(): Skill[] {
   return readdirSync(SKILLS_DIR, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .map((d) => {
+      if (existsSync(join(SKILLS_DIR, d.name, "VENDORED.md"))) return null
       const file = join(SKILLS_DIR, d.name, "SKILL.md")
       if (!existsSync(file)) return null
       const raw = readFileSync(file)
