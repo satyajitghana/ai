@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+
 import { profile } from "@/data/profile"
 import {
   getArticle,
@@ -23,6 +26,73 @@ function header(title: string, canonical: string, meta: string[] = []): string {
     ...meta.map((m) => `> ${m}`),
     "",
   ].join("\n")
+}
+
+// <Receipts src="…"> renders a dataset that lives in a separate JSON file, so an
+// agent reading the .md variant would otherwise get a bare path and none of the
+// evidence. Expand it into a real markdown table from the same file the browser
+// reads. Every other component carries its content inline in attributes (alt,
+// caption, claim), which is why this is the only one that needs expanding.
+//
+// A missing file degrades to a plain link rather than throwing: the HTML route
+// already fails the build loudly on that, and an agent asking for markdown is
+// better served a URL than a 500.
+interface ReceiptsColumn {
+  key: string
+  label: string
+  align?: "left" | "right"
+}
+interface ReceiptsData {
+  claim: string
+  method?: string
+  source?: string
+  captured?: string
+  note?: string
+  columns: ReceiptsColumn[]
+  rows: Record<string, string | number | boolean | null>[]
+}
+
+function receiptCell(value: string | number | boolean | null): string {
+  if (value === null || value === undefined) return "—"
+  if (typeof value === "boolean") return value ? "yes" : "no"
+  if (typeof value === "number") return value.toLocaleString("en-US")
+  return String(value).replace(/\|/g, "\\|")
+}
+
+function expandReceipts(body: string): string {
+  return body.replace(
+    /<Receipts\s+src="([^"]+)"\s*\/>/g,
+    (whole, src: string) => {
+      let data: ReceiptsData
+      try {
+        data = JSON.parse(
+          readFileSync(join(process.cwd(), "public", src), "utf8")
+        ) as ReceiptsData
+      } catch {
+        return `> receipts: ${absoluteUrl(src)}`
+      }
+      const head = `| ${data.columns.map((c) => c.label).join(" | ")} |`
+      const rule = `| ${data.columns
+        .map((c) => (c.align === "right" ? "---:" : ":---"))
+        .join(" | ")} |`
+      const rows = data.rows.map(
+        (r) => `| ${data.columns.map((c) => receiptCell(r[c.key])).join(" | ")} |`
+      )
+      return [
+        `**Receipts.** ${data.claim}`,
+        "",
+        head,
+        rule,
+        ...rows,
+        "",
+        ...(data.note ? [data.note, ""] : []),
+        ...(data.method ? [`> method: ${data.method}`] : []),
+        ...(data.source ? [`> source: ${data.source}`] : []),
+        ...(data.captured ? [`> captured: ${data.captured}`] : []),
+        `> data: ${absoluteUrl(src)} (${data.rows.length} rows)`,
+      ].join("\n")
+    }
+  )
 }
 
 function jsonBlock(data: unknown): string {
@@ -53,7 +123,7 @@ export function contentMarkdown(
           ...(article.tags.length
             ? [`tags: ${article.tags.join(", ")}`]
             : []),
-        ]) + article.body
+        ]) + expandReceipts(article.body)
       )
     }
     case "logs": {
