@@ -21,27 +21,41 @@ and if it does not fit, lengthen that scene's `dur` in the film's `TIMELINE`.
 Speeding the voice up or hacking the sentence shorter both make the film worse.
 `narrate.py` exits non-zero on a beat that overruns, on purpose.
 
-Aim for **≥0.5s** of silence between the end of a line and the next cut, and
-start each line 0.3s after its scene begins so the cut lands before the voice.
+Start each line 0.3s after its scene begins so the cut lands before the voice,
+and leave silence before the next cut — **0.25s on Kokoro, 0.5s on Piper**.
 
-Half a second sounds generous and is not. Piper is stochastic — the same text
-resynthesised comes out a different length. Measured across one 13-beat script
-resynthesised twice, drift reached **0.42s on a single five-second line**, in
-both directions. A beat that fits with 0.2s to spare today overruns tomorrow,
-which means the film is not reproducible from its own script. `narrate.py`
-flags anything under 0.5s as TIGHT for this reason.
+The difference is reproducibility, not taste. Synthesising the same 13-beat
+script twice: **Kokoro is byte-identical, 0.0000s drift.** Piper drifted up to
+**0.42s on a single five-second line**, in both directions — so a Piper beat
+that fits with 0.2s to spare today overruns tomorrow, and the film quietly
+stops being reproducible from its own script. `narrate.py` applies the right
+threshold for the engine you picked.
 
-## Setup
+## Pick an engine
+
+**Kokoro-82M is the default and should stay the default.** Piper is VITS and
+sounds like it — fine for a caption read aloud, audibly synthetic over a minute
+of narration. Kokoro is the smallest model that does not, it still runs about
+3x realtime on CPU, and it is deterministic.
 
 ```bash
-python3 -m venv ttsenv && ./ttsenv/bin/pip install piper-tts
+python3 -m venv ttsenv && ./ttsenv/bin/pip install kokoro-onnx soundfile
+R=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
+curl -sLO $R/kokoro-v1.0.onnx -O $R/voices-v1.0.bin      # 325MB + 28MB
+```
+
+54 voices, 28 of them English (`af_*`/`am_*` American, `bf_*`/`bm_*` British);
+`af_heart` is the highest-graded. **Render the same line in a shortlist and
+listen before committing to one** — you cannot judge this from a spec sheet,
+and neither can an agent.
+
+Piper stays available for a quick draft (`--engine piper`), ~114 MB:
+
+```bash
+./ttsenv/bin/pip install piper-tts
 B=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high
 curl -sLO $B/en_US-lessac-high.onnx -O $B/en_US-lessac-high.onnx.json
 ```
-
-`en_US-lessac-high` is ~114 MB and synthesises a minute of speech in seconds on
-CPU. Other voices live under `rhasspy/piper-voices`; `-high` variants are worth
-the size for anything a reader will sit through.
 
 ## Write the script
 
@@ -67,8 +81,9 @@ roughly 2.3 words per second.
 
 ```bash
 SKILL=brand-crew/skills/film-narration
-python3 $SKILL/scripts/narrate.py script.json \
-  --piper ./ttsenv/bin/piper --voice en_US-lessac-high.onnx --out narration
+./ttsenv/bin/python $SKILL/scripts/narrate.py script.json \
+  --engine kokoro --model kokoro-v1.0.onnx --voices voices-v1.0.bin \
+  --voice af_heart --out narration
 ```
 
 Prints a per-beat fit report and writes `narration/voice.wav` (mono 48k, full

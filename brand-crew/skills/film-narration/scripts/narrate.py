@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Turn a beat script into a timed narration track and a caption file.
 
-    python3 narrate.py script.json --voice <voice.onnx> --piper <piper bin> --out <dir>
+    # Kokoro (default): more natural, 82M, ~3x realtime on CPU
+    python3 narrate.py script.json --engine kokoro \
+        --model kokoro-v1.0.onnx --voices voices-v1.0.bin --voice af_heart
+
+    # Piper: lighter and faster, but audibly synthetic
+    python3 narrate.py script.json --engine piper \
+        --piper ./ttsenv/bin/piper --voice en_US-lessac-high.onnx
 
 `script.json` is a list of beats, one per scene, in film order:
 
@@ -25,10 +31,18 @@ import argparse, json, re, subprocess, sys
 from pathlib import Path
 
 LEAD = 0.30        # let the cut land before the voice starts
-# Piper is stochastic: the same text resynthesised gives a different length.
-# Measured drift on a 13-beat script was up to 0.42s on a five-second line, so a
-# beat that only just fits today will overrun on the next run. Demand more.
-HEADROOM = 0.50
+
+# How much silence to demand between the end of a line and the next cut, per
+# engine, and the reason it differs: reproducibility, not taste.
+#
+#   kokoro  deterministic. Measured over a 13-beat script synthesised twice:
+#           byte-identical output, 0.0000s drift. What fits today fits forever,
+#           so a quarter second is enough to keep the cut from clipping.
+#   piper   stochastic. Same measurement: up to 0.42s of drift on a single
+#           five-second line, in both directions. A beat that fits with 0.2s to
+#           spare stops fitting on the next run, and the film quietly stops
+#           being reproducible from its own script.
+HEADROOM = {"kokoro": 0.25, "piper": 0.50}
 
 
 def probe(path):
@@ -38,11 +52,41 @@ def probe(path):
     return float(out.stdout.strip())
 
 
-def synth(piper, voice, text, dest):
-    subprocess.run([piper, "-m", str(voice), "-f", str(dest)],
-                   input=text, text=True, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return probe(dest)
+class Piper:
+    """VITS. Fast and small; the prosody gives it away on anything long."""
+
+    def __init__(self, args):
+        self.bin, self.voice = args.piper, args.voice
+
+    def say(self, text, dest):
+        subprocess.run([self.bin, "-m", str(self.voice), "-f", str(dest)],
+                       input=text, text=True, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return probe(dest)
+
+
+class Kokoro:
+    """Kokoro-82M via onnxruntime. Loaded once — the model is ~325MB and
+    reloading it per beat dominates the runtime."""
+
+    def __init__(self, args):
+        from kokoro_onnx import Kokoro as K
+        import soundfile  # noqa: F401  (imported here so the error names the fix)
+        self.k = K(args.model, args.voices)
+        self.voice, self.speed, self.lang = args.voice, args.speed, args.lang
+        if self.voice not in self.k.get_voices():
+            sys.exit(f"unknown voice {self.voice!r}; available: "
+                     f"{', '.join(sorted(self.k.get_voices()))}")
+
+    def say(self, text, dest):
+        import soundfile as sf
+        samples, sr = self.k.create(text, voice=self.voice,
+                                    speed=self.speed, lang=self.lang)
+        sf.write(str(dest), samples, sr)
+        return len(samples) / sr
+
+
+ENGINES = {"piper": Piper, "kokoro": Kokoro}
 
 
 def ts(t):
@@ -64,11 +108,18 @@ def wrap(s, n=42):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("script")
-    ap.add_argument("--voice", required=True)
-    ap.add_argument("--piper", default="piper")
+    ap.add_argument("--engine", choices=sorted(ENGINES), default="kokoro")
+    ap.add_argument("--voice", required=True,
+                    help="kokoro: a voice name (af_heart). piper: a path to a .onnx")
+    ap.add_argument("--piper", default="piper", help="piper binary (engine=piper)")
+    ap.add_argument("--model", default="kokoro-v1.0.onnx", help="engine=kokoro")
+    ap.add_argument("--voices", default="voices-v1.0.bin", help="engine=kokoro")
+    ap.add_argument("--speed", type=float, default=1.0, help="engine=kokoro")
+    ap.add_argument("--lang", default="en-us", help="engine=kokoro")
     ap.add_argument("--out", default="narration")
     ap.add_argument("--lufs", type=float, default=-17.0)
     args = ap.parse_args()
+    engine = ENGINES[args.engine](args)
 
     out = Path(args.out); (out / "beats").mkdir(parents=True, exist_ok=True)
     beats = json.loads(Path(args.script).read_text())
@@ -76,10 +127,10 @@ def main():
     offset, placed, bad = 0.0, [], []
     for b in beats:
         wav = out / "beats" / f"{b['name']}.wav"
-        spoken = synth(args.piper, args.voice, b["say"], wav)
+        spoken = engine.say(b["say"], wav)
         start = offset + LEAD
         slack = b["dur"] - LEAD - spoken
-        flag = "" if slack >= HEADROOM else ("  TIGHT" if slack >= 0 else "  OVERRUNS")
+        flag = "" if slack >= HEADROOM[args.engine] else ("  TIGHT" if slack >= 0 else "  OVERRUNS")
         if slack < 0:
             bad.append((b["name"], -slack))
         print(f"  {b['name']:12} scene={b['dur']:5.2f}s  speech={spoken:5.2f}s  slack={slack:+5.2f}s{flag}")
