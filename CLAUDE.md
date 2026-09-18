@@ -68,6 +68,17 @@ Rules for paper figures:
 - **Never edit `data/.generated/*`** — machine-generated, off-limits.
 - **Always run `pnpm validate`** before committing any content/data change; fix until green. (A plugin PostToolUse hook also auto-validates content/data edits.)
 - **Everything ships via PR** with a Vercel preview — nothing auto-deploys to the site.
+- **`pnpm validate` is not the build.** It typechecks and compiles MDX; it does not do static generation or output-file tracing, so it cannot catch a deploy failure. Run **`pnpm build`** before opening or updating a PR.
+- **Watch the serverless function budget.** Vercel rejects any function over **250 MB uncompressed**. `/articles/[slug]` bundles every article (template-literal `import()`), so it grows with the corpus. Check the largest trace after a build:
+  ```bash
+  python3 -c "
+  import json,os,glob
+  for nft in glob.glob('.next/server/**/*.nft.json', recursive=True):
+      root=os.path.dirname(os.path.abspath(nft))
+      t=sum(os.path.getsize(os.path.normpath(os.path.join(root,f))) for f in json.load(open(nft)).get('files',[]) if os.path.exists(os.path.normpath(os.path.join(root,f))))
+      print(f'{t/1048576:8.1f} MB  {nft}')" | sort -rn | head -5
+  ```
+  Two rules keep it down: content routes pair their template-literal `import()` with **`dynamicParams = false`** (the pattern the Next.js MDX guide documents), and **nothing reads `public/` with `fs` on a path the tracer can't resolve** — that pulls the whole directory into every function reachable from it.
 - **Never post to social without explicit approval.** `/amplify` only drafts into `drafts/<date>/`; Satyajit reviews and approves before anything is posted.
 - **No PDFs stored for papers** — paper links are derived from `arxivId`.
 - **MDX prose: escape a bare `<`.** In MDX a `<` starts a JSX tag, so `<2%`, `x < 3`, `<0.5` etc. in prose break the build (`validate:content` only checks frontmatter — `validate:mdx` catches these). Write `&lt;`, or wrap the expression in `` `code` `` or `$math$`.
