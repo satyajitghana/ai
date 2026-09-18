@@ -1,0 +1,693 @@
+---
+title: "Parallel Constrained Decoding, From First Principles"
+description: "Every decoder-only LLM already computes a full-vocabulary distribution at every position — restricting it to a JSON field's legal values and renormalizing is arithmetic you get for free, no new training required. The seven-step mechanism, verified against two real implementations (including a confirmed divergence between them on multi-token candidates), a runnable ~40-line PyTorch build, and a concrete calibration recipe with code."
+date: 2026-09-18
+interest: 4
+helpful: 5
+tags:
+  - inference
+  - structured-generation
+  - calibration
+  - llm
+  - explainer
+draft: false
+---
+
+import { TokenTape, VocabGather } from "@/components/articles/parallel-constrained-decoding/vocab-gather"
+import { SubsetSoftmax } from "@/components/articles/parallel-constrained-decoding/subset-softmax"
+import { CostModel } from "@/components/articles/parallel-constrained-decoding/cost-model"
+
+Ask a model to fill in a JSON schema the ordinary way and it types the whole thing out, character by
+character: `{`, `"risk_level"`, `:`, `"HIGH"`, `,`, `"requires_escalation"`, `:`, `"true"`, `}` — one
+forward pass per token, 150 to 500 of them for a real schema, latency growing with every field you add.
+Nothing stops the model from typing an unmatched brace, a missing comma, or a value that isn't in your
+enum. This got a name — **Parallel Constrained Decoding (PCD)** — after Niels Rogge (Hugging Face)
+published a visual walkthrough of it built from a Qwen2.5 release calling itself RLCD, and TypeSafe's
+closed product **Jev** made the same pitch commercially. The mechanism underneath is small enough to
+fit on one page, needs no training to exist at all, and — verified against two independent, real
+implementations below — has at least one place where getting the bookkeeping wrong silently returns
+the wrong answer while still printing "100% valid JSON." This article is that mechanism: how it works,
+what it costs, how you'd calibrate or train one, and runnable code for all three. The product claims
+around Jev itself are a separate question, covered in [Jev and the System-One
+model](/articles/jev-system-one-models) — this piece stays with the mechanism.
+
+<ModelCard repo="harshatheg/Qwen-2.5-1B-RLCD" note="26 files, 0 downloads, usedStorage: 0 — the Hub's own base_model tag calls it a finetune of Qwen2.5-1.5B-Instruct, but it ships no safetensors or GGUF shards to back that up." />
+
+<Video
+  src="/articles/parallel-constrained-decoding/pcd-film"
+  poster="/articles/parallel-constrained-decoding/pcd-film-poster.jpg"
+  alt="A hand-drawn film, 22 seconds. An empty schema card is ruled on pale paper, three labelled fields with blank value slots. A single stroke grows once across the top of the frame, tick-marked like tokens. Its end fans out into three identical lanes, one per field, which then advance together under one vertical sweep line. The scene cuts to a dark grid standing for the vocabulary; most cells stay grey while nine light gold and are drawn off to a single column at the right. Back on paper, the three slots fill with ink marks and the card's border lights. It closes on the hand-lettered words 'one pass, every field / valid because nothing else was scored'."
+  caption="An opener, not a trace. Every frame is drawn by JavaScript on a 2D canvas at 12fps; the lane count, the vocabulary grid and the nine lit cells are illustrative, not the real tensor shapes — the actual numbers are in the code and the components below. (Drawn with alesha-pro/tools' hand-drawn-canvas-animation skill.)"
+/>
+
+## The seven steps, once
+
+Work through one field with a concrete example: a support-ticket triage schema asking for
+`"risk_level"`, one of `HIGH`, `MEDIUM`, `LOW`, or `NONE`. Every stage below is real — the token IDs are
+Qwen2.5-1.5B-Instruct's actual tokenizer output, checked directly against `tokenizer.json`, not
+approximated. The one thing to watch for as you click through: step 5 has a surprise in it.
+
+<StepThrough titles={["prefill", "suffix pass", "hidden state", "LM head", "gather", "softmax", "argmax"]}>
+
+**1 — Prefill once.** Run the system prompt (a compact catalog of every field the schema asks for),
+the user's context document, and the start of the assistant turn through the decoder a single time.
+Every layer writes its keys and values into a KV cache — Qwen2.5-1.5B has 28 layers, so that's 28
+cache entries, one per layer, each holding every token's key/value vectors. Nothing about a specific
+field has happened yet; this pass only has to happen once no matter how many fields the schema has.
+
+<TokenTape
+  label='prefill — system(schema catalog) + user(context) + assistant "{" — once, for the whole schema'
+  tokens={["<|im_start|>", "system", "\\n", "Classify:", "risk_level", "...", "<|im_end|>", "<|im_start|>", "user", "\\n", "[context]", "<|im_end|>", "<|im_start|>", "assistant", "\\n{"]}
+/>
+
+**2 — Per-field suffix pass.** For `risk_level`, append the few tokens that open its value —
+`  "risk_level": "` — to the *cached* prefix and run only those new tokens through the decoder. The
+28-layer cache from step 1 is reused untouched; the decoder never re-reads the context or the schema
+catalog. A real schema has many fields, and every one of them appends its own short suffix onto the
+*same* cached prefix — which is exactly what makes batching them into one call possible (step 4 below).
+
+<TokenTape
+  label='suffix pass for "risk_level" — everything dashed is cache, only the 6 solid tokens are new work'
+  tokens={["<|im_start|>", "system", "\\n", "Classify:", "risk_level", "...", "<|im_end|>", "<|im_start|>", "user", "\\n", "[context]", "<|im_end|>", "<|im_start|>", "assistant", "\\n{", "\\u0020\\u0020\\\"", "risk_level", "\\\":", "\\u0020\\\""]}
+  highlightFrom={15}
+/>
+
+**3 — The final hidden state.** After that suffix pass, take the decoder's output at the *last*
+position only — one vector, 1,536 numbers wide for Qwen2.5-1.5B (its `hidden_size`; the model has 28
+layers and 12 attention heads, 2 of them key/value heads under GQA). Every other position in the
+suffix, and everything from the cached prefix, is discarded — this one vector is the entire summary of
+"given the context and the schema, what should the value of `risk_level` be."
+
+**4 — The LM head.** Push that single 1,536-wide vector through the LM head — one shared linear
+layer, `[1536, 151936]`, the exact same matrix every token in the model already uses to produce logits.
+This is not a new component built for PCD; it's the layer that turns hidden states into next-token
+predictions everywhere in the network. The output is one row of 151,936 logits, one per vocabulary
+entry.
+
+<VocabGather stage="full" />
+
+**5 — Keep only the candidate rows.** The schema says `risk_level` can only be `HIGH`, `MEDIUM`,
+`LOW`, or `NONE`, so gather just those rows and throw away the other 151,932. Here's the surprise: run
+the real tokenizer on all four choices and `MEDIUM` splits into **two tokens**, `M` + `EDIUM` — HIGH,
+LOW, and NONE are each one token, MEDIUM secretly isn't. The row gathered for "the value is MEDIUM" is
+really the logit for "the next token is `M`" — nothing here has looked at `EDIUM` at all. Hold that
+thought; it gets its own section below.
+
+<VocabGather stage="gathered" />
+
+**6 — Softmax over just those.** Renormalize: exponentiate the 4 gathered logits and divide by their
+own sum, so the 4 probabilities add to 1 — ignoring the other 151,932 rows completely. Drag the
+temperature below; it's the exact knob a calibration fit tunes later in this article.
+
+<SubsetSoftmax />
+
+**7 — Argmax, and a confidence for free.** The highest of the 4 probabilities names the predicted
+value; that probability itself is reported as a "confidence." It costs nothing extra — it fell out of
+step 6 — but *what it means* is worth being precise about, which is also saved for later.
+
+<SubsetSoftmax locked />
+
+</StepThrough>
+
+Repeat steps 2–7 for every other field in the schema — all of them branching off the *same* cached
+prefill from step 1 — and the whole schema is filled in after one prefill plus one cheap pass per
+field, no bracket, quote, or comma ever generated by the model. Since the JSON is assembled
+programmatically from the winning choices rather than typed out and parsed, it's syntactically valid
+by construction. That's the whole trick, and it needs nothing more exotic than logits you were already
+computing. Whether it's *correct* is a different claim from whether it's *valid syntax* — the gap
+between those two is most of what the rest of this article is about.
+
+TypeSafe's own documentation publishes this shape at a size that makes the point better than a
+four-option enum does. Its line-by-line search cookbook tags all 218 clauses of GitHub's Terms of
+Service with an ID, then sends **one** request whose `Choice` question carries all 218 IDs as options,
+alongside a second question asking separately whether the document answers the query at all — one
+shared state, every candidate scored off it:
+
+<Figure
+  src="/articles/parallel-constrained-decoding/fig1.png"
+  alt="Flow diagram. On the left, a tagged document (218 lines with IDs) and a user question feed into a shared document-and-user-question box inside a shaded panel labelled 'one TypeSafe request, both questions see the full document'. Inside the panel the shared state branches into two boxes: 'one ChoiceQuestion — which line answers the question?', producing a probability for every line ID, and 'one NoulQuestion — does the document contain an answer at all?', producing an exists value from 0 to 1. Outside the panel, local code sorts lines by Choice probability and applies a verdict of answered, partial or absent, merging into a final 'ranked evidence and document verdict'."
+  caption="The same mechanism at product scale: one shared state, 218 candidate options scored in a single request, code doing the ranking afterwards. (TypeSafe AI docs, 'Line-by-line search' cookbook, recipe diagram.)"
+/>
+
+Two details in that recipe are worth carrying into the rest of this article. The first is a documented
+ceiling: *"A `Choice` question accepts up to 255 options,"* past which the cookbook tells you to search
+in two passes — one question picks a window of lines, a second ranks the lines inside it. That 255 is
+the same number the RLCD repo's `high_cardinality_255.json` preset picks for its own headline
+benchmark, which is unlikely to be a coincidence. The second is the ID scheme: `line_id(i)` returns
+`f"L{i:03d}"`, so the options are `L000`, `L001`, … `L217` — zero-padded, fixed width, and every single
+one of them starting with the same character. Hold onto that shape; it is exactly what breaks the
+first-token scoring one of the two open implementations below actually ships.
+
+## A minimal, runnable implementation
+
+Here's the mechanism above as one function — prefill, cache broadcast, candidate-row gather, subset
+softmax — trimmed to the essentials. It's ~40 lines, uses only `transformers`, and will run on CPU
+(slowly) or GPU against the real Qwen2.5-1.5B-Instruct checkpoint:
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
+tok = AutoTokenizer.from_pretrained(MODEL_ID)
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16).eval()
+
+
+@torch.no_grad()
+def pcd(context: str, fields: dict[str, list[str]]) -> dict[str, tuple[str, float]]:
+    # 1. Prefill the shared context + schema ONCE, keep the KV cache.
+    prefix = (f"<|im_start|>system\nExtract the requested fields.<|im_end|>\n"
+              f"<|im_start|>user\n{context}<|im_end|>\n<|im_start|>assistant\n{{\n")
+    prefix_ids = tok(prefix, return_tensors="pt").input_ids
+    cache = model(prefix_ids, use_cache=True).past_key_values  # legacy tuple-of-(key, value)
+
+    # 2. One short suffix per field, e.g.  '  "risk_level": "'
+    suffixes = [f'  "{name}": "' for name in fields]
+    suf_ids = [tok(s, add_special_tokens=False).input_ids for s in suffixes]
+    width, pad = max(len(s) for s in suf_ids), (tok.pad_token_id or tok.eos_token_id)
+    batch = torch.tensor([s + [pad] * (width - len(s)) for s in suf_ids])
+    M = batch.shape[0]
+
+    # 3. Broadcast the ONE cache to M rows, then run ONE batched forward pass for every field.
+    bcache = tuple((k.repeat(M, 1, 1, 1), v.repeat(M, 1, 1, 1)) for k, v in cache)
+    attn = torch.cat([torch.ones(M, prefix_ids.shape[1], dtype=torch.long),
+                       (batch != pad).long()], dim=1)
+    logits = model(batch, past_key_values=bcache, attention_mask=attn).logits
+
+    # 4-7. Per field: last real position -> candidate rows -> subset softmax -> argmax.
+    out = {}
+    for i, (name, choices) in enumerate(fields.items()):
+        pos = len(suf_ids[i]) - 1
+        row = logits[i, pos, :]
+        cand_ids = [tok(c, add_special_tokens=False).input_ids[0] for c in choices]
+        probs = torch.softmax(row[cand_ids], dim=-1)
+        winner = int(probs.argmax())
+        out[name] = (choices[winner], float(probs[winner]))
+    return out
+```
+
+One prefill call, one batched call, done — no matter whether the schema has one field or thirty. Real
+production code (both repos below) uses the newer `Cache` object's own broadcast method rather than a
+raw tuple of tensors — `DynamicCache.batch_repeat_interleave(M)` — but the shape of the idea, and the
+`.repeat(M, 1, 1, 1)` fallback for the plain-tuple format, is exactly what's happening either way.
+
+## Multi-token candidates: the part the diagram skips
+
+The visual explanation this article is built from shows four clean, single-token boxes lighting up.
+It doesn't show what happens when a candidate isn't one token — and as step 5 above just demonstrated
+with real tokenizer output, that's not a rare edge case; it's `MEDIUM` in the article's own example.
+So: what does real, shipped code actually do about it?
+
+**harshatheg/Qwen-2.5-1B-RLCD** — the inference engine behind the Qwen2.5 RLCD release (26 files, 0
+downloads, `usedStorage: 0`; it runs stock `mlx-community/Qwen2.5-1.5B-Instruct-4bit` at inference
+time, per `core/engine_mlx.py`'s own `MODEL_ID`) — handles it with a real trick, not a hack: hoist the
+choices' common prefix into the *suffix text itself*, so the model only has to disambiguate the first
+token of each *remainder*. One metadata note worth flagging on its own, in the spirit of checking a
+repo's numbers against what it actually ships: the Hub's own `base_model` tag declares this a
+**finetune** of Qwen2.5-1.5B-Instruct, but zero safetensors or GGUF shards back that claim up — there
+is no retrained checkpoint anywhere in the repo, only inference code over the stock instruct model.
+"Finetune" here is a discoverability tag, not a description of what's inside.
+
+```python
+# core/schema.py:156-168 (harshatheg/Qwen-2.5-1B-RLCD)
+prefix = os.path.commonprefix(fdef.choices)
+suffix = f'  "{fname}": "{prefix}'
+cands = []
+for c in fdef.choices:
+    rem = c[len(prefix):]
+    c_toks = tokenizer.encode(rem, add_special_tokens=False)
+    cands.append(c_toks[0] if c_toks else tokenizer.encode('"', add_special_tokens=False)[0])
+...
+has_collisions.append(len(set(cands)) < len(cands))
+```
+
+For `["HIGH", "MEDIUM", "LOW", "NONE"]` the common prefix is empty, so this degrades to plain
+first-token scoring — which is exactly why `MEDIUM` is silently reduced to its `M` token. But for
+choices that actually share a prefix it's a genuinely good idea: `["TIER_1", "TIER_2", "TIER_3"]`
+hoists `"TIER_"` into the suffix text (`  "action_tier": "TIER_`), and the candidates become the first
+token of each *remainder* — `1`, `2`, `3` — which are trivially distinct. When a remainder is empty
+(one choice is itself a prefix of another, e.g. `["CANCEL", "CANCELLED"]` → common prefix `"CANCEL"`,
+remainder `""` for `CANCEL`), the code falls back to the closing-quote token, which is exactly correct
+since that value genuinely ends there. It's a real, verified, well-designed answer to the "what if the
+common prefix is longer than one token" case — it just doesn't do anything for the *disjoint*-prefix
+case, which is `MEDIUM`.
+
+This is still a **first-token-only** approximation of a multi-token value's probability, and the
+schema's own file has a *second*, more careful path sitting right next to it —
+`compile_candidate_tokens` / `extract_calibrated_probabilities`, which expand surface variants
+(`true`/`True`/`TRUE`/`yes`) and take a max over them — but grepping both engine files confirms neither
+name is ever called. `StructuredSchema` is constructed without a tokenizer at every real call site
+(`app.py`, `core/benchmark.py`), so the more careful function never runs; the only path actually wired
+into inference is the first-token one above. It's dead code, not a hidden fallback.
+
+There's a better answer to "how do you score a multi-token candidate," and it doesn't need to give up
+on staying parallel: since you already know each candidate's *exact* token sequence, you can
+teacher-force all of them in one more batched pass — no sampling, no autoregressive loop — and sum
+(or length-normalize) their real log-probabilities:
+
+```python
+def score_multitoken_candidates(model, tok, cache, prefix_len, suffix_ids, candidates: list[list[int]]):
+    """Score each candidate's FULL token sequence via teacher forcing — still one
+    batched forward pass, still no sampling. candidates: one token-id list per choice."""
+    width, pad = max(len(c) for c in candidates), (tok.pad_token_id or tok.eos_token_id)
+    rows = [suffix_ids + c + [pad] * (width - len(c)) for c in candidates]
+    batch = torch.tensor(rows)
+    K = batch.shape[0]
+    bcache = tuple((k.repeat(K, 1, 1, 1), v.repeat(K, 1, 1, 1)) for k, v in cache)
+    attn = torch.ones(K, prefix_len + batch.shape[1], dtype=torch.long)
+
+    logits = model(batch, past_key_values=bcache, attention_mask=attn).logits
+    log_probs = torch.log_softmax(logits, dim=-1)
+
+    start = len(suffix_ids) - 1  # position that predicts candidate token 0
+    scores = []
+    for k, cand in enumerate(candidates):
+        lp_sum = sum(log_probs[k, start + i, cand[i]].item() for i in range(len(cand)))
+        scores.append(lp_sum / len(cand))  # length-normalized — see below
+    return scores  # softmax these, same as any other logit set
+```
+
+The length normalization (`/ len(cand)`) matters: summing raw log-probs without it systematically
+penalizes longer candidates purely for having more tokens to be right about — the same reason beam
+search divides by length. Without it, `MEDIUM` (2 tokens, each contributing a log-prob ≤ 0) would start
+at a structural disadvantage against `HIGH` (1 token) even if the model is equally sure about both.
+
+**openjev** (TheoLeeCJ/openjev) sidesteps the whole problem a third way: instead of scoring a
+candidate's natural label at all, it remaps every option to a synthetic single uppercase letter and
+verifies the round-trip before trusting it:
+
+```python
+# src/openjev_phase1/direct.py:13-22 (TheoLeeCJ/openjev)
+def _slot_ids(tokenizer, count: int) -> list[int]:
+    result = []
+    for letter in LETTERS[:count]:
+        encoded = tokenizer.encode(letter, add_special_tokens=False)
+        if len(encoded) != 1 or tokenizer.decode(encoded) != letter:
+            raise ValueError(f"Answer slot {letter!r} is not one exact round-trip token")
+        result.append(encoded[0])
+    if len(result) != len(set(result)):
+        raise ValueError("Answer-slot tokens collide")
+    return result
+```
+
+This is the cleanest fix for both the multi-token *and* the collision problem at once — every option
+is provably one token, defensively checked, every time. The tradeoff is that the model is now being
+asked to answer "A", "B", "C"... rather than write the label it actually means, which spends a little
+of the prefill on teaching it the legend and is one small step further from "the model just says the
+thing" than reading its natural-label logits directly.
+
+## The subset softmax is exact — that's not the same as calibrated
+
+Step 6 renormalizes over only the candidate logits. Is that a different distribution than "the model's
+real next-token distribution, restricted to those tokens"? Write it out: if $z_i$ is token $i$'s logit
+and $S$ is the candidate set,
+
+$$
+P(x = i \mid x \in S) = \frac{P(x=i)}{P(x \in S)} = \frac{\exp(z_i)/Z}{\sum_{j \in S} \exp(z_j)/Z} = \frac{\exp(z_i)}{\sum_{j \in S}\exp(z_j)}
+$$
+
+— the normalizer $Z$ (the sum over the *entire* 151,936-row vocabulary) cancels exactly. The subset
+softmax *is* the model's own conditional probability, given that the answer is restricted to $S$, with
+no approximation anywhere in that step. That sounds like it should be reassuring, and it explains why
+these numbers look so clean — but being an exact conditional distribution under the model and being
+*calibrated* (matching how often the answer is actually correct) are unrelated properties. Discarding
+151,932 rows doesn't make the surviving 4 any more truthful; it just stops competing tokens from
+diluting them. In fact it can look *more* confident than it should: in the full 151,936-way softmax,
+probability mass for "the answer is HIGH" is split across every surface form the tokenizer has for
+it — `HIGH`, ` HIGH`, `High`, `high` — each siphoning off a little. Collapsing to the one canonical
+candidate token discards that competition and mechanically inflates the reported number, independent
+of whether the model actually understood the ticket. A model can report 96% and be wrong. openjev's own
+committed measurements catch this directly — one real bin of predictions came in at **83% mean
+confidence and 0% accuracy**, three-for-three wrong, on data collected before evaluation (see the
+calibration section below). Every result row openjev writes carries the same disclaimer for exactly
+this reason: `"probability_status": "conditional option score; uncalibrated as decision confidence"`.
+
+## The real limitation: fields can't see each other
+
+Every field in a schema branches off *the same* cached prefill from step 1 — computed once, before any
+field's value existed. That means no field's suffix pass can ever condition on another field's answer,
+because at the moment every suffix pass runs, no other field has been decided yet. Contrast that with
+plain autoregressive generation: once the model has typed `"risk_level": "HIGH"`, that literal text is
+now sitting in the context, and whatever token comes next — including the start of the *next* field's
+value — is generated *conditioned on having just committed to HIGH*. Slow, but genuinely coupled.
+
+Take the fintech-fraud preset both repos ship variants of: a field `risk_tier` and a field
+`recommended_action`. If the evidence is damning, you'd want `recommended_action` to be something
+drastic exactly *because* `risk_tier` came out `CRITICAL`. Under PCD, both fields are scored from the
+identical, unconditioned snapshot of the context — `recommended_action`'s distribution reflects the
+model's prior guess given only the raw evidence, never given the fact that `risk_tier` is *actually
+going to ship as* `CRITICAL`. Nothing in the mechanism checks that the two answers are mutually
+consistent, and nothing resolves it if they aren't — a schema can come back internally contradictory
+and still be reported as "100% valid JSON," because validity here is a syntax guarantee, not a
+semantic one. The support-triage preset both repos' presets include is the sharpest version of this: 28
+fields, several of them (`severity_tier`, `assigned_agent_tier`, `suggested_action`) exactly the kind
+of chain a human triager would resolve in order, all scored independently and simultaneously here.
+Neither implementation checks for this.
+
+There isn't a free fix — resolving it means giving something up. Feed each newly-decided field's value
+back into the context and re-prefill before scoring the fields that depend on it, and you've recovered
+sequential coupling for that group at the cost of exactly the extra prefill passes PCD exists to avoid.
+The reasonable middle ground is to actually use that independence: score genuinely independent fields
+in the one parallel batch this mechanism is built for, and only chain the handful of fields you know
+are coupled, sequentially, a small group at a time — spending sequential passes only where the coupling
+is real instead of on the field count.
+
+## Where the two real implementations disagree
+
+Everything above about collisions — `has_collisions[i] = len(set(cands)) < len(cands)`, computed once
+per field in `compile_parallel_metadata` — sets up the sharpest, fully verified finding in this
+article. What each engine does with that flag is not the same:
+
+```python
+# core/engine_mlx.py:364-419 (harshatheg/Qwen-2.5-1B-RLCD) — the MLX / Apple Silicon path
+if not has_collisions[i]:
+    scores = [float(field_logits[tid]) for tid in cand_tokens]
+    ...  # ordinary subset softmax, as above
+else:
+    # Fast direct cache slice disambiguation: up to 4 sequential greedy decode
+    # steps on a per-field cache slice, multiplying per-token probabilities.
+    for _ in range(4):
+        nxt = int(mx.argmax(cur_logits))
+        ...
+        probs_prod *= p_tok
+        if '"' in nxt_str or '\n' in nxt_str or ',' in nxt_str:
+            break
+        gen_toks.append(nxt)
+        out_step = model(mx.array([[nxt]]), cache=f_cache)  # one more real forward pass
+        ...
+    ...
+    matched = next((c for c in fdef.choices if gen_val.startswith(c) or c.startswith(gen_val)), None)
+    ...
+    w_prob = round(max(min(probs_prod, 0.9999), 0.75), 4)  # clamped into [0.75, 0.9999]
+```
+
+```python
+# core/engine_torch.py:87-89, 141-148 (harshatheg/Qwen-2.5-1B-RLCD) — the PyTorch / CUDA / ZeroGPU path
+prefixes = meta["prefixes"]
+has_collisions = meta["has_collisions"]
+...
+# has_collisions and prefixes are never read again anywhere in this file.
+for i, (fname, fdef) in enumerate(field_items):
+    ...
+    scores = [float(field_logits[tid].item()) for tid in cand_tokens]  # unconditional gather
+    scores_t = torch.tensor(scores, dtype=torch.float32) / max(temperature, 1e-4)
+    probs = F.softmax(scores_t, dim=-1).tolist()
+```
+
+`prefixes` and `has_collisions` are unpacked in `engine_torch.py` and then never referenced again — a
+plain grep across the file confirms it. On a collision, the MLX path drops into a bounded,
+autoregressive continuation to actually disambiguate; the CUDA/ZeroGPU path — the one the public
+Hugging Face Space and any cloud deployment actually run — does the ordinary gather regardless, on
+token IDs that are no longer unique. When two candidates share a first token after prefix stripping,
+`cand_tokens` contains a duplicate ID, `field_logits[tid]` returns the *identical* value for both, and
+`torch.argmax` breaks the resulting tie toward the lower index — deterministically, every time,
+independent of which choice the model actually favors. This isn't a hypothetical: it's true of the
+repo's own shipped enterprise presets.
+
+| Preset | Field | Choices that collide | Shared first token |
+|---|---|---|---|
+| `fintech_fraud.json` | `counterparty_jurisdiction_risk` | `TIER_1_LOW`, `TIER_2_MODERATE`, `TIER_3_HIGH` | `"T"` |
+| `code_security.json` | `secondary_cwe` | `CWE_798_HARDCODED_CREDENTIALS`, `CWE_1104_OUTDATED_COMPONENTS`, `CWE_200_INFO_EXPOSURE` | `"C"` |
+| `support_triage.json` | `assigned_agent_tier` | `TIER_1`, `TIER_2` | `"T"` |
+| `support_triage.json` | `target_resolution_hours` | `1_HOUR`, `12_HOURS` | `"1"` |
+| `high_cardinality_255.json` | `customs_category` | **all 255 choices** | `"0"` / `"1"` / `"2"` |
+
+That last row is the one that matters most, because `high_cardinality_255.json` is the exact preset
+the README benchmarks as its headline "high-cardinality" number (89 ms, 5.6×, "100% guaranteed"
+validity) — and every one of its 255 tariff codes collides after prefix-stripping, collapsing into
+just 3 distinguishable buckets by hundreds-digit. Checked against the real tokenizer directly: 5 of the
+40 enum fields across all four of the repo's own shipped presets (12.5%) contain at least one
+first-token collision — this isn't a contrived toy case, it's routine for real enum-heavy schemas.
+
+It also isn't a quirk of one repo's preset authoring. The 218 `L000`-style line IDs in TypeSafe's own
+published cookbook, above, are the identical shape: hoist the common prefix `L` and what's left is
+`000` through `217`, the same digit structure that collapses 255 tariff codes into three buckets in the
+row above. That cuts two ways. It says nothing about how Jev is implemented — TypeSafe publishes
+nothing at all about its decoding — but it does say that a first-token gather over raw option labels
+cannot be what's running behind their own documented recipe, because it would hand back the same logit
+for every line in the document. Some remapping step has to exist; openjev's synthetic single-letter
+answer slots are one obvious way to build one.
+
+To be fair to the design: for this specific preset, MLX's bounded fallback happens to *work*, because
+the distinguishing digits (`"0"`,`"0"`,`"1"` for `CAT_001`) sit within its 4-step budget and the
+resulting partial string still matches uniquely via the `startswith` check. But that success comes at
+a real cost the reported numbers hide: `sequential_forward_passes` is hardcoded to `1` in both engines'
+return dictionaries regardless of what actually ran, and the wall-clock total *does* include every one
+of the extra autoregressive steps the collision fallback performs — meaning a real, if bounded, chunk
+of that 89 ms is the exact sequential decoding this design exists to avoid, on the one preset chosen to
+headline the technique. The CUDA path, with no fallback at all, would silently return whichever tariff
+code within a hundred-block happens to sort first — `CAT_000_Live_Animals` — no matter what the
+shipment actually was, on a schema literally auditing dual-use export compliance.
+
+Two takeaways, stated plainly and fairly: the design the README benchmarks — MLX, Apple Silicon — is
+the one that (mostly) handles this correctly; the CUDA/ZeroGPU path most people would actually deploy
+behind an API does not. And "confidence" means two different things depending on which branch fired: a
+genuine subset-softmax probability on the non-collision path, versus a clamped `[0.75, 0.9999]` product
+of greedy per-token probabilities on the MLX collision path — two different quantities, on different
+scales, both surfaced under the same `confidence` field. For an article about calibrated decisions,
+that inconsistency is worth naming directly: a confidence number whose meaning depends on which code
+path happened to fire isn't calibrated in any useful sense, whatever the number reads.
+
+Is the headline benchmark itself fair, at least? `core/benchmark.py`'s `compare_single` runs both the
+naive and the parallel path against the *same* loaded model, same quantization, same hardware, same
+context document — that part holds up; the two paths necessarily use differently-shaped prompts (a
+full JSON-schema-with-descriptions prompt for naive generation vs. a compact field catalog for PCD),
+but that's inherent to comparing the two strategies, not an unfair thumb on the scale. What it isn't is
+*rigorous*: one run per preset, no repeated trials, no confidence interval, and (as above) a pass-count
+field that doesn't reflect what actually executed. Compare that to how openjev treats the same kind of
+claim next.
+
+## openjev's numbers: the honest kind
+
+[openjev](https://github.com/TheoLeeCJ/openjev) asks a related but different question — "can something
+like Jev run on a 3090 at home?" — and is explicit that it reproduces the *interface pattern* (typed
+options, no decode loop, shared-state reuse), not Jev's undisclosed model or training. It scores a
+frozen `Qwen/Qwen3.5-4B` three ways: **direct** logits (one forward pass, native answer-slot letters),
+**serial** (cache the shared state once, score branches one at a time), and **shared** (cache once,
+broadcast, score every branch in one batched call — the same idea as steps 1–6 above, just for
+decisions instead of JSON fields), plus a **Qwen3-Reranker-4B** yes/no baseline for comparison. Reusing
+one state across many decisions is a real, measured win:
+
+<BenchBars
+  title="777 decisions, 37 states × 21 criteria, one RTX 3090"
+  unit=" dec/s"
+  bars={[
+    { label: "parallel suffixes", value: 20.03, highlight: true },
+    { label: "serial prefix reuse", value: 10.75 },
+    { label: "fresh, batch 1", value: 2.33 },
+    { label: "native reranker", value: 1.86 },
+  ]}
+/>
+
+— an 8.6× throughput gain from reuse alone, at the cost of a small, disclosed amount of drift: 5 and 6
+of 777 argmaxes (respectively) flipped relative to fresh scoring, attributed to BF16 numerics rather
+than a logic bug. Quality tells the more interesting story. Direct logits from a *completely untrained*
+4B model beat a dedicated reranker on every general-decision benchmark tried, and land within a few
+points of TypeSafe's own published Jev numbers on the 102-row subset that could be aligned from public
+records:
+
+<BenchBars
+  title="TypeSafe public subset, 102 rows across 20 cases — equal-case modal agreement"
+  unit=""
+  bars={[
+    { label: "published Jev", value: 0.883, highlight: true },
+    { label: "direct logits (stock Qwen3.5-4B)", value: 0.845 },
+    { label: "native reranker", value: 0.560 },
+  ]}
+/>
+
+That 3.8-point gap is genuinely close for zero training — and openjev refuses to oversell it: the
+sample is small and self-selected, no live Jev endpoint was run, and total-variation distance from the
+public reference distributions tells a wider story (direct logits 0.177, published Jev 0.127, reranker
+0.444). The perturbation results are the part worth taking most seriously, because they're where a
+system that looks solid on a frozen benchmark can quietly fall apart: reverse the *displayed* option
+order while keeping the same semantic IDs, and direct logits' balanced accuracy on 36 owned cases
+actually *rose* from 0.723 to 0.813 — but 10 of the 36 argmaxes flipped to get there, meaning the model
+is genuinely sensitive to which position an option is listed in, not indifferent to it the way you'd
+want a calibrated decision system to be. And on a 36-row missing-evidence set specifically constructed
+so the correct answer is always "insufficient evidence," direct logits made **one** confident (>0.8)
+non-`insufficient` call anyway — a real, disclosed failure mode, not a hidden one.
+
+Two results are labeled failures outright rather than smoothed into a speed number, which is the
+detail worth taking away from this repo more than any of its throughput claims. Asked for a *compact*
+ordered array (`["yes","no",...]`, no keys, one line), naive generation on the same frozen model beat
+direct logits' 1.023 s with 5.332 s — a real 5.21× win for the parallel readout — but its own 21-value
+answer only agreed with direct logits' argmax on 18 of 21 criteria (0.857), so the speed number and the
+semantic-equivalence question are kept separate rather than conflated. Pushed one step further, to a
+strictly *minified* array with no internal spaces, the model never terminated: all three runs hit the
+128-token cap still emitting `"no"` past the 21 required entries —
+
+```text
+[..."no","no","no","no","no","no","no","no","no","no","no","no","no","no","no","no","no","no","no
+```
+
+— and openjev records this as a **failure**, not a discounted or padded success, and drops it from the
+headline comparison entirely. That's the honest half of a speed claim: showing the exact run where the
+naive baseline you're claiming a speedup over didn't actually finish. It's also the same calibration
+warning from the subset-softmax section made concrete with real numbers: one of openjev's own committed
+reliability bins — 3 predictions, mean confidence 0.831 — landed at **0% accuracy**. High confidence,
+entirely wrong, on data collected before anyone looked at the results.
+
+## Do you need to train anything?
+
+Mostly, no — and this is the single most useful fact in this whole piece. As the Qwen2.5 RLCD release's
+author put it plainly: *"every LLM has the ability to efficiently batch inference every key of a JSON
+at the same time and generate probabilities from a set of possible categories. No new training
+required, but it's easy to optimize if you need!"* The seven-step mechanism above is arithmetic on
+logits any decoder-only model already produces at every position — there's no new capability being
+trained into anything, which is exactly why a completely untrained Qwen3.5-4B in openjev's benchmarks
+gets within a few points of a claimed, trained product on real held-out comparisons.
+
+What training — or a much cheaper fit — *would* buy you is calibration: making the confidence numbers
+from step 7 actually track how often the answer is right. A **reliability diagram** buckets predictions
+by confidence and plots each bucket's real accuracy against it; a perfectly calibrated model sits on
+the diagonal. **Expected Calibration Error (ECE)** collapses that plot into one number — the
+weighted-average gap between confidence and accuracy across bins. openjev's own 0.831-confidence,
+0.0-accuracy bin is a reliability diagram with one damning point on it already.
+
+**Temperature scaling** is the cheapest real fix: keep the model frozen, keep every logit exactly as
+computed, and fit one scalar $T$ that divides every logit before the softmax, chosen to minimize
+negative log-likelihood on a held-out labeled split. It can't change which answer wins (dividing every
+logit by the same positive number doesn't change their ranking), only how *sharp* the winning
+probability looks — which is precisely the miscalibration this mechanism inherits for free, as shown
+in the subset-softmax section above.
+
+```python
+import numpy as np
+from scipy.optimize import minimize_scalar
+
+def fit_temperature(logits: np.ndarray, labels: np.ndarray) -> float:
+    """logits: (N, K) candidate logits per example. labels: (N,) index of the gold choice.
+    Fits one scalar T minimizing held-out NLL — the cheapest calibration fix there is."""
+    def nll(t):
+        z = logits / max(t, 1e-3)
+        z = z - z.max(axis=1, keepdims=True)
+        p = np.exp(z) / np.exp(z).sum(axis=1, keepdims=True)
+        return -np.log(p[np.arange(len(labels)), labels] + 1e-12).mean()
+    return float(minimize_scalar(nll, bounds=(0.05, 10), method="bounded").x)
+
+
+def ece(probs: np.ndarray, labels: np.ndarray, n_bins: int = 10) -> float:
+    """Expected Calibration Error: weighted-average |accuracy - confidence| per confidence bin."""
+    confidence, predicted = probs.max(axis=1), probs.argmax(axis=1)
+    correct = (predicted == labels).astype(float)
+    total = 0.0
+    for lo, hi in zip(np.linspace(0, 1, n_bins + 1)[:-1], np.linspace(0, 1, n_bins + 1)[1:]):
+        in_bin = (confidence > lo) & (confidence <= hi)
+        if in_bin.sum() == 0:
+            continue
+        total += in_bin.mean() * abs(correct[in_bin].mean() - confidence[in_bin].mean())
+    return total
+```
+
+A concrete recipe you could actually run this week: take a labeled classification set for your own
+schema, run PCD over a stock instruct model to collect per-field candidate logits and the gold label
+for each row, hold out a split, call `fit_temperature` on it, and report `ece(...)` before and after —
+that alone turns "conditional option score, uncalibrated" into a number you've actually checked. If you
+want more than recalibration — if the *ranking* itself is wrong, not just its sharpness — the next step
+is LoRA-finetuning on exactly the field-suffix positions, which is just ordinary classification through
+the LM head, restricted to the candidate columns:
+
+```python
+from peft import LoraConfig, get_peft_model
+import torch.nn.functional as F
+
+lora_model = get_peft_model(model, LoraConfig(r=8, target_modules=["q_proj", "v_proj"]))
+
+def training_step(batch):
+    # batch rows are the same prefix+suffix prompts PCD scores at inference time.
+    logits = lora_model(batch["input_ids"], attention_mask=batch["attention_mask"]).logits
+    decision_logits = logits[torch.arange(len(batch["gold_idx"])), batch["decision_pos"], :]
+    cand_logits = torch.stack([decision_logits[i, ids] for i, ids in enumerate(batch["cand_ids"])])
+    loss = F.cross_entropy(cand_logits, batch["gold_idx"])  # classification through the LM head
+    loss.backward()
+    return loss.item()
+```
+
+On **RLCD** specifically, stay precise about what's public and what isn't. TypeSafe's documentation
+goes a little further than its launch post: an AI-primer page places RLCD as a third post-training
+branch beside RLHF and RLVR, and gives it an output contract — the model "does not generate text," it
+"returns decisions and probabilities," and "higher probability should correspond to a greater chance
+that the answer is correct," with the usual frequentist gloss that outcomes assigned a probability of
+`0.2` should occur about 20% of the time.
+
+<Figure
+  src="/articles/parallel-constrained-decoding/fig2.png"
+  alt="Branching diagram of post-training paths. A box labelled LM (BERTs, low intelligence) leads to LLM (pre-trained models, high intelligence), tagged with GPT-3 and LLaMa. From LLM the tree splits two ways: a greyed-out upper branch to RLHF (chat models, easy assistance), tagged with ChatGPT, Claude, InstructGPT, Grok and DeepSeek, which continues to RLVR (reasoning models, hard assistance) tagged with o1 and o3; and a highlighted green lower branch to RLCD, expanded as Reinforcement Learning for Calibrated Decisions, with no further boxes under it."
+  caption="TypeSafe's placement of RLCD as a third post-training branch. The green box expands the acronym; nothing under it describes an objective, a reward, or a dataset. (TypeSafe AI docs, 'AI primer', training-paths diagram.)"
+/>
+
+That is the whole published specification, and it is a claim about what the *output* should satisfy,
+not about how anything gets trained: no loss function, no reward signal, no training data, no paper, no
+reproduction. What the same page does publish is the motivation — the argument that preference
+optimization collapses a base model's distribution onto a single reward-favored mode, which is a real
+and well-documented failure mode of RLHF and a coherent reason to want a different objective for
+decisions:
+
+<Figure
+  src="/articles/parallel-constrained-decoding/fig3.png"
+  alt="Line chart over an unlabelled output space. A grey curve, 'Base model p(x) — many modes', has four roughly equal humps. A purple curve, 'After RLHF pi(x) — mass collapsed', is flat everywhere except at the second hump, where it rises to roughly twice the grey curve's height and is annotated 'Reward-favored mode: pi(x) sharpens far above p(x)'. The other three grey humps are each marked 'dropped'."
+  caption="TypeSafe's mode-dropping illustration: an argument sketch, not measured data — no model, dataset, or metric is attached to either curve. (TypeSafe AI docs, 'AI primer', mode-dropping diagram.)"
+/>
+
+It's a good argument, and it is also, as evidence, roughly the level available for RLCD as a whole.
+openjev says this plainly in its own results rather than guessing at a method: *"RLCD training, [not
+reproduced] because neither the training data nor a sufficient algorithmic specification is public."*
+Any specific loss function
+attributed to RLCD beyond that sentence is a guess, including the very reasonable-sounding
+cross-entropy-through-the-LM-head sketch above — which is offered here as *a* way to move the needle
+with LoRA, not a claim about what TypeSafe actually did.
+
+## A cost model: when "parallel" stops winning
+
+Put the collision-fallback cost from the divergence section into the same units as everything else —
+forward passes and modeled latency, as a function of how many fields a schema has, how long its values
+run, and what fraction of its fields collide:
+
+<CostModel />
+
+The flat part of that chart is the entire pitch: with zero collisions, PCD's critical path is 2
+forward passes — one prefill, one batched suffix call — regardless of field count, while naive
+decoding's pass count grows linearly with every field and every token of value length. The part the
+chart also shows is the honest caveat from this article's central finding: every colliding field taxes
+that flat line with up to 4 more *sequential* steps, which is precisely the autoregressive cost this
+design exists to eliminate. Push the collision slider to 100% and the model reduces almost all the way
+back to the line it was built to beat — which is not a hypothetical, it's `high_cardinality_255.json`'s
+own headline field, verified above.
+
+## The take
+
+The mechanism is genuinely simple: every model already computes logits over its whole vocabulary at
+every position; restricting those logits to a field's legal values and renormalizing is free arithmetic
+on numbers you have already, which is exactly why it needs no new training to exist. The real
+engineering — and the real risk — lives in the bookkeeping around that one idea: how you score a
+candidate that isn't one token, how you detect and handle two candidates that collide after prefix
+stripping, and how honestly you report the resulting number as a "confidence." The two real
+implementations examined here agree completely on the seven-step mechanism and disagree sharply on that
+bookkeeping — one ships a well-designed collision fallback on the path it benchmarks and a silent
+tie-break on the path most people would actually deploy; the other never claims calibration in the
+first place and publishes its own failures alongside its wins. Neither gap is a reason to distrust the
+idea. Both are reasons to check, on your own schema, which fields collide before you trust what
+argmax hands back — and to treat "100% valid JSON" as the syntax guarantee it is, not the correctness
+guarantee it can sound like.
+
+---
+
+*Sources: the visual explanation this article works from is Niels Rogge's (Hugging Face), built from
+the [Qwen2.5 RLCD release](https://huggingface.co/harshatheg/Qwen-2.5-1B-RLCD) (harshatheg) and its
+public [README](https://huggingface.co/harshatheg/Qwen-2.5-1B-RLCD/blob/main/README.md) and
+[MODEL_CARD](https://huggingface.co/harshatheg/Qwen-2.5-1B-RLCD/blob/main/MODEL_CARD.md). Code excerpts
+and preset data are quoted directly from that repository's `core/` package and `presets/*.json`, and
+from [TheoLeeCJ/openjev](https://github.com/TheoLeeCJ/openjev)'s `src/openjev_phase1/` package and its
+committed `results/raw/*.json` (SHA256-checksummed). All token IDs and collision findings were verified
+directly against Qwen2.5's real `tokenizer.json` and `config.json`, not assumed. The three figures are
+TypeSafe's own, from its public documentation — the [line-by-line search
+cookbook](https://docs.typesafe.ai/cookbooks/semantic_find) (recipe diagram, 218-option `Choice`, the
+255-option cap) and the [AI primer](https://docs.typesafe.ai/introduction/machine-learning-primer)
+(training-paths and mode-dropping diagrams); TypeSafe's [launch
+post](https://typesafe.ai/blog/introducing-system-one-models-and-jev) publishes benchmark charts and a
+workflow diagram but no decoding or architecture figure, and neither open repository above ships an
+image at all. Product claims about
+Jev itself are covered separately in [Jev and the System-One model](/articles/jev-system-one-models).
+Interactives, the cost model, and the teacher-forcing/temperature-scaling code are original to this
+article.*

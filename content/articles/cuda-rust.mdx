@@ -1,0 +1,163 @@
+---
+title: "CUDA Rust: writing the kernel, not just launching it"
+description: "NVIDIA's CUDA Rust announcement ships two ways to write GPU kernels natively in Rust — cuda-oxide, a real rustc backend that compiles SIMT kernels to PTX, and cutile-rs, a tile-based compiler that runs on stable Rust and is already in production at Hugging Face. I cloned both crates to find out exactly what their aliasing-safety claim covers. The honest answer: cuda-oxide's DisjointSlice machinery closes the CUDA C++ __restrict__ gap for aliasing between kernel arguments in global memory, but shared-memory races between threads in a block still need unsafe and are checked by nothing; cutile-rs makes the stronger claim by deleting per-thread indexing from the source language entirely, at the cost of a restricted kernel-body DSL rather than full Rust. cutile-rs's own B200 numbers say the safety is free — GEMM and elementwise throughput sit within measurement noise of the unsafe variant and of cuBLAS — while cuda-oxide, the harder SIMT track, ships no public benchmark at all."
+date: 2026-09-18
+interest: 5
+helpful: 4
+tags:
+  - rust
+  - cuda
+  - gpu
+  - compilers
+  - kernels
+  - explainer
+cover: /articles/cuda-rust/fig1.png
+---
+
+import { AliasingCompare } from "@/components/articles/cuda-rust/aliasing-compare"
+import { SimtVsTile } from "@/components/articles/cuda-rust/simt-vs-tile"
+
+NVIDIA [announced CUDA Rust](https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/) on September 8, 2026: two ways to write GPU kernels natively in Rust, rather than writing them in CUDA C++ and merely launching them from Rust. **[cuda-oxide](https://github.com/NVlabs/cuda-oxide)** compiles SIMT kernels — the classic one-thread-per-element model — straight to PTX through a real `rustc` codegen backend. **[cutile-rs](https://github.com/NVlabs/cutile-rs)** compiles tile-based kernels — the newer, block-of-data model behind NVIDIA's CuTe/cuTile and Triton — through CUDA Tile IR, and it runs on stable Rust. Both are backed by a paper, [*Fearless Concurrency on the GPU*](https://arxiv.org/abs/2606.15991) (Elibol, Roesch, Gelado, Buehler, Garland; NVIDIA, 2026), which is where the actual numbers in this piece come from — the blog post itself carries no benchmark, and says so.
+
+I cloned both repositories to read the macro surface, the compile-time checks, and the code that backs the numbers, rather than take the announcement's word for any of it.
+
+| | |
+|---|---|
+| What it is | two native paths to write GPU kernels in Rust: **cuda-oxide** (SIMT → PTX) and **cutile-rs** (Tile → CUDA Tile IR) |
+| Requires | cuda-oxide: pinned **nightly** Rust, CUDA 12.x+, clang + libclang, `sm_80`+ · cutile-rs: **stable Rust 1.89+**, CUDA 13.2–13.3, `sm_80`+ |
+| Status | both **early alpha**. cutile-rs is on crates.io and already used in Hugging Face's [Grout](https://github.com/huggingface/grout) and in mistral.rs |
+| The claim | both catch **aliasing between kernel arguments** at compile time — a real gap in CUDA C++'s `__restrict__` |
+| What that doesn't cover | shared-memory races between threads in a block: unchecked in cuda-oxide (needs `unsafe`), sidestepped rather than solved by cutile-rs's single-logical-thread model |
+| Benchmarks | cutile-rs: B200 GEMM/elementwise within noise of the unsafe variant and cuBLAS; [Grout](https://github.com/huggingface/grout) competitive with vLLM/SGLang · cuda-oxide: **none published** |
+
+## Rust already talked to CUDA. It never wrote the kernel.
+
+The framing that matters here is "not just launch them" — because Rust launching CUDA is old news. [`cust`](https://crates.io/crates/cust) and [`cudarc`](https://github.com/coreylowman/cudarc) are safe host-side bindings to the CUDA driver API; they build kernel arguments, allocate device memory, and submit work, but the kernel itself is still `.ptx` or `.cu` written somewhere else. That's the "host bindings" layer, and it's been solid for years.
+
+Writing the *device* code in Rust is the part with a genuinely rough history — and it's less "nobody did it" than "somebody did, and it kept rotting." [Rust-CUDA](https://github.com/Rust-GPU/Rust-CUDA) (`rustc_codegen_nvvm`) has compiled Rust to NVVM IR and PTX for years — the *Fearless Concurrency* paper cites the original work to 2022. It went dormant for three years, its CI broke, and it was only [rebooted in early 2025](https://rust-gpu.github.io/blog/2025/01/27/rust-cuda-reboot/) by [VectorWare](https://www.vectorware.com/), the team that also maintains `rust-gpu` (the SPIR-V-targeting sibling project). So the capability — Rust source, real GPU machine code, no C++ in between — already existed. What it never had was an aliasing-safety story: the *Fearless Concurrency* paper is blunt about this, noting that Rust-CUDA, rust-gpu, and (its own words) cuda-oxide all "treat the kernels being compiled as unsafe code." Getting Rust onto the GPU and getting Rust's *ownership rules* onto the GPU are different projects, and only the second one is what's actually new here.
+
+What NVIDIA's involvement changes is scope and durability, not novelty of the idea. cuda-oxide is a from-scratch compiler pipeline — `rustc` frontend, a pure-Rust MLIR-like middle end called [Pliron](https://github.com/vaivaswatha/pliron), LLVM's NVPTX backend — built and staffed by people whose job is compilers, not a side project that a maintainer's day job can starve. Its own [ecosystem appendix](https://github.com/NVlabs/cuda-oxide/blob/main/cuda-oxide-book/appendix/ecosystem.md) draws the line to Rust-CUDA carefully rather than claiming to replace it: "rust-cuda's focus is on bringing **Rust to NVIDIA GPUs** ... cuda-oxide's focus is on bringing **CUDA into Rust**," and the team says it has been "working with the rust-cuda maintainers as both projects mature." That's a materially different posture than a hobby project competing for the same three maintainers' weekends.
+
+## Two tracks, matching CUDA's own two tracks
+
+SIMT is the model CUDA C++ has always used: you write what one thread does, and launch a grid of them.
+
+```cpp
+__global__ void vecadd(const float* a, const float* b, float* c, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) c[i] = a[i] + b[i];
+}
+```
+
+`cuda-oxide`'s SIMT kernel is the same shape, in Rust, compiled by the real `rustc` frontend — type inference, trait resolution, monomorphization, borrow checking, all of it — before a custom codegen backend lowers the MIR to PTX:
+
+```rust
+// crates/rustc-codegen-cuda backs this: Rust MIR -> Pliron IR (dialect-mir)
+// -> LLVM dialect -> textual LLVM IR -> llc -> PTX. No C++ in the pipeline.
+#[kernel]
+#[launch_bounds(256)]
+#[launch_contract(domain = 1, block = (256, 1, 1))]
+pub fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+    let idx = thread::index_1d();
+    if let Some(c_elem) = c.get_mut(idx) {
+        *c_elem = a[idx.get()] + b[idx.get()];
+    }
+}
+```
+
+`cutile-rs` describes what happens to one *tile* — a whole sub-tensor — and lets the compiler decide how many real hardware threads back it:
+
+```rust
+#[cutile::entry()]
+fn add<const B: i32>(
+    z: &mut Tensor<f32, { [B] }>,   // exclusive output tile, width B
+    x: &Tensor<f32, { [-1] }>,      // shared input, dynamic length
+    y: &Tensor<f32, { [-1] }>,
+) {
+    let tx = load_tile_like(x, z);
+    let ty = load_tile_like(y, z);
+    z.store(tx + ty);
+}
+```
+
+Both are real programs — clone either repo, run the quickstart, and you get `PASSED: all 1024 elements correct` — and NVIDIA's own advice, in the announcement, is to reach for Tile first: "the compiler decides how tiles map onto each architecture, so your source doesn't encode architecture-specific choices," and drop to SIMT only when you need that control yourself.
+
+## What "catch aliasing errors at compile time" actually means
+
+In CUDA C++, `__restrict__` is how you tell the compiler two pointers never overlap:
+
+```cpp
+__global__ void vecadd(const float* __restrict__ a,
+                        const float* __restrict__ b,
+                        float* __restrict__ c, int n);
+```
+
+It's a promise, not a fact the compiler checks. Nothing at the call site verifies it, so the compiler either takes your word and optimizes aggressively (wrong if you lied) or — more commonly — can't actually use the hint for kernels sophisticated enough that aliasing analysis gives up anyway, and you're back to whatever the memory access pattern happens to tolerate. When it's wrong, the failure mode is not a crash; it's a data race between threads that only shows up as a wrong number, at some batch size, on some GPU, sometimes.
+
+Rust's borrow checker can make non-aliasing a *checked* fact instead of an unchecked promise — but exactly how much of the CUDA aliasing problem that covers is worth being precise about, because there are two different bugs hiding under "aliasing":
+
+1. **Pointer aliasing between kernel arguments in global memory** — two parameters that turn out to be the same buffer, so a write through one is visible through the other. This is what `__restrict__` addresses in C++, and it's a fact about *which arguments you passed*, checkable without knowing anything about the other 127 threads in the block.
+2. **Race conditions between threads in a block, usually over shared memory** — thread 5 and thread 12 hit the same on-chip location with no ordering between them. This is a fact about *concurrent execution*, and it's the harder problem: `__restrict__` says nothing about it at all.
+
+<AliasingCompare />
+
+cuda-oxide's own [safety-model documentation](https://github.com/NVlabs/cuda-oxide/blob/main/cuda-oxide-book/gpu-safety/the-safety-model.md) is unusually candid about drawing this line itself. It organizes kernels into three tiers. **Tier 1** — a kernel body built entirely from `&[T]` inputs and `DisjointSlice<T>` outputs, launched through a checked `PreparedLaunch` — is safe by construction and covers exactly problem 1: `DisjointSlice::get_mut()` takes a `ThreadIndex` that can only be minted from hardware registers (`threadIdx`, `blockIdx`), is `!Send + !Sync + !Copy`, and is bounds-checked to `Option`, so the borrow checker sees one `&mut T` per thread and the type system makes two live views of the same buffer an ordinary borrow error — the `error[E0502]` in the panel above. This is a real, zero-cost check: the book's own claim is that "the generated PTX is identical to what you would write by hand — the safety net disappears at code generation."
+
+**Tier 2 is where problem 2 lives, and it is explicitly not solved.** Shared memory, warp shuffles, atomics, and barriers all require `unsafe`, and the documentation doesn't paper over what that costs: "the borrow checker cannot reason about whether thread 0 writing `smem[0]` and thread 1 writing `smem[1]` is safe — it sees `&mut smem` and rejects it." Its own "hard problems" section lists, verbatim, what is *not* enforced today: thread-divergent control flow around barriers (worked around by disabling an LLVM optimization pass, not by proving anything), warp-convergence for `shfl_sync`/`ballot_sync` (get it wrong and you get a silent hang, "the worst kind of bug"), and memory-space awareness in general. And per the tier guide's own admission, this is not a rare corner: "if you are writing a vecadd, a GEMM, or a reduction, you will rarely leave Tier 2" — meaning almost any real SIMT kernel eventually reaches into the unchecked tier, exactly where the classic thread-race lives. cuda-oxide's compile-time guarantee is real, and it is scoped tightly to problem 1.
+
+cutile-rs makes what NVIDIA's own announcement calls "the stronger of the two claims," and it earns that by changing the abstraction rather than by checking more: a tile program is one logical thread over a whole sub-tensor, so there is no second thread in the source language to race with in the first place. `.partition([128])` on the host hands each tile block one exclusive sub-tensor before the kernel even launches, ownership of that sub-tensor travels with the tensor value through the launch boundary (not just checked at one call site), and the compiler — not you — decides how many real warps and how much shared-memory staging realize that tile underneath. The blog's own aliasing example fails with `error[E0382]: use of moved value` because the host code tried to hand the same tensor to two roles at once; the *mechanism* is an ordinary Rust move, but it's checked across the async launch, not just within one function signature. The honest framing is that cutile-rs doesn't out-check cuda-oxide on problem 2 so much as it deletes problem 2's premise: there's no `threadIdx` to shuffle through shared memory when the source never mentions a thread. (It isn't absolute either — raw escape hatches like `store_unchecked` and `partition_full_mut` exist in `cutile/src/_core.rs`, all `unsafe fn`, for exactly the cases where you need to reach past the tile abstraction.)
+
+## Why tiles are ascending
+
+Tile-level programming isn't new — [Triton](https://github.com/triton-lang/triton) popularized it, and NVIDIA's own CuTe/cuTile share cutile-rs's Tile IR backend. What's changing is who's building on the model and with what guarantees. The paper's own related-work framing puts it plainly: Triton, Pallas, and ThunderKittens all "prioritize performance and productivity rather than static safety guarantees." Triton in particular is why the tile model is ascending at all — a block-level abstraction where the compiler owns the thread mapping is what makes it possible to write a fused kernel in an afternoon instead of a week, because you stop hand-scheduling warps and start describing data movement over blocks.
+
+cutile-rs occupies the same abstraction level as Triton, from a different direction. Triton is a Python DSL: you write Python, a JIT compiler lowers it, and there's no static type or ownership discipline behind it — correctness bugs surface at runtime, if at all. cutile-rs's kernel body is a genuinely restricted subset of Rust — no closures, no user-defined structs beyond the library's own tile types, only `&Tensor` / `&mut Tensor` / scalars as parameters (see `cutile-macro/src/validate_dsl_syntax.rs`) — but that subset gets checked by the *real* Rust type system and borrow checker before a proc macro ever captures it for the Tile IR compiler. CUDA C++ has the tile model too (CUDA Tile C++ and cuTile Python share the same backend), just without Rust's ownership discipline riding on top of it.
+
+<SimtVsTile />
+
+## "On stable Rust" — and what that costs
+
+This is the detail worth verifying rather than taking on faith, because GPU Rust has a long history of needing nightly and a custom toolchain. cuda-oxide does: `rustc`'s stable interface has no hook for a third-party codegen backend, so it pins a specific nightly (`nightly-2026-04-03` at the time of writing) and needs `llvm-tools` or a system LLVM 21+ for `llc`. That's the real cost of compiling *arbitrary* Rust — including the generic closures with captures that cuda-oxide's own README demonstrates (`fn map<T, F: Fn(T) -> T + Copy>(...)`) — through actual MIR to PTX.
+
+cutile-rs's README claim checks out: **stable Rust 1.89+, no nightly, no custom LLVM**, `cargo add cutile` and go. It earns that by not being a `rustc` backend at all. `cutile-macro/src/lib.rs` says exactly what it does: the `#[cutile::module]` proc macro (built on stable proc-macro APIs) captures the kernel's *verbatim source text* via `Span::source_text()` at macro-expansion time, and a separate crate, `cutile-compiler`, re-parses that string at runtime and lowers it to Tile IR, JIT-compiling on first launch. There's no unstable compiler-internals hook anywhere in the path — which is exactly why the kernel body has to be a restricted DSL rather than full Rust: a hand-written front end can only understand the syntax it was built to understand, and `validate_dsl_syntax.rs` rejects everything else at macro-expansion time with a pointed error rather than a cryptic one three layers down. Stable-vs-nightly isn't "cutile-rs is more finished" — it's a different place to spend the engineering budget: cuda-oxide bought full Rust language coverage with a pinned toolchain, cutile-rs bought toolchain stability with a smaller, purpose-built kernel-body language.
+
+## Performance: does the safety cost anything?
+
+The blog post itself publishes zero benchmark numbers — worth saying plainly, since it's tempting to assume an announcement this polished has them. The real numbers are in the paper, run on an NVIDIA B200:
+
+<Figure
+  src="/articles/cuda-rust/fig1.png"
+  alt="Two line charts from an NVIDIA B200 safety-overhead microbenchmark. Left: element-wise add memory bandwidth in TB/s versus N from 2^20 to 2^28 elements — cuTile Python, safe Rust, and unsafe Rust overlap almost exactly, approaching about 7 TB/s against a dotted peak line near 7.7 TB/s. Right: GEMM compute throughput in TFlop/s (f16) versus M=N=K from 2^10 to 2^15 — Python, safe Rust, unsafe Rust, and cuBLAS all rise together to roughly 2,100-2,200 TFlop/s, visually indistinguishable near the dotted peak line."
+  caption="Element-wise add (left) and GEMM (right) on a B200: cuTile Python, safe Rust, unsafe Rust, and cuBLAS track each other within measurement noise (Fearless Concurrency on the GPU, Figure 5a-b)."
+/>
+
+The specific headline claim is a persistent GEMM at `M=N=K=8192`: safe Rust reaches **2.07 PFlop/s — 92% of the B200's dense f16 peak, within 0.3% of the same kernel written directly in low-level Tile IR**. That 0.3% is the actual "safety costs nothing" number; the chart above is the broader sweep it's drawn from, where safe Rust, unsafe Rust, cuTile Python, and cuBLAS all sit close enough together to call it noise (about 96% of cuBLAS at the largest sizes tested). Element-wise addition reaches 7 TB/s, roughly 91% of peak HBM bandwidth on the same GPU, with the same three variants overlapping.
+
+That's a synthetic microbenchmark, so the paper also runs something with more moving parts: [Grout](https://github.com/huggingface/grout), a Qwen3 inference engine Hugging Face built on cutile-rs.
+
+<Figure
+  src="/articles/cuda-rust/fig2.png"
+  alt="Two line charts of Grout, SGLang, and vLLM on batch-1 Qwen3-4B decode on an RTX 5090. Left: time-to-first-token in milliseconds on a log scale versus prompt tokens (18 to 8192) — Grout tracks at or below both baselines. Right: generated tokens per second versus number of generated tokens (36 to 8192) — Grout stays around 165-172 tokens/s, slightly ahead of SGLang and vLLM until all three converge near 8192 generated tokens."
+  caption="Grout (built on cutile-rs) versus SGLang and vLLM on batch-1 Qwen3-4B decode, RTX 5090 (Fearless Concurrency on the GPU, Figure 7a)."
+/>
+
+In batch-1 decode, Grout reaches **171 tokens/s for Qwen3-4B on an RTX 5090** and **82 tokens/s for Qwen3-32B on a B200**, ahead of or matching vLLM and SGLang across most of the sweep, which the paper checks against an HBM-roofline estimate rather than just eyeballing the win. It's a real, memory-bound inference workload, not a hand-picked microbenchmark — but it is still cutile-rs's own paper measuring its own downstream project. There is no equivalent number anywhere for cuda-oxide's SIMT track, and no third-party benchmark of either project against hand-tuned CUDA C++. If someone reruns this independently and gets a different answer, that's the number to trust over this one.
+
+## The honest caveats
+
+<Callout type="warn">
+Both projects are early alpha with a documented expectation of breakage. The benchmarks above are cutile-rs's own paper, on hardware and workloads the authors chose, measuring cutile-rs against its own Python sibling and its own downstream inference engine — not a neutral third party, and not a comparison against hand-written CUDA C++ or against cuda-oxide. cuda-oxide publishes no performance numbers at all.
+</Callout>
+
+A few more things worth stating plainly:
+
+- **The two aliasing-safety claims are not the same claim.** cuda-oxide checks pointer aliasing between kernel arguments at each launch call; cutile-rs checks tensor ownership across the whole launch boundary, which is why NVIDIA calls it the stronger of the two. Neither checks thread-level races over shared memory — cuda-oxide because that's still `unsafe` and explicitly documented as unenforced (thread divergence, warp convergence, memory-space awareness all named in its own "hard problems" list), cutile-rs because the abstraction removes per-thread indexing from the source rather than verifying anything about it.
+- **cutile-rs's DSL restriction is real and load-bearing.** No closures, no user-defined structs beyond the library's tile types — a smaller language than cuda-oxide's, which runs the genuine `rustc` frontend and accepts generics, closures with captures, and ordinary control flow in device code.
+- **Inter-language interop is promised, not shipped.** The stated plan is for CUDA Rust, CUDA C++, and CUDA Python to interoperate so the frontend choice doesn't lock you out of the others; today, calling out to hand-written PTX/CUBIN is the documented path, not a first-class interop layer.
+- **"On stable Rust" holds up**, but it's a different engineering trade than "more mature": a hand-rolled front end over a DSL-restricted subset of Rust syntax, not a stable-compatible version of what cuda-oxide does.
+
+## The take
+
+The two-tracks framing maps cleanly onto CUDA's own SIMT-versus-Tile split, and it's worth reading the two Rust tracks as making genuinely different bets rather than one superseding the other. cuda-oxide bets that a real `rustc` backend is worth a pinned nightly toolchain, and its payoff is a compile-time check — `DisjointSlice` plus a checked launch contract — that closes a specific, real hole in CUDA C++'s `__restrict__` for aliasing between kernel arguments, while leaving shared-memory races exactly as unchecked as they've always been, and saying so in its own documentation rather than implying otherwise. cutile-rs bets that raising the abstraction to tiles is worth a restricted kernel-body language, and its payoff is stable Rust, a stronger ownership claim across the launch boundary, and — per its own B200 numbers — no measured cost for any of it.
+
+What's actually new isn't "Rust on the GPU," which [Rust-CUDA](https://github.com/Rust-GPU/Rust-CUDA) has done, on and off, for years. It's an aliasing-safety story precise enough to name exactly what it covers, backed by a team whose job is maintaining compilers rather than a side project waiting for its next revival. If you're coming from hand-tuned CUDA C++ — the world of [FlashAttention-3](/articles/flash-attention-3), where the entire trick is scheduling warpgroups around shared memory and register budgets by hand — nothing here touches that layer yet; Tier 2 is still `unsafe`, on purpose. If you're coming from the model-generates-kernels side, like [MusaCoder](/articles/musacoder-gpu-kernels)'s RL loop against a compile/execute/verify reward, a compiler that rejects a whole class of aliasing bugs before the kernel ever runs is a cheaper filter than any verifier — it's just not the same filter as one that catches a shared-memory race.

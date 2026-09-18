@@ -1,0 +1,218 @@
+---
+title: "Lexing on the GPU: the scan is the easy part"
+description: "Pareas compiles a whole language front end on the GPU, and its lexer is a genuinely elegant idea — map every byte to a DFA transition function, compose them with a prefix scan, done in O(log n) parallel steps. I rebuilt its lexer generator to measure the thing that idea costs: the k×k merge table it composes through. The shipped JSON grammar needs 4,176 states and 34.9 MB, exactly as the thesis says; adding one string rule to the language grammar takes it from 7.4 MB to 126.5 MB, and adding one block-comment rule makes the generator die of std::bad_alloc. The headline result — the GPU parser beats simdjson on large input — survives, but the Total column it rests on silently excludes the host-to-device upload, and once you add the transfer back the margin falls from 3.03× to 1.86×. There are no correctness tests in the repository, so I wrote one: five of fourteen inputs disagree with a reference JSON decoder, which is three distinct defects — uppercase hex escapes rejected, a raw 0x7F rejected, and invalid UTF-8 accepted in silence."
+date: 2026-09-18
+interest: 4
+helpful: 4
+featured: false
+tags:
+  - gpu
+  - compilers
+  - parsing
+  - cuda
+  - futhark
+  - performance
+  - explainer
+cover: /articles/lexing-on-the-gpu/fig2.png
+---
+
+import { ScanMerge } from "@/components/articles/lexing-on-the-gpu/scan-merge"
+import { TableBlowup } from "@/components/articles/lexing-on-the-gpu/table-blowup"
+import { ThroughputLedger } from "@/components/articles/lexing-on-the-gpu/throughput-ledger"
+
+[Pareas](https://github.com/Snektron/pareas) is a compiler that runs on the GPU. Not a compiler *for* GPUs — a compiler whose lexer, parser, semantic analysis and RISC-V code generation all execute as Futhark kernels, with the CPU doing little more than reading the file and writing the ELF. It came out of two 2021 Leiden master's theses, [Robin Voetter's *Parallel Lexing, Parsing and Semantic Analysis on the GPU*](https://theses.liacs.nl/pdf/2020-2021-VoetterRobin.pdf) and Marcel Huijben's *Parallel Code Generation on the GPU*, and a 2022 paper at ACM Computing Frontiers, [*Compilation on the GPU? A Feasibility Study*](https://dl.acm.org/doi/10.1145/3528416.3530249) ([DOI 10.1145/3528416.3530249](https://doi.org/10.1145/3528416.3530249) — it is not on arXiv; I looked, including the authors' own [publication list](https://liacs.leidenuniv.nl/~rietveldkfd/publications.html), and there is no preprint).
+
+I cloned the repository, rebuilt its lexer generator, and measured the parts of the design that decide whether any of it scales. The front end is the interesting half: the code-generation backend is a different thesis, and lexing is where the "can this even be data-parallel?" question is sharpest.
+
+| | |
+|---|---|
+| What it is | a GPU compiler front end (lex → parse → semantic analysis) in [Futhark](https://futhark-lang.org/), plus a JSON parser built the same way |
+| The lexer | a parallel DFA: every byte becomes a transition function, composed by a prefix `scan` |
+| Hardware in the paper | one **RTX 3090** (24 GB, 936 GB/s) for GPU runs; a separate **2× EPYC 7601** box for CPU and simdjson runs. Two GPUs installed, **one used**. No cluster anywhere |
+| The headline | on the two largest JSON files, the GPU parser beats simdjson |
+| The baseline it's against | **simdjson, one thread**, on the *other* machine · **PAPAGENO**, a parallel CPU lexer/parser · its own Futhark multicore back end at 1–64 threads |
+| Is the transfer counted? | **No.** Appendix C's JSON table reports Upload as a separate column and leaves it out of Total |
+| Are there tests? | **None** in the repository — no token-stream comparison against any reference |
+| Last commit | March 2024 (a Futhark-HEAD compatibility fix), 383 stars. The research is finished, not abandoned mid-flight |
+
+## A lexer is a prefix scan
+
+Start from why this is hard. A DFA is the definition of sequential: state $q_{i+1} = \delta(q_i, a_i)$, and you cannot know $q_{i+1}$ without $q_i$. Every classic lexer — `flex`, `re2c`, `ragel`, the hand-rolled switch in your favourite parser — is a loop over bytes with a state variable, and that loop is a dependency chain.
+
+The escape is the [Hillis & Steele](https://dl.acm.org/doi/10.1145/7902.7903) reformulation the thesis builds on. Instead of carrying a *state*, carry a *function*. Partially apply the transition function to the symbol: $\delta_{a}(q) = \delta(q, a)$. Then the state after the whole input is
+
+$$\delta_{a_n} \circ \cdots \circ \delta_{a_2} \circ \delta_{a_1}\,(q_0)$$
+
+and function composition is associative, so the running state after every prefix is an inclusive prefix scan. Parallel time drops from $O(n)$ to $O(\log n)$.
+
+The obvious problem is that a transition function is a table of $|Q|$ entries, so a naive scan stores $O(|Q|n)$ intermediate state — the thesis works this out and rejects it. Pareas's answer is to precompute, ahead of time, every composition of transition functions that is actually reachable, assign each one an integer identifier, and reduce composition to a two-dimensional table lookup. Call the number of distinct reachable functions $k$. The scan then carries a single `u16` per position and the merge operator is one load from a $k \times k$ table.
+
+<ScanMerge />
+
+That is the whole kernel. `src/compiler/lexer/lexer.fut`, which is what actually runs on the GPU:
+
+```futhark
+let lex [n] [m] 'token (input: [n]u8) (table: lex_table [m] token): [](token, i32, i32) =
+    let merge (a: state) (b: state) =
+        let a = a & !produces_token_mask
+        let b = b & !produces_token_mask
+        in table.merge_table[state.to_i64 a, state.to_i64 b]
+    let states =
+        input
+        |> map (\x -> table.initial_state[u8.to_i64 x])
+        |> scan merge table.identity_state
+```
+
+Three lines of real work: one `map` from bytes to function identifiers, one `scan` whose operator is a table lookup, then a `filter` and two gathers to turn states into `(token, start, length)` triples. No `if`, no divergence, no shared-memory choreography. Compared to the shared-memory ballet in a hand-tuned CUDA kernel, this is almost embarrassingly clean — which is exactly why it is worth asking what it costs.
+
+<Figure
+  src="/articles/lexing-on-the-gpu/fig1.png"
+  alt="Two schematic diagrams from the thesis. Left: a template nondeterministic finite automaton, drawn as a start circle with three epsilon-labelled arrows fanning out to boxes reading 'automaton for pattern 1', 'automaton for pattern 2' and 'automaton for pattern n'. Right: the same thing collapsed to a single box labelled 'combined DFA' with one incoming arrow from 'start'."
+  caption="How the lexical grammar becomes one automaton: Thompson-construct an NFA per rule, join them with epsilon edges, then subset-construct. The merge table is built from the DFA on the right (Parallel Lexing, Parsing and Semantic Analysis on the GPU, Figure 3.2a-b)."
+/>
+
+## The merge table is the entire cost model
+
+The thesis reports its two tables in passing — "about 8 MB of precomputed data" for the language, "about 35 MB" for JSON — and then moves on. That number is the design, so I wanted it measured rather than quoted.
+
+You do not need a GPU for this. `pareas-lpg`, the lexer and parser generator, is plain C++20 that depends only on `{fmt}`, and it has a `--verbose-lexer` flag that prints the table sizes. I built it against a header-only fmt 7.1.3 and ran it on the two shipped grammars:
+
+```console
+$ pareas-lpg --lexer src/json/json.lex --check --verbose-lexer
+Initial states table: 256 element
+Merge table: 4176² elements = 17438976 elements
+Final states table: 4176 elements
+
+$ pareas-lpg --lexer src/compiler/lexer/pareas.lex --check --verbose-lexer
+Merge table: 1927² elements = 3713329 elements
+```
+
+`lexer.fut` declares `merge_table: [n][n]state` with `module state = u16`, so those are 34,877,952 and 7,426,658 bytes. The thesis's "4 176 unique unary transition functions ... about 34.9 MB" and "1 927 ... about 7.5 MB" are exactly right. First check: the thesis's own arithmetic holds.
+
+The interesting question is what moves $k$. Section 6.1.1 of the thesis predicts the failure mode itself — "when more of these structures are introduced, for example in a programming language which also supports strings, the amount of entries in the merge table blow up drastically, and makes the entire system infeasible" — but never quantifies it. So I edited the grammars, one rule at a time, and re-ran the generator.
+
+<TableBlowup />
+
+Deleting the `string` rule from `json.lex` takes $k$ from 4,176 to 642 and the table from 34.9 MB to 0.82 MB. **One rule is 97.6% of the JSON lexer's precomputed data.** Deleting `//` comments from `pareas.lex` takes it from 7.4 MB to 1.3 MB. Going the other way, adding a single C-style string literal to `pareas.lex` — one line, `string_literal = /"([^"\\\x00-\x1F]|\\["\\nrt])*"/` — takes $k$ from 1,927 to 7,952 and the table from 7.4 MB to **126.5 MB**, and takes the generator from 4 seconds to 139.
+
+Adding a block comment instead does not finish at all. The stock generator aborts after about six seconds:
+
+```console
+$ pareas-lpg --lexer pareas-blockcomment.lex --check --verbose-lexer
+terminate called after throwing an instance of 'std::bad_alloc'
+  what():  std::bad_alloc
+```
+
+`MergeTable::resize` in `src/lpg/lexer/parallel_lexer.cpp` allocates `capacity² × sizeof(Transition)` and doubles the capacity, so the step past 16,384 asks the allocator for 17 GB. I rebuilt it with `resize()` patched to count states instead of allocating; the count went past 38,000 and was still climbing inside the merge closure when I stopped it. One `/* … */` rule, on a 48-rule grammar, and the table goes from 7.4 MB to somewhere north of 2.8 GB.
+
+The mechanism is easy to see once you look at the transition functions. Outside a string, they are constant: a digit puts you in the "in a number" state regardless of where you were. Constants compose to constants, so the closure barely grows. A string introduces a *mode* — a digit means "number" outside it and "string body" inside it — so $\delta_{\text{digit}}$ stops being constant, compositions stop collapsing, and $k$ grows toward its combinatorial bound. Flip the grammar toggle in the widget above and watch the toy do it: 5 functions become 20, a 4.0× growth, against the 4.1× I measured on the real grammar. Same mechanism; the toy's whole merge table is 800 bytes and the real one is 126.5 MB.
+
+<Receipts src="/articles/lexing-on-the-gpu/data/merge-tables.json" />
+
+This matters beyond tidiness, because the table lives in global memory and is read with a data-dependent access pattern. The thesis says so itself, and names the fix it could not reach: if the table were tens of kilobytes it would fit in shared memory and "lexical analysis speed could be improved drastically". At 34.9 MB it does not fit in the RTX 3090's 6 MB L2 either. The merge operator — the innermost operation of the whole kernel — is a random gather into a 35 MB array in VRAM.
+
+## What the throughput number is actually against
+
+Here is the claim, from the thesis's own conclusions: "When the input is sufficiently large, however, the GPU-powered JSON parser is able to outperform simdjson."
+
+<Figure
+  src="/articles/lexing-on-the-gpu/fig2.png"
+  alt="Grouped bar chart with a logarithmic runtime axis from 0.1 to 100000 milliseconds, across five JSON files from twitter_api_response up to refsnp-other-100K. Nine bars per file: the GPU in yellow, the Futhark multicore back end at 1, 4, 16 and 64 threads in greens, simdjson single-threaded in teal, and PAPAGENO at 4, 16 and 64 threads in blues and purples. simdjson is the shortest bar on the three smallest files; on the two largest the yellow GPU bar is shortest."
+  caption="The comparison the headline rests on. Note the two largest files, where the yellow GPU bar drops below the teal simdjson bar (Parallel Lexing, Parsing and Semantic Analysis on the GPU, Figure 5.4b)."
+/>
+
+The figure is a log-scale bar chart, so I went to Appendix C for the milliseconds. Table C.6 breaks the GPU JSON run into five columns — Upload, Lexical Analysis, Parsing, Building parse tree, Restructuring — plus a Total. For the largest file, `refsnp-other-100K` at 442 MB:
+
+```text
+                  Upload    Lexical A.   Parsing    Building   Restruct.   Total
+refsnp-other-100K 107.43      58.41        56.86      12.20      42.11     169.59
+```
+
+Add the four processing stages: 58.41 + 56.86 + 12.20 + 42.11 = 169.58. The printed Total is 169.59. **The Total excludes the 107.43 ms upload.** This is not a rounding artefact — it holds on every row of that table, and the `cpu (1 thread)` row for `twitter_api_response` makes it unambiguous: its four stages sum to 1.10 ms, its Total is 1.10 ms, and its Upload is a separate 9.80 ms. Table C.5, the compiler table three pages earlier in the same appendix, does the opposite: there Total equals Upload plus every stage (pareas-4: 40.74 + 345.34 = 386.08 against a printed 386.10). Two tables, same appendix, two different definitions of Total, and the one the simdjson comparison uses is the one that drops the transfer.
+
+That transfer is not incidental. It carries the document *and* the 34.9 MB merge table, and it is the flattest number in the whole appendix: across a 29,000× range of input sizes the upload rate sits between 3.8 and 4.4 GB/s. That is what a bus looks like, not what a kernel looks like — and the GPU host is a pair of Xeon Silver 4214R, which is PCIe 3.0, capping at 15.75 GB/s theoretical and considerably less for pageable memory.
+
+<ThroughputLedger />
+
+With the upload counted, the GPU still wins on the two largest files, so the thesis's claim survives — but the margin on `refsnp-other-100K` falls from **3.03× to 1.86×**, and `gsoc-2018` flips from a 2.48× GPU win to a 2.34× simdjson win. Turn on the second switch and it gets worse: Futhark hands kernel source to the driver at context creation, and section 5.3.3 measures that at **2.0 seconds** for the JSON parser. Against a 442 MB file that simdjson finishes in 515 ms, a one-shot `pareas-json` invocation pays 2,277 ms. The GPU parser is a server, not a CLI tool, and nothing in the paper claims otherwise — it is just not a distinction the bar chart can draw.
+
+Three more things the denominators are worth saying out loud:
+
+- **simdjson here runs at 0.86 GB/s**, which is well under what simdjson is usually quoted at. That is not a knock on simdjson: it is one thread on a 2017 EPYC 7601 (Zen 1, AVX2, no AVX-512), being compared to a 2020 RTX 3090 sitting in a different machine. Do not read 0.86 GB/s as simdjson's ceiling, and do not read the GPU's 1.60 GB/s as beating simdjson in general. The thesis is candid about exactly this — "comparing the massively parallel GPU architecture with a single-core CPU based implementation, which can be easily replicated over multiple cores to parse different documents in parallel, is not very fair" — and says plainly that "the lack of a proper baseline makes it hard to draw a final conclusion." Four of those 64 EPYC cores parsing four documents at once would out-throughput the GPU on every file in the set.
+- **The lexer stage in isolation is the fast part**: 58.41 ms for 442 MB is 7.57 GB/s, flat at 7.2–7.6 GB/s across the two largest files. Measured against the input alone that is 0.8% of the 3090's 936 GB/s — but the input is not what the kernel moves. Section 5.3.4 works out that lexing holds about 20 bytes of intermediate state per input character (a `u16` state, plus a start and end `i32`, doubled during the filter), and Table 5.2b measures 9.74 GB allocated for this one 442 MB file. Move that 8.8 GB even once in 58.41 ms and you are at roughly 150 GB/s, about 16% of peak. The state expansion, not the byte count, is what the kernel actually pays for — and at 22 bytes per byte of input, a 24 GB card tops out somewhere near a 1 GB document.
+- **The corpus is five files**, two of them reconstituted dbSNP JSONlines dumps wrapped in an array to make them a single document. Two of the five are the ones the headline rests on.
+
+## Does it produce the same tokens?
+
+The repository has no test suite. `git ls-files` turns up a `test_parser.cpp` for the LLP generator and the vendored Futhark library's own tests, and nothing that compares a token stream or a parse tree against a reference. The paper measures runtime; correctness is asserted, not checked. For a lexer that reaches every byte through a precomputed composition table, that is the part I most wanted to poke at — string escapes and comment terminators are exactly where a data-parallel scan gets interesting.
+
+There is a `LexerInterpreter` in `src/lpg/lexer/interpreter.cpp` that walks the same merge table sequentially, but nothing calls it; it is dead code. So I wrote a harness around it. It builds the real `ParallelLexer` from `src/json/json.lex` the way `src/lpg/main.cpp` does, then steps the merge operator one pair at a time — which is the same function `lexer.fut` hands to `scan`, so the token stream it prints is the token stream the kernel produces:
+
+```cpp
+// lexcheck.cpp — transcription of LexerInterpreter::lex_linear, with one change:
+// the byte is widened through `unsigned char`. The repo's version writes
+// `for (auto c : input)` and indexes `initial_states[c]` with a *signed* char,
+// which is out of bounds for every byte >= 0x80. lexer.fut does the same lookup
+// as `table.initial_state[u8.to_i64 x]`, i.e. unsigned.
+for (unsigned char c : input) {
+    auto st = lx.initial_states[c];
+    states.push_back(st.result_state);
+    if (st.produces_lexeme) emit(lx.final_states[PL::START]);
+}
+for (size_t i = 1; i < input.size(); ++i) {
+    auto prev = states[i - 1];
+    auto st = lx.merge_table(states[i - 1], states[i]);
+    states[i] = st.result_state;
+    if (st.produces_lexeme) emit(lx.final_states[prev]);
+}
+```
+
+That signed-`char` indexing is a real bug, though a harmless one — the interpreter it lives in is never called, and the generator itself is `uint8_t` throughout, so the tables the GPU gets are correct. It cost me one confusing run before I spotted it.
+
+Fourteen inputs, against CPython's `json` module as the reference decoder:
+
+<Receipts src="/articles/lexing-on-the-gpu/data/json-conformance.json" />
+
+Three distinct defects in that table, plus a fourth in the language grammar, and nothing in the repository catches any of them:
+
+1. **Uppercase hex in a `\uXXXX` escape is rejected.** The grammar writes the escape as `u[0-9a-f][0-9a-f][0-9a-f][0-9a-f]`. [RFC 8259](https://datatracker.ietf.org/doc/html/rfc8259) §7 defines it as `%x75 4HEXDIG`, and ABNF terminals are case-insensitive, so `"\u00E9"` is valid JSON. Pareas lexes it to `(input error)`. This one is cheap to fix: changing the class to `[0-9a-fA-F]` takes $k$ from 4,176 to 4,249 — 1.2 MB more table, 3.5%.
+2. **A raw `DEL` (0x7F) inside a string is rejected.** RFC 8259 forbids only `%x00-1F` unescaped; 0x7F is explicitly allowed by the `%x5D-10FFFF` range.
+3. **Invalid UTF-8 is accepted silently.** `"\xFF\xFE"` and a lone continuation byte both lex to a clean `string` token. The grammar's negated class lets every byte from 0x80 to 0xFF through unchecked. simdjson, the comparison baseline, validates UTF-8 as part of its parse — so the two programs in that bar chart are not doing the same amount of work.
+4. **A `//` comment at end of file without a trailing newline fails.** `pareas.lex` writes `comment = /\/\/[^\n]*\n/`, and the newline is mandatory. `fn f(): int { return 1; }\n// trailing comment` lexes fine right up to the comment and then ends in `(input error)`.
+
+None of these are fatal to the research — the thesis is a feasibility study, not a conformance claim, and it never says otherwise. They are just what "correctness is asserted, not verified" looks like when you go and check.
+
+<Callout type="note">
+I have no GPU here, so every millisecond in this piece is the thesis's, not mine. What I measured myself is on the CPU side and needs no GPU at all: the merge-table sizes (`pareas-lpg --verbose-lexer` on eight grammars), the generator's failure on block comments, and the token streams (my harness over their tables). The throughput arithmetic is arithmetic on their Appendix C, and I have flagged where it disagrees with their prose.
+</Callout>
+
+## What I could not check
+
+- **Whether the GPU numbers reproduce.** Futhark 20.6, CUDA 11.2 and an RTX 3090 are all five years old now; nobody has re-run this on a Hopper or Blackwell card, where the memory hierarchy and the PCIe generation both changed.
+- **Whether the parse trees are right.** I checked the lexer's token stream. The LLP(1,1) parser, the grammar transformations that work around it, and the semantic analysis passes are all unverified by me and by the repository.
+- **The "no cluster" question.** There isn't one. Two benchmark machines, one for CPU work and one for GPU work, two 3090s installed and one used. Nothing in either thesis or the paper distributes a lexer across nodes, and given that a 442 MB document already needs 9.74 GB of VRAM for the lexing stage alone, sharding by file rather than within a file is the obvious design anyway.
+
+<ChangeMyMind>
+  <Falsifier claim="The merge table, not the scan, is what limits this design.">
+    A grammar with block comments *and* string literals that generates a table small enough to fit in an RTX 3090's 6 MB L2 — or a sparse encoding of the table that keeps the merge operator O(1). The thesis proposes both; neither is implemented. Either would move the ceiling.
+  </Falsifier>
+  <Falsifier claim="The GPU-beats-simdjson result shrinks from 3.03× to 1.86× once the PCIe upload is counted.">
+    A statement from the authors that the JSON Total in Table C.6 does include Upload and the columns are labelled misleadingly. The arithmetic says otherwise on all five rows, but arithmetic on a published table is an inference about intent, not a measurement.
+  </Falsifier>
+  <Falsifier claim="Pareas's JSON lexer disagrees with a reference decoder on five of fourteen inputs.">
+    A demonstration that my harness diverges from the Futhark `scan` — most plausibly if `produces_token_mask` handling in `lexer.fut` changes which token a state reports. Running `pareas-json` on those fourteen inputs on real hardware would settle it in a minute, and I cannot.
+  </Falsifier>
+  <Falsifier claim="Adding one block-comment rule to pareas.lex makes the table unbuildable.">
+    A completed run of the patched generator landing at some modest k — my number is a lower bound taken while the closure was still growing, not a final count. I stopped it; somebody with more RAM and more patience should not.
+  </Falsifier>
+</ChangeMyMind>
+
+## The take
+
+The reformulation is the good part and it is genuinely good. Turning "simulate a DFA" into "scan an associative operator" is the kind of move that makes a sequential problem disappear, and `lexer.fut` is a `map`, a `scan`, a `filter` and two gathers, with no divergence, no barriers and no shared-memory choreography — the opposite of the register-and-barrier hand-scheduling that [FlashAttention-3](/articles/flash-attention-3) style kernels live on. Read it once and the idea is yours.
+
+What the measurements say is that the cost moved rather than vanished. It went into $k$, the number of distinct transition functions, and $k$ is quadratic in the table and superlinear in the grammar's complexity. JSON — twelve token rules, one of them a string — already needs 34.9 MB. One block comment is enough to make the generator run out of memory building the thing. That is not a tuning problem; it is the representation. Every real language the approach would want next (C, Rust, anything with nested comments, raw strings or a preprocessor) sits on the wrong side of that curve, and the thesis's own future-work section names the two fixes it would need — shrink the table into shared memory, or store it sparsely — without implementing either.
+
+And the throughput headline is real but narrower than the chart suggests: a 1.86× win over one simdjson thread on a 442 MB document, once the transfer is counted, on a card with 5.5× the memory bandwidth of the CPU it is being compared against, after a 2.0-second startup, with no UTF-8 validation and no tests. All of which the thesis is more honest about than most papers would be — it writes "the lack of a proper baseline makes it hard to draw a final conclusion" in its own conclusions. The right reading of Pareas is the one its title claims: a feasibility study that answers *yes, and here is precisely which part will stop you.* Five years on, the part that stops you is still the table.
+
+*Sources: [Snektron/pareas](https://github.com/Snektron/pareas) (commit `c0105fd`) · [Voetter 2021, MSc thesis](https://theses.liacs.nl/2052) · [Huijben 2021, MSc thesis](https://theses.liacs.nl/2053) · [Voetter, Huijben & Rietveld, CF '22](https://doi.org/10.1145/3528416.3530249) · [RFC 8259](https://datatracker.ietf.org/doc/html/rfc8259) · [simdjson](https://github.com/simdjson/simdjson)*
