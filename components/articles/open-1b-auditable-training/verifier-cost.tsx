@@ -1,8 +1,11 @@
 import { mlog10 } from "@/lib/dmath"
 
 // Real per-step replay times, pulled from the live ledger at
-// open1b.gensyn.ai/v1/ledger.jsonl on 2026-09-18 (26 submissions, one
-// superseded -- 25 counted toward "stepsAudited"). Grouped by hardware class;
+// open1b.gensyn.ai/v1/ledger.jsonl on 2026-09-18 at 10:30 UTC (27 submissions,
+// one superseded -- 26 counted toward "stepsAudited"). Every one of the 27
+// committed_state_hash values was checked against the run's published
+// state_hashes.jsonl chain: 27/27 land on their claimed link.
+// Grouped by hardware class;
 // min/max are the fastest and slowest logged submission in that class, not an
 // average, so the range is exactly what happened, not a smoothed estimate.
 //
@@ -27,7 +30,7 @@ const ROWS: { label: string; sub: string; min: number; max: number; n: number; c
     sub: "one datacenter GPU, replaying alone",
     min: 0.4106,
     max: 2.773,
-    n: 11,
+    n: 12,
     color: "oklch(0.60 0.15 255)",
   },
   {
@@ -35,7 +38,7 @@ const ROWS: { label: string; sub: string; min: number; max: number; n: number; c
     sub: "one consumer GPU",
     min: 0.9297,
     max: 1.4531,
-    n: 9,
+    n: 10,
     color: "oklch(0.66 0.14 165)",
   },
   {
@@ -124,7 +127,7 @@ export function VerifierCost() {
         {/* coverage today */}
         <div className="mt-2 grid grid-cols-2 gap-3 border-t pt-3 sm:grid-cols-4">
           {[
-            { label: "steps audited", value: "25 / 80,957", note: "0.03%" },
+            { label: "steps audited", value: "26 / 80,957", note: "0.03%" },
             { label: "segments confirmed", value: "0 / 810", note: "every step must match" },
             { label: "contributors", value: "11", note: "self-reported handles" },
             { label: "active claims", value: "7", note: "in progress" },
