@@ -1,0 +1,320 @@
+---
+title: "Grouped Value Attention: cache the value, reconstruct the key"
+description: "GVA stores only grouped values in the KV cache and rebuilds each query head's content key from them with a learned linear map, absorbed into the query so nothing extra touches memory — cutting persistent cache scalars ~45-47% versus matched GQA. The paper's own table puts the accuracy cost at 44.35 vs GQA's 44.36, a 0.01-point gap it calls within seed variation — smaller than the spread across the paper's own seven trained variants (0.64 points) and smaller than the GQA-MLA gap in the same table (0.48). A widely quoted 44.18 doesn't match the primary source, no decoding kernel is public yet, and the one released checkpoint implements a different, explicitly-failed ablation."
+date: 2026-09-18
+interest: 4
+helpful: 4
+tags:
+  - llm
+  - attention
+  - inference-optimization
+  - kv-cache
+  - explainer
+draft: false
+---
+
+import { CacheCalculator } from "@/components/articles/grouped-value-attention/cache-calculator"
+import { AccuracyDelta } from "@/components/articles/grouped-value-attention/accuracy-delta"
+
+[Grouped-query attention](/articles/attention-mechanisms) shares key and value heads across
+groups of query heads, which is why almost every open model since Llama 2 ships it: fewer
+distinct heads, smaller cache, small quality cost. But GQA still writes **two** streams to the
+cache every step — a key and a value, per group, per token. [Multi-head latent attention
+(MLA)](/articles/attention-mechanisms) went further and compressed both into one shared latent.
+**Grouped Value Attention** (GVA), from FrontiersMind ([arXiv 2609.13285](https://arxiv.org/abs/2609.13285)),
+tries a third cut: keep the value cache GQA already has, and stop writing a key stream at all —
+reconstruct each query head's content key from the cached value with a learned linear map,
+computed once per decoded token and folded straight into the query.
+
+<Figure
+  src="/articles/grouped-value-attention/fig1.png"
+  alt="Five attention-caching diagrams side by side, each showing values (orange), keys (red) and queries (blue) as vertical chips connected by dashed lines. Multi-Head Attention: eight of each, one to one. Grouped-Query Attention: eight queries share four key/value pairs. Multi-Query Attention: eight queries share one key/value pair. Multi-Head Latent Attention: eight values and keys funnel into one compressed latent projection box. Grouped-Value Attention: eight queries and eight keys connect to only four values — keys have no separate boxes of their own."
+  caption="Five ways to cache attention state for eight query heads. GVA (right) is the only one where the query and key connections both terminate on the value chips — there is no separate key cache to draw (paper, Figure 1)."
+/>
+
+## The mechanism, precisely
+
+GQA's grouping rule stays: `H` query heads share `G` value groups. What changes is the key. GVA
+gives every query head `h` its own learned map `M_h`, and reconstructs that head's content key
+on the fly from its group's cached value:
+
+$$
+K_{h} = V_{g(h)}\,M_{h}, \qquad M_{h} \in \mathbb{R}^{d_{h} \times d_{n}}
+$$
+
+where `g(h)` is the value group assigned to head `h`. Only `V_{g(h)}` — the value — is ever
+written to the cache. `M_h` is a small, fixed, per-head weight matrix, learned during training
+and frozen at inference, not part of the cache. The paper's framing: values already carry the
+content the attention output needs, and the map just picks out the features used for *scoring*
+that content, so a separate key projection is redundant.
+
+That reconstruction is only free if it can be **absorbed into the query** — computed once per
+decoded token, not once per cached position. It can, because matrix multiplication associates:
+
+$$
+q_{h} k_{j,h}^{\top} = q_{h} (v_{j,g(h)} M_{h})^{\top} = (q_{h} M_{h}^{\top})\, v_{j,g(h)}^{\top} = \tilde q_{h}\, v_{j,g(h)}^{\top}
+$$
+
+`q̃_h = q_h M_h^T` is a single `(d_n × d_h)` matmul, done once per query token, then reused
+against every cached position. Content attention becomes one matmul against the value cache; no
+key tensor is ever materialized. This is the exact same absorption trick MLA uses for its
+up-projection — the "content key" idea, and the trick of folding a learned map into the query so
+the cache never has to reflect it, both trace straight back to DeepSeek's MLA decomposition. GVA
+just applies it to a *linear map from value to key* instead of a *low-rank latent
+up-projection*.
+
+### Why the positional part is the hard part
+
+RoPE breaks the absorption. Rotate the query and the reconstructed key by their positions `t`
+and `j`, and the score becomes:
+
+$$
+q_{t}^{\text{rot}}(k_{j}^{\text{rot}})^{\top} = q_{t} R_{t}^{\top} R_{j} M^{\top} v_{j}^{\top} = q_{t} R_{j-t} M^{\top} v_{j}^{\top}
+$$
+
+The relative rotation `R_{j-t}` sits *between* `q_t` and `M^T`, and it changes with every cached
+position `j` — even for a fixed query. There is no single transformed query that works against
+every cached position anymore, because the thing you'd need to precompute depends on the position
+you haven't seen yet. Any reconstruction scheme that rotates the reconstructed key hits this
+wall — it's the same reason MLA can't just up-project a rotated latent, and the same reason
+naive [KV quantization schemes](/articles/turboquant-kv-cache) that touch keys have to be careful
+about what survives compression.
+
+GVA's fix is DeepSeek MLA's decoupled RoPE, applied to a reconstructed rather than a compressed
+key: split every query and key into an unrotated **content** slice (width `d_n`) and a rotated
+**positional** slice (width `d_r`, shared across all heads, not grouped). The score splits into
+two additive terms —
+
+$$
+q\,k_{j}^{\top} = q^{\text{nope}}(k_{j}^{\text{nope}})^{\top} + q^{\text{rope}}(k_{j}^{\text{rope}})^{\top}
+$$
+
+— where the first term is the absorbable one (`k^nope_j = v_{j,g(h)} M_h`, folds into the query
+exactly as above) and the second reads a small, already-rotated, shared positional key straight
+from the cache. Nothing learned sits between the two rotations in the second term, so relative
+position survives untouched, and it costs `d_r` scalars per token — not `G · d_r` — because it's
+shared across heads rather than grouped. This is the same content/positional split [MiniMax's
+sparse attention](/articles/minimax-sparse-attention) and every MLA-descended design now leans
+on: RoPE is what forces you to keep *something* rotated and cached, and the trick everywhere is
+to make that something as small and as shared as possible.
+
+The first thing the authors tried was blunter: just set the key equal to the value, `K = V`,
+and halve the cache immediately. It doesn't work — one vector asked to both score and be
+retrieved never catches up to GQA's loss over the run they show:
+
+<Figure
+  src="/articles/grouped-value-attention/fig3.png"
+  alt="Line chart of training loss (lm_loss, y-axis 3 to 8) versus consumed tokens (x-axis, 0 to 4.5G) for two runs. A pink line labeled shared_kv and an orange line labeled baseline both drop from about 7.5 to 3.3 over the run; the pink shared_kv line sits consistently above the orange baseline line at every point after the first half-billion tokens, though the gap narrows steadily."
+  caption="The first cut — reusing the value as the key outright — halves the cache but never closes the loss gap to the GQA baseline over the shown run, which is why the paper keeps a dedicated value and reconstructs the key instead (paper, Figure 3)."
+/>
+
+That failure is the whole justification for `M_h` existing at all: a *learned, per-head, linear*
+reconstruction recovers head-specific content keys — `H` distinct key representations from only
+`G` cached value streams — where the raw `K = V` shortcut collapses everything a group's heads
+see into one vector.
+
+## The cache layout, and the reconstruction step
+
+No kernel or reference implementation is public yet (more on that below), so there's no repo to
+quote. This is a direct transcription of the paper's cache-size equations (§3.4) and its Algorithm
+1 into code, faithful to the math, not benchmarked:
+
+```python
+# Persistent KV-cache tensors, per layer. G = kv groups, T_max = max sequence
+# length, d_h = head dim, d_r = shared positional width.
+
+# GQA — two grouped streams (paper, Eq. 3): N_GQA = 2 * T * G * d_h
+k_cache = torch.empty(B, G, T_max, d_h, dtype=torch.bfloat16)
+v_cache = torch.empty(B, G, T_max, d_h, dtype=torch.bfloat16)
+
+# GVA — one grouped value stream + one small SHARED positional-key stream
+# (paper, Eq. 13): N_GVA = T * (G * d_h + d_r). Note this is not grouped —
+# one k_rope per token, reused by every head, not one per group.
+v_cache      = torch.empty(B, G, T_max, d_h, dtype=torch.bfloat16)
+krope_cache  = torch.empty(B,    T_max, d_r, dtype=torch.bfloat16)
+# M_h (H of them, each d_h × d_n) are ordinary model weights — never cached.
+```
+
+```python
+# One decode step for query head h (paper, Algorithm 1 / Eqs. 8-11).
+# M_h is a learned weight, resident with the model, not the cache.
+def gva_decode_step(x_t, W_q, W_v, W_r, M_h, R_t, v_cache_g, krope_cache):
+    q = x_t @ W_q                              # (d_n + d_r,)
+    q_nope, q_rope = q[:d_n], q[d_n:]
+    q_rope = q_rope @ R_t.T                     # rotate the positional slice only
+
+    v_t = x_t @ W_v                             # (d_h,) — appended to v_cache_g
+    k_rope_t = (x_t @ W_r) @ R_t.T               # (d_r,) — shared, appended once per layer
+
+    q_tilde = q_nope @ M_h.T                     # absorb M_h — ONCE per token, not per position
+    content_scores = q_tilde @ v_cache_g.T             # (T,) — reads only the value cache
+    rope_scores    = q_rope  @ krope_cache.T            # (T,)
+    scores = (content_scores + rope_scores) / math.sqrt(d_n + d_r)
+    return scores.softmax(dim=-1) @ v_cache_g              # (d_h,)
+```
+
+The `q_tilde = q_nope @ M_h.T` line is the whole trick: one small matmul per head, per decoded
+token, independent of context length `T`. The actual attention computation —
+`q_tilde @ v_cache_g.T`, an inner product against every cached position — is `O(T)` and memory-
+bandwidth-bound the way it always is. The reconstruction overhead sits alongside it as a fixed
+`O(d_n · d_h)` cost per head that doesn't grow with context, so on paper it shouldn't eat into the
+bandwidth win. Nothing in the paper measures whether that holds on real hardware — see below.
+
+## What it actually saves: the calculator
+
+The paper's own arithmetic (§3.4): GQA caches `2 · T · G·d_h` scalars per layer; GVA caches
+`T · (G·d_h + d_r)`. Divide, and the ratio is `1/2 + d_r / (2·G·d_h)` — half, plus a small tax
+for the shared positional slice. At the widths the paper tests, that tax is a few percent, which
+is where "45–47% smaller" comes from. It checks out exactly: I get 46.9% and 45.3% (rounding to
+47% and 45%) backing out `G·d_h ≈ 256` from the two reported figures, which is consistent with a
+single small `G·d_h` across both `d_r` settings, as the paper's wording implies.
+
+Percent of scalars isn't the number that decides whether a request fits on a GPU, though — bytes
+are. Drag the knobs below; the formulas are the paper's, in bytes, at layer counts and head
+widths from real production models rather than the 350M-parameter research config the paper
+itself trains at:
+
+<CacheCalculator />
+
+The reduction actually **improves** at production scale, not the reverse: GVA's tax is a fixed
+`d_r` (16 or 24) added to a `G·d_h` that grows with the model, so the tax shrinks as a fraction —
+roughly 49% saved at an 8-head-group, 128-dim config, versus the paper's own 45–47% at their much
+narrower research setting. What doesn't improve is the comparison with MLA: at DeepSeek-V2's own
+reported cache width, MLA saves closer to 72% against the same GQA baseline — GVA lands in
+between GQA and MLA on bytes, not past MLA. GVA's own framing is explicit about the tradeoff: it
+keeps the value as the literal persistent state rather than projecting into a separate joint
+latent, which is simpler to reason about and to absorb, but it doesn't compress as hard as a
+learned bottleneck does.
+
+None of this byte accounting includes the reconstruction matmul, because — per the walkthrough
+above — it's a fixed per-head, per-token cost that doesn't scale with cache size. Whether that
+theoretical near-zero overhead survives contact with an actual kernel is exactly what's
+unmeasured (again, see below).
+
+## The headline number, checked
+
+The number this method gets quoted with is a comparison against GQA and MLA on five zero-shot
+benchmarks at 350M parameters, 30B FineWeb-Edu tokens. Checking it against the arXiv source
+directly turns up something worth flagging on its own: **the paper's own number is 44.35, not
+44.18.** A 44.18 figure circulates on at least one third-party paper-mirror site, but it appears
+nowhere in the arXiv HTML of either the original submission or the current revision — I fetched
+both directly and grepped the full text. The real gap, straight from Table 2, is `44.35 − 44.36 =
+-0.01` — smaller than the popularly quoted `-0.18`, and the revised abstract says so explicitly:
+"a gap of 0.01 points, within seed variation."
+
+That phrase is the thing actually worth checking. The paper reports **three runs per
+configuration, each with a different random seed**, averaged — real methodology, better than a
+lot of small-scale ablation work bothers with. But it never reports the per-seed values or a
+standard deviation, despite its own limitations section warning that "small differences should
+not be interpreted as statistically significant without assessing variability across seeds." So
+"within seed variation" is asserted, not shown.
+
+<Figure
+  src="/articles/grouped-value-attention/fig2.png"
+  alt="Line chart of training loss (lm_loss, y-axis around 3 to 8) versus training step (x-axis, 0 to about 28,000) for seven runs: GQA, MLA, GVA baseline, GVA scale-fixed with Q-norm, GVA variance-fixed without Q-norm, GVA DRoPE 24-dim, and GVA DRoPE 16-dim. All seven lines fall together in a tight, overlapping bundle from about 3.5 down to about 2.3, with no line visibly separated from the pack for the last two-thirds of training."
+  caption="Every trained variant — GQA, MLA, and all five GVA configurations — converges to essentially the same training loss. The 0.01-to-0.64-point spread in Table 2 shows up only downstream, on the benchmarks, not in this curve (paper, Figure 2)."
+/>
+
+The loss curves alone would tell you these models are indistinguishable. Table 2 is where the
+separation actually shows up — and it's worth seeing exactly how much of it there is, and how it
+compares to the -0.01 headline. What the table shows, honestly:
+
+<AccuracyDelta />
+
+Every dot above is the paper's own reported number. The 0.01-point GVA-vs-GQA gap is real, but
+it's dwarfed by two things that are also real and also in this table: the 0.64-point range across
+GVA's own seven trained variants (same data, same token budget, differing only in initialization
+and normalization — exactly the kind of small-scale noise the "seed variation" line is gesturing
+at), and the 0.48-point gap between GQA and MLA, two methods nobody would call equivalent. None of
+this makes the paper's claim false. It makes "matches GQA" a claim that would benefit from an
+actual variance number the paper doesn't provide — the central thing to check, and the thing that
+stays unresolved after checking it.
+
+The full table, for reference (bold = best per column, as in the paper):
+
+| Method | HellaSwag | WinoGrande | OBQA | ARC-E | ARC-C | Avg. |
+|---|---|---|---|---|---|---|
+| GQA | **43.41** | 52.48 | 33.40 | 63.42 | 29.09 | 44.36 |
+| MLA | 43.20 | 51.61 | 34.60 | 62.87 | 27.13 | 43.88 |
+| GVA, baseline init | 42.12 | 52.96 | **34.80** | 61.95 | 27.73 | 43.91 |
+| GVA, scale-matched + Q-norm | 42.05 | **53.51** | 34.40 | 62.75 | **29.35** | **44.41** |
+| GVA, variance-fixed, no Q-norm | 42.71 | 53.35 | 32.20 | 62.33 | 28.24 | 43.77 |
+| GVA + DRoPE, d_r = 24 | 42.94 | 53.12 | 33.20 | 63.69 | 28.50 | 44.29 |
+| GVA + DRoPE, d_r = 16 *(proposed)* | 42.69 | 53.35 | 33.60 | **63.81** | 28.32 | 44.35 |
+
+*Averaged over three seeds per row; per-seed values not published.*
+
+Worth noting since it's easy to miss reading only the headline row: the paper's *strongest* GVA
+configuration isn't the proposed one. Scale-matched GVA with query-RMSNorm hits 44.41 — better
+than GQA — but drops the decoupled-RoPE positional slice, which means it can't use the absorbed
+decode path and falls back to reconstructing a position-dependent key every step. The proposed
+44.35 row is the one that keeps the systems property (absorption, no key materialization); the
+one that beats GQA on this table doesn't.
+
+## What's established, and what isn't
+
+350M parameters and 30B tokens is a genuinely small-scale study, and the paper's own limitations
+section says so without hedging: one model scale, one data mix, three seeds, no sweep of RoPE
+width, no context-length sweep. That's a normal, honest place for architecture research to stop —
+it is not a scandal that a new mechanism gets validated small before it gets validated big. But
+it bounds what the result means. [MLA's advantages over GQA are documented mainly at production
+scale and long context](/articles/attention-mechanisms) — DeepSeek-V2's own comparisons run at
+tens of billions of parameters, not hundreds of millions — and nothing in the GVA paper tests
+whether the accuracy parity it reports at 350M holds at 7B, 70B, or past a few thousand tokens of
+context. The `d_r` sweep is two points (16 and 24); the cache-width sweep is effectively one
+(whatever `G·d_h ≈ 256` corresponds to in their config). Established: a linear reconstruction
+from grouped values, with a scale-matched initialization and a decoupled RoPE channel, tracks
+GQA's training loss and lands within a fraction of a point of it on five small-model benchmarks,
+with a real (if unmeasured for variance) methodology behind the number. Not established: that any
+of this holds at a scale or context length anyone would actually deploy.
+
+## What exists today
+
+Working backward from "coming soon" to what's actually checkable right now:
+
+- **Decoding kernels.** None released. The paper says custom decoding kernels have been
+  developed and it is "currently testing their inference performance," with an open-source
+  release "planned soon" — nearly the same sentence recurs in the abstract, the introduction, the
+  limitations section, and the conclusion. No repository is linked anywhere in the paper.
+- **Hugging Face artifacts.** `FrontiersMind/GVA` exists, but it's a paper landing page — no
+  weight files, no listed model size, downloads not tracked. It documents the method; it isn't a
+  model you can load.
+- **The one thing that IS real and downloadable** is `FrontiersMind/Lumma-0.6B-Base`, a genuine
+  600M-parameter checkpoint with safetensors weights on the Hub. But read its own paper citation
+  carefully: it implements the **shared-KV** ablation — `K = V`, no learned reconstruction — which
+  is the variant Figure 3 above shows failing to match the GQA baseline, and which the paper
+  states outright is "not a proposed system." There's also an open (unmerged) pull request adding
+  native `transformers` support for the Lumma architecture — again the shared-KV design, not the
+  decoupled-RoPE GVA that gets the 44.35 number.
+
+So: today, the thing you can actually download implements the ablation the paper itself
+recommends against, and the thing the paper recommends has no released code at all. That's not a
+criticism of the research — the loss curves and the accuracy table are real, checked results —
+it's just the honest state of "kernels coming soon": a paper with a well-specified method, not
+yet a deployment option.
+
+## The take
+
+The idea underneath GVA is clean: if a key and a value both encode "content," maybe you don't
+need to store both, you need a way to recover one from the other, and MLA already showed how to
+make a learned recovery map free at decode time by absorbing it into the query. GVA applies that
+same absorption trick to the simplest possible map — one linear transform per head, not a shared
+low-rank bottleneck — and gets most of MLA's systems property (no materialized key) without
+MLA's compression. What that buys you: values stay literal, easier to reason about, easier to
+absorb, a smaller reconstruction than MLA's up-projection. What it costs: a cache reduction that
+tops out well short of MLA's, at scales this paper doesn't get to.
+
+The number that will actually decide whether this matters is the one the paper doesn't have yet:
+measured decode throughput against GQA and MLA on a real kernel. Until that exists, the honest
+summary is a well-verified architecture result — the mechanism is sound, the arithmetic checks
+out, the loss curves converge — sitting on top of an accuracy claim that needs an error bar it
+doesn't have, and ahead of a systems claim it hasn't tried to make yet.
+
+---
+
+*Built on [Grouped Value Attention: Efficient KV Caching via On-Demand Key Reconstruction](https://arxiv.org/abs/2609.13285)
+(Vishesh Tripathi, Abhay Kumar, Ramsha Khan; FrontiersMind, 2026), arXiv:2609.13285v2, revised
+2026-09-15. Figures 1, 2 and 3 and the results table are reproduced from the paper; all cache-size
+and accuracy numbers are taken directly from its equations and Table 2. The "44.18" figure quoted
+in some secondary coverage does not appear in either arXiv revision of the paper — checked
+directly against the primary source.*

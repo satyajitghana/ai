@@ -1,0 +1,584 @@
+---
+title: "Soup: an 8B model in 3.6 GB of VRAM, and 216 commands around it"
+description: "Soup's headline claim is that layer streaming fine-tunes an 8B model on a 4 GB laptop GPU. I rebuilt the memory arithmetic from the architecture — 218,103,808 params/layer, NF4 plus double-quant, 112.51 MB/layer times 32 layers — and it lands on exactly 3.600 GB, backed by a repaired silent-gradient bug, an executable proof notebook, and a paper the maintainer revised specifically to retract a claim nobody outside the project had challenged. The same codebase's 'one config, one command, no config hell' promise sits in front of a 237-field training config and 216 CLI commands, and the project's own changelog is the best source for where that promise stops holding. Both things are true; this is what checking each one turned up."
+date: 2026-09-13
+interest: 5
+helpful: 4
+tags:
+  - llm
+  - fine-tuning
+  - quantization
+  - systems
+  - explainer
+draft: false
+cover: /articles/soup-cli/fig1.png
+---
+
+import { LayerStreamDiagram } from "@/components/articles/soup-cli/layer-stream-diagram"
+import { MemoryBudget } from "@/components/articles/soup-cli/memory-budget"
+import { ConfigSurface } from "@/components/articles/soup-cli/config-surface"
+import { StepBudget } from "@/components/articles/soup-cli/step-budget"
+import { ExactnessLedger } from "@/components/articles/soup-cli/exactness-ledger"
+import { AliasedWeight } from "@/components/articles/soup-cli/aliased-weight"
+
+[Soup](https://github.com/MakazhanAlpamys/Soup) is a fine-tuning CLI. Its README makes one very specific claim: fine-tune an 8B model on a 4 GB laptop GPU, no cloud, no second GPU, bit-exact against a normal run. I went looking for the seam — the rounding, the missing denominator, the benchmark that doesn't match the shipped code. I didn't find one in the headline claim. What I found instead is a project that checked its own arithmetic harder than I was set up to, including an executable proof notebook, a silently-wrong-gradients bug it found on borrowed hardware and repaired in public, and a published paper it revised specifically to retract an interpretation nobody outside the project had disputed.
+
+A few directories over sits a much less flattering fact about the same codebase: the CLI that promises "one config, one command, no config hell" ships **216 leaf commands** and a training config with **237 fields**. Both of these are true of the same 181,358-line source tree, and neither cancels the other out. This is a read of the source, the tests, and the benchmark records — not the README — with numbers I recomputed myself wherever I could.
+
+<Figure
+  src="/articles/soup-cli/fig1.png"
+  alt="Soup's own terminal readout for a layer-streaming run: base store 3.60 GB across 32 pinned layers, VRAM buffers 2 x 113 MB = 225 MB, resident 2101 MB embeddings and adapters, LoRA applied 6,815,744 trainable of 8,030,261,248 total parameters (0.08%), gradient checkpointing handled per layer, training started. Caption: On the card: 2 x 113 MB."
+  caption="Soup's own pre-flight/training readout, reproduced from the project's README (docs/assets/layer-streaming.gif — Copyright 2026 Makazhan Alpamys, Apache-2.0). Every number on it is checked below — 6,815,744 trainable params is exactly LoRA r=16 on q_proj and v_proj across 32 layers."
+/>
+
+## The memory arithmetic, from scratch
+
+The claim is Llama-3.1-8B-Instruct, NF4-quantized, LoRA, on a card with 4 GB of VRAM. The architecture: hidden size 4096, intermediate size 14336, 32 decoder layers, grouped-query attention with 8 KV heads at head_dim 128 (so the K/V projections are 4096×1024, not 4096×4096). Every decoder layer has seven linear weights — I added them up from the config, not from anything Soup prints:
+
+| projection | shape | elements |
+|---|---|---|
+| `q_proj` | 4096 × 4096 | 16,777,216 |
+| `k_proj` | 4096 × 1024 | 4,194,304 |
+| `v_proj` | 4096 × 1024 | 4,194,304 |
+| `o_proj` | 4096 × 4096 | 16,777,216 |
+| `gate_proj` | 4096 × 14336 | 58,720,256 |
+| `up_proj` | 4096 × 14336 | 58,720,256 |
+| `down_proj` | 14336 × 4096 | 58,720,256 |
+| **total** | | **218,103,808** |
+
+Soup stores the frozen base as NF4 with double quantization, and the bytes-per-parameter constant is a real line of code, not a rule of thumb:
+
+```python
+# src/soup_cli/utils/layer_stream.py:191-196
+#: Streamed bytes per parameter under NF4 + double quant: packed ``N/2`` +
+#: absmax ``N/64`` + nested absmax ``N/64/256*4`` + a 4-byte offset per weight.
+NF4_BYTES_PER_PARAM = 0.5 + 1 / 64 + 4 / (64 * 256)
+#: Without double quant the per-block absmax stays float32: ``N/2 + 4*N/64``.
+NF4_BYTES_PER_PARAM_SINGLE = 0.5 + 4 / 64
+```
+
+`0.5 + 1/64 + 4/(64*256)` is `0.515869140625` — half a byte per parameter for the packed nibbles, plus one 8-bit absmax per 64-value block, plus a 4-byte nested absmax/offset amortized over the same 64×256-value super-block. Multiply it out:
+
+| step | bytes | |
+|---|---|---|
+| NF4 packed weight (0.5 B/param) | 109,051,904 B | 109.05 MB |
+| double-quant state (absmax + nested) | 3,461,120 B | 3.46 MB |
+| **per decoder layer** | **112,513,024 B** | **112.51 MB** |
+| × 32 layers | 3,600,416,768 B | **3.600 GB** (3.3531 GiB) |
+
+That's the README's own "3.60 GB base store" and the GIF's "two 113 MB VRAM buffers" (112.51 rounds to 113), both landing exactly where the architecture says they should — nobody had to fudge a constant to make this reconcile. The project's paper states the same layer in a different unit, "105 MiB per layer," which is the packed weight alone (109,051,904 B ≈ 104 MiB) without the absmax overhead; both numbers are correct, they're just measuring the packed payload versus the full streamed footprint, and I couldn't find anywhere the two are explicitly reconciled in the sources — that reconciliation above is mine.
+
+3.60 GB is the size of the *whole* frozen base. None of it needs to be resident at once — that's the entire point of streaming — but you don't get from "3.60 GB total" to "3.32 GB peak" for free. Here's where the rest of the budget actually goes, using Soup's own peak-VRAM formula:
+
+<MemoryBudget />
+
+The two streaming buffers are the smallest line item in the whole budget. Most of the 4 GB is spent on things streaming doesn't touch at all: the untied `embed_tokens`/`lm_head` pair sitting fully resident in bf16 (2.10 GB — this predates a later optimization that shares one slot between them), and the logits tensor at the sequence's last position (922 MB, `14 × vocab × seq` bytes — 12 bytes for the loss path, 2 for retention). My reconstruction lands at 3.54 GB against a measured 3.32 GB; the project's own out-of-sample check of the same formula against this exact row gets 3.57 GB predicted against 3.32 GB measured — 7.5% high, which matches the formula's documented contract of never under-predicting (worst fitted-grid error 0.85%, over 10 real runs across two models). A pre-flight gate that's allowed to *refuse* a run only has one safe direction to be wrong in, and this one is measured to stay on it.
+
+## The mechanism, and why two buffers are enough
+
+<LayerStreamDiagram />
+
+The mechanism is a pinned host-RAM store holding all 32 NF4 shards, two pre-allocated VRAM buffers, and a prefetch stream that keeps one buffer loading the next layer while the compute stream works on the current one. The docstring states the whole schedule in four lines:
+
+```
+# src/soup_cli/utils/layer_stream_runtime.py:1-17
+FORWARD   layer i: wait(i) -> prefetch(i+1) -> checkpoint(body_i)
+BACKWARD  layer i: wait(i) -> prefetch(i-1) -> recompute + backward
+```
+
+Every layer is read **twice** per training step, and that's physics, not a missed optimization: the backward pass needs the frozen weight again to compute `dL/dx = W^T · dL/dy` down to lower layers and their adapters. `torch.utils.checkpoint` discards the intermediate activations after the forward pass specifically so this second read has something to recompute from — which is also, as the next section covers, exactly the assumption a real bug violated one level down the stack.
+
+Two buffers, not one, is enforced in config validation with a comment worth quoting because it names the failure mode directly: `validate_stream_buffers` says "1 buffer is a scheduler bug, not a config." The pool's `wait()` method carries the tripwire that would catch a buffer recycled too early:
+
+```python
+# src/soup_cli/utils/layer_stream_runtime.py:696-714
+def wait(self, idx: int) -> Dict[str, Any]:
+    """Block the compute stream until layer ``idx`` is resident.
+
+    The ownership check is the plan-P1 tripwire: a buffer recycled while an
+    autograd node still references it produces silently WRONG gradients, not
+    a crash. Failing loudly here is the whole point.
+    """
+    slot = self.slot_for(idx)
+    if self.owner[slot] != idx:
+        raise RuntimeError(
+            f"layer-stream scheduler bug: buffer slot {slot} holds layer "
+            f"{self.owner[slot]}, but layer {idx} was requested. Raise "
+            f"training.stream_buffers (currently {self.n}) or report this."
+        )
+    if self.is_cuda:
+        torch.cuda.current_stream().wait_event(self.events[slot])
+    return self.buffers[slot]
+```
+
+Keep that check in mind — it's the safety mechanism that worked, and it makes what happened next more interesting, not less.
+
+### Is it actually bottlenecked on the PCIe transfer?
+
+The naive count is 64 loads per step (32 forward, 32 backward). Soup's own prefetcher skips a load when the target buffer already owns the layer it's about to need, which is why the measured count is 61, not 64. That gives a real, checkable bandwidth requirement:
+
+| quantity | value | note |
+|---|---|---|
+| layer loads, measured | 61 | of a naive 64 |
+| bytes moved | 61 × 112.529 MB = 6.864 GB | per step |
+| step time | 512 tok ÷ 119.6 tok/s = 4.281 s | RTX 3050 Laptop 4 GB |
+| **average bandwidth needed** | **6.864 GB ÷ 4.281 s = 1.60 GB/s** | |
+| link, idle pinned-copy rate | 7.77 GB/s | PCIe Gen4×8 |
+| link, under real training load | 9.38 GB/s | same link, busy |
+
+1.60 GB/s against a 7.8–9.4 GB/s link is roughly 17–20% utilization — nowhere near saturated. The project didn't stop at the implied number; it instrumented the actual step with CUDA events and ran the ablation directly: deleting every host-to-device byte makes the step **1.4% faster**; deleting the NF4 dequantization on top of that makes it **9.8%** faster again; with both streaming-specific costs zeroed, **88.7% of the step time remains**. The run is compute-bound — specifically bound by dequantizing NF4 on the fly, not by the bus — and the streamed step measures at 71.3% of this same card's own shape-matched GEMM ceiling, measured in the same session because the card's boost clock moved 442–952 MHz within one run, which makes any cross-session ceiling comparison meaningless.
+
+<StepBudget />
+
+I mention the ablation methodology because the project's own paper got this wrong once and corrected itself in public, which is the best single example of the house method this site asks for working from the other side of the table. Version 2 of the paper explained the 8B configuration's matching throughput on a laptop and on an H100 by asserting the method was "bound by host-to-device transfer" — an inference, not a measurement, appearing in the abstract and six places in the body. Version 3's front matter states plainly what changed:
+
+> On 2026-08-11 we measured it directly on the laptop, and it is false at the published configuration: the streamed step runs at 71.3% of that card's same-session, shape-matched GEMM ceiling; deleting every host-to-device byte makes it 1.4% faster; and the compute stream spends 0.20% of the step blocked on a copy. [...] No measured number in version 2 changes. Every throughput, peak-VRAM, exactness and quality figure stands exactly as published; what is withdrawn is an interpretation placed on them [...] Versions 1 and 2 remain citable and are not edited.
+
+Nobody outside the project had challenged that sentence. They measured it, found it wrong, and shipped a new DOI version whose entire content is admitting that one interpretive line was unearned — while explicitly leaving the earlier, wrong versions standing rather than quietly editing them away.
+
+## What "bit-exact" actually means
+
+"Bit-exact" is `torch.equal` — IEEE bitwise identity, zero tolerance. I checked the test files directly rather than trusting the word:
+
+```python
+# tests/test_v07200.py:1598
+assert torch.equal(got, want), (got - want).abs().max().item()
+```
+
+There's no `atol=`/`rtol=` anywhere in the bit-exactness assertions. Two separate claims live under that one word, and the project is careful never to collapse them:
+
+| | 0.5B | 8B | 14B | 32B | 72B |
+|---|---|---|---|---|---|
+| forward (`torch.equal` on logits) | exact | exact | exact | exact | exact |
+| backward (every LoRA gradient tensor) | — | exact 128/128 | exact 192/192 | wrong 62/64 pre-repair, exact 256/256 after | wrong 78/80 pre-repair, exact 320/320 after |
+
+Forward exactness holds everywhere because the forward pass never touches the aliased reference that caused the backward defect below. And 8B — the headline size — was never affected; its exactness held before, during, and after the repair.
+
+<ExactnessLedger />
+
+### The defect that made "backward" a real, separate claim
+
+`install_dequant_forward` exists only because of a real, shipped bug, found on borrowed H100 hardware in August 2026 and repaired in v0.73.0. The docstring is the clearest description of it I've read in any codebase:
+
+```python
+# src/soup_cli/utils/layer_stream_runtime.py:161-193 (trimmed)
+def install_dequant_forward(module: Any) -> int:
+    """#331 — keep a STREAMED NF4 weight out of ``bitsandbytes``' ``MatMul4Bit``.
+
+    ``MatMul4Bit.forward`` stashes the packed weight and the ``quant_state`` on
+    ``ctx`` as plain attributes rather than through ``save_for_backward``::
+
+        ctx.state = quant_state
+        ctx.tensors = (None, B)
+
+    ``torch.utils.checkpoint`` discards and recomputes *saved tensors*. These are
+    not saved tensors, so it cannot see them: the reference taken in the forward
+    survives, it ALIASES the buffer pool, and the backward reads it after that slot
+    has been refilled with a different layer. Measured on 8xH100 against a resident
+    NF4 reference, that is a bit-exact forward, a healthy-looking loss curve, and
+    gradients wrong on every layer but the last ``stream_buffers``.
+
+    De-aliasing was measured and rejected: bnb holds the reference across the whole
+    forward-to-backward span, so any copy keeps one layer alive for that span and
+    costs O(model). On real 32B, peak VRAM 4 220 -> 19 720 MiB.
+
+    So the weight never enters that autograd Function. It is dequantised inside the
+    checkpointed region and multiplied natively [...]
+    """
+```
+
+A bit-exact forward and a healthy-looking loss curve, with silently wrong gradients underneath — this is precisely the failure mode `LayerBufferPool.wait()`'s ownership tripwire was built to catch, and it slipped past it because the aliasing happened **inside bitsandbytes' own autograd `Function`**, one level below where Soup's own buffer-pool bookkeeping operates. The math checks out: 64 − 62 = 2 and 80 − 78 = 2, exactly matching `stream_buffers=2` — only the last two loaded layers, still sitting in the pool, escaped the bug.
+
+<AliasedWeight />
+
+The threshold is bracketed at **163.8–171.5 MiB per NF4 layer** — 8B's layer (112.51 MB, i.e. 107.3 MiB) and 14B's both sit under it, never affected; 32B and 72B sit over it, affected and repaired. The repair dequantizes the weight *inside* the checkpointed region and calls `F.linear` on the dense result, so the ordinary checkpoint mechanism — which does correctly discard and recompute saved tensors — owns the weight instead of `bitsandbytes`' Function. It isn't a numerics change at training shapes: `bitsandbytes::gemm_4bit` already dispatches to the same dequantize-then-matmul fallback at every real projection shape from M=8 to M=2048; the fix just moves *where* the dequantized tensor gets saved.
+
+The regression test pairs a real assertion with a control that proves the assertion can actually fail:
+
+```python
+# tests/test_v07300.py:101-131 (trimmed)
+class TestStreamedNF4AvoidsMatMul4Bit:
+    """The repair, and the control that makes it mean something.
+
+    ``0 calls`` on its own is equally consistent with "the counter never
+    intercepted anything" — which is exactly how an earlier path control in this
+    investigation was fooled. The resident control must COUNT, in the same test
+    session, or the streamed assertion proves nothing.
+    """
+
+    def test_resident_nf4_does_reach_matmul_4bit(self, tmp_path, monkeypatch):
+        """CONTROL. Without this, the assertion below is unfalsifiable."""
+        ...
+        assert calls["n"] > 0, (
+            "the counter did not intercept bnb.matmul_4bit at all, so it cannot "
+            "detect the streamed path avoiding it either"
+        )
+
+    def test_streamed_nf4_forward_does_not_reach_matmul_4bit(self, tmp_path, monkeypatch):
+        ...
+        assert calls["n"] == 0, (
+            f"streamed NF4 still routed {calls['n']} call(s) through MatMul4Bit, which "
+            "captures the packed weight outside save_for_backward and therefore aliases "
+            "the buffer pool across the checkpoint boundary (#331)"
+        )
+```
+
+The gated result, on real hardware: 32B, 256/256 gradient tensors exact against a repair-disabled control's 8–12/256, at +2.9% peak VRAM and −4.8% throughput; 72B, 320/320 against 8/320, at +2.6% and −3.7%. A second, independent silent defect was caught in the same v0.72.2 gate — a meta-skeleton missing an `is_loaded_in_4bit` marker made PEFT silently fall back to a generic adapter path, measured as a 0.9375 logit divergence against resident NF4 with byte-identical weights: no crash, no warning, a loss curve that looked perfectly healthy. Two independent ways the exactness claim could have quietly broken, both caught by the project's own gates before anyone outside noticed.
+
+## The proof notebook: what it proves, and what it explicitly doesn't
+
+Soup ships [a Colab notebook](https://github.com/MakazhanAlpamys/Soup/blob/main/notebooks/proof-4gb.ipynb) that anyone can run on a free T4 — 17 cells, no special hardware required, and it's careful about the difference between "runs" and "proves." It installs from git rather than PyPI because the bf16 pre-Ampere fix isn't released yet, and it uses that gap to make its first real point: `torch.cuda.is_bf16_supported()` defaults to `including_emulation=True`, so a T4 — Turing, no bf16 hardware at all — answers **True**. The notebook's own words:
+
+> Read the two lines below carefully, because they disagree, and the disagreement is the point. [...] Soup asked the permissive question [in an earlier fix], and it was a no-op on the exact hardware it targeted.
+
+That's a bug in Soup's *own* first attempt at detecting this, caught only by actually running the notebook on real T4 hardware rather than reasoning about the API.
+
+Section 3 caps the process to 4 GB via `torch.cuda.set_per_process_memory_fraction`, and states its own limitation up front: the cap is enforced by the allocator, not the driver, so `torch.cuda.mem_get_info()` — which Soup's pre-flight reads for its "free VRAM" line — still reports the whole card's real capacity inside this capped process. That's tracked as a real open issue (#347), not glossed over. The notebook proves the cap actually bites by deliberately requesting 15% over budget and catching the `RuntimeError`.
+
+Section 4 is the forward bit-exactness check, on SmolLM2-135M rather than the headline 8B model, because the reference has to fit in memory *next to* the streamed copy — which is the whole reason the headline size can't be checked this way on a Colab GPU. Before comparing, it deliberately randomizes `lora_B`:
+
+> PEFT initialises `lora_B` to zero, so an untrained adapter contributes NOTHING and any comparison would silently be about the base model alone.
+
+Section 5 is the headline: Llama-3.1-8B, NF4, trained under the 4 GB cap. Its weights alone are about 4.5 GB in NF4 — *more than the very budget the process is capped to* — and it trains anyway, because only a couple of decoder layers are ever resident. The trainer runs **in-process**, not via a `soup train` subprocess, and the notebook explains exactly why: `max_memory_allocated()` reports the peak of the calling process, so a subprocess "would leave us measuring nothing." It also declines to make a claim it can't support: "a T4 under an artificial cap is not a throughput benchmark," and no tok/s number is quoted anywhere in the notebook.
+
+The closing cell states its own scope precisely, which is worth reproducing in full because "proved" and "not proved" lists are rarer than they should be in ML tooling:
+
+> **Proved, on your hardware:** A streamed model returns bit-identical logits to an ordinary one. An 8B model trained with a measured peak below a cap smaller than its own weights. Both on a GPU with no bf16.
+>
+> **Not proved:** Backward exactness at this size — gradient exactness is verified up to 14B against resident references on hardware that can hold them, and a defect above that size was found, named upstream, and repaired. Speed — a T4 under an artificial cap is not a throughput benchmark, and this notebook deliberately does not quote tok/s.
+
+## The honest caveats, in the project's own words
+
+The README carries a standing caveat on its own headline number rather than quietly re-measuring and replacing it:
+
+> (The tok/s figure was measured on v0.72.2, before the v0.73.0 correctness repair that cost −4.8% at 32B; it has not been re-run on a 4 GB card since.)
+
+The CHANGELOG makes the same point with more teeth, and then corrects itself a second time in the same entry — the correction is left in place as a blockquote rather than silently rewritten:
+
+> The headline throughput was measured on code that has since changed. 119.6 tok/s / 3.32 GB for Llama-3.1-8B NF4 on the RTX 3050 was taken before `install_dequant_forward`. [...] nobody has re-run the 8B laptop configuration on the repaired code, and an 80 GB H100 cannot stand in for a 4 GB card whose throughput is bound by host-to-device transfer.
+>
+> **CORRECTION 2026-08-13, third occurrence of the same wrong reason.** The conclusion holds, the reason given for it does not: the laptop is not transfer-bound [...] An H100 still cannot substitute, for a narrower reason — the repair's cost is paid in the per-layer NF4 dequantisation, measured at 9.8% of the step on the laptop, and that share belongs to that card's clock, GEMM ceiling and launch overhead.
+
+There's a discarded measurement worth as much as the published ones. Before the 8B headline row, the project measured a 3B resident-NF4 baseline for comparison — and threw it out:
+
+> First attempt: 34.1 tok/s, peak VRAM 6.07 GB on a 4 GB card, 100% util, 0.63 TFLOPS. A 6.07 GB peak on a 4 GB card is a WDDM shared-host-memory spill [...] Publishing it would have produced a "streaming is 7.2x faster than resident" headline out of a number that measures Windows paging, not training. It is discarded, not reported.
+
+That's a flattering number the project had every reason to publish, and didn't, because it measured Windows swapping to disk rather than the method. The honest consequence, stated in the same record: there is still no valid resident baseline for 8B on this card — the only size where a fair resident comparison exists at all is 0.5B, where streaming is 1.43× *slower* than resident. The headline claim is a capability statement ("this now runs at all"), not a speedup number, and the project's own phrasing never claims otherwise.
+
+<Figure
+  src="/articles/soup-cli/fig2.png"
+  alt="Soup's own benchmark card: 'MEASURED ON THIS BOX — Llama-3.1-8B-Instruct, LoRA, batch 1, seq 512, RTX 3050 Laptop, 4 GB VRAM.' A bar labelled 'peak VRAM, base streamed as NF4' reads 3.32 GB and stops well short of a marked 4.00 GB card line; a second, unlabelled bar below it is left almost empty. Chips read 119.6 tok/s, GPU utilisation 100%, and 3.60 GB RAM store, page locked. The closing line reads 'Resident, it does not fit at all.'"
+  caption="The project's own headline result card, the last frame of its README demo (docs/assets/layer-streaming.gif — Copyright 2026 Makazhan Alpamys, Apache-2.0). The top bar is measured; the empty one under it is not. As the paragraph above says, no valid resident 8B baseline exists on this card — the one attempt measured Windows paging and was discarded — so 'resident, it does not fit at all' is an inference from the arithmetic, which is exactly what the caveat two paragraphs up concedes about the 119.6 tok/s on the same card."
+/>
+
+## The reward-hack controller
+
+Buried in `utils/` is something I did not expect a fine-tuning CLI to ship: a closed-loop controller that mutates the KL coefficient live, mid-run, during GRPO/PPO, to counteract reward hacking as it's detected rather than only flagging it after the fact.
+
+The plain detector underneath watches two signals, each citing a real paper: an InfoRM-style cluster-separation index (Wang et al. 2024, arXiv:2402.09345) — a falling separation between "good" and "bad" reward scores means the policy is starting to exploit the reward model — and pairwise variance across a reward-model ensemble (Coste et al. 2024, arXiv:2312.09244). Three escalating response modes sit on top: `log_only` (instrument, no action), `kl_control` (a reversible bang-bang controller with dwell/release hysteresis on β), and `pid_lagrangian` — a real PID-Lagrangian controller, citing Stooke et al. 2020, that treats "hacking signal at or below target" as a constraint and updates β by a clamped PID law:
+
+```python
+# src/soup_cli/utils/reward_hack_control.py:626-655 (trimmed)
+def pid_step(
+    policy: PIDLagrangianPolicy, state: ControllerState, *, signal: float
+) -> tuple[ControllerState, MitigationAction]:
+    """Advance the PID-Lagrangian controller one step for the hacking ``signal``.
+
+    ``error = signal - target``; the integral accumulates (clamped ±
+    ``integral_clamp``); the multiplier β = clamp(floor..ceil, floor + Kp·error
+    + Ki·∫error + Kd·Δerror). β never crosses 0.
+    """
+    fsignal = float(signal)
+    error = fsignal - policy.signal_target
+    integral = state.integral + error
+    integral = max(-policy.integral_clamp, min(policy.integral_clamp, integral))
+    derivative = error - state.prev_error
+    control = policy.kp * error + policy.ki * integral + policy.kd * derivative
+    beta = max(policy.beta_floor, min(policy.beta_ceil, policy.beta_floor + control))
+    tripped = beta > policy.beta_floor
+    ...
+```
+
+`pid_lagrangian` mode additionally carries a rollback-to-last-good-checkpoint escalation ladder that only exists in this mode: if the hacking signal persists past a patience window, the controller restores the last known-good checkpoint, and after a bounded number of failed recoveries it early-stops training and writes a plain-English postmortem rather than continuing to burn compute on a run it has decided is compromised.
+
+This is wired for real, not merely defined. `peft_wiring.py::_attach_reward_hack` builds the callback from `training.reward_hack_*` config fields and attaches it to the trainer; `attach_rl_callbacks` calls that function from exactly two places, `trainer/grpo.py` and `trainer/ppo.py` — the two tasks where a live, gameable reward signal actually exists. If mitigation was explicitly requested and the callback can't be constructed, the code fails loud rather than silently training without the safety controller the user asked for.
+
+What I like most here is that the project discloses its own validation gap rather than implying more coverage than it has. The module docstring names a real inconsistency from an H100 validation run directly, by issue number:
+
+> The β ladder fired in a `kl_control` arm but the rollback ladder "never fired in any arm": its only home was the `pid_lagrangian` arms, which all crashed (#342) before the rung could run.
+
+And the mitigation log writer has a small, specific piece of self-healing worth noting on its own: if the log directory disappears mid-run (a shared temp root cleaned up by another process), it doesn't silently drop records — it recreates the directory, retries once, and warns, because, in the code's own words, "the run completes while its evidence quietly goes missing" is the one outcome this log must never produce.
+
+## The capability-probe pattern
+
+TRL has broken Soup's preference trainers twice in the same place, and both times the fix derived from reading TRL's source turned out to be wrong, because two independent things were moving on two independent schedules: `max_prompt_length` was removed from the five preference configs in stages, not all at once, and `ORPOConfig`/`CPOConfig`/`BCOConfig` left the public `trl` namespace entirely at one release, becoming an `ImportError` rather than a rejected keyword. `trainer/_trl_compat.py`'s docstring states the lesson learned in one line, and it's worth keeping regardless of what library you're wrapping:
+
+> a version bound derived by reading source is a hypothesis; the experiment that settles it is CONSTRUCTING THE OBJECT.
+
+The fix asks the live class what it accepts, instead of asking `trl.__version__` what it should accept:
+
+```python
+# src/soup_cli/trainer/_trl_compat.py:96-120
+def config_accepts(config_cls: type, field: str) -> bool:
+    """Does this trl config class actually take ``field`` as a keyword?
+
+    Asked of the class the caller is about to construct, so it stays correct
+    across a namespace move as well as a version bump. Configs are dataclasses,
+    so the generated ``__init__`` signature is the authoritative list of
+    accepted keywords — including the ones inherited from ``TrainingArguments``.
+    """
+    try:
+        return field in inspect.signature(config_cls).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def prompt_length_kwargs(config_cls: type, max_prompt_length: int) -> dict[str, int]:
+    """``{'max_prompt_length': N}`` iff this trl's config still accepts it.
+
+    Returns an empty dict on a trl that removed the field, which is the whole
+    migration: there is no replacement keyword to pass instead.
+    """
+    if config_accepts(config_cls, "max_prompt_length"):
+        return {"max_prompt_length": max_prompt_length}
+    return {}
+```
+
+`resolve_trl_symbol` does the same thing for the namespace move: it tries `trl.BCOConfig` first, and only falls back to `trl.experimental.bco.BCOConfig` on failure, so a `trl` that hasn't moved the symbol yet keeps taking the supported, non-experimental path with no warning. The regression test doesn't hardcode a version table either — it constructs a fake config class and checks the probe reads *it*:
+
+```python
+# tests/test_trl_version_compat.py:59-66
+def test_the_probe_never_reads_the_trl_version(self):
+    """A class that still has the field must get the keyword even though the
+    INSTALLED trl may be one that removed it — which is only possible if the
+    answer comes from the class, not from ``trl.__version__``."""
+    from soup_cli.trainer._trl_compat import prompt_length_kwargs
+    class StillHasIt:
+        def __init__(self, max_prompt_length=None):
+            pass
+    assert prompt_length_kwargs(StillHasIt, 7) == {"max_prompt_length": 7}
+```
+
+The same "derive what can be derived, pin what can't, and test the pin" discipline shows up again in the torch-floor test, for a different reason: `pyproject.toml` declares `torch>=2.6.0` once, with a comment explaining why (TRL's preference trainers need the FSDP2 API that PyTorch 2.6.0 introduced), and `doctor.py` keeps a second literal copy for its own dependency report. Three tests keep the two from drifting apart; the third is purely hermetic:
+
+```python
+# tests/test_issue636_torch_floor.py:138-159 (trimmed)
+def test_doctor_torch_floor_matches_the_pyproject_declaration(self) -> None:
+    # Reading installed metadata instead was tried and rejected: dist-info
+    # records the install's history, so an editable checkout whose pyproject
+    # moved on reports a floor nobody declared, and an uninstalled source
+    # tree reports "?" which _version_ok treats as OK.
+    from soup_cli.commands.doctor import EXTRA_GROUPS
+    torch_rows = [
+        (pkg_name, floor)
+        for _, members in EXTRA_GROUPS
+        for _, pkg_name, floor in members
+        if pkg_name == "torch"
+    ]
+    assert len(torch_rows) == 1
+    assert torch_rows[0][1] == _declared_torch_floor(), (
+        f"doctor.py checks torch>={torch_rows[0][1]} but pyproject.toml "
+        f"[train] declares torch>={_declared_torch_floor()} — doctor must "
+        f"report the declared floor (#636)"
+    )
+```
+
+The comment names a specific alternative design — read the floor from installed package metadata instead of hand-copying it — and gives the specific reason it was rejected. That's a level of "we considered the obvious fix and here's why it's wrong" that I don't see often, and it's the same shape of engineering as the capability probes above: don't trust a static claim about a dependency, verify it against the real object, and pin the one thing that genuinely can't be derived.
+
+## What's Soup's own math, and what's TRL's
+
+It's worth being precise about which parts of this are Soup's own work. `DPOTrainerWrapper` is representative of the whole preference-loss family: DPO's actual loss math lives entirely inside `trl.DPOTrainer`/`DPOConfig` — Soup never reimplements it. What Soup adds around that call is real and not small: model/tokenizer loading across three backends, the quantization menu, the Qwen-family target-module resolution below, batch-size halving specifically because DPO processes paired examples, the capability-probe layer above, ReLoRA/curriculum callbacks, and a DeepSpeed empty-param-group guard. That's genuine orchestration engineering, but it's orchestration — the loss math is TRL's.
+
+Where Soup does own the numerics:
+
+**Distillation.** There's no `trl.DistillTrainer`; `trainer/distill.py` is a hand-written temperature-scaled KD kernel with three divergence options, careful about the one detail that's easy to get subtly wrong — the causal-LM shift has to match between the cross-entropy term and the KD term, or the trained-token mask lands one position off:
+
+```python
+# src/soup_cli/trainer/distill.py:49-131 (trimmed)
+def _compute_distill_term(student_logits, teacher_logits, divergence, temperature,
+                           labels=None, attention_mask=None):
+    # Causal-LM alignment: logits at position i predict token i+1, so the CE
+    # term shifts (logits[:, :-1] vs labels[:, 1:]). The KD term must shift the
+    # SAME way — otherwise the trained-token mask (labels != -100) is applied
+    # one position off [...]
+    if labels is not None or attention_mask is not None:
+        student_logits = student_logits[:, :-1, :]
+        teacher_logits = teacher_logits[:, :-1, :]
+        ...
+    temp = float(temperature)
+    log_s = torch.log_softmax(student_logits.float() / temp, dim=-1)
+    log_t = torch.log_softmax(teacher_logits.float() / temp, dim=-1)
+
+    if divergence == "forward_kl":
+        p_t = log_t.exp()
+        per_token = (p_t * (log_t - log_s)).sum(dim=-1)
+        return _masked_mean(per_token) * (temp * temp)
+    ...
+```
+
+This one has a real, closed-form numeric test behind it — not a shape check:
+
+```python
+# tests/test_issue719_stable_distill_divergence.py:39-53
+def test_forward_kl_matches_probability_space_reference() -> None:
+    student = torch.tensor([[[0.2, -0.4, 0.8]]], requires_grad=True)
+    teacher = torch.tensor([[[0.5, 0.1, -0.2]]])
+    temperature = 2.0
+    log_student = torch.log_softmax(student / temperature, dim=-1)
+    teacher_prob = torch.softmax(teacher / temperature, dim=-1)
+    expected = (
+        torch.nn.functional.kl_div(log_student, teacher_prob, reduction="batchmean")
+        * temperature**2
+    )
+    actual = _compute_distill_term(student, teacher, "forward_kl", temperature=temperature)
+    torch.testing.assert_close(actual, expected)
+```
+
+Plus parametrized gradient-finiteness tests across float32/bfloat16/float16 × reverse-KL/JS at a deliberately adversarial temperature (0.05) — the exact numerical instability the fix was for.
+
+**GRPO variants.** Seven named RL objectives, including GSPO (Qwen, arXiv:2507.18071), wired by dynamically subclassing TRL's `GRPOTrainer` at exactly the `compute_loss` seam so streaming, DDP, and gradient checkpointing all keep working as TRL built them:
+
+```python
+# src/soup_cli/utils/grpo_variants.py:278-290
+if normalised == "gspo":
+    # Group Sequence Policy Optimization (Qwen, arXiv:2507.18071):
+    # Sequence-level importance ratio length-normalized by completion length:
+    #   s_i = exp( 1/|y_i| * sum_{t=1}^{|y_i|} (log p_new - log p_old) )
+    # Optimized with sequence-level surrogate clipping:
+    #   loss = -min(s_i * A_i, clip(s_i, 1-eps, 1+eps) * A_i).mean()
+    ...
+```
+
+The module is candid about the limits of its own validation: "the math is intentionally minimal — these are *reference* kernels for routing + unit tests. Production correctness on multi-billion-param models will be validated by the v0.53.11 smoke run on SmolLM2-135M + gsm8k." `dr_grpo` is named as partial today too — length normalization is implemented, the doubly-robust bias-correction term the name actually refers to is "left to v0.53.12+," and the schema gate keeps a misconfigured run from silently getting the wrong thing.
+
+**Unlearning.** NPO, SimNPO, and RMU, each a small hand-written loss:
+
+```python
+# src/soup_cli/utils/unlearn_kernels.py:59-73
+def npo_loss(policy_logps, ref_logps, *, beta: float = 0.1):
+    """Negative Preference Optimization loss over forget-set sequences.
+
+    ``L = (2/beta) * mean( -logsigmoid(-beta * (policy_logps - ref_logps)) )``.
+    Lower policy log-prob (vs the reference) => lower loss => the fact is
+    being forgotten.
+    """
+    b = _check_beta(beta)
+    ratio = policy_logps - ref_logps
+    return (2.0 / b) * torch.mean(-functional.logsigmoid(-b * ratio))
+```
+
+And the reward-hack controller above. Everything in this section is genuinely Soup's own numerics; everything in the paragraph before it is genuinely someone else's, orchestrated well. Both are true of the same file tree.
+
+## One config, one command?
+
+Now the other half. I walked the real command tree with `typer.main.get_command` rather than grepping — 77 top-level names, 216 leaf commands once every sub-group is expanded, implemented across 89 files. `soup train` alone declares 42 of its own `typer.Option` flags, independent of anything `soup.yaml` already sets. `pyproject.toml`'s own description says "in one command" — literally true only if you count `soup train` as the one command that matters and treat the other 215 as an ecosystem around it.
+
+<ConfigSurface />
+
+`SoupConfig`, the object `soup.yaml` actually deserializes to, is genuinely small — about ten top-level keys, one of which, `training`, points at `TrainingConfig`. That one field's schema spans lines 1023–3933 of `config/schema.py` — 2,911 lines, 237 annotated fields, out of 372 leaf fields across all 8 Pydantic models in the file, guarded by 156 validator methods (73 field-level, 83 model-level) and over 300 `raise ValueError` sites. A rank-0 LoRA config is a nice small example of how carefully those validators are written — `r: 0` is a deliberate, documented full-fine-tuning switch, and the field bound closes a real historical hole:
+
+```python
+# src/soup_cli/config/schema.py:53-69 (trimmed)
+class LoraConfig(BaseModel):
+    # #340 — `r: 0` is the first-class full-fine-tuning switch: no adapter is
+    # applied and the base weights train directly. Before #340 a rank of 0
+    # reached peft and died with "`r` should be a positive integer value", so
+    # nothing that worked before changes meaning. `ge=0` closes the
+    # pre-existing hole where a NEGATIVE rank parsed and failed the same way,
+    # deep in peft.
+    r: int = Field(
+        default=64,
+        ge=0,
+        description=(
+            "LoRA rank. 0 = full fine-tuning: no adapter, every base "
+            "parameter trains (sft / embedding + transformers + text + "
+            "quantization='none' only)."
+        ),
+    )
+```
+
+The config schema catching a bug before it reaches a *different* library's C extension is a good, small example of the validators earning their keep rather than just being ceremony.
+
+The best single story about what that surface size costs in practice is one the project tells on itself. Pydantic's default is `extra="ignore"`, and none of the 8 config models override it — so historically, a typo'd or version-skewed key was silently dropped and the run proceeded as if you'd never written it:
+
+```python
+# src/soup_cli/config/loader.py:62-92 (trimmed)
+def load_config(path: "Path | str") -> SoupConfig:
+    """Load a soup.yaml file and return validated SoupConfig."""
+    ...
+    unknown_error = _report_unknown_keys(raw)
+    if unknown_error is not None:
+        console.print("[red bold]Config validation error:[/]\n")
+        console.print(f"  [red]{for_terminal(unknown_error)}[/]")
+        raise SystemExit(1)
+    try:
+        config = SoupConfig(**raw)
+    except ValidationError as e:
+        ...
+    return config
+```
+
+The module that powers `_report_unknown_keys` names the exact incident that forced it to exist, by issue number:
+
+> #623 is the live case: `training.stream_pin` reached main two days after 0.73.3 shipped, so a user on the released wheel wrote the documented escape hatch, `--dry-run` reported "Config valid," the key was discarded, and the resulting OOM was investigated as a layer-streaming defect.
+
+A user hit a real OOM and root-caused it as a training bug, when the actual cause was a version-skewed config key being silently ignored. The fix is a versioned deprecation with a self-enforcing deadline — `UNKNOWN_KEY_REJECTION_VERSION = "0.75"` — and the deadline has already landed: `__version__` is `"0.75.0"` right now, so an unknown key refuses the load today (`SystemExit(1)` on the CLI, `ValueError` in the API) rather than warning. A dedicated test class pins the version and the enforced behavior together so they can't drift apart silently.
+
+Against that, the templated path genuinely is small: `soup init --template chat` writes a 13-key YAML file, unvalidated, out of 372 possible fields — everything else falls to Pydantic defaults, and `soup train` defaults `--config` to exactly the path `init` just wrote, so the two chain with zero repeated arguments. The one thing the README's 3-line quick-start glosses over is that `data.train: ./data/train.jsonl` is a path the template doesn't create — you need your own dataset there first. The command that's genuinely zero-input and guaranteed to succeed on the first try is a different one, `soup quickstart`, which bundles a synthetic dataset and a tiny model and just runs.
+
+## Where it breaks
+
+The README's own v0.75.0 changelog entry is the sharpest self-disclosure in the whole project, and it sits three paragraphs below the "one command" pitch in the same document:
+
+> the same `soup.yaml` trained a different recipe on MLX than on transformers, silently. Six training options were validated, documented, accepted — and read by nothing on that backend.
+
+`config/backend_support.py` exists to catch exactly this class of gap going forward, and its own docstring is worth reading as an example of scoping down deliberately rather than a confession — it explains why the table only covers `task=sft` on `backend=mlx` today, having tried and rejected three broader inference strategies by name:
+
+> reachability over the import graph detects none of the known gaps, because every trainer's transitive closure is most of the package; reads of the trainer module alone invent gaps for fields that live in helper modules [...] and `--dry-run` exits before a trainer is ever constructed, so runtime tracing observes nothing. So this table is maintained by review [...] Scope today: `task=sft` on `backend=mlx`. Other pairs report nothing rather than guessing.
+
+A separate comment, attached to the module's `STATUSES` constant rather than that docstring, explains why a *third*, more ambitious status is deliberately left unbuilt:
+
+> `honoured` would mean enumerating 275 declared fields against every reviewed pair — a table nobody can review honestly, and the opposite of this module's premise that a gap list is short enough to be checked.
+
+Read in place, that's a reason for *not* building a comprehensive positive table, not an admission that the project's actual gap list is unreviewable — the module's whole premise is that the list it does maintain is short enough to check by hand.
+
+The other tagline worth checking precisely is "No SSH, no config hell." It holds fully for the advertised path — a local GPU, `soup train`, nothing else — and it stops holding for exactly one opt-in flag combination. `soup train --cloud lambda` alone is plan-only: it renders a controller script and prints the command, executing nothing. Add `--cloud-submit`, and `submit_lambda_run` requires `LAMBDA_SSH_KEY_NAME`/`LAMBDA_SSH_PRIVATE_KEY` and launches the rendered script, whose own body does this:
+
+```python
+# src/soup_cli/cloud/lambda_labs.py:196-206 (each line is a string literal —
+# this is source code Soup WRITES to a generated file, not code that runs
+# inside the `soup` process itself)
+"def _train_and_copy(ip, private_key):",
+"    common = [",
+"        '-i', private_key, '-o', 'BatchMode=yes',",
+"        '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=15',",
+"    ]",
+"    wait = subprocess.run(",
+"        ['ssh', *common, f'ubuntu@{ip}',",
+"         'cloud-init status --wait >/dev/null 2>&1; cat /home/ubuntu/soup.exit'],",
+```
+
+And `train.py`'s own help text says so outright: `"--cloud-submit ... Lambda requires a registered SSH key."` That's the honest scope: the "No SSH" line holds for the local path and stops holding on one named, opt-in cloud-submission path, documented in the flag's own help text — fair to mention, not fair to overstate as the tagline being false.
+
+One more precise gap, because "supported" turns out to mean two different things at two different layers: the MLX backend's trainer registry lists `dpo` and `grpo` as supported tasks, so `soup train --backend mlx --task dpo` gets past config validation and even loads real MLX models — and then `.train()` raises `NotImplementedError`, naming the real blocker (waiting on upstream `mlx-lm` DPO support) in plain text. Not a silent gap, but a real one: "supported" at the routing layer doesn't mean supported at the layer that actually runs your job.
+
+## The scale, plainly
+
+A few numbers, without a verdict attached, recomputed from the git history at commit `fcca8ef` (1,223 commits, 205 days old):
+
+- The maintainer, across three separate git identities never unified by `.mailmap`, accounts for **986 of 1,223 commits — 80.6%**.
+- **56 authors** total; **24 of them (43%) have exactly one commit**, and together those 24 one-off contributions are **2.0%** of all commits by volume.
+- **172 commits (14.06%)** are a maintainer-run `docs(contributors): <name>'s Nth merge (#N)` ritual, fired immediately after almost every external PR merges, sharing its PR number. It's a real, consistently-applied recognition practice, not a one-off — running at roughly one for every six feature/fix commits.
+- **91.5%** of all 1,223 commit subjects follow a `type(scope): subject` conventional-commit shape.
+- The test suite: **492 files, 16,609 test functions** — about 34 per file — of which **134 files (27.2%)** are named `test_issue<N>*.py`, i.e. filed against a specific bug report. Test LOC (240,909) exceeds source LOC (181,358), a 1.33:1 ratio.
+- 350 of 492 test files (71.7%) use mocking; 91 (18.6%) do closeness-based numeric assertions. The bulk of the suite's *volume* is CLI-surface and validator-rejection testing — but the numerically load-bearing paths this piece actually quotes (distillation, the finite-metric guard, the six preference trainers' `setup()`) each have a real, non-mocked test behind them, not just a shape check.
+- The recipe catalog holds **169 entries** in one 5,251-line Python file — no recipe YAML files exist on disk. The README says "100+ ready-made model recipes." That's a rare case of the project *understating* itself; nobody complains that there are more recipes than advertised.
+- `utils/` alone holds **51.2% of the 181,358-line source tree**, across 276 files, including the three layer-streaming files (`layer_stream_runtime.py` at 2,346 lines is the single largest file I opened) and the 1,216-line reward-hack controller.
+
+## Both things are true
+
+I don't think this resolves into a verdict, and I don't think it's supposed to. The same codebase that gets the memory arithmetic exactly right, ships an executable proof of its own headline claim, found and repaired a silent gradient bug on borrowed hardware with a public postmortem, and revised a published, DOI'd paper specifically to retract an interpretation nobody outside the project had challenged — is also the codebase where "one config, one command, no config hell" sits in front of 216 commands and a 237-field training config, and where a typo'd config key silently trained the wrong thing for two release cycles before anyone closed the gap. Both are real. The project's own `backend_support.py` is, in its own words, a module reasoning openly about a table it deliberately refused to build — which is a fair description of the whole codebase, not just that one file.
+
+---
+
+*Built on [Soup](https://github.com/MakazhanAlpamys/Soup) (Makazhan Alpamys and contributors; commit `fcca8ef`, 2026-09-13) and its accompanying paper, [Exact Layer Streaming: LoRA Fine-Tuning of an 8B Model on a 4GB Laptop GPU](https://doi.org/10.5281/zenodo.21771064) (v3, 13 August 2026). Every number here is recomputed from the repository's source, tests, and benchmark records, or quoted directly from them; where I couldn't verify something, I said so.*

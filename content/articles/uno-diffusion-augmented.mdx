@@ -1,0 +1,248 @@
+---
+title: "Uno: the draft model was already inside the target model"
+description: "Uno replaces the extra draft model in speculative decoding with a LoRA adapter bolted onto the exact backbone it gets verified against, and its 'lossless' claim is the precise speculative-decoding kind — the same rejection-sampling rule that makes ordinary speculative decoding provably exact, not just 'the benchmark score didn't move.' The paper's own numbers mostly hold up: at batch size 1 it really is about 2.2–2.5x faster than its base model, and it beats EAGLE-3 and DFlash, the actual speculative-decoding incumbents, at every batch size tested — not just other diffusion LLMs. But the abstract's 'up to 3x' doesn't trace to any number in the paper's own tables, and the shipped Hugging Face checkpoint's own benchmark table disagrees with the paper's Table 1, and with the paper's own Figure 1, on the same score, by up to twelve points."
+date: 2026-09-18
+interest: 5
+helpful: 5
+tags:
+  - speculative-decoding
+  - diffusion
+  - inference
+  - llm
+  - explainer
+draft: false
+---
+
+import { DecodingRace } from "@/components/articles/uno-diffusion-augmented/decoding-race"
+import { SpeedupModel } from "@/components/articles/uno-diffusion-augmented/speedup-model"
+
+Today's LLMs still write like typewriters: one token at a time, each one waiting on every token before it. That is the whole pitch for every drafter-and-verifier scheme of the last three years — a cheap proposer guesses ahead, an expensive verifier checks the guesses in one pass, and you keep whatever was right. [Uno](https://arxiv.org/abs/2609.04010), out of the Institute of Foundation Models with UIUC, Cornell Tech, Harvard and Cerebras, keeps that shape but deletes the second model: the proposer is a LoRA adapter bolted onto the exact backbone that verifies it.
+
+The paper's word for the result is **lossless**, and that word has a precise, pre-existing meaning in this literature: the sampler's output distribution is provably identical to the base model's, by construction, the same way plain speculative decoding has been provably exact since Leviathan et al. (2023). It is not a synonym for "benchmark scores didn't move." Whether Uno earns the strict version of that word — and whether "up to 2.2x" survives contact with the paper's own tables — is the rest of this piece.
+
+| | |
+|---|---|
+| Who | [IFM et al.](https://arxiv.org/abs/2609.04010) · code at [ifm-ai/uno](https://github.com/ifm-ai/uno) · 3 Sep 2026 |
+| What | a LoRA-adapted diffusion pathway on the same backbone it is verified against, plus a rejection-sampling verifier |
+| Mechanism | frozen AR weights θ<sub>AR</sub> + rank-128 LoRA "diffusion weights" θ<sub>Δ</sub>, gated on/off per token |
+| Losslessness | standard speculative-decoding rejection sampling — provably exact, not a new guarantee |
+| Measured speedup | 2.2–2.5x at batch 1, 1.5–1.6x at the largest batch a single H200 fits — not the abstract's "up to 3x" |
+| vs. the actual incumbent | beats EAGLE-3 (AR drafter) and DFlash (diffusion drafter) at every batch size, with fewer added params |
+| Out today | [K2-Horizon-7B-Uno](https://huggingface.co/IFM/K2-Horizon-7B-Uno), a 0.9B variant, and an adapter for Qwen3-8B |
+
+<ModelCard repo="IFM/K2-Horizon-7B-Uno" />
+
+## What "lossless" actually has to mean
+
+Speculative decoding has a built-in reason to trust the word "lossless": the accept/reject rule is not a design choice you can get subtly wrong and still call it lossless, it's a specific piece of math. A drafter proposes a token from proposal distribution `q`; the target model computes its own probability `p` for that same token; you accept with probability `min(1, p/q)`, and on rejection you resample from the leftover mass `max(p − q, 0)`, renormalized. Leviathan et al. proved in 2023 that running this rule end to end reproduces samples from `p` exactly — the drafter can be arbitrarily bad and the output distribution never moves, only the speed does.
+
+Uno's whole mechanism is built to make that rule apply to itself, with the draft coming from inside the same weights instead of a second model. Concretely, Uno's verifier does exactly the textbook computation — here it is in the released inference engine, `nano_vllm_uno/engine/two_pass_decoding.py`:
+
+<CodeCollapse label="nano_vllm_uno/engine/two_pass_decoding.py — _sparse_verify_tensors">
+
+```python
+def _sparse_verify_tensors(
+    clean_ids: Tensor, clean_probs: Tensor,      # p: the frozen AR verifier's distribution
+    draft_ids: Tensor, draft_probs: Tensor,       # q: the diffusion pathway's distribution
+    spec_vals: Tensor, accept_random: Tensor,
+    vocab_size: Optional[int] = None,
+) -> Tuple[Tensor, Tensor]:
+    """Return accept flags and correction probabilities on clean support."""
+    p_spec = torch.where(clean_ids.eq(spec_vals.unsqueeze(1)), clean_probs,
+                          torch.zeros_like(clean_probs)).sum(dim=1)
+    q_spec = torch.where(draft_ids.eq(spec_vals.unsqueeze(1)), draft_probs,
+                          torch.zeros_like(draft_probs)).sum(dim=1)
+    ratio = torch.where(q_spec > 0, p_spec / q_spec, torch.zeros_like(p_spec))
+    accepted = accept_random.lt(torch.clamp(ratio, max=1.0))
+    # ... correction_probs = clamp(clean_probs - q_on_clean, min=0), renormalized
+    return accepted, correction_probs
+```
+
+</CodeCollapse>
+
+`ratio = p/q`, accept if a uniform draw is below `min(1, ratio)`, and the residual is `clamp(p − q, 0)` — this is Leviathan et al.'s rule, not a new one. The distributional guarantee it inherits does not depend on where `q` came from. It can come from a smaller model (EAGLE-3, DFlash), a hand-built heuristic, or — Uno's move — a LoRA adapter on the same weights the verifier uses. The proof doesn't care.
+
+That's a reason to believe it *can* be lossless. It is not, by itself, a reason to believe this specific paper's sampler *is* — a proof about the rule says nothing about whether the code that ships implements the rule correctly. The paper is unusually candid about exactly this gap, because it caught another method failing it: **I-DLM (R-ISD)**, a concurrent method, claims losslessness on the same theoretical grounds. Section C.5 of the appendix reports that IFM ran I-DLM's own released sampler and found measurable accuracy degradation relative to the base model — the sampler does greedy drafting but never adjusted its rejection rule to match, so the "lossless" guarantee doesn't actually hold for the code as shipped. Swap in Uno's Ψ-Spec sampler against I-DLM's own adapters instead, and the guarantee holds (at a lower speedup than Uno's own recipe). Losslessness here is a property of the *sampler*, and it is falsifiable — which is exactly why I trust Uno's version of the claim more than I would trust an assertion alone: they checked someone else's, and it broke.
+
+<Callout type="note">
+What's actually novel is not "lossless is possible" — DFlash, EAGLE-3, and Medusa already provide that with a separate draft model. It's using the same rejection rule with a draft distribution `q` that comes from LoRA weights riding on the verifier's own backbone, sharing its KV cache, instead of a second network. See this site's [EAGLE-3](/articles/eagle-3-speculative-decoding), [DFlash 2](/articles/dflash2), and [multi-token prediction](/articles/multi-token-prediction) write-ups for that lineage; Uno is explicitly positioned as a drop-in replacement for all of it.
+</Callout>
+
+## One backbone, two pathways
+
+The mechanism has three moving parts, and none of them are exotic on their own.
+
+**The weights split into θ<sub>AR</sub> and θ<sub>Δ</sub>.** θ<sub>AR</sub> is a completely ordinary autoregressive model — pretrained, SFT'd, RL'd exactly the way any causal transformer is. θ<sub>Δ</sub> is a rank-128 LoRA adapter attached to every `q/k/v/o/gate/up/down` projection in every layer, trained afterward, with θ<sub>AR</sub> frozen. This is the whole reason the backbone doubles as its own drafter: LoRA adapters are additive deltas on the same weight matrices, so "run with the adapters on" and "run with the adapters off" are two forward passes through the *same* parameters, not two models.
+
+**θ<sub>Δ</sub> is trained to imitate θ<sub>AR</sub>'s own multi-token joint distribution**, not to predict anything θ<sub>AR</sub> doesn't already predict. The recipe is uniform-state discrete diffusion, distilled down to one denoising step per block (Discrete Consistency Distillation, adapted from Sahoo et al. 2025): corrupt a block of the target sequence, and train θ<sub>Δ</sub> so the corrupted-block prediction (with adapters on) matches θ<sub>AR</sub>'s own clean-block prediction (adapters off), via a KL term plus a total-variation term that specifically rewards longer accepted prefixes. That is Equation (3); the recipe that actually ships sets the KL term's weight to zero, which I get to below. For the from-scratch model this is 7B tokens of adapter training against roughly 23T tokens of AR pretraining — about 0.03% on top, which is the paper's basis for calling it "negligible overhead," and the ratio checks out.
+
+**One forward pass produces both distributions, via gated LoRA.** A single sequence is built as `[clean context, noisy block]`, with a block-causal attention mask. A boolean row-mask marks which rows are "noisy" — that's the only extra state gated LoRA needs; the training code builds it directly:
+
+```python
+# training/modeling.py — the gated-LoRA row mask
+def _build_noisy_region_mask(num_tokens, sequence_length):
+    rows = []
+    for lengths in num_tokens:
+        parts = []
+        for length in lengths.tolist():
+            parts.append(torch.ones(length, dtype=torch.bool))   # clean region
+            parts.append(torch.zeros(length, dtype=torch.bool))  # noisy region
+        rows.append(torch.cat(parts))
+    return torch.stack(rows)
+```
+
+and the inference engine's linear layers refuse to run without it (`nano_vllm_uno/layers/linear.py`: *"Gated LoRA requires an explicit row mask"*). Rows flagged clean skip the adapter and emit pure θ<sub>AR</sub> logits — the verifier's distribution, `p`. Rows flagged noisy add the LoRA delta — the drafter's distribution, `q`. One pass, one set of weights, two distributions, exactly the two the rejection rule needs.
+
+<DecodingRace />
+
+The box that never changes is the first one in every cycle. It's generated by θ<sub>AR</sub> alone, not the diffusion pathway, so it is never rejected — which is the reason even a total wipeout still emits two tokens (the seed, plus the verifier's own resample) instead of one. Everything grey and everything green in that strip were computed in the *same* forward pass; the diffusion pathway isn't learning caution, it's proposing everything and letting the frozen verifier throw out whatever it disagrees with.
+
+That's the schematic. Here is the thing itself — the authors' own inference animation, published on the [project page](https://s-sahoo.github.io/uno/):
+
+<Video
+  src="/articles/uno-diffusion-augmented/inference-loop"
+  poster="/articles/uno-diffusion-augmented/inference-loop-poster.jpg"
+  alt="A monospaced panel headed 'Uno (Ours)'. A word problem about a rectangular garden sits in a grey prompt box, and below it an algebraic solution builds up in chunks. The most recent chunk is blue, and it alternates between unreadable junk such as 'rx c5 1jb4zm, rz' and the real continuation that replaces it in the very next frame, 'is 54 meters, we'."
+  caption="Uno decoding one answer end to end, from the authors' own project page (muted and looped here; the source is a GIF). The blue span is the block currently in flight — it flashes as junk, then resolves. 36 such flashes produce the whole 206-word solution. (Sahoo et al., project page, 'Inference in Uno'.)"
+/>
+
+Watch the blue span rather than the black text and the animation stops being a progress bar. It has exactly two beats, and they alternate from the first chunk to the last: a short frame (160 ms in the source GIF) in which the newest span is unreadable garbage — `rx c5 1jb4zm, rz` — then a slightly longer one (220 ms) in which that identical span has become `is 54 meters, we`. Seventy-three frames: one prompt frame, then thirty-six junk/resolved pairs. Two beats per committed chunk is not a design flourish. It is the two forward passes.
+
+And the garbage is not a rendering artifact or a stylized "thinking" effect. It is the literal input tensor of the drafting pass. `nano_vllm_uno/engine/noise.py` builds each draft row as the last committed token followed by uniformly random vocabulary ids, and `random_uniform` is the shipped default in `nano_vllm_uno/sampling_params.py`:
+
+```python
+# nano_vllm_uno/engine/noise.py — build_draft_batch
+def build_draft_batch(seqs, block_len, sampling_params, *, vocab_size, device):
+    """Build the two-pass draft inputs as ``[seed, noise...]`` rows."""
+    batch_size = len(seqs)
+    draft = torch.empty((batch_size, block_len), dtype=torch.long, device=device)
+    draft[:, 0] = torch.tensor(                      # the last committed token
+        [int(seq.token_ids[-1]) for seq in seqs], dtype=torch.long, device=device
+    )
+    if block_len <= 1:
+        return draft
+
+    mode = str(sampling_params.noise_mode)
+    low, high = _noise_bounds(sampling_params, vocab_size)   # -> [1, mask_token_id)
+    if mode == "random_uniform":                     # the shipped default
+        draft[:, 1:] = torch.randint(
+            low, high, (batch_size, block_len - 1), dtype=torch.long, device=device
+        )
+    elif mode == "mask":
+        draft[:, 1:] = high
+    # ... "deterministic_uniform" fills the same slots from a hashed per-request seed
+    return draft
+```
+
+This is the practical difference between *uniform-state* discrete diffusion and the masked kind that most d-LLMs use: there is no mask token to reserve and no half-filled buffer to carry between steps, because the block starts out as ordinary random tokens and one denoising pass turns them into a proposal. The engine states the contract in a docstring: the draft pass takes `[uncached seed, noise_1, ..., noise_(L-1)]` and returns `[clean, proposal_1, ..., proposal_(L-1)]`, with the seed row held out of the adapter two lines later — *"Gated LoRA applies only to the noise rows, never to the causal seed"* (`nano_vllm_uno/engine/two_pass_decoding.py`). That held-out row is what emits the blue box at the head of every strip above.
+
+Two honest caveats about the animation. It is a demo, not a logged trace — the project page doesn't say which checkpoint or sampler produced it, and in all three junk/resolved pairs I compared frame by frame the resolved span has exactly as many whitespace-separated pieces as the junk it replaced, which means the demo is showing full-block acceptance every cycle rather than a real run's mix of rejections. And its arithmetic is plausible without being a measurement: 206 words over 36 cycles is about 5.7 words per cycle, against a measured acceptance length of τ = 5.97 *tokens* for the B = 16 tree sampler (Table 2) — and tokens run shorter than words, so the demo is, if anything, a shade generous. Read it as the shape of the mechanism, not as a benchmark.
+
+<Figure
+  src="/articles/uno-diffusion-augmented/fig1.png"
+  alt="Top: a three-stage training pipeline — NTP Training, then a drop-in Diffusion Distillation phase labeled Lossless Inference Acceleration, then RL Post-training. Bottom left: a bar chart of system throughput in tokens per second, showing Uno and AR (the same height, both around 5000) far above Diffusion Gemma and Mercury 2 (both under 1000). Bottom right: four grouped bar charts across Agentic Tool Use, Long Context Reasoning, Agentic Terminal Use, and Agentic Coding, each showing Uno and AR tied and both clearly ahead of Diffusion Gemma and Mercury 2."
+  caption="The paper's own headline figure — training pipeline, plus Uno versus AR versus the diffusion baselines. Two things in it don't survive a check: the 'Agentic Tool Use (Tau2 Banking)' bars (90/90/71/68) actually match Table 1's τ2-Telecom row, not any Banking row, and the 'Agentic Coding (SWE-bench Verified)' bars read 58/58 here versus 68.4 in the paper's own Table 1 — more on both below. (Paper, Figure 1.)"
+/>
+
+Two things earn their keep in that figure regardless: **every Uno bar is exactly the height of the adjacent AR bar.** That's the lossless claim, drawn rather than argued — if the sampler is exact, accuracy has to be identical to the base model's up to sampling noise, and the chart shows exactly that, category after category. It's also the reason there's no "Uno accuracy" number anywhere in this piece: Section 5.2.1 states plainly that the paper doesn't report separate accuracy for lossless methods, because any difference from the base model is sampling noise, not a real effect. That part of the mechanism I have no complaint about.
+
+## The speedup, without the "up to"
+
+Here's every decimal-place speedup number stated anywhere in the paper's body, against the base AR model, at the hardware and batch size the paper actually measured:
+
+| Model | Batch size | Hardware | Speedup vs. base AR | Source |
+|---|---|---|---|---|
+| K2-Horizon / Uno (from scratch, ~9B) | 1 | 1× H200 | **2.2×** (383 vs 176 tok/s) | Table 7, §5.1.3 |
+| K2-Horizon / Uno | 64 (largest that fits) | 1× H200 | **1.5×** (5255 vs 3577 tok/s) | Table 7 |
+| Uno<sub>Qwen</sub> (LoRA on frozen Qwen3-8B) | 1 | 1× H200 | **2.5×** (445 vs 176 tok/s) | Table 18, §5.2.3 |
+| Uno<sub>Qwen</sub> | 64 (largest that fits) | 1× H200 | **1.6×** (5733 vs 3662 tok/s) | Table 18 |
+| Uno<sub>Qwen</sub> vs. EAGLE-3 (AR drafter, 0.40B params) | 1 | 1× H200 | **1.5×** (445 vs 289 tok/s) | Table 18 |
+| Uno<sub>Qwen</sub> vs. EAGLE-3 | 64 | 1× H200 | **1.2×** (5733 vs 4944 tok/s) | Table 18 |
+| Uno<sub>Qwen</sub> vs. DFlash (diffusion drafter, 1.05B params) | 1 | 1× H200 | **1.2×** (445 vs 369 tok/s) | Table 18 |
+| Uno<sub>Qwen</sub> vs. DFlash | 64 | 1× H200 | **1.07×** (5733 vs 5351 tok/s) | Table 18 |
+
+Both experiments use the paper's "1K/8K throughput test" (1,024 random input tokens, 8,192-token output, temp 1, top-p 0.95, top-k 50), on a single H200. The from-scratch model runs at a 262,144-token context window; the Qwen adapter runs at Qwen3-8B's native 32,768.
+
+**Nowhere in that table is there a 3×.** The abstract says Uno "delivers up to 3× speedups over the base AR model, including at the largest batch size supported by the device," and the conclusion restates it as "up to a 3× speedup... while retaining up to a 2× speedup at the largest batch size." The largest number I can find anywhere in the paper's own results — for either model, at any batch size — is 2.5×, and that's at batch 1, not "the largest batch size supported by the device," where the measured numbers are 1.5× and 1.6×. The pitch this piece opened with — "up to a 2.2× speedup" — turns out to be the *more* defensible number: it's exactly the from-scratch model's own measured batch-1 figure, not a round-up of it.
+
+The authors' own project page agrees with me, which is the part I didn't expect. Its caption for the throughput panel reads: "Uno Pareto-dominates speculative decoding and achieves up to 2.5× speedup over the base AR model." Same authors, same figure, same week — and 2.5×, not 3×. The abstract and the conclusion are the only two places the larger number appears.
+
+<SpeedupModel />
+
+The batch-size story explains why the headline number shrinks at scale — verification is a second forward pass, and at high concurrency the GPU is already compute-bound, so an extra pass to keep three tokens instead of one buys less. The model above is the *other* half of "report the spread, not the maximum": even at fixed batch size, the payoff depends on how long the reply is and how predictable it is, because every cycle costs exactly two forward passes no matter what. Push `n` down to a few tokens and Uno is provably *slower* than plain AR, for any predictability — you still pay for a verify pass you didn't need.
+
+## Beating the actual incumbent
+
+The comparison a reader should actually want is not Uno versus other diffusion LLMs — it's Uno versus autoregressive decoding with speculative decoding already turned on, since that's what's running in production today. The paper does not dodge this: Table 2 puts Uno<sub>Qwen</sub> directly against **EAGLE-3** (an AR drafter, the current standard in vLLM/SGLang/TensorRT-LLM) and **DFlash** (a diffusion drafter — see [DFlash 2](/articles/dflash2) on this site for how that lineage works) on the same base model, same benchmarks, same hardware. Uno wins at every batch size tested, Pareto-dominating both in Figure 2:
+
+<Figure
+  src="/articles/uno-diffusion-augmented/fig2.png"
+  alt="A scatter plot of system throughput versus per-request throughput across concurrency levels 1 through 64. Four lines: Uno-Qwen (blue) sits above and to the right of DFlash (dark grey) and EAGLE-3 (light grey) at every concurrency level, with AR (black dashed) lowest of all. Points are annotated with sampler configuration, e.g. B4, B8, B16,V32."
+  caption="System versus per-request throughput across batch sizes, for Uno against the actual speculative-decoding incumbents. Uno Pareto-dominates both at every concurrency tested. (Paper, Figure 2.)"
+/>
+
+The margin over EAGLE-3 and DFlash (1.07–1.5×) is real but modest next to the margin over plain AR (1.5–2.5×) — which is the honest way to read this chart: the hard part was already solved by ordinary speculative decoding, and Uno's actual contribution is winning that same game while adding **0.35B** parameters instead of EAGLE-3's 0.40B or DFlash's 1.05B, and needing one KV cache instead of two (a separate draft-model cache is exactly what a same-backbone LoRA drafter doesn't need). That's a real, if narrower, win over the thing that matters, not a straw-man win over diffusion LLMs that were never the state of the art on batched serving anyway. If you want the background on why a *separate* draft model existed in the first place, [multi-token prediction](/articles/multi-token-prediction) and [EAGLE-3](/articles/eagle-3-speculative-decoding) cover that lineage; for what a masked-diffusion LM looks like when it isn't wearing a speculative-decoding costume, see [iLLaDA](/articles/illada-diffusion-language-model).
+
+The cost side of that comparison is the half the throughput chart can't show, and the project page draws it separately:
+
+<Figure
+  src="/articles/uno-diffusion-augmented/fig3.png"
+  alt="Two grouped bar charts inside a rounded blue panel, with a legend for Uno (blue), EAGLE-3 (light grey) and DFlash (dark grey). Left chart, 'Additional Parameters', with a downward arrow meaning lower is better: DFlash 1050, EAGLE-3 400, Uno 350. Right chart, 'Peak Memory': DFlash 130, EAGLE-3 130, Uno 122, on an axis that starts at 100 rather than 0."
+  caption="Added parameters (millions) and peak GPU memory (GiB) for the three drafters. Both panels match Table 2's bottom rows to the decimal — 0.35B / 0.40B / 1.05B and 122.2 / 130.0 / 130.1 GiB. Note the memory axis starts at 100, so a 6% saving is drawn as a third of a bar. (Sahoo et al., project page, panel (a).)"
+/>
+
+The memory bar is the one that's easy to under-read in either direction. Truncating the axis at 100 GiB makes 122 look dramatically below 130 — it's a 6% saving, not a third. But an H200's 141 GB of HBM is about 131 GiB, so a 130 GiB peak is already sitting within a gigabyte of the ceiling — which is why EAGLE-3's widest tree config is the one entry Table 18 has to mark "resident-capacity-infeasible" at concurrency 64, while every Uno config still fits. Freeing 7.8 GiB there is not nothing, and it's the direct physical consequence of the mechanism: EAGLE-3 and DFlash each have to hold a second model's weights and a second KV cache, and a LoRA drafter riding the verifier's own backbone has neither. That headroom is why Uno can run a larger batch on the same card, which is where the system-throughput numbers come from in the first place.
+
+Against the *other* diffusion LLMs — DiffusionGemma-26B-A4B, Nemotron-Labs-Diffusion-14B, and the proprietary Mercury 2 — Uno wins on quality across nearly every benchmark (Table 1), and on system throughput by roughly 1.9–4.6×. That comparison is real, but it's the less interesting one, and it's the one the abstract leads with.
+
+## Numbers that don't quite agree with each other
+
+Running the house check on this paper turns up more small inconsistencies than most — none of them changes the mechanism, but they're worth naming plainly.
+
+**The checkpoint's own name, the paper's own label, and the weights on disk disagree about size.** The base repo is `IFM/K2-Horizon-7B`. The paper's own Table 1 column header calls the same model "Uno (8B)." The architecture section states the arithmetic directly — 6.95B transformer-body parameters plus 2.05B from the untied input/output embedding matrices — which sums to 9.00B, and Hugging Face's own `model.safetensors.index.json` confirms it: 17,998,356,480 bytes at bf16, divided by 2, is exactly 8,999,178,240 parameters. Three names, three numbers, one checkpoint.
+
+**Figure 1 and Table 1 disagree with each other, and the shipped model card disagrees with both.** I checked this three ways (see the caption above): Figure 1's "Agentic Coding (SWE-bench Verified)" bars read 58 for both Uno and AR; Table 1 lists Uno's SWE-bench Verified score as 68.4; and the current `IFM/K2-Horizon-7B-Uno` README's own results table — for the identical checkpoint — lists 70.1. That's a 12.1-point spread across three places the same number should appear once. The Figure 1 "Agentic Tool Use (Tau2 Banking)" bars have a second, different problem: their values (90/90/71/68) match Table 1's τ2-**Telecom** row exactly, not any Banking row (τ3-Banking is 25.8) — the figure's own label doesn't match its own numbers.
+
+**Table 1 and Table 7 don't even agree with each other inside the same PDF.** Table 1 lists Uno's per-request throughput as 405 tok/s; Table 7 — the table the "batch size 1" claim in Section 5.1.3 is actually computed from — lists the same quantity, for the same model, as 383 tok/s. I used Table 7's number above because that's what the paper's own "≈2.2×" sentence traces to; using Table 1's 405 instead gives 2.3×, not that it changes the conclusion.
+
+**The released training recipe is not the loss the paper writes down.** Equation (3) defines the diffusion objective as two weighted terms: the Discrete Consistency Distillation loss L<sub>DCD</sub> — a reverse KL against the frozen AR teacher — plus the total-variation loss L<sub>TV</sub> that rewards longer accepted prefixes. The shipped code has three terms, not two (it adds a cross-entropy term Equation (3) doesn't mention), and it defaults two of the three to zero:
+
+```python
+# training/constants.py
+DEFAULT_CE_ALPHA = 0.0      # cross-entropy on the noised positions
+DEFAULT_KL_BETA  = 0.0      # L_DCD, the reverse-KL distillation term
+DEFAULT_TV_GAMMA = 1.0      # L_TV, the total-variation term
+
+# training/trainer.py — combine_objective_losses
+return (
+    objective.ce_weight * ce_loss
+    + objective.kl_weight * kl_loss
+    + objective.tv_weight * tv_loss
+)
+```
+
+`training/run_slurm.sh` — the launcher `examples/uno_qwen3_8B/run_train.sh` hands off to — re-states the same defaults (`KL_BETA="${KL_BETA:-0.0}"`), and the trainer skips the KL branch entirely when its weight is zero. So the training run you can reproduce is total-variation-only: the *distillation* half of "Discrete Consistency Distillation" is switched off in the artifact.
+
+The paper isn't hiding this, to be clear — Ablation 1 in §5.2.4 reports it plainly: L<sub>TV</sub> alone reaches a TPF of 2.39, against 2.23 for L<sub>DCD</sub> + L<sub>TV</sub> and 2.23 for L<sub>DCD</sub> alone, because L<sub>DCD</sub> came out an order of magnitude larger and drowned the other term. It's still worth knowing that the surviving term is the one aimed directly at the accept/reject rule. The paper derives L<sub>TV</sub> from Corollary 3.6 of Leviathan et al. (2023) — the acceptance probability of a speculative step is exactly `1 − TV(p, q)` — so minimizing total variation *is* maximizing the accepted prefix, with no proxy in between. L<sub>DCD</sub>, the term that got zeroed, is the one that tries to match the AR distribution in general. The method's name points at the half that is switched off.
+
+<Callout type="warn">
+None of this is the weights being wrong. I checked: the `adapter_model.safetensors` pinned by the paper's own release scripts (`run_inference.sh`, revision `ec92bbd`) is byte-identical, by SHA-256, to the file at the repo's current HEAD — only the README changed afterward. The LoRA parameter count checks out too: 36 layers × 7 projections × (A + B) = 504 tensors, matching `conversion_summary.json` exactly, and 349,175,808 parameters × 4 bytes lands within safetensors' own header overhead of the real 1,396,763,616-byte file. The adapter does ship in float32 rather than bf16, though, which doubles its download size for no accuracy benefit I can see.
+</Callout>
+
+## What I'd still want to know
+
+**The abstract's "up to 3×" needs a citation I couldn't find.** If it's real, it should be a table entry, not a number that only exists in the prose layer above the tables.
+
+**The RL section admits it isn't finished.** Section 5.1.3 reports "up to a 40% end-to-end training speedup" from using the frozen diffusion adapters to accelerate RL rollouts, then says plainly: "We will provide detailed results in the next revision." That's an honest thing to write, and also a reason to treat the RL-speedup number as provisional until that revision exists.
+
+**Inference-time scaling is gestured at, not measured.** Section 4.3 notes that running more denoising steps than drafted tokens (T > B) could, in principle, produce quality *above* the base AR model's — at which point AR verification would be actively holding results back, and you'd want to turn it off. The paper explicitly declines to explore this ("we leave a systematic exploration... to future work"), which means the entire idea that diffusion weights might one day beat the model they were distilled from is, for now, one sentence and no experiment.
+
+**The oracle question DFlash 2 asked applies here too.** That piece found real headroom just from *choosing* better among tokens a drafter had already computed. Uno's drafter is a single LoRA forward pass with no analogous candidate-reranking step — worth watching whether a DFlash-2-style selector composes with a same-backbone drafter, or whether sharing weights with the verifier removes the slack that trick exploits.
+
+**The from-scratch recipe isn't reproducible outside IFM.** UnoQwen's training code and data (OpenThoughts3) are public; the flagship K2-Horizon numbers rest on ~23T tokens of "internal quality data" nobody outside the lab can rerun. The open-weights half of the paper is the one anyone else can actually check end to end.
+
+## The line worth keeping
+
+> Our core idea is simple: define a high-quality AR distribution, then learn to sample multiple tokens in parallel from that same distribution.
+
+Every part of Uno that holds up traces back to taking that sentence literally — not approximating the AR distribution, not converting the model into something else, just adding a cheap parallel path to sample from the identical thing. That's also exactly why the lossless claim survives a check that a claim like it usually doesn't: it isn't asking you to trust a new guarantee, it's reusing an eight-year-old one and doing the bookkeeping to make it apply. The 3× in the abstract, I'd cut. The mechanism under it, I wouldn't.
