@@ -4,6 +4,36 @@ import createMDX from "@next/mdx"
 const nextConfig: NextConfig = {
   // Let .md / .mdx files act as pages/imports alongside ts/tsx.
   pageExtensions: ["ts", "tsx", "js", "jsx", "md", "mdx"],
+  // public/ must never reach a serverless function — Vercel serves it from the
+  // CDN. It was reaching them anyway: <Receipts> and lib/markdown.ts read their
+  // committed JSON with readFileSync(join(process.cwd(), "public", src)), and
+  // because `src` is not a literal the tracer cannot tell which file is wanted,
+  // so it conservatively pulled in ALL of public/. That is 214 MB of figures and
+  // video, and <Receipts> is registered globally, so every MDX-rendering route
+  // carried it: /articles/[slug] reached 266 MB against Vercel's 250 MB limit
+  // and seven more routes sat just under it. Worse, it compounded — every figure
+  // committed inflated eight functions at once.
+  //
+  // Excluding the media (never read by code) leaves the ~0.3 MB of
+  // public/**/data/*.json the two readers actually want. Build-time reads are
+  // unaffected: tracing only decides what ships inside a function.
+  outputFileTracingExcludes: {
+    "/*": [
+      "./public/**/*.png",
+      "./public/**/*.jpg",
+      "./public/**/*.jpeg",
+      "./public/**/*.webp",
+      "./public/**/*.avif",
+      "./public/**/*.gif",
+      "./public/**/*.svg",
+      "./public/**/*.ico",
+      "./public/**/*.mp4",
+      "./public/**/*.webm",
+      "./public/**/*.mov",
+      "./public/**/*.pdf",
+      "./public/**/*.bin",
+    ],
+  },
   // The chat/ask routes build their corpus from content/ at runtime — make sure
   // those files are traced into the serverless bundle on Vercel.
   outputFileTracingIncludes: {

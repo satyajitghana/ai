@@ -5,9 +5,12 @@ import { AgentChip } from "@/components/site/agent-chip"
 import { PageShell } from "@/components/site/page-shell"
 import { getLog, getLogs } from "@/lib/content"
 
-// Unknown slugs still 404 via notFound() below; `true` (a static literal, as
-// Next requires) lets newly-added content resolve in dev without a restart.
-export const dynamicParams = true
+// Paired with the template-literal `await import()` below, per the Next.js MDX
+// guide, which documents that pattern with dynamicParams = false. With `true`
+// the route must keep a runtime function able to render an arbitrary slug, and
+// because the bundler cannot resolve a template-literal import it bundles every
+// file in the directory into it. Unlisted slugs now get Next's static 404.
+export const dynamicParams = false
 
 export function generateStaticParams() {
   return getLogs().map((l) => ({ slug: l.slug }))
