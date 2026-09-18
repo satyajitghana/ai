@@ -1,0 +1,300 @@
+---
+title: "Depth Anything 3 in ROS 2: the metres come from the wrapper, not the model"
+description: "ika's ros2-depth-anything-v3-trt publishes a 32FC1 depth image and a PointCloud2 and calls both metric. I traced where the metres actually come from: a single line, depth *= 0.5*(fx*sx + fy*sy)/300, in the node's CUDA postprocess. The 300 is Depth Anything 3's own focal normalisation constant, and the checkpoint the node runs cannot apply it itself — I pulled the published ONNX apart with Range requests and the graph ends at two raw head outputs, 1418 nodes, no metric scaling, no sky fill, fp16 weights already baked in. The conversion is correct in kind and exact only for a 1.8:1 camera; on a 4:3 sensor the same code silently shortens every published distance by 13%. Plus a dead ROS parameter, a README that has the sky mask backwards, and a depth image that disagrees with its own point cloud about what the sky is."
+date: 2026-09-18
+interest: 4
+helpful: 5
+tags:
+  - robotics
+  - ros2
+  - depth-estimation
+  - 3d-perception
+  - tensorrt
+  - explainer
+draft: false
+---
+
+import { RosGraph } from "@/components/articles/depth-anything-3-ros2/ros-graph"
+import { ScaleSeam } from "@/components/articles/depth-anything-3-ros2/scale-seam"
+import { AspectBox } from "@/components/articles/depth-anything-3-ros2/aspect-box"
+
+A monocular camera cannot measure distance. It measures direction. Everything else — how far the wall is, how tall the pedestrian is — is a prior that has to come from somewhere outside the image. So when a ROS 2 node publishes `sensor_msgs/Image` with encoding `32FC1` on a topic called `depth_image`, it is making a claim about units, and the interesting question is not how good the network is. It is: *who supplied the metres, and under what assumption?*
+
+[`ika-rwth-aachen/ros2-depth-anything-v3-trt`](https://github.com/ika-rwth-aachen/ros2-depth-anything-v3-trt) is a clean, small TensorRT node from RWTH Aachen's Institute for Automotive Engineering that wraps [Depth Anything 3](https://arxiv.org/abs/2511.10647) and publishes a depth image and a point cloud. Its README says, in three places, that the output is metric. I read both repositories, pulled the published ONNX apart over HTTP, and found the answer: the metres are produced by one multiply in the wrapper's CUDA postprocess, the model file contributes nothing metric on its own, and the conversion is exactly right only for a camera whose frame is 1.8:1.
+
+| | |
+|---|---|
+| Model | [Depth Anything 3](https://arxiv.org/abs/2511.10647) · arXiv **2511.10647v1**, 13 Nov 2025 · Lin, Chen, Liew, Chen, Li, Shi, Feng, Kang (ByteDance Seed) |
+| Checkpoint | `DA3METRIC-LARGE` — DINOv2 ViT-L backbone, DPT head, outputs `depth` + `sky` |
+| Code | [`ByteDance-Seed/Depth-Anything-3`](https://github.com/ByteDance-Seed/Depth-Anything-3) @ `3d835ec` · Apache-2.0 |
+| ROS 2 node | [`ika-rwth-aachen/ros2-depth-anything-v3-trt`](https://github.com/ika-rwth-aachen/ros2-depth-anything-v3-trt) @ `9bad9db` (21 Aug 2026) · Apache-2.0 · Till Beemelmanns |
+| Target | ROS 2 Jazzy, Ubuntu 24.04, CUDA 12.8/13, TensorRT 10.9 |
+| ONNX | [`TillBeemelmanns/Depth-Anything-V3-ONNX`](https://huggingface.co/TillBeemelmanns/Depth-Anything-V3-ONNX) · 731,352,693 bytes, static `[1,3,280,504]` input |
+
+<Callout type="note">
+Naming: the paper, the repo and the Hugging Face org all say **Depth Anything 3**. The ROS package says **V3** everywhere — package name, node name, topic namespace. They are the same thing. I use "DA3" for the model and "the node" for the wrapper.
+</Callout>
+
+## What the node actually publishes
+
+Before any argument about correctness, the plain inventory. This is read off the source at `9bad9db`, not the README — the two disagree in several places, which I come back to at the end.
+
+<RosGraph />
+
+Three things in there are worth pulling out now, because they set up everything else.
+
+**The depth image and the point cloud are not the same measurement.** The cloud is built from the 280×504 network output with intrinsics scaled to that grid. The depth image is that same map, bicubic-upscaled to the camera's full resolution by a kernel whose own comment says the overshoot is kept: *"There is no saturating cast here: `cv::resize` on `CV_32F` keeps the interpolated value, overshoot included."* Bicubic has negative lobes, so at every depth discontinuity the published image rings — a thin band of pixels nearer than the near object and a thin band further than the far background. The cloud never goes through that filter.
+
+**They also disagree about the sky.** In the cloud, sky pixels are `NaN`: no measurement. In the depth image, sky pixels are filled with a positive number, the 99th percentile of the non-sky depths capped at 200 m. Point one obstacle layer at the cloud and another at the image and you get two different worlds, one with a hole overhead and one with a wall at 200 m.
+
+**The header is copied, not constructed.** `tensorrt_depth_anything.cpp` carefully picks a `frame_id` out of `CameraInfo`, falling back to `"camera_link"`, and preserves the `CameraInfo` stamp. Then the node does this:
+
+```cpp
+// depth_anything_v3_node.cpp:216–218
+sensor_msgs::msg::PointCloud2 point_cloud = tensorrt_depth_anything_->getPointCloud();
+point_cloud.header = image_msg->header;
+pub_point_cloud_->publish(point_cloud);
+```
+
+Whole-header assignment. Both the frame and the stamp the cloud builder chose are discarded and replaced with the image's. In practice a well-behaved driver stamps both identically, so nothing breaks — but the `"camera_link"` fallback inside the builder can never reach a subscriber, and the cloud's geometry is the optical convention (`X = (u−cx)·Z/fx`, `Y = (v−cy)·Z/fy`, `Z = depth`: +z forward, +y down). If your driver publishes images in a REP-103 body frame rather than a `_optical_frame`, the node will happily label an optical-frame cloud with it and everything downstream will be rotated 90°.
+
+## Monocular depth has no metres in it
+
+The reason this is delicate, in one picture. A pinhole camera maps a ray to a pixel. Scale the whole scene — every distance and every object — by the same factor and every pixel is unchanged. The image constrains the *shape* of the scene and says nothing at all about its size.
+
+<ScaleSeam />
+
+So a network trained to emit "depth" from one image is emitting it in whatever unit its training made canonical. DA3's metric branch picks the cleanest possible convention: **depth as it would be if the camera's focal length were 300 pixels in the model's own input grid.** Give it a real focal and the metres fall out by similar triangles. That convention lives in exactly one function in the upstream repo:
+
+```python
+# depth_anything_3/utils/alignment.py:118
+def apply_metric_scaling(
+    depth: torch.Tensor, intrinsics: torch.Tensor, scale_factor: float = 300.0
+) -> torch.Tensor:
+    focal_length = (intrinsics[:, :, 0, 0] + intrinsics[:, :, 1, 1]) / 2
+    return depth * (focal_length[:, :, None, None] / scale_factor)
+```
+
+And the node reimplements it, in C++, against the intrinsics that arrived on `~/input/camera_info`:
+
+```cpp
+// tensorrt_depth_anything.cpp:357–360
+const double fx = camera_info.k[0] * scale_x_;
+const double fy = camera_info.k[4] * scale_y_;
+const double focal_pixels = 0.5 * (fx + fy);
+const double focal_scale = focal_pixels > 0.0 ? focal_pixels / 300.0 : 1.0;
+```
+
+Same formula, same magic 300, `focal_scale` then multiplied into every pixel by a CUDA kernel (`postprocess_gpu.cu:88`). That is the whole of the scale recovery. There is no stereo, no IMU, no known-size object, no ground-plane fit. The metres come from `CameraInfo` and from the assumption that the network is calibrated to 300 px.
+
+<Callout type="warning">
+Note what this implies for a robot. If your `camera_info` is wrong — a placeholder `K`, the wrong resolution's calibration, an un-rectified stream, a lens swapped without recalibrating — the depth is wrong by exactly the focal ratio, and nothing in the pipeline will tell you. The node never checks `distortion_model` or `D`, and it never publishes its own `camera_info` alongside the depth image, so a downstream `depth_image_proc` has to be pointed back at the camera's.
+</Callout>
+
+There is one small tell that the author was not entirely sure about this line. The comment immediately above it reads `// Use original intrinsics for metric conversion per spec.` — but the code multiplies by `scale_x_` and `scale_y_`, which is precisely *not* the original intrinsics. Scaling is the right choice (the network sees the resized grid, so the focal must be in that grid), so the code is correct and the comment is stale. Worth knowing before you "fix" it.
+
+## The model file really does stop at the head
+
+The obvious objection: DA3's `NestedDepthAnything3Net.forward` already calls `apply_metric_scaling`, then least-squares-aligns the relative branch onto it, then fills the sky, and sets `output.is_metric = 1`. If the exported ONNX contained any of that, the node would be applying the focal factor a second time and every published distance would be off by a full focal ratio.
+
+It doesn't, for two independent reasons.
+
+**The config.** `DA3METRIC-LARGE` is not the nested model. `depth_anything_3/configs/da3metric-large.yaml` instantiates a plain `DepthAnything3Net` with a `vitl` backbone and a single-output DPT head — no `cam_dec`, no `cam_enc`, no Gaussian head. `_process_camera_estimation` is therefore a no-op and `output.intrinsics` never exists, so `apply_metric_scaling` could not run on this checkpoint even in principle; it needs intrinsics, and this network does not predict any. The nested model that *does* self-scale is `da3nested-giant-large`, which pairs a 40-block ViT-g with this ViT-L.
+
+**The graph.** I didn't want to take that on faith, so I pulled the published ONNX apart without downloading it. ONNX is one protobuf, and PyTorch serialises `graph.node` before `graph.initializer`, so the first 40 MB of a 697 MiB file contains the entire node list. A hand-written varint walker over that prefix, plus a handful of Range-request probes deeper in for the weight dtypes:
+
+<Receipts src="/articles/depth-anything-3-ros2/data/onnx-graph-audit.json" />
+
+1418 nodes, 27 op types, and the last node in the graph is `Reshape → sky`. Nothing follows the head. 24 `Softmax` nodes is one ViT-L, not two backbones. Zero `NonZero` and zero `ScatterND` means there is no boolean-mask write anywhere, so `_process_mono_sky_estimation` — which does `depth[~non_sky_mask] = max_depth` — never made it into the trace. That is not mysterious: `onnx/export.py` traces on `torch.zeros(1, 3, 280, 504)`, and that block opens with two early returns guarded on tensor sums (`if non_sky_mask.sum() <= 10: return output`). Tracing resolves a Python `if` once, on the dummy data, and bakes the branch it took. On an all-black frame it took the early return.
+
+So the shipped artifact is narrower than the code that produced it, and the node's CUDA reimplementation of the focal scaling, the sky mask and the percentile fill is not redundant — it is the only copy that runs. The README's line *"Depth Anything V3 predicts a dense metric depth map"* is, for this artifact, wrong in a way that matters: it predicts a focal-normalised depth map, and the wrapper makes it metric.
+
+<Figure
+  src="/articles/depth-anything-3-ros2/fig1.png"
+  alt="Depth Anything 3's pipeline: images go through patch embedding into a single vanilla DINO transformer with interleaved within-view and cross-view self-attention, then a dual-DPT head predicts a depth map and a ray map, which fuse into points; a teacher model supervises the depth branch and an optional camera token is encoded in and decoded out."
+  caption="Depth Anything 3's full pipeline — one plain DINOv2 transformer, a dual-DPT head emitting depth and rays, optional camera tokens, teacher supervision on the depth branch (Lin et al., Figure 2). The checkpoint the ROS node runs is the narrow case of this: one view, no camera token, no ray head, no pose decoder. Just the backbone and a single-output DPT with a sky head bolted on."
+/>
+
+While auditing the graph I also learned two things nobody documents. The `depth` output comes out of an `Exp`, so it is strictly positive — the node's `if (scaled <= 0.0f) scaled = 0.0f;` clamp can only ever fire on an fp16 underflow to exactly zero. And `sky` comes out of a `Relu`, with no `Sigmoid` anywhere in the graph, so it is a non-negative activation and not a probability, despite being thresholded at `0.3`.
+
+## The 504×280 box
+
+Here is where the conversion stops being exact.
+
+The engine's input is fixed at `[1, 3, 280, 504]`. The node resizes every incoming frame straight into that shape with a bicubic kernel that scales the axes independently (`preprocess_gpu.cu:41`) — a stretch, not a crop. Then it takes `fx·sx` and `fy·sy`, averages them, and divides by 300.
+
+DA3's own input pipeline does the opposite. `InputProcessor._resize_longest_side` computes **one** scale from the longest side and applies it to both axes; `_make_divisible_by_crop` then centre-crops the short side down to a multiple of 14, with a docstring that spells out the intent: `Example: 504x377 -> 504x364`. One scale means one focal, and no averaging is needed.
+
+For a 16:9 frame these agree almost exactly, and not by accident: 1080 × 504/1920 = 283.5, rounds to 284, floors to 280. The shipped 504×280 engine *is* what DA3's own preprocessing produces for 1920×1080. ika builds automotive perception; the node is calibrated for the camera they have.
+
+Point it at anything else and the arithmetic drifts. With `fx = fy` the ratio between the node's focal and the aspect-preserving one collapses to a one-liner in the source aspect ratio `a = W/H`: `(1 + a/1.8)/2`, exactly 1 at a = 1.8 and falling away below it.
+
+<AspectBox />
+
+A 4:3 camera — a RealSense RGB stream, most USB webcams, plenty of automotive 4:3 sensors — gets a scale factor 13.0% short, so every published distance is 13.0% short, silently, on every frame. A 5:4 industrial sensor gets 15.3%. Nothing in the node inspects the incoming aspect ratio, warns, or refuses.
+
+And that is only the half I can compute. The other half is that the network is being handed a frame squeezed to 74% of its correct height, which is not something its training pipeline ever produced, and I have no way to bound what that does to the prediction itself from source alone. The repo's own code is blunt about how sensitive this stage is — the preprocessing kernel exists at all because of it:
+
+```cuda
+// preprocess_gpu.cu:30 — comment above cubicCoeffs
+// Cubic convolution weights with A = -0.75, as used by cv::INTER_CUBIC. A
+// bilinear substitute is much cheaper but moves the published depth by tens of
+// metres, so the filter is reproduced rather than approximated.
+```
+
+If swapping bicubic for bilinear moves depth by tens of metres, an anisotropic stretch is not a rounding concern. (DA3, for what it is worth, uses `cv2.INTER_AREA` when downscaling and `INTER_CUBIC` only when upscaling; the node always uses cubic, and it is always downscaling. That is a third divergence from the reference recipe, and I can't quantify it either.)
+
+The fix is cheap and the repo already supports it: `onnx/export.py` takes `--height` and `--width`, any multiple of 14. Export at 504×378 for a 4:3 camera and the arithmetic error goes to exactly zero.
+
+## Sky is filled, not invalidated
+
+The sky handling is the one place where the node's reimplementation is measurably better than doing nothing, and also the place where the documentation is most confidently wrong.
+
+The kernel:
+
+```cuda
+// postprocess_gpu.cu:86–92
+float scaled = raw[i];
+if (scaled <= 0.0f) scaled = 0.0f;
+scaled *= focal_scale;
+
+const bool non_sky = sky[i] < sky_threshold;
+depth[i] = scaled;
+mask[i] = non_sky ? 1u : 0u;
+```
+
+`sky[i] < threshold` means **not** sky. That matches DA3 exactly — `compute_sky_mask` in `alignment.py:54` is literally `return sky_prediction < threshold`, and its docstring says "True indicates non-sky regions". The node is right. The README is backwards twice: it describes the `sky` output as *"sky classification logits (float32, lower values = sky)"* and the rule as *"Pixels with sky confidence below `sky_threshold` are classified as sky."* Both invert the actual test. The third statement about sky, in the parameter table — *"lower = more sky detected"* — is correct, because lowering the threshold does shrink the non-sky set. Two out of three wrong, in a way that will send anyone tuning the threshold in the wrong direction.
+
+Then the fill: the 99th percentile of the valid depths, capped at 200 m, written into every sky pixel. Two details the docs skip. The percentile is taken over the first 100,000 valid pixels **in row-major order** — the kernel's own comment says so: *"The sample is the first `kMaxSample` valid pixels in row-major order, not a subsample spread over the frame."* DA3 draws a random 100,000 instead. At 280×504 = 141,120 pixels the cap only bites when more than 100,000 survive the sky mask — that is, when sky covers less than 29% of the frame — and the pixels it then drops are the bottom rows, which are the near field. A 99th percentile barely moves. It is still not the same estimator, and the kernel says so rather than hiding it.
+
+The second detail is a bug. `sky_depth_cap` is declared as a ROS parameter, documented in the README, set in `config/depth_anything_v3.param.yaml`, and wired into `onSetParam` for live reconfiguration. It reaches nothing:
+
+```cpp
+// depth_anything_v3_node.cpp:76 — the parameter
+node_param_.sky_depth_cap = declare_parameter<double>("sky_depth_cap", 200.0);
+
+// tensorrt_depth_anything.hpp:190 — what the kernel is actually handed
+const float sky_depth_cap_{200.0f};
+```
+
+The node passes `sky_threshold` down through `setSkyThreshold()`, but never passes `sky_depth_cap` anywhere. The kernel argument is fed from a `const` member that no code path writes. Set `sky_depth_cap: 50.0` in your param file and you will still get 200 m in the sky, with no error and no warning. It happens to be the same default, which is exactly why it hasn't been noticed.
+
+## How fast, and on what
+
+The README's entire performance section is three lines:
+
+> Performance on Quadro RTX 6000:
+> - **DA3METRIC-LARGE**: 50 FPS
+
+Credit where it's due: a device is named, which is more than most repos manage. But it is a 24 GB Turing workstation card, not robot compute, and three things are left implicit. The resolution is 504×280 — fixed by the engine, so at least it can't be gamed. The precision is fp16, the node's default. And the number is per-inference-call, not per-frame: the region the node times is exactly `doInference`, which starts after `cv_bridge` has decoded the frame and ends before the 32FC1 message is allocated and published.
+
+```cpp
+// depth_anything_v3_node.cpp:187–191
+auto start = std::chrono::high_resolution_clock::now();
+bool success = tensorrt_depth_anything_->doInference(input_images, *camera_info_msg, ...);
+auto end = std::chrono::high_resolution_clock::now();
+const double inference_time_sec = std::chrono::duration<double>(end - start).count();
+```
+
+That is also the number stamped onto the debug overlay as "FPS", averaged over 20 frames. In its favour, it does include the point-cloud build, which is still on the CPU with a per-pixel `cv::Mat::at` loop. It excludes the image decode, which on a compressed transport is a full JPEG per frame, and it excludes the `32FC1` serialisation and publish — 1920×1080 float32 is 8.3 MB per message, on a publisher left at rclcpp's default *reliable* QoS with depth 1. Whatever the end-to-end rate is on your rig, it is below 50.
+
+There is no Jetson number anywhere in the repo, and no Jetson build either: `.github/workflows/docker-ros.yml` passes `platform: amd64`, and the only base images referenced anywhere are `nvcr.io/nvidia/tensorrt:25.03-py3` and `25.08-py3`, both x86. If you are planning to put a ViT-L at 504×280 on an Orin, the honest position is that this repo does not tell you what to expect, and neither do I; I have no GPU here and did not run it.
+
+The paper's own speed table doesn't transfer either. Table 8 reports 78.37 FPS for DA3-Large on an **A100**, at **504×336**, averaged per image over a 32-image scene, in PyTorch. Different model, different resolution, different GPU, different runtime, and multi-view batching amortises the backbone in a way a single-frame ROS callback cannot. It is not comparable to 50 FPS and the repo does not claim it is.
+
+## How metric is metric
+
+The last number worth having, because it's the one that decides whether you can put this in a costmap. The paper's Table 11 compares DA3's metric branch against the specialist metric-depth models, `δ1` up and AbsRel down:
+
+| Method | NYUv2 δ1 / AbsRel | KITTI δ1 / AbsRel | ETH3D δ1 / AbsRel | SUN-RGBD δ1 / AbsRel | DIODE δ1 / AbsRel |
+|---|---|---|---|---|---|
+| DepthPro | 0.932 / 0.093 | 0.843 / 0.121 | 0.386 / 0.349 | 0.950 / 0.126 | 0.734 / 0.173 |
+| Metric3D v2 | 0.971 / 0.067 | 0.976 / 0.051 | 0.830 / 0.138 | 0.954 / 0.132 | 0.018 / 0.154 |
+| UniDepthv1 | 0.980 / 0.061 | 0.978 / 0.051 | 0.234 / 0.464 | 0.971 / 0.113 | 0.570 / 0.266 |
+| UniDepthv2 | 0.968 / 0.064 | 0.968 / 0.076 | 0.863 / 0.152 | 0.977 / 0.111 | 0.856 / 0.123 |
+| **DA3-metric** | **0.963 / 0.070** | **0.953 / 0.086** | **0.917 / 0.104** | **0.973 / 0.105** | **0.838 / 0.128** |
+
+DA3-metric is not the best on KITTI or NYUv2 — Metric3D v2 and UniDepth beat it on both. What it is, is the only row that never collapses: ETH3D breaks DepthPro (0.386) and UniDepthv1 (0.234) outright, and DA3 leads it at 0.917. For a robot that has to work in rooms *and* outdoors, "never below 0.838" is worth more than a best-in-class line on one dataset.
+
+The number to internalise is AbsRel 0.086 on KITTI: **8.6% mean relative error**. At 30 m that is ±2.6 m. At 8 m it is ±0.7 m. That is a usable free-space prior and it is not a range measurement; if something downstream is deciding whether to brake at 30 m, it is deciding on a number with a couple of metres of slack in it before you add the aspect-ratio error above.
+
+One oddity in that table, since I'm reading it closely: Metric3D v2 on DIODE is printed as δ1 = 0.018 with AbsRel = 0.154. Those cannot both be true. AbsRel 0.154 means the average pixel is off by 15%, which cannot coexist with 98.2% of pixels falling outside a 25% band; every neighbouring entry in that column sits between 0.57 and 0.86. It looks like a transcription slip, it is in someone else's row rather than the authors' own, and it changes no conclusion — but if you were going to quote "Metric3D v2 scores 0.018 on DIODE", don't.
+
+<Figure
+  src="/articles/depth-anything-3-ros2/fig2.png"
+  alt="Eight scenes in two columns. Each shows an input photo, the metric depth map produced with DA3 teacher supervision, and the map produced without it. The teacher-supervised maps keep thin structures — a lamp's arms, a plant's fronds, table legs — where the unsupervised maps smear them into the background or invert them into large blue blobs."
+  caption="The metric branch with and without DA3's teacher supervision (Lin et al., Figure 10). This is the checkpoint the ROS node runs. The failure mode on the right — thin structures dissolving, and whole regions flipping to the wrong depth band — is what a monocular depth map degrades into, and it is worth knowing that is the shape of the error before you feed it to an obstacle layer."
+/>
+
+## Things the README says that the code doesn't
+
+Collected in one place, because several of these will cost someone an afternoon. All line numbers are `9bad9db`.
+
+| Documented | Actual | Where |
+|---|---|---|
+| `sky` output: "lower values = sky" | post-ReLU; `sky < threshold` is **non**-sky | `postprocess_gpu.cu:90`, `alignment.py:54` |
+| `sky_depth_cap` is a parameter | `const float sky_depth_cap_{200.0f}`, never written | `tensorrt_depth_anything.hpp:190` |
+| `point_cloud_downsample_factor` default 2 | 10 | `depth_anything_v3_node.cpp:79` |
+| `write_colormap` default false | true | `depth_anything_v3_node.cpp:72` |
+| `debug_colormap_min_depth` 0.0 · max 50.0 | 2.0 · 100.0 | `depth_anything_v3_node.cpp:73–74` |
+| `onnx_path` default `DA3METRIC-LARGE.onnx` | `DA3METRIC-LARGE.fp16-batch1.engine` | `depth_anything_v3_node.cpp:63` |
+| "approximate time synchronizer with 100ms tolerance" | `ApproxSyncPolicy(10)` — queue size only, no max interval ever set | `depth_anything_v3_node.cpp:102–104` |
+| Architecture diagram: "Postprocessing (CPU)" | CUDA since PR #20; only the point cloud is still CPU | `postprocess_gpu.cu` |
+| `models/README.md`: input `[1,3,388,504]`, optional `confidence` output | `[1,3,280,504]`, outputs `depth` + `sky` | `models/README.md` vs the graph |
+
+The `enable_debug` default is a nice illustration of how these accumulate: the README table says `false`, the node declares `false`, and the shipped `config/depth_anything_v3.param.yaml` — the file the launch file loads by default — says `true`. Launch it as documented and you get the debug publisher, the colormap and, since `write_colormap` also defaults to `true` in code, a JPEG written to `/tmp` for every frame. At 50 FPS.
+
+And one that isn't a documentation drift but is worth flagging: setting `precision: "fp32"` does not give you fp32. The published ONNX already stores every attention and MLP weight as `FLOAT16` — that's the last two rows of the audit above — because `onnx/export.py`'s instructions have you edit `api.py` to force `autocast_dtype = torch.float16` before tracing. The rounding happened at export. TensorRT can only preserve it.
+
+## If I were putting this on a robot
+
+Concretely, in order:
+
+1. **Check your aspect ratio first.** If it isn't within a percent or two of 1.8:1, re-export the ONNX at width 504 and height `504/a` floored to a multiple of 14, then rebuild the engine — `python export.py --model-dir DA3METRIC-LARGE --width 504 --height 378` for a 4:3 sensor. One command, and it removes a 13% systematic error.
+2. **Treat the depth image as a prior, not a range image.** 8.6% AbsRel on KITTI, plus a bicubic upscale with ringing at every edge, plus a 200 m wall where the sky is. If you want obstacles, subscribe to the point cloud — it's on the native grid and it NaNs the sky.
+3. **Verify `camera_info` is the real calibration.** The entire metric claim rests on `k[0]` and `k[4]`. A placeholder `K` produces confident, wrong metres.
+4. **Rectify upstream.** Nothing in the node reads `D` or `distortion_model`; the point-cloud projection is a pure pinhole. Feed it `image_rect` and the matching `camera_info`.
+5. **Don't tune `sky_depth_cap`.** It does nothing. Tune `sky_threshold`, which does — and remember that *lower* means *more* sky.
+6. **Measure your own frame rate**, end to end, on your own compute. The 50 FPS is a desktop Turing card timing a subset of the callback.
+
+None of this is a complaint about the node, which is about 1,300 lines of tidy, well-commented C++ and CUDA that does something genuinely useful, ships a Docker image, and hand-reproduces OpenCV's bicubic kernel on the GPU because it noticed the filter mattered. That last detail is the tell of someone who actually measured. The gap is the usual one: the code knows things the README hasn't caught up with, and a wrapper that recovers scale from `CameraInfo` is only as calibrated as the camera you point it at.
+
+<ChangeMyMind>
+
+<Falsifier claim="The published ONNX contains no metric scaling, so the node's divide by 300 is the only one applied.">
+Run the shipped `DA3METRIC-LARGE.onnx` on one image and compare its raw `depth` output to a
+PyTorch run of the same checkpoint. If they match, my reading holds. If the ONNX output is
+already in metres, the node is double-scaling and every published distance is wrong by the
+full focal ratio. My evidence is the graph structure and the config, not an execution — I
+have no GPU here and did not run the model.
+</Falsifier>
+
+<Falsifier claim="A 4:3 camera gets depths 13.0% short.">
+That figure is arithmetic on the scale factor alone: `(1 + a/1.8)/2` with a = 4/3. Measure
+it instead — a calibrated 4:3 camera, a target at a tape-measured distance, read the
+published `32FC1` value. If the observed error isn't near 13% short, the stretch is doing
+something to the network's prediction that cancels or compounds the scale error, and I
+already said I could not bound that from source.
+</Falsifier>
+
+<Falsifier claim="sky_depth_cap is a dead parameter.">
+`ros2 param set /depth_anything_v3 sky_depth_cap 50.0`, point the camera at the sky, read
+the maximum of the published depth image. If it drops to 50 m, the parameter is wired
+somewhere I missed and this is simply wrong.
+</Falsifier>
+
+<Falsifier claim="The 50 FPS figure excludes decode and publish.">
+Instrument the callback end to end — `image_msg` receipt to `pub_point_cloud_->publish`
+return — on the same Quadro RTX 6000 at 1920×1080. If it also lands at 50 FPS, then decode,
+an 8.3 MB serialisation and a per-pixel CPU cloud loop are free, and I was wrong to imply
+they cost anything.
+</Falsifier>
+
+<Falsifier claim="Depth Anything 3's own preprocessing preserves aspect ratio, so the node's stretch is off-recipe.">
+I read `InputProcessor._resize_longest_side` and `_make_divisible_by_crop` at `3d835ec`.
+If the training-time pipeline — which is not in the released repo — stretched to a fixed
+grid instead, then the node is on-recipe, DA3's own inference path is the odd one out, and
+the whole aspect-ratio section is backwards.
+</Falsifier>
+
+</ChangeMyMind>
