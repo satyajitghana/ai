@@ -2,10 +2,12 @@ import type { MDXComponents } from "mdx/types"
 import type { ComponentPropsWithoutRef } from "react"
 
 import { BenchBars } from "@/components/mdx/bench-bars"
+import { ChangeMyMind, Falsifier } from "@/components/mdx/change-my-mind"
 import { CodeCollapse } from "@/components/mdx/code-collapse"
 import { Diagram } from "@/components/mdx/diagram"
 import { ModelCard } from "@/components/mdx/model-card"
 import { Plot } from "@/components/mdx/plot"
+import { Receipts } from "@/components/mdx/receipts"
 import { StepThrough } from "@/components/mdx/step-through"
 import { Video } from "@/components/mdx/video"
 import { Zoomable } from "@/components/mdx/zoomable"
@@ -150,10 +152,13 @@ export const mdxComponents: MDXComponents = {
   // article's .mdx (keeps this global list from bloating). Every component
   // degrades to meaningful static output; the .md agent variants carry the prose.
   BenchBars,
+  ChangeMyMind,
   CodeCollapse,
   Diagram,
+  Falsifier,
   ModelCard,
   Plot,
+  Receipts,
   StepThrough,
   Video,
 }
