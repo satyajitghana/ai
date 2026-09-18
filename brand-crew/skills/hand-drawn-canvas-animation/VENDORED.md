@@ -23,10 +23,25 @@ Two, both recorded here so a re-vendor can reapply or drop them:
    the default `/dev/shm` is too small for 1920x1080 frame buffers, so the
    render dies partway. Added `--no-sandbox --disable-dev-shm-usage
    --disable-gpu`. No effect outside a container.
-2. **This file**, which upstream does not have.
+2. **`SKILL.md` — frontmatter only.** The `description` is a plain YAML scalar
+   containing a `: ` sequence ("further than drawing on a flat frame: found
+   motion traces…"), which is not valid YAML — a plain scalar cannot contain
+   colon-space. Lenient parsers accept it; `gray-matter`, which this site uses
+   to publish `/.well-known/agent-skills/`, throws. Rewrapped as a folded block
+   scalar (`>-`), which carries the identical 1,565 characters with no escaping.
+   The prose is untouched.
+3. **This file**, which upstream does not have.
 
 Nothing else is changed. `core.js`, the references, the examples and the other
 scripts are byte-for-byte upstream.
+
+## Not published from this site
+
+`lib/skills.ts` skips any skill directory containing a `VENDORED.md`, so this
+one is absent from `/.well-known/agent-skills/`. That endpoint advertises the
+skills that author and maintain this site, with a sha256 per file; serving
+someone else's SKILL.md from it would put their work under our name and our
+digest. The skill still ships with the plugin and still works locally.
 
 ## Using it here
 
