@@ -316,9 +316,11 @@ export function BrowserScorer() {
     setOptions((prev) => prev.map((o, j) => (j === i ? v : o)))
   const removeOption = (i: number) => setOptions((prev) => prev.filter((_, j) => j !== i))
   const addOption = () =>
-    setOptions((prev) =>
-      prev.length >= 16 ? prev : [...prev, EXTRA_OPTIONS[prev.length % EXTRA_OPTIONS.length]],
-    )
+    setOptions((prev) => {
+      if (prev.length >= 16) return prev
+      const next = EXTRA_OPTIONS.find((o) => !prev.includes(o))
+      return [...prev, next ?? `option ${prev.length + 1}`]
+    })
 
   const pct = progress && progress.total ? (progress.received / progress.total) * 100 : 0
 
