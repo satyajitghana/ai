@@ -32,7 +32,7 @@ const SRC = [
   { w: "ん", t: 4.65 },
 ]
 
-// The emitted translation: nine words, each with the delay d_i at which it left
+// The emitted translation: eight words, each with the delay d_i at which it left
 // the model. Nothing moves until 1.6s, then output tracks input, and the whole
 // clause stalls on the final negation.
 const EMIT = [
@@ -50,7 +50,7 @@ const REF_LEN = 8 // |Y*| — the reference translation is eight words too
 
 export function LagTimeline() {
   const W = 780
-  const H = 372
+  const H = 382
   const padL = 128
   const padR = 28
   const plotW = W - padL - padR
@@ -87,7 +87,7 @@ export function LagTimeline() {
         viewBox={`0 0 ${W} ${H}`}
         className="w-full min-w-[680px]"
         role="img"
-        aria-label="A five-second Japanese source utterance is drawn as word blocks on a time axis. Below it, two staircases climb through the eight words of the English translation. The oracle staircase is a straight diagonal: it emits one word every 0.625 seconds, the source duration divided evenly across eight words. The system's staircase emits its first two words at 1.6 and 1.9 seconds, then stalls: the remaining six words all land at or after 4.9 seconds, because the Japanese negation that decides the whole clause is the final morpheme. The horizontal gap between the two staircases is shaded; the mean of those gaps is the length-adaptive average lagging, 2.1 seconds in this worked example."
+        aria-label="A five-second Japanese source utterance is drawn as word blocks on a time axis. Below it, two staircases climb through the eight words of the English translation. The oracle staircase is a straight diagonal: it emits one word every 0.625 seconds, the source duration divided evenly across eight words. The system's staircase emits its first two words at 1.6 and 1.9 seconds, then stalls: the remaining six words all land at or after 4.9 seconds, because the Japanese negation that decides the whole clause is the final morpheme. The horizontal gap between the two staircases is shaded; the mean of those eight gaps is the length-adaptive average lagging, 1.99 seconds in this worked example."
       >
         {/* ---------- source audio strip ---------- */}
         <text x={16} y={yAudio - 18} className="fill-muted-foreground font-mono" style={{ fontSize: 11 }}>

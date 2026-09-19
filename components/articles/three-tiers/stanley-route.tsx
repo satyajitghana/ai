@@ -64,7 +64,7 @@ export function StanleyRoute() {
   const stageTop = 92
   const stageH = 62
   const gap = 20
-  const H = stageTop + STAGES.length * (stageH + gap) + 122
+  const H = stageTop + STAGES.length * (stageH + gap) + 90
 
   const distX = x0 + boxW + 28 // 514
   const barMax = 150
@@ -279,6 +279,15 @@ export function StanleyRoute() {
 
         {/* outcome */}
         <g>
+          <line
+            x1={x0 + boxW / 2}
+            y1={stageTop + STAGES.length * (stageH + gap) - gap}
+            x2={x0 + boxW / 2}
+            y2={H - 69}
+            className="stroke-muted-foreground"
+            strokeWidth={1.5}
+            markerEnd="url(#sr-arrow)"
+          />
           <rect
             x={x0}
             y={H - 66}

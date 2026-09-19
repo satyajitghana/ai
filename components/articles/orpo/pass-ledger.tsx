@@ -19,7 +19,7 @@ const BAR_W = 520 // width of a full 16P row
 const UNIT = BAR_W / 16 // px per P-unit
 const ROW_H = 34
 const ROW_GAP = 26
-const TOP = 26
+const TOP = 30
 
 type Seg = { label: string; cost: number; kind: "fwd" | "bwd" | "ref" }
 type Row = { name: string; sub: string; segs: Seg[] }
@@ -153,18 +153,16 @@ export function PassLedger() {
             )
           })}
 
-          {/* the delta, drawn where the reference blocks are */}
-          <line
-            x1={BAR_X + 12 * UNIT}
-            x2={BAR_X + BAR_W}
-            y1={TOP + ROW_H + 24}
-            y2={TOP + ROW_H + 24}
+          {/* bracket over the two reference blocks — the part ORPO deletes */}
+          <path
+            d={`M ${BAR_X + 12 * UNIT} ${TOP - 6} L ${BAR_X + 12 * UNIT} ${TOP - 2} L ${BAR_X + BAR_W} ${TOP - 2} L ${BAR_X + BAR_W} ${TOP - 6}`}
+            fill="none"
             stroke={WARM}
             strokeWidth={1.2}
           />
           <text
             x={BAR_X + 14 * UNIT}
-            y={TOP + ROW_H + 21}
+            y={TOP - 11}
             textAnchor="middle"
             className="font-mono"
             fill={WARM}

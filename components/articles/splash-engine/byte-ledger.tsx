@@ -154,13 +154,6 @@ export function ByteLedger() {
             const cx = s.x + s.w / 2
             return (
               <g key={`lead-${s.key}`}>
-                <line
-                  x1={cx}
-                  y1={BAR_Y + BAR_H / 2}
-                  x2={cx}
-                  y2={BAR_Y + BAR_H / 2}
-                  stroke={ACCENT}
-                />
                 <text
                   x={cx}
                   y={BAR_Y + BAR_H / 2 + 4}

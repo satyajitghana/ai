@@ -277,6 +277,18 @@ export function DecodeStep() {
 
           <text
             x={W / 2}
+            y={ROW_Y + ROW_H + 74}
+            textAnchor="middle"
+            className="fill-foreground font-mono"
+            fontSize={10}
+          >
+            {accepted === 7
+              ? "all seven survived — row 7 yields a free token too, so 8 commit"
+              : `row ${accepted + 1} is replaced by the target's own token, so ${emitted} commit`}
+          </text>
+
+          <text
+            x={W / 2}
             y={H - 8}
             textAnchor="middle"
             className="fill-muted-foreground font-mono"

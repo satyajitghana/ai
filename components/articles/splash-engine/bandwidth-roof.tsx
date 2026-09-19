@@ -185,7 +185,7 @@ export function BandwidthRoof() {
                   className="fill-muted-foreground font-mono"
                   fontSize={9}
                 >
-                  {c.sub} · {ceiling(c.bw).toFixed(0)} tok/s
+                  {c.sub} · ceiling {ceiling(c.bw).toFixed(0)}
                 </text>
               </g>
             )
@@ -224,9 +224,9 @@ export function BandwidthRoof() {
                   filter="url(#roof-soft)"
                 />
                 <text
-                  x={px(accept) - 12}
+                  x={accept < 2.6 ? px(accept) + 12 : px(accept) - 12}
                   y={py(rate.value) + 3.5}
-                  textAnchor="end"
+                  textAnchor={accept < 2.6 ? "start" : "end"}
                   className="fill-foreground font-mono"
                   fontSize={11}
                 >

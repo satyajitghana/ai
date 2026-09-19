@@ -318,9 +318,10 @@ export function MemoryScaling() {
           while SAM 3 goes 37.7 ms to 102.0 ms. Past sixteen a second bucket
           opens and the multiplex line starts to climb too, just eight times
           more slowly. That divergence is the whole result: the headline{" "}
-          <span className="text-foreground">7×</span> is this gap read off at
-          128 objects, and the <span className="text-foreground">2×</span> in
-          Meta&apos;s blog post is the same gap read off at about seven.
+          <span className="text-foreground">7×</span>
+          {" is this gap read off at 128 objects, and the "}
+          <span className="text-foreground">2×</span>
+          {" in Meta’s blog post is the same gap read off at about seven."}
         </p>
       </div>
     </figure>
