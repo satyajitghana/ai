@@ -51,33 +51,32 @@ function mark(cx: number, cy: number, r: number, l: number) {
   ].join(" ")
 }
 
-export function BrushWidth() {
-  const colW = 108
-  const pad = 14
-  const W = pad * 2 + colW * SAMPLES.length
-  const bandTop = 58
-  const bandH = 150
-  const axisY = bandTop + bandH + 18
-  const gateH = 34
-  const gateTop = axisY + 42
-  const H = gateTop + gateH + 52
+const COL = 108
+const GUTTER = 76
+const RIGHT = 14
+const W = GUTTER + COL * SAMPLES.length + RIGHT
+const BAND_TOP = 62
+const BAND_H = 150
+const AXIS_Y = BAND_TOP + BAND_H + 20
+const GATE_TOP = AXIS_Y + 48
+const GATE_H = 34
+const H = GATE_TOP + GATE_H + 30
 
+export function BrushWidth() {
   const cols = SAMPLES.map((s, i) => {
     const spread = 1 - 1 / s.neff
-    const radius = 9 + 18 * (1 - spread)
-    const step = 4 + 12 * (1 - spread)
-    const richness = richnessOf(spread)
     return {
       ...s,
       spread,
-      radius,
+      radius: 9 + 18 * (1 - spread),
       // the renderer walks up to 4 steps either side of the seed point
-      half: Math.min(bandH / 2 - 6, 4 * step),
-      richness,
-      cx: pad + colW * i + colW / 2,
+      half: Math.min(BAND_H / 2 - 6, 4 * (4 + 12 * (1 - spread))),
+      richness: richnessOf(spread),
+      cx: GUTTER + COL * i + COL / 2,
       nats: mlog(s.neff),
     }
   })
+  const gateX = GUTTER + COL * 3
 
   return (
     <figure className="my-8">
@@ -86,39 +85,39 @@ export function BrushWidth() {
           viewBox={`0 0 ${W} ${H}`}
           className="h-auto w-full"
           role="img"
-          aria-label="Seven brush marks drawn to scale against the number of effective colours in the pixel distribution. Marks get narrower as the distribution spreads out, but below 1.92 effective colours no mark is drawn at all."
+          aria-label="Seven brush marks drawn to scale against the number of effective colours in the pixel distribution. Marks get narrower and shorter as the distribution spreads out, but below 1.92 effective colours no mark is drawn at all."
         >
           <text
-            x={pad}
-            y={22}
-            className="fill-foreground font-mono text-[12px] font-semibold"
+            x={14}
+            y={24}
+            className="fill-foreground font-mono text-[13px] font-semibold"
           >
-            radius = 9 + 18 × (1 − spread)
+            radius = 9 + 18 × (1 − spread) · placed only if spread &gt; 0.48
           </text>
-          <text x={pad} y={40} className="fill-muted-foreground font-mono text-[11px]">
-            spread = 1 − 1/N_eff · drawn at the renderer&apos;s own scale, 560px canvas
+          <text x={14} y={42} className="fill-muted-foreground font-mono text-[11px]">
+            spread = 1 − 1/N_eff · marks drawn at the renderer&apos;s own 560px scale
           </text>
 
           {/* the flat zone: nothing is painted here */}
           <rect
-            x={pad}
-            y={bandTop}
-            width={colW * 3}
-            height={bandH}
-            className="fill-foreground/[0.04]"
+            x={GUTTER}
+            y={BAND_TOP}
+            width={COL * 3}
+            height={BAND_H}
+            className="fill-foreground/[0.05]"
           />
           <line
-            x1={pad + colW * 3}
-            y1={bandTop}
-            x2={pad + colW * 3}
-            y2={gateTop + gateH}
-            className="stroke-foreground/35"
+            x1={gateX}
+            y1={BAND_TOP}
+            x2={gateX}
+            y2={GATE_TOP + GATE_H}
+            className="stroke-foreground/40"
             strokeWidth={1}
             strokeDasharray="3 3"
           />
           <text
-            x={pad + colW * 1.5}
-            y={bandTop + bandH / 2}
+            x={GUTTER + COL * 1.5}
+            y={BAND_TOP + 16}
             textAnchor="middle"
             className="fill-muted-foreground font-mono text-[11px]"
           >
@@ -129,20 +128,20 @@ export function BrushWidth() {
             <g key={c.neff}>
               {c.richness > 0 ? (
                 <path
-                  d={mark(c.cx, bandTop + bandH / 2, c.radius, c.half)}
+                  d={mark(c.cx, BAND_TOP + BAND_H / 2 + 8, c.radius, c.half)}
                   className="fill-foreground/75"
                 />
               ) : (
                 <path
-                  d={mark(c.cx, bandTop + bandH / 2, c.radius, c.half)}
-                  className="fill-none stroke-foreground/25"
+                  d={mark(c.cx, BAND_TOP + BAND_H / 2 + 8, c.radius, c.half)}
+                  className="fill-none stroke-foreground/30"
                   strokeWidth={1}
                   strokeDasharray="3 3"
                 />
               )}
               <text
                 x={c.cx}
-                y={axisY}
+                y={AXIS_Y}
                 textAnchor="middle"
                 className="fill-foreground font-mono text-[11px]"
               >
@@ -150,41 +149,39 @@ export function BrushWidth() {
               </text>
               <text
                 x={c.cx}
-                y={axisY + 15}
+                y={AXIS_Y + 15}
                 textAnchor="middle"
                 className="fill-muted-foreground font-mono text-[10px]"
               >
                 {c.spread.toFixed(2)} · {c.nats.toFixed(2)} nats
               </text>
-              {c.note ? (
-                <text
-                  x={c.cx}
-                  y={axisY + 29}
-                  textAnchor="middle"
-                  className="fill-muted-foreground font-mono text-[10px] italic"
-                >
-                  {c.note}
-                </text>
-              ) : null}
+              <text
+                x={c.cx}
+                y={AXIS_Y + 30}
+                textAnchor="middle"
+                className="fill-muted-foreground font-mono text-[10px] italic"
+              >
+                {c.note ?? ""}
+              </text>
 
               {/* the gate: probability the stroke is placed at all */}
               <rect
                 x={c.cx - 26}
-                y={gateTop}
+                y={GATE_TOP}
                 width={52}
-                height={gateH}
-                className="fill-foreground/[0.06]"
+                height={GATE_H}
+                className="fill-foreground/[0.07]"
               />
               <rect
                 x={c.cx - 26}
-                y={gateTop + gateH - gateH * c.richness}
+                y={GATE_TOP + GATE_H - GATE_H * c.richness}
                 width={52}
-                height={gateH * c.richness}
+                height={GATE_H * c.richness}
                 className="fill-foreground/70"
               />
               <text
                 x={c.cx}
-                y={gateTop + gateH + 15}
+                y={GATE_TOP + GATE_H + 16}
                 textAnchor="middle"
                 className="fill-muted-foreground font-mono text-[10px]"
               >
@@ -197,26 +194,29 @@ export function BrushWidth() {
             </g>
           ))}
 
-          <text
-            x={pad}
-            y={axisY + 29}
-            className="fill-muted-foreground font-mono text-[10px]"
-          >
+          <text x={8} y={AXIS_Y} className="fill-muted-foreground font-mono text-[10px]">
             N_eff
           </text>
           <text
-            x={pad}
-            y={gateTop + 14}
+            x={8}
+            y={AXIS_Y + 15}
             className="fill-muted-foreground font-mono text-[10px]"
           >
-            stroke
+            spread
           </text>
           <text
-            x={pad}
-            y={gateTop + 26}
+            x={8}
+            y={GATE_TOP + 14}
             className="fill-muted-foreground font-mono text-[10px]"
           >
-            placed
+            chance
+          </text>
+          <text
+            x={8}
+            y={GATE_TOP + 27}
+            className="fill-muted-foreground font-mono text-[10px]"
+          >
+            of a mark
           </text>
         </svg>
       </div>
@@ -224,9 +224,9 @@ export function BrushWidth() {
         The width rule and the gate pull in opposite directions. Reading left to right,
         the mark gets narrower and shorter as Jev&apos;s colour distribution spreads out —
         that is the &ldquo;more confident, wider brush&rdquo; claim, and it is real. But
-        the bottom row is the probability the renderer places that mark at all, and it is
-        zero until the distribution carries more than 1.92 effective colours. The three
-        widest marks on this chart are drawn dashed because they are never painted.
+        the bottom row is the chance the renderer places that mark at all, and it is zero
+        until the distribution carries more than 1.92 effective colours. The three widest
+        marks on this chart are dashed because they are never painted.
       </figcaption>
     </figure>
   )

@@ -21,7 +21,7 @@ type Sys = {
 }
 
 const SYS: Sys[] = [
-  { name: "Qwen3.8-LiveTranslate", laal: 2.3, comet: 85.7, mark: "ours", place: "r" },
+  { name: "Qwen3.8-LiveTranslate", laal: 2.3, comet: 85.7, mark: "ours", place: "br" },
   { name: "Qwen3.5-LiveTranslate", laal: 2.8, comet: 83.0, mark: "prev", place: "tr" },
   { name: "Seed LiveInterpret 2.0", laal: 2.8, comet: 79.4, mark: "other", place: "br" },
   { name: "Gemini 3.5 Live translate", laal: 2.5, comet: 73.5, mark: "other", place: "l" },
@@ -70,8 +70,8 @@ export function QualityLatency() {
         >
           LAAL, seconds ↓
         </text>
-        <text x={padL + 6} y={padT + 14} className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
-          ← better on both axes
+        <text x={padL + 108} y={22} className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
+          top left is better on both axes
         </text>
 
         {/* grid */}

@@ -130,9 +130,9 @@ export function ConfidenceMap() {
         </svg>
       </div>
       <figcaption className="mt-2 font-mono text-xs leading-5 text-muted-foreground">
-        Jev&apos;s most confident cells are the four corners of the sky (top-1 of 0.91,
-        0.90, 0.79 and 0.82) and its least confident are inside the flower head (0.23 at
-        the worst). The renderer turns that straight into paint: the border stays smooth
+        Jev is surest around the border of the sky — top-1 of 0.91 in the top-left
+        corner and 0.90 in the top-right — and least sure inside the flower head, where
+        it bottoms out at 0.23. The renderer turns that straight into paint: the border stays smooth
         and the subject is where every visible brush mark lands. That makes the painting
         a picture of where the model was unsure — an illustration of calibration, not a
         measurement of it. Nothing here has been compared against a ground-truth

@@ -69,7 +69,7 @@ export function MemoryScaling() {
       <div className="flex items-center justify-between border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
         <span>the memory path, once per object vs once per bucket</span>
         <span className="text-muted-foreground/60">
-          single H100 · Meta&apos;s measured points
+          single H100 · vs the Nov 2025 SAM 3
         </span>
       </div>
 
@@ -86,7 +86,7 @@ export function MemoryScaling() {
           <div className="flex gap-5 text-right">
             <div>
               <div className="font-mono text-[10px]" style={{ color: MUTED }}>
-                SAM 3
+                SAM 3 · Nov 2025
               </div>
               <div
                 className="font-mono text-xl font-semibold tabular-nums"
@@ -321,7 +321,7 @@ export function MemoryScaling() {
           <span className="text-foreground">7×</span>
           {" is this gap read off at 128 objects, and the "}
           <span className="text-foreground">2×</span>
-          {" in Meta’s blog post is the same gap read off at about seven."}
+          {" in Meta’s blog post is the same gap read off at about seven. Both against the November release; strip the engineering out and the single-object case flips to a 7% regression."}
         </p>
       </div>
     </figure>
