@@ -50,13 +50,13 @@ Some articles open with a short film. Hand-drawn ones are built with the vendore
 - **Manim is the other option, for a film that is arithmetic rather than argument.** Community Edition renders on CPU; it needs `libcairo2-dev libpango1.0-dev` and a LaTeX with `dvisvgm` for `MathTex`. Same narration pipeline: instrument the scene to print `self.renderer.time` per act, then write beats whose durations match those boundaries.
 - **The caption must say what the film is not.** These are drawn explanations, not recordings: if a film shows a distribution or a benchmark, the caption states plainly that the figures are illustrative and points at where the measured numbers are.
 
-## Discoverability (`lib/jsonld.tsx`, `components/site/related-articles.tsx`)
+## Discoverability (`lib/jsonld.tsx`, `lib/related.ts`)
 The technical SEO surface is already comprehensive — JSON-LD throughout, a `Person` entity with `sameAs` and `knowsAbout`, `@id` entity references, `BreadcrumbList`, `dateModified`, per-route OG images, `llms.txt`, `.md` twins and permissive AI-crawler directives. **Audit before adding to it**; a `knowsAbout` block was once added that already existed and was better scoped.
 
 Two things are load-bearing and easy to break:
 
 - **Articles emit `citation`.** `citationsFromBody()` pulls arXiv abstract pages, DOIs, GitHub and Hugging Face repos out of the body — deduplicated, capped at 20, order-stable so the JSON-LD does not churn between builds. 213 of 252 articles carry at least one. This is the most relevant signal the site has: an answer engine deciding whether a page is grounded reads the citation graph, not the prose. Articles are `TechArticle`, not `Article`.
-- **Every article gets `<RelatedArticles>`.** Tag overlap, Jaccard-scored so a five-tag article cannot out-rank a tight pair by having more tags to collide on, tie-broken by recency. It exists because 48% of articles had **no inbound internal link at all** and 36% no outbound one — orphans get crawled less, and it lands hardest on the newest work. The anchor text is the target's own title: descriptive and unique per target. Never "read more".
+- **Every article gets `<RelatedArticles>`, and no article is an orphan.** The plan lives in `lib/related.ts` and is computed once per build over the whole corpus, because coverage is a property of the graph and ranking is per-page. Pass one is tag overlap, Jaccard-scored so a five-tag article cannot out-rank a tight pair by having more tags to collide on, tie-broken by recency. That alone took orphans from 122 to 20 — the recency tie-break piles the same recent hubs onto many lists (the busiest takes 40 inbound) and starves the tail. Pass two places each remaining orphan on the page it matches best, with deterministic tie-breaks so the HTML does not churn between builds. Result: in-degree min 1 / median 5. `pnpm validate:links` fails if that ever regresses — which it can only do when an article shares no tag with anything else, and the fix is a tag. The anchor text is the target's own title: descriptive and unique per target. Never "read more".
 
 What none of this fixes is **backlinks**, which come from other people citing the work. The lever there is `/amplify` plus Satyajit's approval, not markup.
 
@@ -82,7 +82,8 @@ What none of this fixes is **backlinks**, which come from other people citing th
 - `pnpm validate:content` — load every MDX through the Zod content layer (loud failure)
 - `pnpm validate:mdx` — **compile** every MDX body the way the build does (same remark plugins), so JSX/MDX syntax errors fail here instead of at the Vercel build
 - `pnpm validate:math` — parse every MDX with the build's remark stack and report any `$…$` span that reads like English rather than like math (two literal dollar signs pairing up — see the guardrail below)
-- `pnpm validate` — `typecheck` + `validate:content` + `validate:mdx` + `validate:math` + `check:models`. **Run this after any content/data edit, before committing.**
+- `pnpm validate:links` — assert no article is an orphan (see "Discoverability"), and print the in-degree spread
+- `pnpm validate` — `typecheck` + `validate:content` + `validate:mdx` + `validate:math` + `validate:links` + `check:models`. **Run this after any content/data edit, before committing.**
 - `pnpm check:spacing [slug…]` — renders articles in a headless browser and reports words fused together at JSX element boundaries (`the restskip`). Needs `pnpm dev` running, so it is deliberately outside `validate`. Run it after writing a component with prose that wraps around inline tags. A full run needs `NODE_OPTIONS=--max-old-space-size=8192 pnpm dev` — Turbopack holds every compiled route and the default heap dies around a hundred articles in.
 
 ## Guardrails (LOCKED)
