@@ -50,6 +50,16 @@ Some articles open with a short film. Hand-drawn ones are built with the vendore
 - **Manim is the other option, for a film that is arithmetic rather than argument.** Community Edition renders on CPU; it needs `libcairo2-dev libpango1.0-dev` and a LaTeX with `dvisvgm` for `MathTex`. Same narration pipeline: instrument the scene to print `self.renderer.time` per act, then write beats whose durations match those boundaries.
 - **The caption must say what the film is not.** These are drawn explanations, not recordings: if a film shows a distribution or a benchmark, the caption states plainly that the figures are illustrative and points at where the measured numbers are.
 
+## Discoverability (`lib/jsonld.tsx`, `components/site/related-articles.tsx`)
+The technical SEO surface is already comprehensive — JSON-LD throughout, a `Person` entity with `sameAs` and `knowsAbout`, `@id` entity references, `BreadcrumbList`, `dateModified`, per-route OG images, `llms.txt`, `.md` twins and permissive AI-crawler directives. **Audit before adding to it**; a `knowsAbout` block was once added that already existed and was better scoped.
+
+Two things are load-bearing and easy to break:
+
+- **Articles emit `citation`.** `citationsFromBody()` pulls arXiv abstract pages, DOIs, GitHub and Hugging Face repos out of the body — deduplicated, capped at 20, order-stable so the JSON-LD does not churn between builds. 213 of 252 articles carry at least one. This is the most relevant signal the site has: an answer engine deciding whether a page is grounded reads the citation graph, not the prose. Articles are `TechArticle`, not `Article`.
+- **Every article gets `<RelatedArticles>`.** Tag overlap, Jaccard-scored so a five-tag article cannot out-rank a tight pair by having more tags to collide on, tie-broken by recency. It exists because 48% of articles had **no inbound internal link at all** and 36% no outbound one — orphans get crawled less, and it lands hardest on the newest work. The anchor text is the target's own title: descriptive and unique per target. Never "read more".
+
+What none of this fixes is **backlinks**, which come from other people citing the work. The lever there is `/amplify` plus Satyajit's approval, not markup.
+
 ## data/*.ts records (typed, hand-curated)
 `profile` (identity + `seedStats`), `resume` (feeds `/resume`, the PDF, `/resume.json`), `publications`, `patents`, `health` (Zod-validated **inline** at import — bad edit throws), `now` (bump `updated`), `uses`, `reading`, `interests` (arXiv categories + keyword weights driving the digest). Edit through the skills below; `pnpm typecheck` catches shape errors.
 

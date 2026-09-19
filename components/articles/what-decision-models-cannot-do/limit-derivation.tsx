@@ -264,6 +264,14 @@ export function LimitDerivation() {
         <text x={40} y={490} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
           NOT ONE LIMIT — five ceilings, five unrelated causes
         </text>
+        <line
+          x1={322}
+          y1={504}
+          x2={322}
+          y2={572}
+          className="stroke-border"
+          strokeWidth={1}
+        />
         {CONSTANTS.map(([who, cap, why], i) => {
           const baseline = 515 + i * 15
           return (
@@ -274,15 +282,6 @@ export function LimitDerivation() {
               <text x={310} y={baseline} textAnchor="end" className="fill-foreground">
                 {cap}
               </text>
-              <line
-                x1={324}
-                y1={baseline - 4}
-                x2={880}
-                y2={baseline - 4}
-                className="stroke-border"
-                strokeWidth={0.75}
-                strokeDasharray="2 4"
-              />
               <text x={336} y={baseline} className="fill-muted-foreground">
                 {why}
               </text>
