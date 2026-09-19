@@ -191,9 +191,11 @@ export function TierAxes() {
           )
         })}
 
-        <text x={16} y={H - 14} className="fill-muted-foreground font-mono" style={{ fontSize: 9.5 }}>
-          cost and latency are the measured per-call figures from the xArm7 run (Jev 1.13 vs GPT-6 Astra,
-          low reasoning); the other four rows are categorical, not to scale.
+        <text x={16} y={H - 26} className="fill-muted-foreground font-mono" style={{ fontSize: 9.5 }}>
+          Cost and latency are measured per-call figures from the xArm7 run (Jev 1.13 vs GPT-6 Astra, low
+        </text>
+        <text x={16} y={H - 13} className="fill-muted-foreground font-mono" style={{ fontSize: 9.5 }}>
+          reasoning effort). The other four rows are categorical; the heights order them, they do not scale.
         </text>
       </svg>
     </figure>
