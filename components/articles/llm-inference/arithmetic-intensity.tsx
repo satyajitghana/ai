@@ -254,7 +254,7 @@ export function ArithmeticIntensity() {
                   fontSize="9.5"
                   fill={color}
                 >
-                  {p.ai < 10 ? p.ai.toFixed(1) : p.ai.toFixed(0)}
+                  {p.ai < 10 ? p.ai.toFixed(2) : p.ai.toFixed(0)}
                 </text>
               </g>
             )
