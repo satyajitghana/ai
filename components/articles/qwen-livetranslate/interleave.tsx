@@ -115,20 +115,22 @@ export function Interleave() {
         })}
 
         {/* hand-off arrows between the stages */}
-        {[
-          [0.24, casY + casH, 0.26, casY + casH + 12],
-          [0.38, casY + 2 * casH + 12, 0.40, casY + 2 * casH + 24],
-        ].map(([x1, y1, x2, y2], i) => (
+        {(
+          [
+            [0.24, casY + casH, 0.26, casY + casH + 12],
+            [0.38, casY + 2 * casH + 12, 0.4, casY + 2 * casH + 24],
+          ] as [number, number, number, number][]
+        ).map(([x1, y1, x2, y2], i) => (
           <path
             key={`ho-${i}`}
-            d={`M ${padL + x1! * lane} ${y1} L ${padL + x2! * lane} ${y2}`}
+            d={`M ${padL + x1 * lane} ${y1} L ${padL + x2 * lane} ${y2}`}
             className="stroke-foreground/60"
             strokeWidth={1.5}
           />
         ))}
         <text
           x={W - padR}
-          y={casY + 3 * (casH + 12) + 4}
+          y={casY + 3 * (casH + 12) + 2}
           textAnchor="end"
           className="fill-muted-foreground font-mono"
           style={{ fontSize: 10 }}
@@ -137,7 +139,7 @@ export function Interleave() {
         </text>
 
         {/* =============== interleave =============== */}
-        <line x1={16} y1={168} x2={W - padR} y2={168} className="stroke-border" strokeWidth={1} />
+        <line x1={16} y1={178} x2={W - padR} y2={178} className="stroke-border" strokeWidth={1} />
         <text x={16} y={196} className="fill-foreground font-mono" style={{ fontSize: 12 }}>
           interleave
         </text>

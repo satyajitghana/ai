@@ -87,29 +87,25 @@ export function RelationSupply() {
 
         {/* deterministic link A -> D, drawn by code */}
         <path
-          d="M 84 74 C 116 74, 116 173, 88 173"
+          d="M 84 74 C 108 74, 108 173, 88 173"
           fill="none"
           stroke={ACCENT}
           strokeWidth={1.5}
           markerEnd="url(#rs-arrow)"
         />
-        {[
-          "CODE, not the model:",
-          "A declares an identifier",
-          "that D references.",
-          "A regex over added",
-          "lines — no call.",
-        ].map((t, i) => (
-          <text
-            key={t}
-            x={104}
-            y={96 + i * 12}
-            className="fill-muted-foreground font-mono"
-            style={{ fontSize: 9 }}
-          >
-            {t}
-          </text>
-        ))}
+        {["CODE, not the", "model: A declares", "an id that D", "references. One", "regex, no call."].map(
+          (t, i) => (
+            <text
+              key={t}
+              x={124}
+              y={100 + i * 12}
+              className="fill-muted-foreground font-mono"
+              style={{ fontSize: 8.5 }}
+            >
+              {t}
+            </text>
+          )
+        )}
 
         {/* the constructed pair frame */}
         <rect
@@ -149,7 +145,7 @@ export function RelationSupply() {
           strokeWidth={1}
         />
         <text x={262} y={188} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
-          p ≥ 0.60 → clear the flag
+          p ≥ 0.60 → clear flag
         </text>
 
         {[

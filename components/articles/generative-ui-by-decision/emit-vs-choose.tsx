@@ -3,7 +3,7 @@
 //
 // Left: a model that *writes* the interface. It emits tokens until it stops, so
 // its output space is every string its tokenizer can produce — which is why
-// json-render ships a 536-line spec-validator with fourteen error codes and a
+// json-render ships a 536-line spec-validator with thirteen error codes and a
 // lossy repair pass.
 //
 // Right: a model that *chooses* the interface. json-render's experimental
@@ -229,7 +229,7 @@ export function EmitVsChoose() {
           spec-validator.ts — 536 lines
         </text>
         <text x={LX + 12} y={375} className="fill-muted-foreground font-mono" fontSize={9.5}>
-          14 error codes, 6 silent repairs, lossy pruning
+          13 error codes, 6 silent repairs, lossy pruning
         </text>
         <text x={LX + 12} y={390} className="fill-muted-foreground font-mono" fontSize={9.5}>
           of children that point at nothing

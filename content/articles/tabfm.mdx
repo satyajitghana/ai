@@ -1,0 +1,478 @@
+---
+title: "The tabular foundation model where 98.8% of the weights never see a cell"
+description: "Google's TabFM is 1,639,444,522 parameters, and 1,619,925,002 of them are an ordinary 24-block transformer reading one 2048-d vector per row. The part that actually reads a table cell is 36,032 parameters. The zero-shot claim is real and the synthetic-only pretraining genuinely forecloses benchmark contamination — but the 'single forward pass' is thirty-two of them, the announcement's top-10 chart contains no gradient-boosted tree at all, and the model's own committed per-fold results show the ensemble variant's headline gain is worth a median half a percent on the thirty binary tasks."
+date: 2026-09-19
+interest: 5
+helpful: 5
+featured: true
+tags:
+  - explainer
+  - architecture
+  - benchmarks
+  - transformers
+  - open-weights
+draft: false
+---
+
+import { TableToTokens } from "@/components/articles/tabfm/table-to-tokens"
+import { ColumnOrder } from "@/components/articles/tabfm/column-order"
+import { EloDenominators } from "@/components/articles/tabfm/elo-denominators"
+
+Tabular data is the last place a transformer was supposed to win. Text has a
+vocabulary; images have pixels on a grid; audio has samples in time. A table has
+none of that. It has columns whose meaning lives in a header string the model
+does not get to read, whose order is arbitrary, whose types are mixed, and whose
+count changes every time somebody opens a new spreadsheet. There is nothing to
+pretrain *on*, because there is no shared input space to pretrain *over* — my
+`customer_id` is your `sensor_7`, and no amount of data teaches a model what
+either one means.
+
+That is the real reason gradient-boosted trees have held this ground for fifteen
+years. A tree does not need a shared input space. It re-derives the whole
+structure from your data, from scratch, every time.
+
+[TabFM](https://research.google/blog/introducing-tabfm-a-zero-shot-foundation-model-for-tabular-data/),
+released by Google Research on 30 June 2026, is an answer to that, and it is
+worth understanding precisely, because the answer is stranger than the
+announcement makes it sound. The model does not learn a shared vocabulary for
+columns. It learns to *not need one* — and then spends 98.8% of its parameters
+on a transformer that has never seen a cell in its life.
+
+## What was actually shipped
+
+<Callout type="note">
+Weights on [Hugging Face](https://huggingface.co/google/tabfm-1.0.0-pytorch)
+(and a [JAX twin](https://huggingface.co/google/tabfm-1.0.0-jax)), inference code
+on [GitHub](https://github.com/google-research/tabfm) under Apache-2.0, a
+BigQuery `AI.PREDICT` integration in preview, and a blog post. **No paper.** The
+repository says so itself: *"A technical report is not included in this
+repository at this time."*
+</Callout>
+
+That is the first thing to hold onto. Everything below about the architecture I
+read out of `tabfm/src/pytorch/model.py` and the safetensors header, because
+there is no document that states it. Everything about the *training* — the part
+that carries the entire zero-shot claim — is three sentences in a blog post, and
+the generator that produced the training data is not in the repository.
+
+To the team's credit, the code they did ship is unusually legible: module names
+mirror the JAX original for mechanical weight conversion, the comments explain
+numerical choices ("*Normalize entirely in float32… doing the multiply in bf16
+loses precision and accumulates across the ~36 RMSNorms per transformer
+stack*"), and the per-fold benchmark results are committed as parquet. That last
+one matters more than it sounds. It is what let me check their headline against
+their own numbers, further down, and find that it does not quite hold up.
+
+## How a table becomes tokens
+
+Start with the thing the blog post skips. A transformer needs a sequence of
+vectors. A table is a grid of mixed-typed scalars with no order in either
+direction. Getting from one to the other is the entire problem, and TabFM does
+it in four stages with two completely different token grids.
+
+<TableToTokens />
+
+Walk the stages.
+
+**Stage 0 happens outside the model.** The scikit-learn wrapper detects column
+types, ordinal-encodes categoricals *by order of first appearance* (unknown and
+missing both map to `-1`), mean-imputes numerics, clips at |z| &gt; 4, and picks a
+normaliser. By the time anything reaches the network there are no strings, no
+`NaN`s, and no column names. The model is handed a float matrix, a boolean mask
+saying which columns were categorical, and an integer saying how many are real
+rather than padding. Missing values are not handled by the model at all; they
+are handled before it. (`torch.nan_to_num(x, nan=-100.0)` at the entry to
+`forward()` is a belt-and-braces sentinel for anything that slips through.)
+
+**Stage 1 is the cell embedder, and it is 36,032 parameters.** Each cell is
+grouped with the cells 0, 1 and 3 columns to its right — offsets `2^i - 1`,
+taken modulo the active feature count. Each of the three values is expanded by
+32 learned Fourier frequencies into sine/cosine pairs, projected `64 → 256` by
+one of two linear maps chosen by whether the cell is categorical, and the three
+are summed. One cell in, one 256-dimensional vector out. For context rows, the
+label's embedding is added on top.
+
+That is the whole of TabFM's table-reading machinery: two frequency tables of
+shape `[3, 32]`, two `Linear[64, 256]`, and a `[10, 256]` label embedding.
+
+**Stage 2 alternates column attention and row attention, twice each.** For
+column attention the grid is reshaped so that each *column* is a sequence of
+rows — a Set Transformer with 256 induced points, no positional encoding, so it
+is genuinely permutation-invariant over rows. For row attention the grid is
+reshaped so that each *row* is a sequence of columns, and rotary position
+embeddings run over the column axis. The induced points attend only to context
+rows, so nothing about the query rows leaks into the column representation.
+
+**Stage 3 throws the cell grid away.** Eight learned CLS tokens per row survive
+the second row-attention pass and are concatenated: `8 × 256 = 2048`. One vector
+per row.
+
+**Stage 4 is the model.** A 24-block transformer, width 2048, 8 heads of
+dimension 256, SwiGLU feed-forward at 8192, no positional encoding. Every row
+attends to the labelled context rows and to nothing else — the mask is key-side
+only, which means query rows do not see each other and predictions are not
+transductive. A `MLP[2048 → 4096 → 10]` reads out the logits.
+
+<Receipts src="/articles/tabfm/data/anatomy.json" />
+
+The ratio is the finding. The stack that turns a spreadsheet into row vectors —
+cell embedder, both column embedders, both row interactors, the CLS tokens — is
+19,519,520 parameters. The transformer that reasons over those row vectors is
+1,619,925,002. **83 to 1 in favour of the part that never sees a table**, and
+44,960 to 1 against the cell embedder specifically.
+
+<Callout type="warning">
+The model card describes stage 4 as *"a 24-block **causal** transformer"*. It is
+not causal. `ICLearning.forward` builds `tm = arange(T) < train_size` and passes
+`tm[:, None, None, :]` — a key-side mask. Every query position attends to every
+context position and to no query position. There is no lower-triangular
+structure anywhere in the ICL stack, and there is no RoPE in it either
+(`rope_base=None`, with a comment saying so). The stage is order-invariant over
+rows, which is the correct design for a table and the opposite of causal.
+</Callout>
+
+## The zero-shot claim, mechanically
+
+Here is what "a schema it has never seen" actually means. Nothing in the
+1.64 billion parameters is indexed by column identity. No column-name
+embedding. No per-schema head. No vocabulary. A column is a *position*, and the
+only quantity the model knows about the schema is `d`, the count. That is why an
+arbitrary table slots in: there is nothing to look up and fail to find.
+
+The elegance has a price, and the price is that column *order* is now load-bearing
+twice over. The cell embedder's three-way group is `{h, h+1, h+3} mod d`, so
+moving one column rewrites every cell embedding in the table. And the row
+attention puts RoPE on the column axis, so column position is a coordinate the
+attention sees directly.
+
+<ColumnOrder />
+
+So the announcement's own framing — *"tables are fundamentally two-dimensional
+and inherently orderless: swapping two rows or two columns does not change the
+underlying meaning"* — is half true of TabFM. Rows are orderless in the model.
+Columns are not, and the default estimator spends 32 forward passes washing that
+out with random permutations.
+
+Which brings us to a phrase worth reading carefully.
+
+<Callout type="warning">
+*"Predictions are generated in a single forward pass, requiring no tuning or
+cross-validation."* The default `TabFMClassifier` ships `n_estimators=32`. Each
+member gets its own random column permutation, its own class-label rotation, and
+one of two normalisers (`["none", "power"]`, alternating), and the 32 logit sets
+are averaged. That is thirty-two forward passes over thirty-two different views
+of your table, before you reach for the "ensemble" preset. The claim is true of
+the *architecture* — there is no gradient step, no validation split, no search —
+and it is not true of the shipped default in the ordinary sense of the words.
+</Callout>
+
+## Trained on tables that do not exist
+
+The pretraining story is one paragraph in the post and it is the most important
+paragraph in the release: TabFM is trained *entirely* on "hundreds of millions
+of synthetic datasets," generated on the fly from structural causal models with
+"a wide variety of random functions." No real tables. The stated reason is
+scarcity — big, diverse, licence-clean tabular corpora essentially do not exist,
+because the interesting tables are proprietary.
+
+This is the same bet [TabPFN](https://arxiv.org/abs/2207.01848) made in 2022 and
+it has a second payoff the post does not claim, so I will claim it for them:
+**it forecloses benchmark contamination at the root.** A model that never saw a
+real table cannot have seen `credit-g`. Contrast this with `Real-TabPFN`, which
+continues pretraining on curated real OpenML and Kaggle tables and consequently
+has to build "an enhanced multi-tiered deduplication and filtering pipeline"
+against every public benchmark to stay honest. TabArena itself is
+contamination-aware — its leaderboard code carries a warning tag for entrants
+that involve an LLM, reading *"its results depend on a model whose training data
+we cannot inspect and which may already have seen the test data."* TabFM
+correctly carries no such tag.
+
+That is a real and underrated advantage, and I want it stated plainly before the
+next section takes some of it back.
+
+## What the benchmark actually says
+
+Both charts in the announcement are TabArena Elo. Here is the one for
+classification, reproduced from the post:
+
+<Figure
+  src="/articles/tabfm/fig2.png"
+  alt="Two bar charts of TabArena Elo. Top, classification: TabFM-Ensemble 1815, TabFM 1727, AutoGluon 1.5 extreme 4h 1666, TabPFN-3 default 1639, AutoGluon 1.4 extreme 4h 1623, TabPFN-2.6 default 1585, TabICLv2 default 1576, RealTabPFN-2.5 tuned+ensembled 1566, RealMLP tuned+ensembled 1469, TabM tuned+ensembled 1440. Bottom, regression: TabFM-Ensemble 2125, TabFM 1940, TabPFN-3 default 1802, AutoGluon 1.5 1786, RealTabPFN-2.5 1752, TabPFN-2.6 1751, TabDPT 1722, AutoGluon 1.4 1688, TabICLv2 1687, RealMLP 1654."
+  caption="TabArena Elo for the top ten entrants at release, classification above and regression below. (D) = default, (T+E) = tuned + ensembled. Note what is not in either panel (Google Research, TabFM announcement, results figure)."
+/>
+
+The post's opening paragraph names AdaBoost, XGBoost and random forests as the
+incumbents it is displacing. **Not one gradient-boosted tree appears in either
+panel.** Ten bars per chart, twenty bars total, zero trees. The nearest thing is
+AutoGluon, which is an AutoML system that stacks trees among other models. If
+you want to know where tuned CatBoost sits relative to TabFM you have to go to
+the leaderboard yourself.
+
+So I did. Here is the live TabArena classification board on the day I wrote
+this, eleven weeks after release:
+
+<BenchBars
+  title="TabArena classification Elo · all 38 datasets · read 2026-09-19"
+  bars={[
+    { label: "LimiX-2 (D)", value: 1926 },
+    { label: "TabPFN-3.5 (D)", value: 1852 },
+    { label: "TabPFN-3.5-Fast (D)", value: 1789 },
+    { label: "Causilo (D)", value: 1776 },
+    { label: "TabFM (D)", value: 1769, highlight: true },
+    { label: "EXAONE-Tabular (D)", value: 1765 },
+    { label: "Mitra-v2 (D)", value: 1758 },
+    { label: "TabPFN-3 (D)", value: 1635 },
+    { label: "TabICLv2 (D)", value: 1577 },
+    { label: "LightGBM (T+E)", value: 1429 },
+    { label: "CatBoost (T+E)", value: 1412 },
+    { label: "CatBoost (D)", value: 1389 },
+    { label: "XGBoost (T+E)", value: 1375 },
+    { label: "LightGBM (D)", value: 1191 },
+    { label: "RandomForest (D)", value: 1000 },
+  ]}
+  max={2000}
+/>
+
+Two things fall out of that chart that the announcement's does not show.
+
+The first is the actual gap to the incumbent. Tuned-and-ensembled LightGBM, the
+strongest tree on the board, sits 340 Elo below TabFM. On TabArena's scale — 400
+points is a 91% expected win rate, and default random forest is pinned at
+exactly 1000 — that is a rout. It is also *not* a rout against a straw man:
+"tuned + ensembled" on TabArena means 200 randomly-sampled hyperparameter
+configurations per model, selected on an inner cross-validation and then
+post-hoc ensembled, with search spaces taken from the original papers or
+developed with the models' authors. The denominators hold up.
+
+The second is that TabFM is now fifth. LimiX-2, TabPFN-3.5, TabPFN-3.5-Fast and
+Causilo have all landed since June. Nothing about the checkpoint changed.
+
+<Receipts src="/articles/tabfm/data/head-to-head.json" />
+
+The win rates are the number to quote, not the Elo, because Elo is not a
+property of the model at all.
+
+<EloDenominators />
+
+<Receipts src="/articles/tabfm/data/denominators.json" />
+
+Same weights, six ratings, 262 points apart. The two Google plots are the two
+highest numbers available on the day of release. That is not dishonest — every
+one of these is a correct Elo for its pool — but "1815 versus 1666" reads as a
+fact about two models and it is a fact about a pool.
+
+One more thing the chart flattens. TabArena's own code files TabFM-Ensemble
+(which it lists as `TabFM+`) under method class `System`, with the comment
+*"Whole pipelines rather than single models: AutoGluon, TabFM+, an agent, a
+hosted API."* The announcement plots it beside single models, in the same chart,
+as the top bar.
+
+## What the ensemble preset is actually buying
+
+The `TabFM-Ensemble` configuration adds cross features, SVD features, a 32-way
+non-negative-least-squares blend, and Platt scaling for binary problems. It is
+worth 88 Elo on the release-day classification chart and 44 on the live
+all-tasks board. Google committed the per-fold results for both configurations,
+so this is checkable without running anything.
+
+<Receipts src="/articles/tabfm/data/ensemble-gain.json" />
+
+Across all 816 folds the ensemble preset wins 67.0% of them. But split it by
+task and the structure appears: on the 30 binary datasets — 438 folds, scored by
+ROC AUC — it wins 59.4% of folds for a median error reduction of **half a
+percent**. On the 8 multiclass datasets, scored by log loss, it wins 75.0% and
+cuts 1.59%. On regression, 76.6% and 0.35%.
+
+There is a mechanical reason the binary column is the weak one, and it is worth
+spelling out. Platt scaling is a monotone map. ROC AUC depends only on the
+ranking of the scores. **On 30 of the 51 datasets, the calibration half of the
+"ensemble" preset cannot change the metric by construction.** Log loss, which
+scores the multiclass tasks, is the one metric on TabArena that rewards
+calibration directly — and that is exactly where the preset earns its keep.
+
+The rest of the gain is concentrated, not broad. The five biggest per-dataset
+wins are `anneal` (+25.2%, class imbalance 85:1), `APSFailure` (+25.1%, 54:1,
+170 features), `polish_companies_bankruptcy` (+17.3%, 13:1), `hiva_agnostic`
+(+14.5%, 88:1, 1,617 features) and `airfoil_self_noise` (+12.6%). Four of the
+five are the suite's most imbalanced tables. The honest summary of
+`TabFM-Ensemble` is not "pushes performance further"; it is *"recovers the
+calibration and wide-table handling the base model lacks, on the minority of
+datasets where that is what the metric is measuring."*
+
+## Where it loses, and why
+
+I compared mean test error per dataset, in each dataset's own metric, against
+tuned-and-ensembled CatBoost. Zero-shot TabFM wins **48 of 51**. The three it
+loses:
+
+| dataset | rows | features | imbalance | TabFM rank of 86 |
+|---|---|---|---|---|
+| `hiva_agnostic` | 3,845 | 1,617 | 88:1 | 70.3 |
+| `Amazon_employee_access` | 32,769 | 9 | 16:1 | 34.8 |
+| `Diabetes130US` | 71,518 | 47 | 10:1 | 19.9 |
+
+`hiva_agnostic` is the interesting one, because the mechanism is legible in the
+code. `max_num_features` defaults to 500. With 1,617 columns, every one of the
+32 ensemble members sees a random 31% slice of the table, and the three-way cell
+group wraps modulo a *different* `d` in each. Mean rank 70.3 of 86 — TabFM's
+worst result on the suite by a wide margin, worse than default XGBoost. Turn on
+the ensemble preset, whose SVD features compress all 1,617 columns into dense
+directions that survive subsampling, and it climbs to 21.6.
+
+`Amazon_employee_access` is nine columns of high-cardinality identifiers. My
+reading of `TransformToNumerical` is that a column arriving as pandas `int64`
+takes the *numeric* path, which would Fourier-expand raw employee and resource
+IDs as if they were continuous quantities — the failure mode CatBoost's ordered
+target statistics exist to prevent. I have not verified the dtype TabArena hands
+over, so that stays labelled as reasoning, with a falsifier below.
+
+What does *not* show up is the degradation with dataset size that the "foundation
+models only win on small data" story predicts. Bucketing the 51 datasets by row
+count, TabFM's mean rank is 10.96 at ≤10k rows, 11.93 from 10k–100k, and 2.45 on
+the two datasets above 100k rows. Two datasets is not a trend, but it is not a
+collapse either.
+
+## The architecture diagram, and what it leaves out
+
+<Figure
+  src="/articles/tabfm/fig1.png"
+  alt="TabFM architecture diagram: a small table with three feature columns and a label column, two training rows with labels 0 and 1 and a test row with a question mark; an alternating row and column attention block drawn as three rows of three blue nodes with curved arrows running both horizontally within each row and vertically between rows; a row compression arrow from each row into a Row Embedding box; and a stack of three Row Embedding boxes feeding a Predict Missing Label output."
+  caption="The published architecture figure. Accurate as far as it goes; the three blue nodes per row are cells, and the boxes on the right are the 2048-d row vectors that 98.8% of the parameters operate on (paper, Figure 1)."
+/>
+
+The diagram is honest about the shape and silent about the proportions. Three
+cells, three row embeddings, three boxes — nothing in it suggests that the right
+third of the picture is 1.62 billion parameters and the left two thirds are
+19.5 million. It is also silent about the thirty-two members, about where
+categoricals are encoded, and about the fact that the left-hand table has already
+been through a scikit-learn pipeline before it arrives.
+
+## The limits, stated and unstated
+
+The model card is unusually forthcoming, which I want to credit: it lists the
+10-class ceiling as a *"hard architectural limit"*, says memory scales with
+context rows, says behaviour on very wide tables "may degrade", and says
+outright that *"performance on specific real-world domains, minority groups, or
+edge distributions is not fully characterised."* That is a better limitations
+section than most releases get.
+
+Here is what I would add to it.
+
+**The 10-class ceiling is never tested.** The decoder's output dimension is
+literally 10; there is no way around it short of a new checkpoint. TabArena's
+hardest multiclass task has 8 classes. So the ceiling that defines the model's
+applicability is not exercised anywhere in the reported evaluation.
+
+**The README's own limits are wrong.** The FAQ says the estimators expose
+*"`max_num_features` and `max_num_rows` (defaults are 500 features and 100
+context rows)."* The 500 is right. `max_num_rows` defaults to `None` in all three
+places it appears — `EnsembleGenerator`, `TabFMClassifier` and `TabFMRegressor`
+— meaning no cap, every training row goes into the context. Which is the more
+important fact, because it is where the cost lives.
+
+**The cost profile inverts against trees.** Median seconds per 1,000 samples on
+TabArena: TabFM encodes its context in 16.1 and predicts in 6.65; tuned CatBoost
+burns 1,346 to search and then predicts in 0.344. Against a *tuned* tree TabFM
+is 84× cheaper end-to-end for a one-shot job. Against a tree you have already
+fitted, it is 19× more expensive per prediction, forever, on a GPU. And there is
+no fitted artifact — there is a 6.25 GiB float32 checkpoint (12.5 GiB if you want
+regression too) plus your entire training table, re-encoded on every call unless
+you opt into `cache_context=True`.
+
+**The licence forbids the obvious use.** The code is Apache-2.0. The weights are
+not.
+
+<Callout type="warning">
+The TabFM Non-Commercial License v1.0 prohibits using the model *"or any Outputs
+and data produced by the TabFM Model… for any commercial or production
+purposes."* Not just the weights — the predictions. "Non-Commercial Purpose"
+explicitly excludes use "in client deliverables, or paid products/services." An
+announcement that opens on customer churn and financial fraud ships weights you
+may not use to predict customer churn or financial fraud. BigQuery is the
+licensed path: *"For customers accessing the TabFM Model through our API, other
+terms and conditions may apply."*
+</Callout>
+
+## So what changed
+
+The honest answer to "why did tabular resist foundation models for so long" is
+that everyone was looking for the wrong shared substrate. There is no universal
+column vocabulary and there never will be. What TabFM — and TabPFN before it —
+found is that you do not need one: you need a model that has seen enough
+*shapes* of statistical dependence that a new table's dependence structure is
+recognisable in-context, and you get those shapes from a synthetic prior rather
+than from data.
+
+What TabFM adds to that idea is scale, and the scale went somewhere specific.
+TabPFN v2's default classifier checkpoint is 27.7 MiB — about 7.25M parameters
+at float32. TabICL's is 103.3 MiB, about 27M. TabFM is 1.64 *billion*, with
+98.8% of it in a transformer reading one token per row. The bet is that
+in-context learning over compressed rows is the part that benefits from depth,
+and the table-reading front end can stay tiny. On TabArena, in June, that bet
+paid: 1727 Elo against 1585 for TabPFN-2.6.
+
+Eleven weeks later there are four models above it, and the two at the top —
+LimiX-2 at 1926 and TabPFN-3.5 at 1852 — get there at 36.96 and 1.85 median
+seconds per 1,000 samples against TabFM's 18.45. The category is moving fast
+enough that the interesting question is no longer whether a transformer can beat
+a tuned tree on a spreadsheet. It is which of these priors generalises to the
+table you actually have, and nobody — including Google, which has not released
+its generator — has published enough to answer that.
+
+<ChangeMyMind>
+<Falsifier claim="TabFM's 'single forward pass' is thirty-two forward passes in the shipped default.">
+Read `TabFMClassifier.__init__` in `tabfm/src/classifier_and_regressor.py`:
+`n_estimators: int = 32`, with `feat_shuffle_method="random"`, `class_shift=True`
+and `norm_methods` defaulting to `["none", "power"]`. If a future release drops
+the default to 1, or if someone shows the 32 members are fused into one batched
+call that is meaningfully "a single pass", this framing is wrong. I have
+measured the architecture, not the wall-clock.
+</Falsifier>
+
+<Falsifier claim="98.8% of TabFM's parameters are in a stage that never sees a cell.">
+Computed from the safetensors header of `google/tabfm-1.0.0-pytorch`
+(`classification/model.safetensors`, 913 F32 tensors) by summing shape products
+per top-level module: `icl_predictor` = 1,619,925,002 of 1,639,444,522. Sum it
+yourself and get a different split, and the claim falls. The word "sees" is
+doing load-bearing work: the ICL stack reads 2048-d row vectors produced from
+cells, so it sees cells the way a language model's last layer sees characters.
+</Falsifier>
+
+<Falsifier claim="The binary half of TabArena cannot reward the ensemble preset's calibration step.">
+ROC AUC is invariant to any strictly monotone transform of the scores, and Platt
+scaling is one. If the preset's binary gain came from calibration rather than
+from crosses, SVD and NNLS blending, that would falsify it — the cleanest test
+is to run the preset with `binary_calibration_method=None` and see whether the
+30 binary datasets move at all. I have not run it; I inferred it from the metric
+and the code path.
+</Falsifier>
+
+<Falsifier claim="TabFM's weakness on Amazon_employee_access is high-cardinality categoricals taking the numeric path.">
+This is reasoning, not measurement. `TransformToNumerical.fit` routes any column
+where `pd.api.types.is_numeric_dtype` is true to `SimpleImputer`, not to the
+ordinal encoder, and nine integer-coded ID columns would qualify. Print
+`clf.X_encoder_.tfm_.transformers_` on that task's DataFrame as TabArena hands it
+over; if the columns land in the `categorical` transformer, my explanation is
+wrong and the loss needs a different one. The loss itself is measured: mean
+error 0.14196 against CatBoost (T+E) at 0.11760.
+</Falsifier>
+
+<Falsifier claim="Synthetic-only pretraining forecloses direct benchmark contamination, but the claim is unverifiable as shipped.">
+The repository contains inference code only — no prior, no generator, no
+training loop. "Hundreds of millions of synthetic datasets from structural
+causal models" is a sentence in a blog post. Releasing the generator, or a
+technical report describing it, would settle this in either direction. Until
+then the correct posture is that TabFM's contamination story is *structurally*
+strong and *evidentially* unaudited — and that the wrapper's dozen tuned
+defaults (`softmax_temperature=0.9`, `outlier_threshold=4.0`, `nnls_beta=0.75`,
+`n_estimators=32`) were fit to something nobody has named.
+</Falsifier>
+
+<Falsifier claim="Elo on TabArena is a property of the pool, not the model.">
+Six ratings for one checkpoint, 1727 to 1989, captured 2026-09-19 from
+`website_leaderboard.csv` across entrant sets and task slices. If the ratings
+were stable across pools this would be a non-point. Re-pull the same files on a
+later date and the numbers will have moved again without a byte of the
+checkpoint changing — which is the claim, not a caveat about it.
+</Falsifier>
+</ChangeMyMind>
