@@ -153,9 +153,10 @@ export function ConfidenceMap() {
       <figcaption className="mt-2 font-mono text-xs leading-5 text-muted-foreground">
         Jev is surest around the border of the sky — top-1 of 0.91 in the top-left
         corner and 0.90 in the top-right — and least sure inside the flower head, where
-        it bottoms out at 0.23. The renderer turns that straight into paint: the border stays smooth
-        and the subject is where every visible brush mark lands. That makes the painting
-        a picture of where the model was unsure — an illustration of calibration, not a
+        it bottoms out at 0.23. The renderer turns that straight into paint: six of the
+        144 cells fall under the gate and get no mark at all, the outer ring gets thin
+        faint ones, and the flower head is at full texture. That makes the painting a
+        picture of where the model was unsure — an illustration of calibration, not a
         measurement of it. Nothing here has been compared against a ground-truth
         sunflower, and a reliability diagram needs one.
       </figcaption>

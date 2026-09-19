@@ -85,7 +85,7 @@ export function PropositionSeparator() {
   const margin = loPos - hiNeg
 
   const AXIS_Y = 132
-  const H = 224
+  const H = 190
 
   return (
     <figure className="my-8 overflow-hidden rounded-md border">
@@ -134,6 +134,15 @@ export function PropositionSeparator() {
             height={AXIS_Y - 52}
             fill="url(#sbm-empty)"
           />
+          <rect
+            x={(x(hiNeg) + x(loPos)) / 2 - 116}
+            y={56}
+            width={232}
+            height={36}
+            rx={4}
+            fill="var(--background)"
+            fillOpacity={0.88}
+          />
           <text
             x={(x(hiNeg) + x(loPos)) / 2}
             y={70}
@@ -165,6 +174,15 @@ export function PropositionSeparator() {
                 strokeWidth={1}
                 strokeDasharray="3 3"
               />
+              <rect
+                x={x(pr.t) - 22}
+                y={97}
+                width={44}
+                height={13}
+                rx={3}
+                fill="var(--background)"
+                fillOpacity={0.9}
+              />
               <text
                 x={x(pr.t)}
                 y={106}
@@ -187,9 +205,6 @@ export function PropositionSeparator() {
               </text>
             </g>
           ))}
-          <text x={AX0 - 8} y={AXIS_Y + 4} textAnchor="end" fontSize={10} fill="var(--muted-foreground)">
-            p
-          </text>
 
           {/* the six lines */}
           {LINES.map((l) => {
@@ -224,25 +239,16 @@ export function PropositionSeparator() {
                 >
                   {l.n}
                 </text>
-                <text
-                  x={x(l.p)}
-                  y={AXIS_Y + 32}
-                  textAnchor="middle"
-                  fontSize={10}
-                  fill={yes ? POS : NEG}
-                >
-                  {l.p.toFixed(2)}
-                </text>
               </g>
             )
           })}
 
           {/* verdicts */}
-          <text x={AX0} y={H - 12} fontSize={11} fill={NEG}>
-            four say no
+          <text x={AX0} y={H - 10} fontSize={11} fill={NEG}>
+            four say no — 0.08 to 0.17
           </text>
-          <text x={AX1} y={H - 12} textAnchor="end" fontSize={11} fill={POS}>
-            two say yes
+          <text x={AX1} y={H - 10} textAnchor="end" fontSize={11} fill={POS}>
+            two say yes — 0.94, 0.98
           </text>
         </svg>
       </div>

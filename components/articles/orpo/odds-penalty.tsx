@@ -190,9 +190,11 @@ export function OddsPenalty() {
               δ / (1 − P_l)
             </text>
 
+            {/* pull-on-y_w and L_OR end within 5px of each other on the log
+                axis, so their labels are nudged apart by hand */}
             <text
               x={W - PR + 8}
-              y={y(pullChosen(X_HI)) + 3}
+              y={y(pullChosen(X_HI)) + 12}
               className="fill-muted-foreground font-mono"
               fontSize={10}
             >
@@ -210,7 +212,7 @@ export function OddsPenalty() {
 
             <text
               x={W - PR + 8}
-              y={y(loss(X_HI)) + 3}
+              y={y(loss(X_HI)) - 7}
               className="font-mono"
               fill={WARM}
               fontSize={10}

@@ -93,8 +93,8 @@ export function CacheBoundary() {
           <text x={CX - NW / 2 - 12} y={boxTop + 16} fontSize={11} fill={ACCENT}>
             &ldquo;use cache&rdquo;
           </text>
-          <text x={CX + NW / 2 + 12} y={boxTop + 16} textAnchor="end" fontSize={10} fill={MUTED}>
-            key = build id + fn id + arguments
+          <text x={CX + NW / 2 + 12} y={boxBottom - 8} textAnchor="end" fontSize={10} fill={MUTED}>
+            key = build id + fn id + args
           </text>
 
           {/* connectors down the spine */}

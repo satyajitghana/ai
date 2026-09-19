@@ -28,7 +28,7 @@
 
 const W = 760
 const AX0 = 116
-const AX1 = W - 130
+const AX1 = W - 180
 const SPAN = AX1 - AX0
 const ROW_H = 62
 const TOP = 34
@@ -55,7 +55,7 @@ const ROWS: Row[] = [
 const x = (p: number) => AX0 + p * SPAN
 
 export function ThresholdLogic() {
-  const H = TOP + ROWS.length * ROW_H + 30
+  const H = TOP + ROWS.length * ROW_H + 6
 
   return (
     <figure className="my-8 overflow-hidden rounded-md border">
@@ -98,9 +98,6 @@ export function ThresholdLogic() {
               </text>
             </g>
           ))}
-          <text x={AX0 - 10} y={TOP - 18} textAnchor="end" fontSize={10} fill="var(--muted-foreground)">
-            p
-          </text>
 
           {ROWS.map((r, i) => {
             const y = TOP + i * ROW_H

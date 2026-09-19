@@ -228,8 +228,8 @@ export function TableToTokens() {
           <text x={tx + 580} y={220}>Move a column and every cell in</text>
           <text x={tx + 580} y={235}>the table changes. Nothing here is</text>
           <text x={tx + 580} y={250}>indexed by name — only by position.</text>
-          <text x={tx + 580} y={268}>label: Embedding[10, 256], context</text>
-          <text x={tx + 580} y={283}>rows only</text>
+          <text x={tx + 580} y={265}>label: Embedding[10, 256], context</text>
+          <text x={tx + 580} y={278}>rows only</text>
         </g>
 
         <line x1={tx} y1={282} x2={W - 20} y2={282} className="stroke-border" strokeWidth={1} />

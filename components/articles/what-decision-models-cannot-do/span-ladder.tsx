@@ -76,8 +76,8 @@ export function SpanLadder() {
       </div>
       <figcaption className="border-t px-3 py-2 font-mono text-xs leading-5 text-muted-foreground">
         The candidate count is measured by reimplementing their{" "}
-        <code className="font-mono">collectCandidates</code> over this prompt alone. Every
-        other number and quotation is read out of the file.
+        <code className="font-mono">collectCandidates</code>{" "}
+        over this prompt alone. Every other number and quotation is read out of the file.
       </figcaption>
     </figure>
   )
