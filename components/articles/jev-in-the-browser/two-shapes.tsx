@@ -43,7 +43,7 @@ export function TwoShapes() {
         </g>
         <g className="fill-muted-foreground font-mono" style={{ fontSize: 11 }}>
           <text x={colL} y={42}>Jev, CUA-S1, an NLI head. Options never meet.</text>
-          <text x={colR} y={42}>GLiClass / rlcd-modernbert-151m. Options share a context.</text>
+          <text x={colR} y={42}>GLiClass, rlcd-modernbert-151m. Options meet.</text>
           <text x={colL} y={rowTop - 16}>N rows in, N scalars out</text>
           <text x={colR} y={rowTop - 16}>1 row in, N logits out</text>
         </g>
@@ -108,7 +108,7 @@ export function TwoShapes() {
             </g>
           ))}
           <text x={colR + 6} y={rowTop + 40} className="fill-muted-foreground">
-            &lt;&lt;LABEL&gt;&gt; spans · then &lt;&lt;SEP&gt;&gt; · then question + context
+            &lt;&lt;LABEL&gt;&gt; spans · &lt;&lt;SEP&gt;&gt; · question + context
           </text>
         </g>
         {/* the attention arc that the left column does not have */}

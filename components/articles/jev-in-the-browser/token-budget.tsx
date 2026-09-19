@@ -77,10 +77,14 @@ export function TokenBudget() {
           <g key={`p${n}`}>
             <circle cx={sx(n)} cy={sy(cross(n))} r={3.5} style={{ fill: "oklch(0.58 0.19 27)" }} />
             <circle cx={sx(n)} cy={sy(uni(n))} r={3.5} style={{ fill: "oklch(0.55 0.16 155)" }} />
-            <text x={sx(n) + 7} y={sy(cross(n)) - 6} className="font-mono" style={{ fontSize: 10, fill: "oklch(0.58 0.19 27)" }}>
+            <text x={sx(n) + (n === MAXN ? -7 : 7)} y={sy(cross(n)) - 6}
+              textAnchor={n === MAXN ? "end" : "start"}
+              className="font-mono" style={{ fontSize: 10, fill: "oklch(0.58 0.19 27)" }}>
               {cross(n)}
             </text>
-            <text x={sx(n) + 7} y={sy(uni(n)) + 14} className="font-mono" style={{ fontSize: 10, fill: "oklch(0.55 0.16 155)" }}>
+            <text x={sx(n) + (n === MAXN ? -7 : 7)} y={sy(uni(n)) + 14}
+              textAnchor={n === MAXN ? "end" : "start"}
+              className="font-mono" style={{ fontSize: 10, fill: "oklch(0.55 0.16 155)" }}>
               {uni(n)}
             </text>
           </g>

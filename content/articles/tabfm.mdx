@@ -15,6 +15,7 @@ draft: false
 ---
 
 import { TableToTokens } from "@/components/articles/tabfm/table-to-tokens"
+import { CellShapes } from "@/components/articles/tabfm/cell-shapes"
 import { ColumnOrder } from "@/components/articles/tabfm/column-order"
 import { EloDenominators } from "@/components/articles/tabfm/elo-denominators"
 
@@ -51,9 +52,11 @@ repository at this time."*
 
 That is the first thing to hold onto. Everything below about the architecture I
 read out of `tabfm/src/pytorch/model.py` and the safetensors header, because
-there is no document that states it. Everything about the *training* — the part
-that carries the entire zero-shot claim — is three sentences in a blog post, and
-the generator that produced the training data is not in the repository.
+there is no document that states it; every TabFM code block in this piece is
+quoted from `google-research/tabfm` at `fbb6655`, the head of `main` on the day
+I wrote this. Everything about the *training* — the part that carries the entire
+zero-shot claim — is three sentences in a blog post, and the generator that
+produced the training data is not in the repository.
 
 To the team's credit, the code they did ship is unusually legible: module names
 mirror the JAX original for mechanical weight conversion, the comments explain
@@ -92,8 +95,56 @@ one of two linear maps chosen by whether the cell is categorical, and the three
 are summed. One cell in, one 256-dimensional vector out. For context rows, the
 label's embedding is added on top.
 
+The grouping is a gather, and it is short enough to read in full:
+
+```python
+# tabfm/src/pytorch/model.py — CellEmbedder._group, the three-way column cross
+def _group(self, x, d=None):  # x: [B,T,H] -> [B,T,H,G]
+    h = x.shape[-1]
+    idxs = torch.arange(h, device=x.device)
+    stacked = []
+    if d is not None:
+        d_safe = torch.clamp(d.to(torch.long), min=1)  # [B] active feature count
+        for i in range(self.fgs):                      # fgs = feature_group_size = 3
+            offset = (2 ** i) - 1                      # 0, 1, 3
+            idx = (idxs[None, :] + offset) % d_safe[:, None]         # [B, H]
+            idx = idx[:, None, :].expand(x.shape[0], x.shape[1], h)  # [B, T, H]
+            stacked.append(torch.gather(x, -1, idx))
+    ...
+    return torch.stack(stacked, dim=-1)
+```
+
+No column name is read, no column identity is stored. `% d_safe` is the whole
+schema-independence trick: a column is an index, the group wraps past the last
+real column, and `d` — the count — is the only thing the model knows about your
+table. Then the expansion, which is where the parameters live:
+
+```python
+# the same class — _cell: Fourier features, two heads, sum over the group
+def _cell(self, x, cat_mask, d=None):  # [B,t,H] -> [B,t,HC,E]
+    g = self._group(x, d=d).unsqueeze(-1).float()
+    dt = x.dtype
+    ff = self.fourier_frequencies.float()       # [3, 32]
+    ffc = self.fourier_frequencies_cat.float()  # [3, 32], a second set for categoricals
+    num_out = self.in_linear(torch.cat([(g * ff).sin(), (g * ff).cos()], dim=-1).to(dt))
+    if cat_mask is not None:
+        cat_out = self.in_linear_cat(torch.cat([(g * ffc).sin(), (g * ffc).cos()], dim=-1).to(dt))
+        cmg = self._group(cat_mask[:, None, :].float(), d=d).bool()[..., None]
+        return torch.where(cmg, cat_out, num_out).sum(-2)
+    return num_out.sum(-2)
+```
+
 That is the whole of TabFM's table-reading machinery: two frequency tables of
 shape `[3, 32]`, two `Linear[64, 256]`, and a `[10, 256]` label embedding.
+
+Two things the code says that the prose above does not. The choice between the
+numeric and categorical heads is a `torch.where`, not a branch — **both
+projections are computed for every cell**, and the categorical one is thrown
+away on numeric columns. And the Fourier path runs in float32 (the comment in
+the source says why: the arguments reach ~30, where bf16 sine is not sine). So
+the smallest module in the model is not the cheapest one to run.
+
+<CellShapes />
 
 **Stage 2 alternates column attention and row attention, twice each.** For
 column attention the grid is reshaped so that each *column* is a sequence of
@@ -112,6 +163,27 @@ dimension 256, SwiGLU feed-forward at 8192, no positional encoding. Every row
 attends to the labelled context rows and to nothing else — the mask is key-side
 only, which means query rows do not see each other and predictions are not
 transductive. A `MLP[2048 → 4096 → 10]` reads out the logits.
+
+All four stages are ten lines of `forward`, and the last line is the finding:
+
+```python
+# tabfm/src/pytorch/model.py — TabFM.forward, the entire path
+def forward(self, x, y, train_size, cat_mask=None, d=None):
+    x = torch.nan_to_num(x, nan=-100.0).to(self.cls_tokens.dtype)
+    emb = self.cell_embedder(x, y, train_size, cat_mask, d=d)  # [B,T,H,256]
+    emb = self.col_embedder(emb, train_size)
+    b, t, _, e = emb.shape
+    cls = self.cls_tokens.expand(b, t, -1, -1)                 # 8 CLS slots per row
+    emb = torch.cat([cls, emb], dim=2)
+    emb = self.row_interactor(emb, d=d)
+    emb = self.col_embedder_2(emb, train_size)
+    reps = self.row_interactor_2(emb, d=d)                     # [B,T,8*256]
+    return self.icl_predictor(reps, y, train_size)
+```
+
+`icl_predictor` is the 1.62 billion. It is handed `reps`. `x` — the table — does
+not appear on that line, and there is no path by which it could: the cell grid
+was discarded one line earlier.
 
 <Receipts src="/articles/tabfm/data/anatomy.json" />
 
@@ -190,10 +262,72 @@ of synthetic datasets," generated on the fly from structural causal models with
 scarcity — big, diverse, licence-clean tabular corpora essentially do not exist,
 because the interesting tables are proprietary.
 
-This is the same bet [TabPFN](https://arxiv.org/abs/2207.01848) made in 2022 and
-it has a second payoff the post does not claim, so I will claim it for them:
-**it forecloses benchmark contamination at the root.** A model that never saw a
-real table cannot have seen `credit-g`. Contrast this with `Real-TabPFN`, which
+The generator is the evidence for that claim, so: here is the generator.
+
+```bash
+$ git -C tabfm ls-files 'tabfm/**/*.py' | grep -v _test
+tabfm/src/__init__.py
+tabfm/src/classifier_and_regressor.py
+tabfm/src/hugging_face/convert_and_upload.py
+tabfm/src/hugging_face/torch_convert.py
+tabfm/src/jax/__init__.py
+tabfm/src/jax/checkpointing.py
+tabfm/src/jax/memory_efficient_attention.py
+tabfm/src/jax/model.py
+tabfm/src/jax/tabfm_v1_0_0.py
+tabfm/src/pytorch/__init__.py
+tabfm/src/pytorch/model.py
+tabfm/src/pytorch/tabfm_v1_0_0.py
+```
+
+Twelve files, three of them `__init__`s: one scikit-learn wrapper, a JAX model
+and a PyTorch model with their two config modules, a checkpoint loader, an
+attention kernel, and two Hugging Face converters. No `priors/`, no data module,
+no training loop, no sampler. The sentence that carries the entire release ships
+without the code that would make it checkable.
+
+This is the same bet [TabPFN](https://arxiv.org/abs/2207.01848) made in 2022 —
+and TabPFN shipped its prior, so at least the *shape* of the thing is on record.
+Its abstract promises one that *"entails a large space of structural causal
+models with a preference for simple structures."* In code that is a random MLP
+with noise at every layer, read rather than evaluated:
+
+```python
+# automl/TabPFN at v1.0.0 (a9298ae), tabpfn/priors/mlp.py — get_batch()
+def generate_module(layer_idx, out_dim):
+    noise = GaussianNoise(...)  # one std per output dim, drawn once at init
+    return [nn.Sequential(*[self.prior_mlp_activations(),
+                            nn.Linear(self.prior_mlp_hidden_dim, out_dim), noise])]
+...
+outputs = [causes]
+for layer in self.layers:
+    outputs.append(layer(outputs[-1]))
+outputs = outputs[2:]
+
+if self.is_causal:
+    ## Sample nodes from graph if model is causal
+    outputs_flat = torch.cat(outputs, -1)
+    random_perm = torch.randperm(outputs_flat.shape[-1] - 1, device=device)
+    random_idx_y = list(range(-num_outputs, -0)) if self.y_is_effect else random_perm[0:num_outputs]
+    random_idx = random_perm[num_outputs:num_outputs + num_features]
+    y = outputs_flat[:, :, random_idx_y]
+    x = outputs_flat[:, :, random_idx]
+```
+
+Read the last four lines. The columns of a synthetic table are not the inputs to
+a function; they are a random subset of the *internals* of one, and the label is
+another node from the same graph. That is what makes the dependence worth
+learning instead of trivial — the model never sees the causes, only a handful of
+downstream nodes, which is exactly the situation you are in with a real
+spreadsheet. Sample a few hundred million of those and a new table's dependence
+structure is recognisable in-context.
+
+TabFM's generator is presumably bigger and better than this one. Nobody outside
+Google can say.
+
+That bet has a second payoff the post does not claim, so I will claim it for
+them: **it forecloses benchmark contamination at the root.** A model that never
+saw a real table cannot have seen `credit-g`. Contrast this with `Real-TabPFN`, which
 continues pretraining on curated real OpenML and Kaggle tables and consequently
 has to build "an enhanced multi-tiered deduplication and filtering pipeline"
 against every public benchmark to stay honest. TabArena itself is
@@ -289,6 +423,46 @@ non-negative-least-squares blend, and Platt scaling for binary problems. It is
 worth 88 Elo on the release-day classification chart and 44 on the live
 all-tasks board. Google committed the per-fold results for both configurations,
 so this is checkable without running anything.
+
+The preset itself is one classmethod, and the defaults it overrides are the
+whole story:
+
+```python
+# tabfm/src/classifier_and_regressor.py — TabFMClassifier.ensemble()
+@classmethod
+def ensemble(cls, model: Any, **overrides: Any) -> "TabFMClassifier":
+    params = dict(
+        n_estimators=32,                         # unchanged — this is also the default
+        average_logits=False,                    # default True: average probabilities instead
+        n_feature_crosses="sqrt",                # default 0
+        n_svd_features="sqrt",                   # default 0
+        enable_nnls=True,                        # default False
+        binary_calibration_method="platt",       # default None
+        multiclass_calibration_method="vector",  # default None
+    )
+    params.update(overrides)
+    return cls(model, **params)
+```
+
+Six flags, and `n_estimators` is not one of them — the preset does not add a
+single forward pass to the thirty-two the default already runs. `"sqrt"`
+resolves to `max(1, int(np.sqrt(n_cols)))` over the *capped* column count, so a
+500-column member gets 22 crosses and 22 SVD directions. And it gets them on
+half the ensemble, because the schedule is deliberately lopsided:
+
+```python
+# the same file — EnsembleGenerator._get_member_n_features_list
+k_max = self._get_n_features_to_add(n_features_requested, n_cols)
+return [0 if i % 2 == 0 else k_max for i in range(self.n_estimators)]
+```
+
+Sixteen augmented views, sixteen plain ones, averaged together. A cross is a
+product of two numeric columns (`X[:, i] * X[:, j]`, categoricals excluded), and
+the SVD is fitted on the full uncapped table *before* per-member subsampling —
+which is why it rescues `hiva_agnostic` further down. The blend is non-negative
+least squares on out-of-fold predictions, then pulled a quarter of the way back
+to the uniform average by `nnls_beta = 0.75`. That is not nothing. It is also
+not a second model.
 
 <Receipts src="/articles/tabfm/data/ensemble-gain.json" />
 
