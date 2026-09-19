@@ -83,7 +83,8 @@ What none of this fixes is **backlinks**, which come from other people citing th
 - `pnpm validate:mdx` — **compile** every MDX body the way the build does (same remark plugins), so JSX/MDX syntax errors fail here instead of at the Vercel build
 - `pnpm validate:math` — parse every MDX with the build's remark stack and report any `$…$` span that reads like English rather than like math (two literal dollar signs pairing up — see the guardrail below)
 - `pnpm validate:links` — assert no article is an orphan (see "Discoverability"), and print the in-degree spread
-- `pnpm validate` — `typecheck` + `validate:content` + `validate:mdx` + `validate:math` + `validate:links` + `check:models`. **Run this after any content/data edit, before committing.**
+- `pnpm validate:assets` — assert every `<Figure src>`, `<Video src>`, `poster` and `captions` path resolves to a committed file under `public/`. A broken `src` passes every other check and ships an empty box; asset directories need not match the slug (`/articles/fastlio2/` serves `fast-lio2-lidar-inertial-odometry`), so it resolves the literal path rather than guessing one
+- `pnpm validate` — `typecheck` + `validate:content` + `validate:mdx` + `validate:math` + `validate:links` + `validate:assets` + `check:models`. **Run this after any content/data edit, before committing.**
 - `pnpm check:spacing [slug…]` — renders articles in a headless browser and reports words fused together at JSX element boundaries (`the restskip`). Needs `pnpm dev` running, so it is deliberately outside `validate`. Run it after writing a component with prose that wraps around inline tags. A full run needs `NODE_OPTIONS=--max-old-space-size=8192 pnpm dev` — Turbopack holds every compiled route and the default heap dies around a hundred articles in.
 
 ## Guardrails (LOCKED)
