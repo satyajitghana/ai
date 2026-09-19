@@ -179,10 +179,10 @@ export function PriceFloor() {
           same $0.36 for a minute whether it holds one object or a hundred and
           twenty-eight — but under the November model, a hundred and
           twenty-eight objects burned{" "}
-          <span style={{ color: MUTED }}>$1.06</span> of rented H100 to serve,
-          almost three times the fare. Object Multiplex pulls that to{" "}
-          <span style={{ color: ACCENT }}>$0.15</span>, back under the line with
-          room to spare. Whether that is why the price is flat, only Meta knows.
+          <span style={{ color: MUTED }}>$1.06</span>
+          {" of rented H100 to serve, almost three times the fare. Object Multiplex pulls that to "}
+          <span style={{ color: ACCENT }}>$0.15</span>
+          {", back under the line with room to spare. Whether that is why the price is flat, only Meta knows."}
         </p>
       </div>
     </figure>

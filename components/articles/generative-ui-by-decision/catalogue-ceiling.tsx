@@ -12,9 +12,10 @@ import { Range } from "@/components/articles/ui/range"
 //
 // The five dots are measured: synthetic catalogs of 42 / 101 / 201 / 401 / 801
 // atomic candidates through the real composer, recording the exact select-call
-// body. The line is the least-squares fit through them, 668.6 bytes per
-// candidate, converted to tokens at 4 bytes per token. The two ceilings are the
-// context windows the two sources publish — and they disagree.
+// body. The growth is exactly linear, so the line is the slope through the
+// endpoints — 668.6 bytes per candidate — converted at 4 bytes per token.
+// The two ceilings are the context windows the two sources publish, and they
+// disagree with each other.
 
 const ACCENT = "oklch(0.60 0.15 255)"
 const WARN = "oklch(0.60 0.17 25)"
@@ -33,6 +34,7 @@ const BYTES_PER = 668.6
 const BYTES_0 = 97
 const tokensAt = (n: number) => Math.round((BYTES_PER * n + BYTES_0) / 4)
 const candidatesAt = (tokens: number) => Math.floor((tokens * 4 - BYTES_0) / BYTES_PER)
+const commas = (n: number) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
 
 const MEASURED = [
   { n: 42, bytes: 28_179 },
@@ -62,7 +64,7 @@ export function CatalogueCeiling() {
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label={`A line chart of the estimated input tokens in one batched select request against the number of candidate recipes offered. The line rises linearly at about 167 tokens per candidate. It crosses the Vercel AI Gateway's listed 32,000-token context window at roughly 196 candidates and TypeSafe's documented 64,000-token cap at roughly 392. At ${n} candidates the request is about ${tokens.toLocaleString("en-US")} tokens.`}
+        aria-label={`A line chart of the estimated input tokens in one batched select request against the number of candidate recipes offered. The line rises linearly at about 167 tokens per candidate. It crosses the Vercel AI Gateway's listed 32,000-token context window at roughly 196 candidates and TypeSafe's documented 64,000-token cap at roughly 392. At ${n} candidates the request is about ${commas(tokens)} tokens.`}
       >
         <defs>
           <filter id="gvd-cc-soft" x="-40%" y="-40%" width="180%" height="180%">
@@ -106,7 +108,7 @@ export function CatalogueCeiling() {
           className="fill-muted-foreground font-mono"
           fontSize={9.5}
         >
-          candidate recipes offered →
+          candidate recipes offered
         </text>
 
         {CAPS.map((cap) => (
@@ -203,7 +205,7 @@ export function CatalogueCeiling() {
           </div>
           <div>
             <dt className="text-muted-foreground">~input tokens</dt>
-            <dd className="tabular-nums">{tokens.toLocaleString("en-US")}</dd>
+            <dd className="tabular-nums">{commas(tokens)}</dd>
           </div>
           <div>
             <dt className="text-muted-foreground">of Gateway&rsquo;s 32k</dt>

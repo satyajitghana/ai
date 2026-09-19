@@ -21,7 +21,7 @@ const MUTED = "oklch(0.62 0.03 255)"
 
 const W = 760
 const H = 208
-const X0 = 108
+const X0 = 152
 const X1 = 738
 const SPAN = 3600 // ms on the axis
 
@@ -51,7 +51,7 @@ const TRACKS: Track[] = [
   {
     key: "edit",
     label: "edit: move",
-    sub: "target, destination, finish",
+    sub: "target, then destination",
     calls: 3,
     accent: false,
   },

@@ -4,6 +4,7 @@ import { notFound } from "next/navigation"
 import { AgentChip } from "@/components/site/agent-chip"
 import { Citation } from "@/components/site/citation"
 import { PageShell } from "@/components/site/page-shell"
+import { RelatedArticles } from "@/components/site/related-articles"
 import { ShareButtons } from "@/components/site/share-buttons"
 import { getArticle, getArticles } from "@/lib/content"
 import { articleJsonLd, breadcrumbJsonLd, JsonLd } from "@/lib/jsonld"
@@ -84,6 +85,7 @@ export default async function Page({
         </header>
         <Article />
       </article>
+      <RelatedArticles slug={slug} />
       <Citation title={article.title} slug={slug} date={article.date} />
       <ShareButtons
         path={`/articles/${slug}`}

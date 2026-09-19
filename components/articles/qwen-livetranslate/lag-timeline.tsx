@@ -148,14 +148,14 @@ export function LagTimeline() {
         </text>
 
         {/* ---------- lag plot ---------- */}
-        <text x={16} y={yPlot0 - 14} className="fill-muted-foreground font-mono" style={{ fontSize: 11 }}>
+        <text x={16} y={yPlot0 - 26} className="fill-muted-foreground font-mono" style={{ fontSize: 11 }}>
           TARGET WORD i
         </text>
-        <text x={16} y={yPlot0 + 2} className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
-          emitted at d
+        <text x={16} y={yPlot0 - 13} className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
+          solid = emitted, d
         </text>
-        <text x={16} y={yPlot0 + 15} className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
-          oracle at d*
+        <text x={16} y={yPlot0 - 1} className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
+          dashed = oracle, d*
         </text>
 
         {/* time gridlines */}
@@ -200,13 +200,17 @@ export function LagTimeline() {
         {/* what the system actually did */}
         <path d={emitPath} fill="none" className="stroke-foreground" strokeWidth={2} />
 
-        {EMIT.map((e, i) => (
+        {EMIT.map((e, i) => {
+          // When the staircase runs on to the right from this point, the word
+          // label would sit on top of the line — put it above the dot instead.
+          const runsRight = i + 1 < EMIT.length && EMIT[i + 1]!.d > e.d + 0.3
+          return (
           <g key={e.w}>
             <circle cx={x(dStar(i))} cy={rowY(i)} r={2.5} className="fill-muted-foreground" />
             <circle cx={x(e.d)} cy={rowY(i)} r={3.5} className="fill-foreground" />
             <text
-              x={x(e.d) + 8}
-              y={rowY(i) + 4}
+              x={x(e.d) + (runsRight ? 0 : 8)}
+              y={rowY(i) + (runsRight ? -8 : 4)}
               className="fill-foreground font-mono"
               style={{ fontSize: 10 }}
             >
@@ -222,7 +226,8 @@ export function LagTimeline() {
               {`i=${i + 1}  ${lags[i]! >= 0 ? "+" : ""}${lags[i]!.toFixed(2)}s`}
             </text>
           </g>
-        ))}
+          )
+        })}
 
         {/* ---------- readout ---------- */}
         <line x1={padL} y1={yPlot1 + 30} x2={W - padR} y2={yPlot1 + 30} className="stroke-border" strokeWidth={1} />

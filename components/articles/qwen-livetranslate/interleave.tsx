@@ -207,9 +207,9 @@ export function Interleave() {
               <g key={`leg-${t}`}>
                 <rect
                   x={lx}
-                  y={ly}
+                  y={t === "V" ? ly + 3 : ly}
                   width={12}
-                  height={12}
+                  height={t === "V" ? 8 : 12}
                   rx={2}
                   className={
                     isWrite(t)

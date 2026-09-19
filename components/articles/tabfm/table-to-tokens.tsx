@@ -206,28 +206,30 @@ export function TableToTokens() {
           <text x={tx + 139} y={206}>sin(g·ω), cos(g·ω)</text>
           <text x={tx + 139} y={222}>ω: 32 learned freqs</text>
           <text x={tx + 139} y={238}>→ 64 dims each</text>
-          <text x={tx + 139} y={254}>(a second ω set for cats)</text>
+          <text x={tx + 139} y={254}>cats: a 2nd ω set</text>
         </g>
         <line x1={tx + 258} y1={222} x2={tx + 296} y2={222} className="stroke-border" strokeWidth={1.5} />
 
         <rect x={tx + 296} y={198} width={116} height={48} rx={4} className="fill-background stroke-foreground/40" strokeWidth={1.5} />
         <g className="fill-foreground font-mono" style={{ fontSize: 10 }}>
           <text x={tx + 305} y={216}>Linear[64→256]</text>
-          <text x={tx + 305} y={232}>then sum over the 3</text>
+          <text x={tx + 305} y={232}>sum over the 3</text>
         </g>
         <line x1={tx + 412} y1={222} x2={tx + 448} y2={222} className="stroke-border" strokeWidth={1.5} />
 
         <rect x={tx + 448} y={204} width={96} height={36} rx={4} className="fill-muted/60 stroke-border" strokeWidth={1} />
         <text x={tx + 457} y={226} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
-          one cell = 256-d
+          cell → 256-d
         </text>
 
         <g className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
-          <text x={tx + 560} y={196}>The cell for column h is a fixed 3-way cross with columns</text>
-          <text x={tx + 560} y={212}>h+1 and h+3. Move a column and every cell in the table</text>
-          <text x={tx + 560} y={228}>changes. There is no column identity anywhere in the model —</text>
-          <text x={tx + 560} y={244}>no name, no embedding, only position.</text>
-          <text x={tx + 560} y={262}>label added to context rows only: Embedding[10, 256]</text>
+          <text x={tx + 580} y={190}>A cell&rsquo;s embedding is a fixed 3-way</text>
+          <text x={tx + 580} y={205}>cross with columns h+1 and h+3.</text>
+          <text x={tx + 580} y={220}>Move a column and every cell in</text>
+          <text x={tx + 580} y={235}>the table changes. Nothing here is</text>
+          <text x={tx + 580} y={250}>indexed by name — only by position.</text>
+          <text x={tx + 580} y={268}>label: Embedding[10, 256], context</text>
+          <text x={tx + 580} y={283}>rows only</text>
         </g>
 
         <line x1={tx} y1={282} x2={W - 20} y2={282} className="stroke-border" strokeWidth={1} />
@@ -241,7 +243,7 @@ export function TableToTokens() {
           { t: "col ×3", s: "a column as a set of rows", n: "256 induced pts · no positions", w: 148 },
           { t: "row ×3", s: "a row across its columns", n: "RoPE over the COLUMN axis", w: 148 },
           { t: "col ×3", s: "again, after row mixing", n: "masked to context rows", w: 148 },
-          { t: "row ×3", s: "again; keep the 8 CLS slots", n: "output 8 × 256", w: 158 },
+          { t: "row ×3", s: "again; keep 8 CLS slots", n: "output 8 × 256", w: 158 },
         ].map((b, i) => {
           const x = tx + i * 166
           return (
@@ -344,7 +346,7 @@ export function TableToTokens() {
         <rect x={tx + 566} y={452} width={128} height={48} rx={4} className="fill-muted/40 stroke-border" strokeWidth={1} />
         <g className="fill-foreground font-mono" style={{ fontSize: 10 }}>
           <text x={tx + 575} y={470}>MLP[2048→4096→10]</text>
-          <text x={tx + 575} y={488}>10 logits, hard ceiling</text>
+          <text x={tx + 575} y={488}>10 logits, hard cap</text>
         </g>
 
         <g className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
