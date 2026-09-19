@@ -73,13 +73,18 @@ export function ConfidenceMap() {
             the stroke rule applied to the same grid
           </text>
 
+          {/* an opaque canvas under both panels, so the pigments read the same
+              in light and dark mode instead of blending with the page */}
+          <rect x={left} y={TOP} width={PANEL} height={PANEL} fill="#ffffff" />
+          <rect x={right} y={TOP} width={PANEL} height={PANEL} fill="#ffffff" />
+
           {CELLS.map(([idx, , spread], i) => {
             const x = (i % N) * CELL
             const y = Math.floor(i / N) * CELL
             const fill = PIGMENT[idx]
             const richness = richnessOf(spread)
             const halfW = (9 + 18 * (1 - spread)) * SCALE
-            const halfL = CELL / 2 - 1
+            const halfL = CELL / 2 + 2
             const k = halfW * 1.12
             const cx = right + x + CELL / 2
             const cy = TOP + y + CELL / 2
@@ -94,24 +99,40 @@ export function ConfidenceMap() {
                 <rect
                   x={left + x}
                   y={TOP + y}
-                  width={CELL}
-                  height={CELL}
+                  width={CELL + 0.6}
+                  height={CELL + 0.6}
                   fill={fill}
                 />
                 <rect
                   x={right + x}
                   y={TOP + y}
-                  width={CELL}
-                  height={CELL}
+                  width={CELL + 0.6}
+                  height={CELL + 0.6}
                   fill={fill}
-                  opacity={0.3}
+                  opacity={0.38}
                 />
                 {richness > 0.02 ? (
-                  <path d={d} fill={fill} opacity={0.35 + 0.65 * richness} />
+                  <path d={d} fill={fill} opacity={0.45 + 0.55 * richness} />
                 ) : null}
               </g>
             )
           })}
+          <rect
+            x={left}
+            y={TOP}
+            width={PANEL}
+            height={PANEL}
+            className="fill-none stroke-foreground/25"
+            strokeWidth={1}
+          />
+          <rect
+            x={right}
+            y={TOP}
+            width={PANEL}
+            height={PANEL}
+            className="fill-none stroke-foreground/25"
+            strokeWidth={1}
+          />
 
           <text
             x={left}

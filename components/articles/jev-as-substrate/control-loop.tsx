@@ -22,7 +22,7 @@ const CYCLE = 1.6093
 const SEGMENTS = [
   { label: "intent call", secs: 0.7174, tone: "fill-foreground/70" },
   { label: "motor call", secs: 0.6969, tone: "fill-foreground/40" },
-  { label: "physics, IK", secs: 0.195, tone: "fill-foreground/15" },
+  { label: "physics, IK", secs: 0.195, tone: "fill-foreground/22" },
 ]
 
 const RATES = [
@@ -35,10 +35,11 @@ const RATES = [
 const W = 760
 const PAD = 16
 const BAR_W = W - PAD * 2
-const BAR_Y = 56
+const BAR_Y = 58
 const BAR_H = 40
-const NOTE_Y = 142
-const RATE_TOP = 192
+const SIM_Y = 140
+const SIM_H = 16
+const RATE_TOP = 202
 const ROW_H = 30
 const LABEL_W = 236
 const RATE_MAX_W = 380
@@ -51,7 +52,7 @@ export function ControlLoop() {
     acc += s.secs
     return { ...s, x, w: (s.secs / CYCLE) * BAR_W }
   })
-  const simX = PAD + (0.32 / CYCLE) * BAR_W
+  const simW = (0.32 / CYCLE) * BAR_W
 
   return (
     <figure className="my-8">
@@ -70,7 +71,8 @@ export function ControlLoop() {
             one decision cycle — 1.609 s of wall clock
           </text>
           <text x={PAD} y={42} className="fill-muted-foreground font-mono text-[11px]">
-            mean over the 113 recorded cycles of the seed-0 Jev run
+            mean over the 113 recorded cycles of the seed-0 Jev run — 87.9% of it is
+            model wait
           </text>
 
           {segs.map((s) => (
@@ -103,24 +105,29 @@ export function ControlLoop() {
             strokeWidth={1}
           />
 
-          <line
-            x1={simX}
-            y1={BAR_Y - 8}
-            x2={simX}
-            y2={BAR_Y + BAR_H + 36}
-            className="stroke-foreground"
-            strokeWidth={1.5}
-            strokeDasharray="4 3"
+          {/* the same scale again: how much simulated time that cycle bought */}
+          <rect
+            x={PAD}
+            y={SIM_Y}
+            width={simW}
+            height={SIM_H}
+            className="fill-foreground/70"
+          />
+          <rect
+            x={PAD}
+            y={SIM_Y}
+            width={BAR_W}
+            height={SIM_H}
+            className="fill-none stroke-foreground/25"
+            strokeWidth={1}
+            strokeDasharray="3 3"
           />
           <text
-            x={simX + 7}
-            y={NOTE_Y}
-            className="fill-foreground font-mono text-[10px]"
+            x={PAD + simW + 8}
+            y={SIM_Y + 12}
+            className="fill-foreground font-mono text-[11px]"
           >
-            0.32 s — the simulated time this cycle buys
-          </text>
-          <text x={PAD} y={NOTE_Y} className="fill-muted-foreground font-mono text-[10px]">
-            87.9% model wait
+            0.32 s of simulated time bought, at the same scale
           </text>
 
           <text

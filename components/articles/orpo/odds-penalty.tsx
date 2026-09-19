@@ -66,7 +66,8 @@ const STOPS = [
   { pl: 0.9, head: "rejected beats chosen", note: "term is shouting" },
 ]
 
-const fmt = (v: number) => (v >= 10 ? v.toFixed(1) : v >= 1 ? v.toFixed(2) : v.toFixed(3))
+const fmt = (v: number) =>
+  v >= 10 ? v.toFixed(1) : v >= 1 ? v.toFixed(2) : v >= 0.1 ? v.toFixed(3) : v.toFixed(4)
 
 export function OddsPenalty() {
   return (
