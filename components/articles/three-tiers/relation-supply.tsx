@@ -40,171 +40,203 @@ export function RelationSupply() {
           <filter id="rs-soft" x="-40%" y="-40%" width="180%" height="180%">
             <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.14" />
           </filter>
-          <marker id="rs-arrow" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="7" refY="0">
+          <marker
+            id="rs-arrow"
+            viewBox="0 -5 10 10"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto"
+            refX="7"
+            refY="0"
+          >
             <path d="M0,-4L6,0L0,4" fill="none" stroke={ACCENT} strokeWidth={1.5} />
           </marker>
         </defs>
 
-        <line x1={mid} y1={16} x2={mid} y2={H - 16} className="stroke-border" strokeWidth={1} />
+        <line x1={mid} y1={16} x2={mid} y2={H - 62} className="stroke-border" strokeWidth={1} />
 
         {/* ─────────── LEFT: Stanley ─────────── */}
-        <text x={18} y={28} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
+        <text x={16} y={28} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
           stanley-code · check
         </text>
-        <text x={18} y={43} className="fill-muted-foreground font-mono" style={{ fontSize: 9.5 }}>
+        <text x={16} y={43} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
           &quot;hunks are judged individually&quot; — its own notChecked list
         </text>
 
         {HUNKS.map((h, i) => {
-          const y = 62 + i * 34
+          const y = 62 + i * 33
           const linked = h === "A" || h === "D"
           return (
             <g key={h}>
               <rect
-                x={18}
+                x={16}
                 y={y}
-                width={74}
-                height={26}
+                width={68}
+                height={25}
                 rx={5}
                 className="fill-background"
                 stroke={linked ? ACCENT : "var(--border)"}
                 strokeWidth={linked ? 2 : 1}
               />
-              <text x={30} y={y + 17} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
+              <text x={27} y={y + 17} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
                 hunk {h}
               </text>
             </g>
           )
         })}
 
-        {/* deterministic link A -> D */}
+        {/* deterministic link A -> D, drawn by code */}
         <path
-          d="M 92 75 C 128 75, 128 177, 92 177"
+          d="M 84 74 C 116 74, 116 173, 88 173"
           fill="none"
           stroke={ACCENT}
           strokeWidth={1.5}
           markerEnd="url(#rs-arrow)"
         />
-        <text x={134} y={112} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          CODE, not the model:
-        </text>
-        <text x={134} y={124} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          A declares an identifier
-        </text>
-        <text x={134} y={136} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          that D references — a regex
-        </text>
-        <text x={134} y={148} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          over added lines.
-        </text>
+        {[
+          "CODE, not the model:",
+          "A declares an identifier",
+          "that D references.",
+          "A regex over added",
+          "lines — no call.",
+        ].map((t, i) => (
+          <text
+            key={t}
+            x={104}
+            y={96 + i * 12}
+            className="fill-muted-foreground font-mono"
+            style={{ fontSize: 9 }}
+          >
+            {t}
+          </text>
+        ))}
 
         {/* the constructed pair frame */}
         <rect
-          x={244}
+          x={250}
           y={62}
-          width={150}
-          height={96}
+          width={152}
+          height={94}
           rx={8}
           className="fill-background"
           stroke={ACCENT}
           strokeWidth={2}
           filter="url(#rs-soft)"
         />
-        <text x={256} y={80} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
+        <text x={262} y={80} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
           one frame, two hunks
         </text>
-        <text x={256} y={98} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
+        <text x={262} y={97} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
           candidateHunk: A
         </text>
-        <text x={256} y={111} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
+        <text x={262} y={109} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
           dependentHunk: D
         </text>
-        <text x={256} y={131} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
-          noul: &quot;does A add something
+        <text x={262} y={129} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
+          noul: does A add
         </text>
-        <text x={256} y={143} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
-          D uses and needs?&quot;
+        <text x={262} y={141} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
+          something D needs?
         </text>
 
-        <rect x={244} y={172} width={150} height={30} rx={6} className="fill-muted/40 stroke-border" strokeWidth={1} />
-        <text x={256} y={191} className="fill-foreground font-mono" style={{ fontSize: 9.5 }}>
+        <rect
+          x={250}
+          y={170}
+          width={152}
+          height={28}
+          rx={6}
+          className="fill-muted/40 stroke-border"
+          strokeWidth={1}
+        />
+        <text x={262} y={188} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
           p ≥ 0.60 → clear the flag
         </text>
 
-        <text x={18} y={244} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          The pair never competes as two options in one question. It arrives as
-        </text>
-        <text x={18} y={257} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          one state with a yes-or-no about it — the one shape the model can answer.
-        </text>
-        <text x={18} y={276} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          Budgeted: only a weak hunk linked to a strongly-related one gets a
-        </text>
-        <text x={18} y={289} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          follow-up, and it gets exactly one.
-        </text>
+        {[
+          "The pair never competes as two options in one question.",
+          "It arrives as one state with a yes-or-no about it — the",
+          "one shape the model can answer.",
+          "",
+          "Rationed, too: only a weak hunk linked to a strongly-",
+          "related one gets a follow-up, and it gets exactly one.",
+        ].map((t, i) =>
+          t ? (
+            <text
+              key={t}
+              x={16}
+              y={240 + i * 13}
+              className="fill-muted-foreground font-mono"
+              style={{ fontSize: 9 }}
+            >
+              {t}
+            </text>
+          ) : null
+        )}
 
         {/* ─────────── RIGHT: the arm ─────────── */}
         <text x={mid + 18} y={28} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
           jev-robot-control · one control cycle
         </text>
-        <text x={mid + 18} y={43} className="fill-muted-foreground font-mono" style={{ fontSize: 9.5 }}>
+        <text x={mid + 18} y={43} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
           the vector the model is never asked for
         </text>
 
         {/* the question NOT asked */}
         <rect
           x={mid + 18}
-          y={58}
-          width={170}
-          height={44}
+          y={56}
+          width={168}
+          height={40}
           rx={6}
           className="fill-muted/30 stroke-border"
           strokeWidth={1}
           strokeDasharray="4 3"
         />
-        <text x={mid + 28} y={76} className="fill-muted-foreground font-mono" style={{ fontSize: 9.5 }}>
+        <text x={mid + 28} y={73} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
           &quot;pick a move&quot; — 3×3×3×3
         </text>
-        <text x={mid + 28} y={90} className="fill-muted-foreground font-mono" style={{ fontSize: 9.5 }}>
+        <text x={mid + 28} y={86} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
           = 81 joint options
         </text>
         <line
-          x1={mid + 26}
-          y1={98}
+          x1={mid + 24}
+          y1={92}
           x2={mid + 180}
-          y2={62}
+          y2={60}
           className="stroke-destructive"
           strokeWidth={1.5}
           opacity={0.75}
         />
 
-        {/* the four questions actually asked */}
+        <text x={mid + 18} y={112} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
+          asked instead, in parallel, none reading another&apos;s answer:
+        </text>
+
         {AXES.map((a, i) => {
-          const y = 120 + i * 38
+          const y = 120 + i * 37
           return (
             <g key={a.k}>
               <rect
                 x={mid + 18}
                 y={y}
-                width={170}
-                height={30}
+                width={168}
+                height={29}
                 rx={6}
                 className="fill-background"
                 stroke={ACCENT}
                 strokeWidth={1.5}
               />
-              <text x={mid + 28} y={y + 13} className="fill-foreground font-mono" style={{ fontSize: 9.5 }}>
+              <text x={mid + 28} y={y + 13} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
                 question {i + 1}: {a.k}
               </text>
-              <text x={mid + 28} y={y + 25} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
+              <text x={mid + 28} y={y + 24} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
                 {a.opts}
               </text>
               <line
-                x1={mid + 188}
-                y1={y + 15}
-                x2={mid + 232}
-                y2={y + 15}
+                x1={mid + 186}
+                y1={y + 14}
+                x2={mid + 230}
+                y2={y + 14}
                 className="stroke-border"
                 strokeWidth={1.2}
               />
@@ -212,59 +244,64 @@ export function RelationSupply() {
           )
         })}
 
-        <text x={mid + 18} y={112} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          asked instead, in parallel, none reading another&apos;s answer:
-        </text>
-
         {/* the executor */}
         <rect
-          x={mid + 236}
+          x={mid + 234}
           y={120}
-          width={144}
-          height={144}
+          width={150}
+          height={140}
           rx={8}
           className="fill-background stroke-border"
           strokeWidth={1.5}
           filter="url(#rs-soft)"
         />
-        <text x={mid + 248} y={142} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
+        <text x={mid + 246} y={140} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
           shared executor
         </text>
-        <text x={mid + 248} y={160} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
+        <text x={mid + 246} y={158} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
           CODE supplies:
         </text>
-        <text x={mid + 248} y={176} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
-          step 18 / 4 / 2 mm
-        </text>
-        <text x={mid + 248} y={190} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
-          inverse kinematics
-        </text>
-        <text x={mid + 248} y={204} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
-          workspace bounds
-        </text>
-        <text x={mid + 248} y={218} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
-          0.32 s physics step
-        </text>
-        <text x={mid + 248} y={240} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
+        {["step 18 / 4 / 2 mm", "inverse kinematics", "workspace bounds", "0.32 s physics step"].map(
+          (t, i) => (
+            <text
+              key={t}
+              x={mid + 246}
+              y={174 + i * 14}
+              className="fill-foreground font-mono"
+              style={{ fontSize: 9 }}
+            >
+              {t}
+            </text>
+          )
+        )}
+        <text x={mid + 246} y={236} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
           MODEL supplies:
         </text>
-        <text x={mid + 248} y={254} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
+        <text x={mid + 246} y={251} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
           four signs.
         </text>
 
-        <text x={mid + 18} y={290} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          The model chooses direction. Code chooses distance. The relation between
-        </text>
-        <text x={mid + 18} y={303} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          the axes lives entirely in the executor&apos;s geometry.
-        </text>
+        {[
+          "The model chooses direction. Code chooses distance.",
+          "Every relation between the axes lives in the executor.",
+        ].map((t, i) => (
+          <text
+            key={t}
+            x={mid + 18}
+            y={288 + i * 13}
+            className="fill-muted-foreground font-mono"
+            style={{ fontSize: 9 }}
+          >
+            {t}
+          </text>
+        ))}
 
         {/* shared footer */}
-        <line x1={18} y1={H - 52} x2={W - 18} y2={H - 52} className="stroke-border" strokeWidth={1} />
-        <text x={18} y={H - 32} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
+        <line x1={16} y1={H - 52} x2={W - 16} y2={H - 52} className="stroke-border" strokeWidth={1} />
+        <text x={16} y={H - 32} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
           Same move, twice: a relation the decision tier cannot form is built by the tier below it,
         </text>
-        <text x={18} y={H - 18} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
+        <text x={16} y={H - 17} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
           then handed down as an independent question. The workaround is the architecture.
         </text>
       </svg>

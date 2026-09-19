@@ -4,7 +4,7 @@
 // bounded choice with a distribution, and deterministic code decides whether to
 // believe it. Three of the four stages are code.
 //
-// Every constant in the right-hand column is quoted from ROUTING_POLICY and the
+// Every constant in the stage bodies is quoted from ROUTING_POLICY and the
 // FrameExecutor budget in router.ts. The probability vector is illustrative — it
 // is a worked example, not a recorded run.
 //
@@ -33,41 +33,41 @@ const DIST: [string, number][] = [
   ["others (6)", 3],
 ]
 
-const STAGES = [
+const STAGES: { tier: string; title: string; body: string[] }[] = [
   {
     tier: "CODE",
     title: "deterministic facts",
-    body: "diff = present · input = none · safe untracked files counted",
+    body: ["diff = present · input = none · safe untracked files counted"],
   },
   {
     tier: "CODE",
     title: "availability gate",
-    body: "each workflow's own available({diff, input}) — a false value is a hard constraint",
+    body: ["each workflow's own available({diff, input}) —", "a false value is a hard constraint"],
   },
   {
     tier: "MODEL",
     title: "one Jev choice",
-    body: "criteria = the eligible ids + cannot_tell · budget: 2 requests, 16k input tokens, 30 s",
+    body: ["criteria = the eligible ids + cannot_tell", "budget: 2 requests · 16k input tokens · 30 s"],
   },
   {
     tier: "CODE",
     title: "acceptance policy",
-    body: "confidence ≥ 0.60 · p(pick) ≥ 0.55 · margin over runner-up ≥ 0.15",
+    body: ["confidence ≥ 0.60 · p(pick) ≥ 0.55", "margin over the runner-up ≥ 0.15"],
   },
 ]
 
 export function StanleyRoute() {
   const W = 820
-  const railW = 74
-  const x0 = railW + 18
-  const boxW = 452
+  const railW = 70
+  const x0 = railW + 16 // 86
+  const boxW = 400 // 86 → 486
   const stageTop = 92
   const stageH = 62
   const gap = 20
-  const H = stageTop + STAGES.length * (stageH + gap) + 128
+  const H = stageTop + STAGES.length * (stageH + gap) + 122
 
-  const distX = x0 + boxW + 30
-  const distW = 250
+  const distX = x0 + boxW + 28 // 514
+  const barMax = 150
 
   return (
     <figure className="my-8 overflow-x-auto rounded-md border">
@@ -84,12 +84,20 @@ export function StanleyRoute() {
           <filter id="sr-soft" x="-40%" y="-40%" width="180%" height="180%">
             <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodOpacity="0.14" />
           </filter>
-          <marker id="sr-arrow" viewBox="0 -5 10 10" markerWidth="7" markerHeight="7" orient="auto" refX="7" refY="0">
+          <marker
+            id="sr-arrow"
+            viewBox="0 -5 10 10"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto"
+            refX="7"
+            refY="0"
+          >
             <path d="M0,-4L6,0L0,4" fill="none" stroke="var(--muted-foreground)" strokeWidth={1.5} />
           </marker>
         </defs>
 
-        <text x={16} y={30} className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
+        <text x={14} y={30} className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
           TIER
         </text>
         <text x={x0} y={30} className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
@@ -109,7 +117,7 @@ export function StanleyRoute() {
           className="fill-muted/40 stroke-border"
           strokeWidth={1}
         />
-        <text x={x0 + 14} y={64} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
+        <text x={x0 + 12} y={64} className="fill-foreground font-mono" style={{ fontSize: 10.5 }}>
           natural-language request — no subcommand, no flags
         </text>
 
@@ -120,17 +128,17 @@ export function StanleyRoute() {
             <g key={s.title}>
               {/* tier rail chip */}
               <rect
-                x={16}
-                y={y + 16}
-                width={railW - 6}
+                x={14}
+                y={y + 18}
+                width={railW - 8}
                 height={22}
                 rx={5}
                 fill={isModel ? ACCENT : "var(--muted)"}
                 opacity={isModel ? 1 : 0.7}
               />
               <text
-                x={16 + (railW - 6) / 2}
-                y={y + 31}
+                x={14 + (railW - 8) / 2}
+                y={y + 33}
                 textAnchor="middle"
                 className="font-mono"
                 fill={isModel ? "white" : "var(--muted-foreground)"}
@@ -150,17 +158,20 @@ export function StanleyRoute() {
                 strokeWidth={isModel ? 2 : 1.5}
                 filter="url(#sr-soft)"
               />
-              <text x={x0 + 14} y={y + 24} className="fill-foreground font-mono" style={{ fontSize: 11.5 }}>
+              <text x={x0 + 12} y={y + 22} className="fill-foreground font-mono" style={{ fontSize: 11.5 }}>
                 {s.title}
               </text>
-              <text
-                x={x0 + 14}
-                y={y + 43}
-                className="fill-muted-foreground font-mono"
-                style={{ fontSize: 9.5 }}
-              >
-                {s.body}
-              </text>
+              {s.body.map((line, li) => (
+                <text
+                  key={line}
+                  x={x0 + 12}
+                  y={y + 39 + li * 13}
+                  className="fill-muted-foreground font-mono"
+                  style={{ fontSize: 9 }}
+                >
+                  {line}
+                </text>
+              ))}
 
               {i < STAGES.length - 1 && (
                 <line
@@ -177,13 +188,13 @@ export function StanleyRoute() {
           )
         })}
 
-        {/* stage 2 readout: the eligible set */}
+        {/* stage 2 readout: the eligible set, two columns */}
         <g>
           {CANDIDATES.map((c, i) => {
             const col = i % 2
             const row = (i - col) / 2
-            const cx = distX + col * 124
-            const cy = stageTop + (stageH + gap) + 2 + row * 13
+            const cx = distX + col * 140
+            const cy = stageTop + (stageH + gap) + 4 + row * 13
             return (
               <text
                 key={c.id}
@@ -203,7 +214,7 @@ export function StanleyRoute() {
         <g>
           {DIST.map((d, i) => {
             const y = stageTop + 2 * (stageH + gap) + 4 + i * 14
-            const bw = (distW - 96) * d[1] / 100
+            const bw = (barMax * d[1]) / 100
             const lead = i === 0
             return (
               <g key={d[0]}>
@@ -216,7 +227,7 @@ export function StanleyRoute() {
                   {d[0]}
                 </text>
                 <rect
-                  x={distX + 86}
+                  x={distX + 72}
                   y={y}
                   width={bw}
                   height={9}
@@ -225,7 +236,7 @@ export function StanleyRoute() {
                   opacity={lead ? 0.9 : 0.35}
                 />
                 <text
-                  x={distX + 86 + bw + 5}
+                  x={distX + 76 + bw}
                   y={y + 8}
                   className="fill-muted-foreground font-mono"
                   style={{ fontSize: 8.5 }}
@@ -241,25 +252,25 @@ export function StanleyRoute() {
             className="fill-muted-foreground font-mono"
             style={{ fontSize: 8.5 }}
           >
-            illustrative vector — thresholds are real
+            illustrative vector; thresholds are real
           </text>
         </g>
 
         {/* stage 4 readout: the three tests */}
         <g>
           {[
-            ["confidence", "0.71 ≥ 0.60", true],
-            ["p(security)", "0.62 ≥ 0.55", true],
-            ["margin", "0.62 − 0.21 = 0.41 ≥ 0.15", true],
+            ["confidence", "0.71 ≥ 0.60"],
+            ["p(security)", "0.62 ≥ 0.55"],
+            ["margin", "0.62 − 0.21 ≥ 0.15"],
           ].map((t, i) => {
-            const y = stageTop + 3 * (stageH + gap) + 6 + i * 15
+            const y = stageTop + 3 * (stageH + gap) + 8 + i * 15
             return (
-              <g key={t[0] as string}>
+              <g key={t[0]}>
                 <text x={distX} y={y + 8} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-                  {t[0] as string}
+                  {t[0]}
                 </text>
-                <text x={distX + 72} y={y + 8} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
-                  {t[1] as string}
+                <text x={distX + 74} y={y + 8} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
+                  {t[1]}
                 </text>
               </g>
             )
@@ -270,7 +281,7 @@ export function StanleyRoute() {
         <g>
           <rect
             x={x0}
-            y={H - 68}
+            y={H - 66}
             width={boxW}
             height={40}
             rx={8}
@@ -279,10 +290,13 @@ export function StanleyRoute() {
             strokeWidth={1.5}
             strokeDasharray="4 3"
           />
-          <text x={x0 + 14} y={H - 42} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
-            run `security` — or, on any failed test, cannot_tell and a clarification
+          <text x={x0 + 12} y={H - 47} className="fill-foreground font-mono" style={{ fontSize: 10 }}>
+            run `security` — or, if any test fails, cannot_tell
           </text>
-          <text x={distX} y={H - 46} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
+          <text x={x0 + 12} y={H - 34} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
+            and a clarification instead of a guess
+          </text>
+          <text x={distX} y={H - 47} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
             the model never runs a workflow;
           </text>
           <text x={distX} y={H - 34} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
