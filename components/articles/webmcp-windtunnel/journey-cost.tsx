@@ -224,8 +224,8 @@ export function JourneyCost() {
       <figcaption className="border-t px-3 py-2 text-center font-mono text-[11px] leading-5 text-muted-foreground">
         &ldquo;Tool calls&rdquo; and &ldquo;page actions&rdquo; are the same column —
         median <code>actions_or_tool_calls</code> — counted once as tool
-        invocations and once as clicks, types and selects. One tier up from the
-        crossing, the page setup is doing 22 actions where WebMCP does 4.
+        invocations and once as clicks, types and selects. In the last tier the
+        page setup performs 22 of them where WebMCP performs 4.
       </figcaption>
     </figure>
   )

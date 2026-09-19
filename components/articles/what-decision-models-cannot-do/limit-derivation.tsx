@@ -17,15 +17,15 @@
 // Server-rendered SVG, zero JS. Integer coordinates only — no Math.* anywhere,
 // so nothing can serialize differently on the server and in the browser.
 const W = 920
-const H = 596
+const H = 604
 
 const L = 24 // left column x
 const R = 512 // right column x
 const CW = 384 // column width
 const LC = L + CW / 2 // left column centre  = 216
 const RC = R + CW / 2 // right column centre = 704
-const RAIL_A = 440 // fork rail for the left column, inside the corridor
-const RAIL_B = 480 // fork rail for the right column
+const RAIL_A = 424 // fork rail for the left column, hugging its own edge
+const RAIL_B = 496 // fork rail for the right column
 
 const ORDINARY = [
   "literal reading",
@@ -212,16 +212,16 @@ export function LimitDerivation() {
         {/* ---------- detached band: ordinary weaknesses ---------- */}
         <line
           x1={L}
-          y1={344}
+          y1={352}
           x2={R + CW}
-          y2={344}
+          y2={352}
           className="stroke-border"
           strokeWidth={1}
           strokeDasharray="5 5"
         />
         <text
           x={460}
-          y={338}
+          y={344}
           textAnchor="middle"
           className="fill-muted-foreground font-mono"
           style={{ fontSize: 10.5 }}
@@ -229,13 +229,13 @@ export function LimitDerivation() {
           everything below is reported as a limit of the shape and is not one
         </text>
 
-        <Box x={L} y={364} w={872} h={88} tone="dashed" />
-        <text x={40} y={386} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
+        <Box x={L} y={372} w={872} h={88} tone="dashed" />
+        <text x={40} y={394} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
           NOT DERIVED — ordinary weaknesses any encoder has
         </text>
         {ORDINARY.map((label, i) => {
           const x = 40 + (i % 3) * 288
-          const y = 402 + (i < 3 ? 0 : 24)
+          const y = 410 + (i < 3 ? 0 : 24)
           return (
             <g key={label}>
               <rect
@@ -260,20 +260,20 @@ export function LimitDerivation() {
         })}
 
         {/* ---------- detached band: cardinality ---------- */}
-        <Box x={L} y={468} w={872} h={112} tone="dashed" />
-        <text x={40} y={490} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
+        <Box x={L} y={476} w={872} h={112} tone="dashed" />
+        <text x={40} y={498} className="fill-foreground font-mono" style={{ fontSize: 11 }}>
           NOT ONE LIMIT — five ceilings, five unrelated causes
         </text>
         <line
           x1={322}
-          y1={504}
+          y1={512}
           x2={322}
-          y2={572}
+          y2={580}
           className="stroke-border"
           strokeWidth={1}
         />
         {CONSTANTS.map(([who, cap, why], i) => {
-          const baseline = 515 + i * 15
+          const baseline = 523 + i * 15
           return (
             <g key={who} className="font-mono" style={{ fontSize: 10.5 }}>
               <text x={40} y={baseline} className="fill-muted-foreground">
