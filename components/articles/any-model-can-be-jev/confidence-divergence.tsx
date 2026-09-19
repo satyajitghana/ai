@@ -79,7 +79,7 @@ export function ConfidenceDivergence() {
             <tr className="border-b text-left font-mono text-xs text-muted-foreground">
               <th className="px-3 py-2 font-normal">distribution</th>
               <th className="px-3 py-2 text-right font-normal">
-                (p&#8202;&#8209;&#8202;1/n) / (1&#8202;&#8209;&#8202;1/n)
+                (p_max &minus; 1/n) / (1 &minus; 1/n)
               </th>
               <th className="px-3 py-2 text-right font-normal">1 &minus; H(p)/ln n</th>
               <th className="px-3 py-2 text-right font-normal">1 &minus; E|i&minus;mode|/(L&minus;1)</th>

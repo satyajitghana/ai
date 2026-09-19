@@ -34,7 +34,7 @@ const POLICY: Seg[] = [
 const ROWS: Row[] = [
   {
     name: "DPO",
-    sub: "policy + frozen reference",
+    sub: "policy + reference",
     segs: [
       ...POLICY,
       { label: "ref", cost: 2, kind: "ref" },
@@ -103,8 +103,6 @@ export function PassLedger() {
                   const w = s.cost * UNIT
                   const xPos = cursor
                   cursor += w
-                  const short = s.label.split(" ")[0]
-                  const fits = s.cost >= 4
                   return (
                     <g key={si}>
                       <rect
@@ -126,7 +124,7 @@ export function PassLedger() {
                         className="fill-foreground font-mono"
                         fontSize={10}
                       >
-                        {fits ? s.label : short}
+                        {s.label}
                       </text>
                       <text
                         x={xPos + w / 2}
