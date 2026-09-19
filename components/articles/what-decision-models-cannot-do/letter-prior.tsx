@@ -120,9 +120,8 @@ export function LetterPrior() {
           strokeDasharray="6 4"
         />
         <text
-          x={W - 14}
-          y={PLOT_TOP + (TOP - MEDIAN) * PX - 6}
-          textAnchor="end"
+          x={AXIS_X + 8}
+          y={PLOT_TOP + (TOP - MEDIAN) * PX - 7}
           className="fill-muted-foreground font-mono"
           style={{ fontSize: 10.5 }}
         >

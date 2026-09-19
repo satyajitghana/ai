@@ -41,6 +41,8 @@ type ModelSpec = {
   tokenizerMB: number
   entailIndex: number
   note: string
+  /** measured too slow to offer without a GPU — see the latency table */
+  needsGPU?: boolean
 }
 
 const MODELS: ModelSpec[] = [
@@ -72,10 +74,11 @@ const MODELS: ModelSpec[] = [
     label: "ModernBERT-large zeroshot",
     params: "395M",
     dtype: "q4f16",
-    weightsMB: 297.4,
-    tokenizerMB: 3.6,
+    weightsMB: 283.6,
+    tokenizerMB: 3.4,
     entailIndex: 0,
-    note: "Laya-class: a 4-bit ModernBERT-large. Only pick this if you meant to.",
+    needsGPU: true,
+    note: "Laya-class: a 4-bit ModernBERT-large. The only one here that gets the sample decision right — and 11-33 s per 16-option decision on WASM.",
   },
 ]
 
@@ -227,6 +230,12 @@ export function BrowserScorer() {
         setBackend(device)
       } catch (gpuErr) {
         if (device !== "webgpu") throw gpuErr
+        if (spec.needsGPU) {
+          // Falling back to WASM here would hand the reader an 11-33 s decision.
+          throw new Error(
+            "WebGPU session failed to build, and this model is too slow on the WASM fallback to run it anyway. Pick a smaller one.",
+          )
+        }
         setMessage("WebGPU session failed to build; retrying on WASM.")
         model = await AutoModelForSequenceClassification.from_pretrained(spec.repo, {
           dtype: spec.dtype,
@@ -329,15 +338,21 @@ export function BrowserScorer() {
             <div className="grid gap-2 sm:grid-cols-3">
               {MODELS.map((m) => {
                 const on = m.id === spec.id
+                // Measured at 11.4-32.6 s for a 16-option decision on the WASM
+                // backend. Offering that to a reader without a GPU is offering
+                // them a frozen tab, so it is off until an adapter is confirmed.
+                const blocked = m.needsGPU === true && gpu?.available !== true
                 return (
                   <button
                     key={m.id}
                     type="button"
                     onClick={() => setSpec(m)}
                     aria-pressed={on}
+                    disabled={blocked}
                     className={cn(
                       "rounded border p-2.5 text-left transition-colors",
                       on ? "border-foreground/50 bg-muted/50" : "hover:bg-muted/30",
+                      blocked && "cursor-not-allowed opacity-45 hover:bg-transparent",
                     )}
                   >
                     <div className="font-mono text-xs text-foreground">{m.label}</div>
@@ -347,7 +362,9 @@ export function BrowserScorer() {
                         {(m.weightsMB + m.tokenizerMB).toFixed(0)} MB
                       </span>
                     </div>
-                    <div className="mt-1.5 text-[11px] leading-snug text-muted-foreground">{m.note}</div>
+                    <div className="mt-1.5 text-[11px] leading-snug text-muted-foreground">
+                      {blocked ? "Needs WebGPU — measured at 11-33 s per decision on the WASM backend, so it is disabled here rather than freezing your tab." : m.note}
+                    </div>
                   </button>
                 )
               })}

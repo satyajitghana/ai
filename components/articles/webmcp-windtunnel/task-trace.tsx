@@ -114,7 +114,7 @@ function Line({
   return (
     <div className="flex gap-2 py-1">
       <span
-        className={`mt-px w-[3.6rem] shrink-0 rounded-sm px-1 text-center font-mono text-[10px] leading-5 ${
+        className={`mt-px w-[3.6rem] shrink-0 self-start rounded-sm px-1 text-center font-mono text-[10px] leading-5 ${
           tone === "jev"
             ? "bg-foreground text-background"
             : tone === "mercury"
