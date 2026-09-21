@@ -1,0 +1,461 @@
+---
+title: "144 tok/s needs 502 GB/s, and Apple sells two M5 Max chips"
+description: "Inco AI open-sourced Splash, a Metal inference engine for two Qwen models, under Apache-2.0; LM Studio shipped it a day later. The written benchmark says 74 tok/s for Qwen3.8-27B on an M5 Pro. The number going around says 144 on an M5 Max. One decode step reads 16.73 GB — computable from the repository's own tensor shapes and its 4.5-bit pack — and Inco publish the acceptance length separately, so both figures can be checked against a memory bus. 74 needs 84% of the M5 Pro's peak bandwidth. 144 needs 502 GB/s, which the 40-core M5 Max has and the 32-core one does not."
+date: 2026-09-19
+interest: 5
+helpful: 5
+featured: true
+tags:
+  - explainer
+  - inference
+  - speculative-decoding
+  - on-device
+  - systems
+  - kv-cache
+  - linear-attention
+draft: false
+---
+
+import { ByteLedger } from "@/components/articles/splash-engine/byte-ledger"
+import { BandwidthRoof } from "@/components/articles/splash-engine/bandwidth-roof"
+import { DecodeStep } from "@/components/articles/splash-engine/decode-step"
+
+On 17 September [Inco AI](https://inco.ai/blog/splash/) put an inference engine
+on GitHub under Apache-2.0. It runs on a Mac, it serves exactly two models, and
+it has no settings. A day later [LM Studio](https://lmstudio.ai/blog/splash-engine)
+shipped it as a backend. The number that travelled was **"144 tok/s on an M5
+Max"**, and that number is not in the launch post.
+
+What is in the launch post is **74 tok/s**, on a 48 GB M5 Pro, for Qwen3.8-27B,
+single request, short prompt, reasoning on. Those two figures differ by 1.95×.
+Two Apple chips differ by 2.00×.
+
+That coincidence is the whole story, and it is checkable, because Splash is the
+rare release where every input to the arithmetic is published by someone. The
+tensor shapes are hard-coded in the engine. The quantisation format is nine
+bytes per sixteen weights, in a function you can read. The acceptance length of
+the draft model is in a *different* Inco blog post, measured on benchmarks, for
+this exact drafter. And Apple publishes the memory bandwidth of every chip it
+sells.
+
+So: what does a decode step actually read, and does the bus have room for it?
+
+<Receipts src="/articles/splash-engine/data/claims.json" />
+
+## The engine hard-codes the model
+
+Most inference engines take a checkpoint and figure out what it is. Splash does
+the opposite, and says so in the README: *"Its kernels, draft model, and memory
+plan are specialized for each model it serves. That is why it is fast, and why
+there is nothing to configure."*
+
+This is not marketing abstraction. `runtime/model/Qwen3_8.hpp` is a struct with
+the model in it:
+
+```cpp
+uint32_t layers = 64;
+uint32_t hiddenSize = 5120;
+uint32_t vocabularySize = 248320;
+uint32_t attentionQueryHeads = 24;
+uint32_t attentionKvHeads = 4;
+uint32_t attentionHeadDimension = 256;
+uint32_t intermediateSize = 17408;
+uint32_t fullAttentionPeriod = 4;   // every fourth layer, and only those, has a KV cache
+```
+
+`fullAttentionPeriod = 4` is the single most consequential line in the file.
+Qwen3.8-27B is a **hybrid**: 16 of its 64 layers run gated attention, and the
+other 48 run Gated DeltaNet, a linear-attention layer that carries a
+fixed-size recurrent state instead of a growing cache. You can read that out of
+the widths too — the attention layers project to 14,336
+(`6144 + 1024 + 1024 + 6144`: queries, keys, values, and an output gate) and the
+GDN layers to 16,640.
+
+And the pack format is exact. From `runtime/model/WeightStore.cpp`:
+
+```cpp
+uint64_t q4PackedBytes(uint32_t outputSize, uint32_t inputSize) {
+    uint64_t elements = q4Elements(outputSize, inputSize);
+    return checkedWeightMultiply(elements / 16, 9, "Q4 packed byte count");
+}
+```
+
+Nine bytes per sixteen weights. Thirty-two bytes of nibbles plus a bf16 scale
+and a bf16 bias for every group of 64 inputs: **4.5 bits per weight**, with no
+per-tensor exceptions anywhere in the loader. Which means the checkpoint is
+reconstructible from the header file alone.
+
+<Receipts src="/articles/splash-engine/data/geometry.json" />
+
+It comes to **26,935,320,064 parameters in 15.155 GB**, against a launch post
+that says 15 GiB. The draft comes to 1.266 GB against a stated 1.2 GiB. And the
+Hugging Face package is 17.4 GB, which the two of them do not explain — until
+you notice that `ops/Vision.hpp` carries a 27-block vision tower at hidden 1,152
+and `QwenVision.cpp` reads every one of its tensors as **bf16**, not Q4. That is
+0.93 GB. 15.155 + 1.266 + 0.93 = 17.35.
+
+Everything closes. Which is the point of doing it: from here on, when I say a
+number of bytes, it is a number I computed rather than one I was told — and the
+vision tower is deliberately not in any of them, because decode never reads it.
+
+## What one step reads
+
+<ByteLedger />
+
+Two things in that bar are not obvious.
+
+The first is that **the language-model head is read twice**. The DFlash 2 draft
+has no head of its own — `DFlashDraft::addDecode` takes the target's
+`vocabularyProjection` as an argument and runs it. That is a reasonable design
+(the draft shares the target's vocabulary, so it may as well share the readout),
+but it means a 715 MB matrix crosses the bus twice per step, 8.6% of the total,
+for a model that is nominally 27B.
+
+The second is the **GDN state**. Forty-eight recurrent layers, 48 value heads
+each, a 128 × 128 matrix per head, in fp32 — 147 MiB per request, read and
+written back every single step. It does not grow with context. At a short
+prompt it costs the same bytes per step as about 9,000 tokens of KV cache would;
+at 32K it is less than a third of what the KV costs. That crossover is why Splash's decode rate barely
+moves between a short prompt and a 32K one.
+
+## The decode step is one command buffer
+
+Speculative decoding in Splash is not a feature you enable. The shapes are
+compile-time constants in `runtime/metal/abi/ExecutionGeometry.h`:
+
+```c
+#define SPLASH_DRAFT_QUERY_ROWS       8u
+#define SPLASH_DRAFT_PROPOSAL_TOKENS  7u
+#define SPLASH_TARGET_VERIFY_ROWS     8u
+#define SPLASH_MAXIMUM_BATCH_WIDTH    4u
+```
+
+and `Runtime.mm` states the consequence in a comment: *"DFlash has one physical
+graph: anchor + seven proposal rows. A shorter output budget only lowers the
+token-exact commit count; it never changes the Metal graph shape."*
+
+<DecodeStep />
+
+Everything in that frame — rope tables, the draft's embedding gather, the
+five-layer draft, the path selector, the verify-input assembly, the target's
+embedding gather, sixty-four target layers, top-32 sampling, the accept test,
+the GDN state commit and the draft's own state commit — is encoded into **one**
+`MTLCommandBuffer` and submitted once. The launch post's claim that *"the decode
+step runs as one unit"* is literally one `submitCommandAsync` call per step.
+
+This is the part that matters for the arithmetic. **The bytes do not depend on
+how many tokens the step emits.** Read the bar above, then drag the cut: 16.73 GB
+buys one token or eight, and it costs the same either way.
+
+It also explains `SPLASH_MAXIMUM_BATCH_WIDTH = 4`, which otherwise looks like an
+arbitrary ceiling for a server. Four lanes of eight rows is 32 rows, and the
+decode kernels exist in exactly four shapes —
+`decode_linear_q4_n128_m16`, `_m24`, `_m32` and the unbatched one. The
+scheduler's own header says so: *"decode dispatches every ready lane immediately
+and therefore has only the four real M8/M16/M24/M32 shapes."* The batch width is
+not a policy. It is the number of kernels they compiled.
+
+### The draft is a small model with an unusual selector
+
+The [previous piece on DFlash 2](/articles/dflash2) worked out what the selector
+does from Inco's blog post. The Metal is now public, and it does exactly that.
+`draft_select_edges` in `decode/sampling.metal` takes the top 16 candidates at
+each of the 7 positions, and for every (predecessor, candidate) pair computes
+
+```c
+context[i]   = predecessor_codebook[pred * 256 + dim] * row_hidden[dim];
+score       += context[i] * successor_codebook[cand * 256 + dim];
+```
+
+— a trilinear form over a rank-256 embedding of the previous token, a rank-256
+projection of the position's hidden state, and a rank-256 embedding of the
+candidate. A context-conditioned bigram, scored for all 16 × 16 edges at once.
+Then `draft_select_dflash` walks the seven positions, adding each candidate's
+own logit to the edge from whatever it just chose.
+
+That is the fix for the fundamental weakness of drafting a whole block in
+parallel: the positions are conditionally independent given the prefix, so they
+produce fluent tokens that do not follow each other. The edge term restores
+local dependence without making the draft sequential. It costs two bf16
+codebooks of 248,320 × 256 — 254 MB, a fifth of the draft. Inco measure the
+selector and its companion two-tap convolution together at **+1.05 tokens per
+pass** over plain DFlash on Qwen3.5-4B, for 1.3% more draft-verify cycle latency.
+
+The draft as a whole is about **1.9 B parameters**, 7% of the target's, and
+7.6% of the step's bytes. That is the trade the entire engine rests on: pay 7.6%
+more memory traffic, get 4.8× as many tokens out of the same target pass.
+
+## The roof
+
+Now the arithmetic. A step reads 16.73 GB and emits at most 8 tokens, so
+
+$$
+\text{tok/s} \;\le\; \frac{\text{memory bandwidth}}{16.73\ \text{GB}} \times \alpha
+$$
+
+where $\alpha$ is tokens accepted per pass. That is a straight line through the
+origin, one per chip, and nothing in the kernels, the scheduler or the draft can
+put a measurement above its own chip's line.
+
+The value of $\alpha$ is not mine to guess: Inco [published it](https://inco.ai/blog/dflash2/),
+for this drafter, on this model, at this block size. **4.80 tokens** averaged
+over five datasets; 4.39 on HumanEval and 4.79 on MBPP, the two that look most
+like the coding prompts the Splash benchmark uses.
+
+<BandwidthRoof />
+
+At the published 4.80:
+
+- **74 tok/s on the M5 Pro needs 258 GB/s — 84% of its 307 GB/s peak.** That is
+  a real number for a well-written bandwidth-bound kernel on Apple silicon, and
+  it is achievable. The claim is not just plausible; it is *tight*. There is no
+  room in it for a slack byte count, which is itself a check on my arithmetic.
+  (Apple publishes 307 GB/s against the 20-core M5 Pro; Inco tested the 16-core
+  bin, whose bandwidth Apple does not list separately. If that bin is lower, the
+  efficiency is *higher* than 84%, so the direction only makes the point harder.)
+- **144 tok/s needs 502 GB/s.** The 40-core M5 Max has 614 GB/s, so that is 82%
+  of peak — the same efficiency as the M5 Pro figure, which is exactly what you
+  would expect if both came off the same engine on the same workload. The
+  32-core M5 Max has 460 GB/s. 502 is **109% of it**. Not "unlikely". Not
+  achievable.
+
+So the 144 figure is almost certainly real, and it is specifically a **40-core
+M5 Max** number. Anyone reading "M5 Max" as the chip in the cheaper
+configuration will not see it, and no amount of tuning will get them there,
+because the shortfall is not in the engine.
+
+Two more consistency checks, both of which could have gone the other way:
+
+**The ratio.** 144 / 74 = 1.946. 614 / 307 = 2.000. A decode path that scales
+with memory bandwidth to within 2.7% across two chips is a decode path that is
+bandwidth-bound and very little else. Every kernel in this repository exists to
+approach the bus, not to beat it.
+
+**The control.** uzu appears in the same table at 19 tok/s, and the post states
+uzu's Qwen3.8-27B package has no draft — one token per forward pass. My byte
+count says a draft-free engine on this chip cannot exceed **20.8 tok/s**. uzu
+measures 19, or 91% of that bound. I did not fit anything to this; it is a
+number computed from a header file landing on top of a number measured by
+someone else on hardware I do not have.
+
+The one row that does *not* fit is Ollama's 24 tok/s, which would need 115% of
+the M5 Pro's bandwidth at one token per pass. So Ollama is not decoding one
+token per pass in that row. llama.cpp ships DFlash, and Qwen3.8-27B has a native
+multi-token-prediction head that Inco's own Table 4 measures at 4.28 accepted
+tokens. The launch post describes uzu's missing draft but says nothing about
+Ollama's, and on this evidence Ollama had one.
+
+## Why Apple silicon, and why not the M5
+
+The requirement is **M3 or newer** and **macOS 26.4 or later**, and neither of
+those is about the M5.
+
+`DeviceCapabilities::validationError()` refuses to start unless
+`appleGpuFamily >= 9` (Apple9 is the M3 generation), the device has unified
+memory, and — the interesting one — `supportsPlacementSparse`. The comment says
+what it is for: *"Exposes the full logical KV address space while committing
+physical memory only for pages in use."* macOS 26.4 is the first release where
+that is queryable, which is the entire reason for the OS floor.
+
+That is a genuinely Apple-specific mechanism doing genuinely useful work.
+`Q8PageStorage` allocates the KV pool as one placement-sparse buffer covering
+the model's full 256K logical context, then maps physical tiles into it 128
+pages at a time as the cache grows and unmaps them as it shrinks — the mapping
+batch size falls out of Metal's 64 KiB tile alignment against the 4-head scale
+buffer, which is the tightest constraint. There is no reallocation, no
+fragmentation, and the page table the attention kernel reads never changes
+shape.
+
+The unified memory is used for the other half: weights are `mmap`ed `MAP_SHARED`
+and handed to Metal with `wrapSharedMemory`, so the 15 GB of weights is never
+copied and stays file-backed and reclaimable. The comment explaining the
+`MAP_SHARED` choice is the kind you only write after being burned:
+*"Metal can materialize MAP_PRIVATE file mappings as anonymous dirty pages on
+GPU use. Keep immutable weights file-backed and reclaimable."*
+
+The kernels do use the matrix hardware, and the reason is worth following. A
+decode "GEMV" here is not a GEMV: the eight verify rows make it an 8 × K × N
+GEMM, and `decode/linear_q4.metal` is built on `q4_mpp_tile`, a Metal
+Performance Primitives cooperative-tensor tile, in shapes named `_m16`, `_m24`
+and `_m32` for two, three and four lanes. At M = 8 the Q4 matmul does about
+28 FLOPs per byte of weight; at M = 32 it does 114. That is the whole economic
+argument for speculative decoding restated as arithmetic intensity — and it is
+why the four-lane aggregate in the table above needs only 156 GB/s, half the
+bus, while the single-lane figure needs 84% of it.
+
+What is *not* doing the work is the M5's headline feature. The M5 generation
+puts a Neural Accelerator in every GPU core, and Splash's device policy branches
+on `appleGpuFamily` and `gpuCoreCount`, never on anything newer than Apple9.
+The evidence is in the two rates themselves. Going from a 16-core M5 Pro to a
+40-core M5 Max is **2.50× the GPU cores** and **2.00× the memory bandwidth**.
+The measured throughput ratio is **1.95×**. Decode on this engine tracks the
+memory controller, not the shader count, and an M5 is not what it needs.
+
+## The model is doing half the work
+
+Splash's most impressive number is not a throughput figure. It is **282 ms to first
+token on a cached 32K prompt**, against oMLX's 2,049 ms. And the second is that
+sixteen concurrent 32K requests fit on a 48 GB machine where a general-purpose
+memory policy took nine.
+
+Both of those are the hybrid architecture as much as the engine.
+
+A KV page in Splash is 32 tokens, int8, with an fp32 scale per token per head:
+**32.5 KiB per token**, across 16 attention layers. If Qwen3.8-27B ran attention
+in all 64 layers at these head dimensions it would be 130 KiB per token, and the
+sixteen-request demonstration — sixteen separate 32K contexts is 17.4 GB of KV,
+on top of 16.4 GB of weights and draft, which is already 34 GB of a 48 GB
+machine — would need 70 GB of KV alone and would be flatly impossible. The memory plan is good work. It is good work on a
+problem the model made four times smaller.
+
+The engine's own contribution to cache reuse is the part that is easy to miss:
+a recurrent layer has no cache to hit. Restoring a 32K prefix in a hybrid model
+means restoring the KV pages *and* the GDN state at that exact boundary, or
+replaying 48 layers of recurrence from scratch. Splash snapshots it — 147 MiB
+per cached prefix, in `CompositeStateLayout::cachedBytes`, sitting in RAM next
+to the pages. That is what the launch post means by *"cache reuse covers the
+recurrent layers too instead of replaying them"*, and it is the reason the
+number is 282 ms rather than 96 seconds.
+
+The sixteen-request claim, then, is a budgeting result, not a throughput one —
+those sixteen requests decode four at a time. The post is careful about this in
+a way the retellings are not, and adds a line that most vendors would have cut:
+*"We did not test whether another engine could be configured to do the same."*
+
+## Exact, up to top-32
+
+The acceptance test in `decode/sampling.metal` is the standard speculative
+sampling one, `u·q < p` with a residual `max(p − q, 0)` draw on rejection, so
+the output distribution is the target's. With one structural caveat: the target
+contributes **32 candidates per row** and the draft 16, and a token outside
+those sets looks up as probability zero.
+
+This is less alarming than it sounds, and the design is careful. The target's
+32 probabilities are computed as *"temperature over its first top_k entries,
+truncated by top_p, renormalized"* — the exact distribution the caller asked
+for. A token outside the caller's top-k has probability zero in the requested
+distribution too, so the truncation costs nothing, and the sampling is exact.
+
+The cost is moved to the API. `MAX_TOP_K` is 32, `top_k` is mandatory when
+sampling, and `server/protocol.py` returns a 400 reading *"top_k in [1,32] when
+sampling is enabled"*. You cannot ask Splash for untruncated sampling, or for
+top-k above 32, on any model, ever. Given that the default is Qwen's recommended
+20, most callers will never notice — but it is a real constraint that appears in
+neither the README nor the launch post, and if you are porting an eval harness
+that sweeps top-k, it will stop you.
+
+## What is actually open
+
+Apache-2.0, and it is not a gesture: 319 files, the complete Metal kernel set,
+the scheduler, the paged KV pool, the memory governor, the OpenAI and Anthropic
+server, the launcher, the tests, the benchmarks, and the kernel auto-tuner.
+This is the engine, not a wrapper around a binary.
+
+Three things are not in it, and they are the three that would let you use it on
+your own model:
+
+1. **The packer.** Splash loads `splash-packed-q4`; there is no tool here that
+   produces one. `DEVELOPMENT.md` states it plainly — *"ordinary HF weights need
+   conversion"* — and the converter is not published. Your fine-tune cannot run
+   on Splash unless Inco packs it.
+2. **The draft.** DFlash 2 training is not here; only the loader for its output.
+3. **The kernel agents.** The post credits *"our in-house kernel agents"* for
+   writing and tuning the Metal. The `.metal` files are the agents' output; the
+   agents are not in the repository.
+
+And the launch benchmark is not reproducible from the repo. `dev/benchmarks/`
+contains a Splash-vs-Splash HTTP regression harness that compares two Splash
+binaries in ABBA order — useful, honest, and not the thing that produced the
+oMLX, Lily, uzu and Ollama columns. Neither the cross-engine harness nor the
+selection of SPEED-Bench prompts is published, so the entire "2×" claim has to
+be taken on trust or re-run from scratch.
+
+`CONTRIBUTING.md` is candid about the governance too: the repository is *"a
+mirror of our development branch, published as a single commit per release"*,
+force-pushed, and pull requests cannot be merged. Apache-2.0 means you can fork
+it, ship it, and sell it. It does not mean you can contribute to it.
+
+## Shipped in LM Studio, with an asterisk worth one sentence
+
+<Figure
+  src="/articles/splash-engine/fig1.png"
+  alt="LM Studio's Runtime settings pane, showing a list of inference backends. Splash (Metal) appears under a heading reading Experimental backends, with a Download button beside it."
+  caption="Splash in LM Studio Bionic's runtime list. It is a first-class backend, and it is under Experimental, which is the correct shelf for a version 1.0.0 engine that is two days old (LM Studio, Splash Engine post)."
+/>
+
+The partnership is real — LM Studio integrates Splash as a selectable runtime,
+downloads it from the Runtime pane, and picks up the same two Hugging Face
+packages. "Day zero" is doing a little work in the launch post (LM Studio's post
+is dated the following day, and it requires Bionic 1.1.5 or newer), but the
+integration exists and is the fastest route to trying this without Homebrew.
+
+<Figure
+  src="/articles/splash-engine/fig2.png"
+  alt="A new LM Studio session with the model picker open, showing the Qwen3.6 35B A3B Splash package selected."
+  caption="The packages are Splash-format, not MLX or GGUF — which is why they are listed by their own Hugging Face repository and will not load on any other backend (LM Studio, Splash Engine post)."
+/>
+
+## What deserves credit
+
+Three things in this release are published against their author's interest, and
+they are the reason I believe the rest of it.
+
+The prefill section says the quiet part: *"reading a large repository cold is
+still expensive for every engine we tested, ours included."* 96 seconds to first
+token on a cold 32K prompt is in their own table, in a post whose headline is
+about speed.
+
+The methodology section pre-empts the objection: *"Because each engine ran at
+its own recommended settings, these are end-to-end comparisons. They show the
+combined effect of specializing the engine for its model, not the contribution
+of any one part."* That is precisely the right caveat on a set of bar charts
+that would otherwise read as kernel benchmarks.
+
+And the DFlash 2 post benchmarks its own drafter against **the model's native
+MTP head**, and publishes that MTP beats the community DSpark drafter by 0.66
+tokens on Qwen3.8-27B. A vendor selling a drafter did not have to run that
+column.
+
+Against that, one omission: the number that actually travelled is the one
+without a method. 144 tok/s appears in a video, on an unspecified chip, and by
+the time it reaches an aggregator it has lost the model, the quantisation, the
+prompt length, the concurrency and the reasoning setting. The written benchmark
+is careful enough that the video did not need to be loose.
+
+The best thing about the engine is that it made this checkable at all. Splash
+exposes `splash_draft_acceptance_ratio` on `/metrics`. Anyone who owns the
+hardware can settle every estimate in this article in about ninety seconds:
+
+```bash
+splash serve --model incoai/Qwen3.8-27B-Splash
+# run a coding prompt, then:
+curl -s 127.0.0.1:8000/metrics | grep -E 'acceptance|decode_tokens_per_second'
+```
+
+<ChangeMyMind>
+
+<Falsifier claim="One Splash decode step for Qwen3.8-27B reads 16.73 GB, so decode throughput is bounded by bandwidth ÷ 16.73 GB × tokens accepted per pass.">
+Every input is in the repository. Recompute `q4PackedBytes(o, i) = o·i/16·9` over the shapes in `Qwen3_8.hpp` and `DFlashDraft.hpp`, and check whether the draft really runs the target's `vocabularyProjection` rather than one of its own. If the total is materially below 16.73 GB — a cheaper head path, weights that stay in cache across layers, anything I have missed — then every efficiency figure in this piece is too high and the claims have more headroom than I say. If it is materially above, 74 tok/s on an M5 Pro is the number that stops being possible, and I have made an arithmetic error rather than found one.
+</Falsifier>
+
+<Falsifier claim="144 tok/s is a 40-core M5 Max number and cannot be produced on the 32-core bin.">
+Run `splash serve` on a 32-core M5 Max and decode a short coding prompt, single request, reasoning on. If it clears roughly 132 tok/s — the 460 GB/s ceiling at the published acceptance length — then either the step reads fewer bytes than I compute or the acceptance is better than Inco's own 4.80, and the "impossible" call is wrong. The tell is `splash_draft_acceptance_ratio` on `/metrics`: tokens per pass is `1 + 7 × ratio`, and anything much above 5.2 would rewrite the ceiling.
+</Falsifier>
+
+<Falsifier claim="Splash on this workload accepts about 4.6–4.8 tokens per verification pass, which is where my efficiency figures come from.">
+`curl 127.0.0.1:8000/metrics | grep splash_draft_acceptance_ratio` after a real agent session. If it reads meaningfully below 0.51 — under 4.6 tokens per pass — then 74 tok/s implies more than 90% of the M5 Pro's theoretical peak, which no real kernel sustains, and my byte count is too large. If it reads above 0.63, the engine has more headroom than I credit it with and the bandwidth story is less tight than I claim.
+</Falsifier>
+
+<Falsifier claim="Ollama's 24 tok/s in the launch table cannot be one token per forward pass.">
+Re-run Ollama's Qwen3.8-27B on a 48 GB M5 Pro with any speculative or MTP path explicitly disabled and measure short-prompt decode. If it still reaches 24 tok/s at one token per pass, it is moving fewer than 12.8 GB per token, which would mean its quantisation is materially smaller than Splash's 4.5-bit pack — and my assumption that the two engines read comparable bytes, which also underpins the uzu check, is wrong.
+</Falsifier>
+
+<Falsifier claim="Splash's sampling is exact for the requested distribution, and the top-32 cap costs nothing but expressiveness.">
+Set `temperature=1.0, top_k=32` and draw a few hundred thousand tokens from a fixed one-token prompt through Splash, and the same through a non-speculative reference on the same weights. Compare the empirical distributions. A significant divergence would mean the truncated accept test is not preserving the target distribution the way I read `sparse_residual_sample` as doing, and the caveat is a correctness bug rather than an API limit.
+</Falsifier>
+
+<Falsifier claim="The M5's per-core Neural Accelerators are not what makes Splash fast; the memory controller is.">
+Compare decode throughput on an M4 Max (546 GB/s, no per-core Neural Accelerator) against a 32-core M5 Max (460 GB/s, with one), on the same model and prompt. If the M5 Max wins despite 16% less bandwidth, decode is getting real work out of the matrix hardware and my reading of the Q4 tile kernels as bandwidth-bound is wrong. Splash requires M3 or newer, so this experiment is available today.
+</Falsifier>
+
+</ChangeMyMind>

@@ -1,0 +1,391 @@
+---
+title: "Qwen-Image-2.1: the 7B is 28% of the pipeline, and the licence is not Apache-2.0"
+description: "Qwen open-sourced a unified text-to-image and editing model on 20 September 2026. I read the weights instead of the announcement: 7,115,124,736 parameters in the denoiser, exactly, from the safetensors headers — but a 25.6B pipeline on the path the README recommends, and the first Qwen image model in seven that ships under a non-commercial research licence rather than Apache-2.0. The denoiser stops being an MMDiT: 32 single-stream blocks with one shared modulation projection, a block-causal mask, and a prefix KV cache that is exact only because condition tokens modulate from t = 0. The one published eval is Qwen's own benchmark, scored by Qwen's own judge model, on Chinese prompts, measuring the single capability this release did not change."
+date: 2026-09-20
+interest: 4
+helpful: 4
+tags:
+  - image-generation
+  - diffusion
+  - qwen
+  - open-weights
+  - inference-optimization
+  - benchmarks
+  - explainer
+draft: false
+---
+
+import { ParamBudget } from "@/components/articles/qwen-image-2-1/param-budget"
+import { PrefixCache } from "@/components/articles/qwen-image-2-1/prefix-cache"
+import { RubricMath } from "@/components/articles/qwen-image-2-1/rubric-math"
+
+Two months ago Qwen shipped **Qwen-Image-3.0** as an API and published no architecture, no
+parameter count and no benchmark table — a capabilities announcement, which is what
+[the piece on it here](/articles/qwen-image-3) had to work with. On 20 September 2026 they
+shipped **Qwen-Image-2.1**: a lower version number, released *after* 3.0, with the weights
+attached.
+
+So this time there are files to read, and I read them rather than the blog. Every number
+below comes from
+[`Qwen/Qwen-Image-2.1`](https://huggingface.co/Qwen/Qwen-Image-2.1) and its ModelScope
+mirror — `config.json` per component, the safetensors indexes, the tensor headers pulled
+over HTTP range reads, and the `LICENSE` file. They do not all say what the announcement
+says, and the gaps are worth knowing before you plan around this model.
+
+<ModelCard
+  repo="Qwen/Qwen-Image-2.1"
+  claimed="7B visual generation component, 32 Single-Stream DiT layers, open-source"
+  note="Measured from the safetensors headers: the denoiser is 7,115,124,736 parameters in 297 tensors, all BF16, with no bias tensors anywhere — the claim holds exactly. The pipeline around it does not: 8,767,123,696 in the Qwen3-VL text encoder, 337,740,404 in the FP32 autoencoder, and a further 9,409,813,744 if you use the prompt rewriter the README recommends. The LICENSE is the Qwen Research License Agreement, non-commercial, dated 20 September 2026 — not Apache-2.0, which every previous open Qwen image model carried."
+/>
+
+## The denoiser stops being an MMDiT
+
+Qwen-Image 1.0 and its December refresh were both `QwenImageTransformer2DModel`: 60 joint
+blocks, 24 heads of 128 (3,072 wide), a separate text stream with its own modulation and
+its own MLP, and a text encoder whose states arrived at `joint_attention_dim: 3584`. That
+is an MMDiT, in the MM-DiT-from-SD3 sense, and it weighed 20,430,401,088 parameters.
+
+2.1 is `QwenImage21Transformer2DModel`, and the tensor names give it away before the config
+does. There is no `txt_mlp`, no `add_q_proj`, no `to_add_out` — no second stream at all.
+Text is projected once by `txt_in` into the same 4,096-wide space, condition-image latents
+are substituted into the sequence at the slots the vision-language encoder reserved for
+them, the target image's tokens are appended, and one stack of 32 blocks runs over the lot.
+
+| | Qwen-Image 1.0 / 2512 | Qwen-Image-2.1 |
+|---|---|---|
+| denoiser class | `QwenImageTransformer2DModel` | `QwenImage21Transformer2DModel` |
+| blocks | 60, dual-stream | 32, single-stream |
+| width | 24 x 128 = 3,072 | 32 x 128 = 4,096 |
+| `mlp_ratio` | 4 (implicit) | 3 |
+| modulation | per block | one shared projection |
+| `patch_size` | 2 | 1 |
+| denoiser params | 20,430,401,088 | 7,115,124,736 |
+| text encoder | Qwen2.5-VL-7B | Qwen3-VL-8B |
+| VAE | `z_dim` 16, 8x spatial, RGB | `z_dim` 64, 16x spatial, RGBA |
+| licence | Apache-2.0 | Qwen Research (non-commercial) |
+
+Two of those rows do most of the shrinking, and neither touches depth or width.
+`mlp_ratio: 3` is unusual — nearly every transformer since 2017 uses 4 — and the modulation
+is a single top-level `Linear(4096 → 16384)` that every block slices its scales and gates
+out of, rather than 32 copies of it. The diffusers port says so in as many words: *"blocks
+hold no modulation parameters of their own."* There are no bias tensors, and the final
+AdaLN emits scale only, no shift.
+
+<ParamBudget />
+
+The 7B claim is exact. The framing around it is the part to watch: the README's "just 7B
+parameters in its visual generation component" is true of the component and not of the
+thing you download, which is 33.1 GB of BF16 and FP32 weights before you add the rewriter.
+Some of that is dead: the Qwen3-VL text encoder ships its 622,329,856-parameter `lm_head`,
+`tie_word_embeddings` is `false`, and the pipeline never generates a token. vLLM-Omni's
+recipe notes the same thing from the other direction — it excludes "its vision tower and
+unused `lm_head`" when quantising.
+
+## Block-causal attention, and why the cache is exact
+
+The interesting engineering is in how the sequence is masked. The release calls it
+"mixed-granularity attention"; the implementation is one line:
+
+```python
+# diffusers/models/transformers/transformer_qwenimage21.py
+allowed = ((q_idx >= kv_idx) | same_image_block) & key_valid[batch_idx, kv_idx]
+```
+
+The joint sequence is causal, the way a language model is causal — except that every image
+block, each reference image and the target, is internally bidirectional. Text tokens get
+token-level granularity; image tokens get chunk-level. The release's own figure is the mask
+itself, which is the right way to draw it:
+
+<Figure
+  src="/articles/qwen-image-2-1/fig1.png"
+  alt="An attention mask drawn as a grid of query rows against key columns, divided into four segments — system prefix, optional input image, edit instruction, target image. The text segments form causal staircases; the image segments are solid blocks, bidirectional within themselves. A bracket labels the first three segments 'Compute once, Reuse K/V' and the target image segment 'Compute each step'."
+  caption="The mixed-granularity mask: causal across the sequence, bidirectional inside each image block (Qwen-Image-2.1 release, architecture figure)."
+/>
+
+Causality alone would not buy anything during sampling, because a diffusion step changes
+every token's activations. What makes the prefix reusable is a second switch,
+`causal_condition: true`, and it is the detail worth carrying away from this release. Text
+and condition-image tokens are modulated from `t = 0` instead of from the sampled timestep
+— the code builds a modulation tensor with `batch_size + 1` rows and routes the prefix to
+the extra one. Their activations therefore do not depend on the step, so their K and V do
+not either, and caching them is exact rather than approximate. The library refuses to let
+you get this wrong:
+
+```
+kv_cache requires `causal_condition=True`. The cache is only valid because text and
+condition-image tokens modulate from t=0, which makes their activations independent of
+the denoising step.
+```
+
+Whether that is worth anything depends entirely on how much prefix there is, and the
+arithmetic is simple enough to do exactly. `patch_size` is 1 and the VAE compresses 16x, so
+an image is exactly `(H/16) × (W/16)` tokens: a 1024px reference costs 4,096 of them, a
+2048px target costs 16,384.
+
+<PrefixCache />
+
+At four references and a 1024px target that puts 19.8% of the sequence in the recomputed
+part, against the "about a fifth" the vLLM-Omni recipe reports for the same configuration —
+which is the cross-check I wanted, because it means the model matches the serving stack's
+behaviour rather than my reading of the code. Drag the references to zero and the saving
+collapses to nothing, which is also what the recipe says: "plain short-prompt
+text-to-image has almost nothing to cache." This is an editing optimisation that a
+text-to-image benchmark cannot see.
+
+<Callout type="note">
+The README claims up to **10 reference images**. vLLM-Omni, the serving path the same
+README lists as Day-0 supported, caps a request at **four** and rejects a fifth with a 400.
+Both can be true — one is a model capability, the other a server policy — but a release
+note that advertises 10 and a Day-0 integration that allows 4 are a bad pair to ship
+together, and nothing in either document reconciles them.
+</Callout>
+
+## The alpha channel is real; the published evidence is 684 pixels wide
+
+The feature that actually distinguishes this checkpoint is in `vae/config.json`, one line
+from the top: `in_channels: 4`, `out_channels: 4`. The autoencoder takes and returns RGBA.
+`z_dim` is 64, `scale_factor_spatial` is 16, `decoder_base_dim` is 144 against a
+`base_dim` of 96 — so the decoder carries 259,044,052 of the VAE's 337,740,404 parameters
+and the encoder only 78,675,680, a 3.3:1 split. It is stored in FP32, alone among the three
+components, which is why 337M parameters occupy 1.35 GB.
+
+This folds in the December 2025 `Qwen-Image-Layered` model as a capability of the base
+checkpoint rather than a separate download, and the prompt format is a blunt instrument:
+you ask for it in English, in the prompt, with a sentence the model card spells out —
+`This is an RGBA image with transparency. … The image has alpha channel and the background
+is transparent.`
+
+<Figure
+  src="/articles/qwen-image-2-1/fig3.png"
+  alt="A cartoon dragon in Chinese new-year dress riding a lion-dance lion, holding a lantern and a firecracker, with no background. The empty area is drawn as a pale grey and white checkerboard, showing that those pixels are transparent rather than white."
+  caption="A published RGBA sample, composited here onto a checkerboard rather than white so the alpha channel survives the page (Qwen-Image-2.1 release, transparency showcase)."
+/>
+
+I measured that file's alpha channel rather than taking the claim. All 256 levels are
+present, so it is not a one-bit matte — but the histogram is sharply bimodal: 53.1% of
+pixels fully transparent, 23.5% fully opaque, 22.6% within 31 levels of one of those two
+extremes, and **0.8% of the image anywhere between alpha 32 and 223**. That is a clean cutout
+with an anti-aliased fringe, not translucency. It is also a 684 x 685 web asset, well under
+the 2048px the card gives as the default generation size, and downsampling manufactures
+fringe alpha on its own — so even the fringe is not safely attributable to the model.
+The release publishes no
+native-resolution RGBA sample, which means the one claim you most want to check from the
+artifacts is the one you cannot.
+
+## The licence is the news
+
+Every open Qwen image model before this one is Apache-2.0. I checked all of them on the
+Hub:
+
+| Repo | Released | Licence |
+|---|---|---|
+| `Qwen/Qwen-Image` | Aug 2025 | Apache-2.0 |
+| `Qwen/Qwen-Image-Edit` | Aug 2025 | Apache-2.0 |
+| `Qwen/Qwen-Image-Edit-2509` | Sep 2025 | Apache-2.0 |
+| `Qwen/Qwen-Image-Edit-2511` | Dec 2025 | Apache-2.0 |
+| `Qwen/Qwen-Image-Layered` | Dec 2025 | Apache-2.0 |
+| `Qwen/Qwen-Image-2512` | Dec 2025 | Apache-2.0 |
+| `Qwen/Qwen-Image-Bench` | May 2026 | Apache-2.0 |
+| **`Qwen/Qwen-Image-2.1`** | **Sep 2026** | **Qwen Research License** |
+
+The `LICENSE` file is dated 20 September 2026 and says what it says:
+
+> You are granted a non-exclusive, worldwide, non-transferable and royalty-free limited
+> license … to use, reproduce, distribute, copy, create derivative works of, and make
+> modifications to the Materials **FOR NON-COMMERCIAL PURPOSES ONLY**.
+
+with `"Non-Commercial"` defined in clause 1(i) as *"for research or evaluation purposes
+only"*, and commercial use routed to an email address. Both prompt-rewriting checkpoints
+carry the same terms. So does the VAE — there is no separate licence for it, which matters
+because autoencoders get lifted out of releases and reused more often than denoisers do,
+and this is the first 16x RGBA one worth lifting.
+
+This is not a use-restriction licence in the RAIL sense; there is no acceptable-use annex
+and no list of forbidden applications. It is a plain commercial restriction, with Chinese
+governing law and exclusive jurisdiction in the Hangzhou courts. "Open-source" is the word
+the blog, the README and the model card all use. The [OSI definition](https://opensource.org/osd)
+has said no field-of-endeavour restrictions since 1998, and this is one.
+
+The downstream is already inconsistent about it, within hours of release. Of the two FlagOS
+repackages that Qwen's own README links,
+[`FlagRelease/Qwen-Image-2.1-BF16-zhenwu-FlagOS`](https://modelscope.cn/models/FlagRelease/Qwen-Image-2.1-BF16-zhenwu-FlagOS)
+is labelled **apache-2.0** on ModelScope, which is not a licence that repo is in a position
+to grant. Among the community GGUF conversions that appeared the same day, two carry
+`qwen-research` and one carries no licence field at all. None of that is Qwen's doing, and
+all of it is the predictable consequence of shipping a research licence into a family
+people have spent a year treating as Apache.
+
+## What the one published eval measures
+
+There is no technical report. arXiv has no Qwen-Image-2.1 paper; the most recent Qwen image
+paper is the benchmark's, from May. The GitHub repo is a README, a LICENSE, and a
+`prompt_rewrite/` directory — no inference code of its own, no training code, no evaluation
+harness. The entire quantitative record of this release is one chart.
+
+<Figure
+  src="/articles/qwen-image-2-1/fig2.png"
+  alt="A bar chart of 29 image models ranked by a single total score from 67.01 down to 46.17, with Qwen Image 2.1 highlighted in green at 60.28 in seventh place. Below each bar, a second row shows parameter counts: open models are labelled with sizes from 6B to 80B, while closed models show a padlock icon on a full-height bar and a footnote that closed models' parameter counts are not disclosed."
+  caption="The only quantitative claim in the release: one aggregate score across 29 models, on Qwen's own benchmark (Qwen-Image-2.1 release, Qwen-Image-Bench evaluation comparison)."
+/>
+
+Name the denominators, because the chart does not.
+[Qwen-Image-Bench](https://huggingface.co/datasets/Qwen/Qwen-Image-Bench) is **1,000
+expert-written bilingual prompts**, scored across a three-level rubric — 5 pillars, 23
+sub-capabilities, **56 verifiable facets**. Each facet is judged Fail, Pass or Excel, mapped
+to **0, 60 and 100**, `N/A` excluded, and averaged up the tree. The judge is **Q-Judger**, a
+Qwen3.6-27B fine-tune trained on 130,000+ annotated pairs from 80 art-academy annotators,
+run at `temperature 0`, `seed 42`, thinking on.
+
+So: Qwen's model, on Qwen's prompts, scored by Qwen's judge, against competitors Qwen ran
+itself. That is not disqualifying — the benchmark, the judge and the dataset are all
+published under Apache-2.0, which is more than most vendors do, and you can rerun it. It is
+also not third-party, and the chart does not say so.
+
+Three things the chart leaves out that its own sources state:
+
+1. **The leaderboard it reuses is the Chinese-prompt run.** Eighteen of the 29 bars match
+   the benchmark's published leaderboard to the hundredth, and that leaderboard carries a
+   footnote: *"results are computed based on Q-Judger's evaluation of images generated from
+   Chinese prompts. We will release the results for image generation from English prompts
+   soon."* The chart inherits the denominator and does not mention it.
+2. **The human-agreement figure is a model-level rank correlation.** Spearman
+   $\rho = 0.92$ is impressive and it is computed over $N = 18$ **models**, not over images.
+   It says the judge orders a field the way experts do. It does not say the judge is right
+   about any particular picture, and it says nothing at all about whether a 0.46-point gap
+   between two adjacent bars is a real difference.
+3. **It is a text-to-image benchmark.** Transparency, ten-reference composition, circle- and
+   mask-guided local editing, identity preservation — everything this release actually added
+   — is measured by none of it. The chart scores the one capability 2.1 did not change.
+
+The rubric is worth putting the totals back onto, because 60 is not an arbitrary number on
+that scale. It is the score of a model that passes every facet and excels at none.
+
+<RubricMath />
+
+That gives the chart a reading it does not advertise. Qwen-Image-2.1 at 60.28 is the
+lowest bar on it that could, in principle, have zero Fails — everything below is carrying a
+floor on how often the judge said the image failed outright, up to 23.1% for the last bar.
+Against its own line the improvement is real and large: 49.23 for Qwen-Image 1.0, 52.06 for
+2512, 60.28 here, at roughly a third of 1.0's denoiser size. Against the field it is
+seventh of 29, below Qwen's own `Qwen Image 3 Pro` at 62.36, and the six models above it are
+all closed.
+
+<Callout type="warn">
+The second row of that chart draws every closed model's parameter count as a full-height
+bar with a padlock, footnoted "closed-source models' parameter counts are not disclosed".
+A bar whose height encodes *unknown* sits on the same axis as bars whose height encodes 6B
+and 80B. Read the row as a lookup table, not as a chart.
+</Callout>
+
+## What it costs to run, from someone other than the vendor
+
+The release makes an efficiency argument — "compact", "lightweight", "low computational
+cost" — and publishes no latency, no throughput and no memory figure to support it. The
+only measured numbers I found are third-party, in the
+[vLLM-Omni recipe](https://recipes.vllm.ai/Qwen/Qwen-Image-2.1), taken on one NVIDIA GB300
+at 1024 x 1024 and 40 steps:
+
+| Config | Peak memory | Time per image |
+|---|---:|---:|
+| BF16 | 34.0 GB | 3,282-4,492 ms |
+| DiT FP8, `img_mlp` kept BF16 | 32.0-32.7 GB | 3,356-4,706 ms |
+| Text-encoder FP8 | 27.5-28.1 GB | 3,427-4,770 ms |
+
+Two things follow. 34 GB peak means a "7B" model does not fit a 24 GB card without
+offloading — the pipeline is 33.1 GB of weights before activations, of which the denoiser
+is 14.2 GB. And FP8 on Blackwell buys memory, not speed: none of the quantised rows
+is faster, which is what you expect when the bottleneck is bandwidth rather than tensor
+cores. Qwen ships no quantised export of its own; every FP8, W8A8 and GGUF build is a
+partner's or the community's.
+
+## What is missing
+
+Shortest useful list, all verified by absence:
+
+- **No technical report.** No arXiv preprint, no PDF, no architecture section beyond eight
+  bullet points in a README.
+- **No training data disclosure.** Nothing about corpus, scale, filtering, or the licensing
+  of what it learned from. The flagship multi-reference demo is a generated group photograph
+  assembled from six publicity portraits of identifiable real people, and the release has
+  nothing to say about that either.
+- **No eval for anything new.** The benchmark covers text-to-image; the transparency,
+  editing and reference-composition claims are supported by curated examples only. No
+  GEdit, no ImgEdit, no alpha-matting metric, no identity-similarity number.
+- **No first-party quantisation.** BF16 shards only, plus an FP32 VAE.
+- **No inference code in the repo.** The GitHub repository ships the prompt rewriter and
+  nothing else; the model runs through third-party libraries from day one, which is a
+  reasonable choice and worth knowing before you file an issue.
+- **No limitations, bias or intended-use section** in the model card. Not one line.
+- **No separate licence for the VAE.**
+
+## The take
+
+Qwen-Image-2.1 is a good piece of engineering and a worse release than the six that
+preceded it. The architecture work is genuine and legible from the files: a single-stream
+DiT at a third of the previous denoiser's size, a shared modulation projection and
+`mlp_ratio: 3` that together account for 3.69B of the parameters it does not have, a 16x
+RGBA autoencoder that makes transparency a property of the latent space instead of a second
+model, and a block-causal mask whose prefix cache is exact because someone thought to
+modulate the condition from `t = 0`. That last one is the idea I would steal.
+
+What surrounds it is thinner than the version number suggests. One aggregate score on the
+vendor's own benchmark, on the vendor's own judge, on the Chinese-prompt run, measuring the
+capability that did not change. No report, no data, no numbers for the new features, no
+first-party quantisation. And a licence that moves a year-old Apache-2.0 family to
+non-commercial research terms while the announcement keeps saying "open-source" — which is
+the one change here that decides whether you can use it at all, and the only one the blog
+post does not mention.
+
+<ChangeMyMind>
+  <Falsifier claim="The denoiser is exactly 7,115,124,736 parameters and contains no second text stream.">
+    Sum the shapes in
+    `transformer/diffusion_pytorch_model.safetensors.index.json` and the two shard headers.
+    A `txt_mlp`, `add_q_proj` or `to_add_out` tensor anywhere in those 297 names, or a
+    total that does not reconcile with the index's `total_size` of 14,230,249,472 bytes at
+    two bytes per BF16 parameter, falsifies it.
+  </Falsifier>
+
+  <Falsifier claim="The published quantitative comparison is the vendor's benchmark, judged by the vendor's model, on Chinese prompts.">
+    A third-party evaluation of this checkpoint on a harness Qwen did not write, or an
+    English-prompt Qwen-Image-Bench leaderboard that reproduces the chart's ordering, would
+    change how much weight the 60.28 carries. The footnote I am relying on is on the
+    dataset card at `huggingface.co/datasets/Qwen/Qwen-Image-Bench`; if it is edited or
+    the English run lands, this section is stale.
+  </Falsifier>
+
+  <Falsifier claim="The prefix KV cache is worth little for plain text-to-image and a lot for multi-reference editing.">
+    The widget computes token shares and MACs from the config; it times nothing. A measured
+    step-time breakdown showing the cached path saving substantially less than the token
+    share predicts — because the win is bandwidth-bound, or because cache reads cost more
+    than the recompute they avoid — would falsify the framing, not the arithmetic.
+  </Falsifier>
+
+  <Falsifier claim="Qwen-Image-2.1 is the first Qwen image model under a non-commercial licence.">
+    A Qwen image checkpoint on the Hub or ModelScope, dated before 20 September 2026, whose
+    `LICENSE` is not Apache-2.0. I checked the eight repos in the table and nothing else.
+  </Falsifier>
+
+  <Falsifier claim="The published RGBA sample is a clean cutout with an anti-aliased fringe, not real translucency.">
+    An alpha histogram from a native-resolution generation — not the 684px web asset — with
+    meaningful mass between alpha 32 and 223. My measurement is on a downscaled published
+    file, and resampling alone can account for the fringe I found; a glass or smoke prompt
+    at 2048px would settle it in either direction.
+  </Falsifier>
+</ChangeMyMind>
+
+---
+
+*Sources, all read directly: the [Hugging Face repo](https://huggingface.co/Qwen/Qwen-Image-2.1)
+(`model_index.json`, `transformer/config.json`, `text_encoder/config.json`,
+`vae/config.json`, `scheduler/scheduler_config.json`, both safetensors indexes, the tensor
+headers by range read, and `LICENSE`); the
+[ModelScope mirror](https://modelscope.cn/models/Qwen/Qwen-Image-2.1), whose card is
+byte-identical to the Hub's; the [GitHub repo](https://github.com/QwenLM/Qwen-Image-2.1);
+the [release blog](https://qwen.ai/blog?id=qwen-image-2.1); the diffusers implementation of
+`QwenImage21Transformer2DModel` and `AutoencoderKLQwenImage21`; the
+[Qwen-Image-Bench dataset](https://huggingface.co/datasets/Qwen/Qwen-Image-Bench) and
+[Q-Judger model](https://huggingface.co/Qwen/Qwen-Image-Bench) cards, and their paper
+([arXiv:2605.28091](https://arxiv.org/abs/2605.28091)); and the third-party
+[vLLM-Omni recipe](https://recipes.vllm.ai/Qwen/Qwen-Image-2.1) for the only measured
+latency and memory figures in this piece. Figures are the release's own, served locally and
+flattened; the checkerboard behind the RGBA sample is mine.*
