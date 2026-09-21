@@ -1,0 +1,108 @@
+---
+title: "Two ways to read a decision out of a model"
+description: "The whole of how a System One model turns a caller-supplied option list into probabilities, in runnable Python. Same input, same output shape, two completely different mechanisms — and only one of them is sensitive to the order you list the options in."
+date: 2026-09-18
+lang: python
+tags:
+  - llm
+  - inference
+  - calibration
+---
+
+Both take `(evidence, question, options[])` and return one probability per option,
+for an option list the caller chose at request time. Neither generates any text.
+Neither has the number of options baked into its weights.
+
+That is where the similarity stops.
+
+```python
+import torch, torch.nn.functional as F
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FAMILY 1 — vocabulary readout.  (openjev, Bespoke Nimble, any LoRA-on-an-LLM)
+#
+# The options are TEXT IN THE PROMPT. The model only ever picks a letter.
+# One forward pass, exactly like generation — you just never sample.
+# ─────────────────────────────────────────────────────────────────────────────
+def read_by_vocabulary(model, tok, evidence, question, options):
+    letters = "ABCDEFGHIJKLMNOP"[: len(options)]          # hard cap: 16 options
+    prompt = tok.apply_chat_template([
+        {"role": "system", "content":
+            "Apply the supplied criterion to the supplied evidence. Choose exactly "
+            "one listed option. Respond with only its uppercase letter."},
+        {"role": "user", "content": json.dumps({
+            "evidence": evidence, "criterion": question,
+            "options": [{"letter": L, "description": o}
+                        for L, o in zip(letters, options)]})},
+    ], tokenize=False, add_generation_prompt=True)
+
+    # each letter must be ONE token that round-trips, or you cannot slice its row
+    slots = [tok.encode(L, add_special_tokens=False)[0] for L in letters]
+
+    ids = torch.tensor([tok.encode(prompt, add_special_tokens=False)])
+    with torch.inference_mode():
+        logits = model(ids).logits[:, -1, :]              # (1, 151936)  <- full vocab
+    return F.softmax(logits[0, slots], dim=-1)            # (N,)  renormalised over N rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FAMILY 2 — per-option scalar scorer.  (cua-s1-forms, open-jev-deberta, and —
+# per the published disclosures — Jev itself)
+#
+# No letters. No vocabulary. The head's output dimension is ONE, and it runs
+# once per option. N is a loop bound.
+# ─────────────────────────────────────────────────────────────────────────────
+class DecisionHead(torch.nn.Module):            # open-jev-deberta's real shapes:
+    def __init__(self, d=1024):                 #   0.weight [1024, 3072]
+        super().__init__()                      #   2.weight [1, 1024]
+        self.net = torch.nn.Sequential(         #   = 3,147,777 params
+            torch.nn.Linear(3 * d, d), torch.nn.GELU(), torch.nn.Linear(d, 1))
+
+    def forward(self, q, o):                    # q, o: (B, 1024) pooled spans
+        return self.net(torch.cat([q, o, q * o], dim=-1)).squeeze(-1)   # (B,)
+
+def read_by_scoring(encoder, head, tok, evidence, question, options):
+    ctx = pool(encoder, tok, f"{evidence}\n{question}")           # (1024,)
+    scores = torch.stack([                                        # one scalar EACH
+        head(ctx[None], pool(encoder, tok, o)[None])[0] for o in options
+    ])                                                            # (N,)
+    return F.softmax(scores, dim=-1)
+```
+
+## What actually differs
+
+The first slices `N` rows out of a 151,936-wide vector that was computed anyway.
+The second computes `N` separate numbers, one per option, from a head whose output
+layer is `Linear(1024, 1)`.
+
+Consequences, in order of how much they will bite you:
+
+- **Order.** Family 1 is sensitive to it, because `A` and `B` are different tokens
+  carrying different learned priors. Measured on openjev's own committed
+  predictions: reversing the option list changes the answer on
+  **10 of 36 cases — 27.8%** — and confidently, not marginally. Family 2 has no
+  letters and no positions, so the question does not arise.
+- **Cardinality.** Family 1 caps at the number of single-token letters you can
+  find: `LETTERS = "ABCDEFGHIJKLMNOP"`, so 16. Family 2 runs the loop more times;
+  TypeSafe quote 255 for Jev, with a second stage above some threshold.
+- **Cost.** Family 1 is one forward pass regardless of `N`. Family 2 is `N` head
+  evaluations over a shared encoding — cheap per option, but linear in `N`.
+
+## Checking the first one is real
+
+`softmax` over the sliced logits *is* the returned distribution, and openjev
+commits enough to verify it:
+
+```python
+# openjev commits option_logits AND probabilities for every row
+worst = max(
+    abs(a - b)
+    for row in predictions
+    for a, b in zip(softmax(row["option_logits"]), row["probabilities"])
+)
+# 144 rows, worst |diff| = 9.7e-08 — i.e. the 6-dp rounding in the JSON
+```
+
+Written up at length in [RLCD is not constrained
+decoding](/articles/rlcd-calibrated-decisions) and [A System One model in 706,048
+parameters](/articles/cua-s1-forms).

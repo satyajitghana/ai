@@ -10,7 +10,7 @@ The agent map for this repo. An **AI-native personal site** (Next.js 16, App Rou
 - `content/**` — MDX content (blog, logs, projects, papers, snippets, notes).
 - `data/*.ts` — typed, hand-curated records (profile, resume, etc.) — single sources of truth for pages, `/api/*`, JSON-LD, the resume PDF, and `llms.txt`.
 - `scripts/` — `validate-content.mts` (the safety net), `build-resume-pdf.mts`, `fetch-arxiv.mts` (arXiv candidate fetcher — dedups against ids already in `content/arxiv/`, and anchors its date window to arXiv's newest returned paper so a fast local clock never empties the results).
-- `brand-crew/` — the installable plugin: `skills/`, `commands/`, `agents/`, `hooks/`, `brand/voice.md` (the brand DNA every author reads), `.claude-plugin/plugin.json`.
+- `brand-crew/` — the installable plugin: `skills/`, `commands/`, `agents/`, `hooks/`, `brand/voice.md` (the brand DNA every author reads), `.claude-plugin/plugin.json`. One skill is vendored rather than ours — `skills/hand-drawn-canvas-animation/` (MIT, Alexey Fateev); see its `VENDORED.md` for the upstream commit, the two local deltas, and the render + ffmpeg recipe.
 - `plans/` — `00-ai-site-master-plan.md` (the site) and `01-brand-crew.md` (the crew). Read these for the full design.
 
 ## Content-layer contract
@@ -40,6 +40,26 @@ Rules for paper figures:
 - **Pick the important ones** (usually 1–3): the method/architecture diagram + the key quantitative result. Skip decorative, appendix, and pure-text-table figures. Interactives and paper figures are complementary — keep both even when they overlap.
 - Fetch figures from `arxiv.org/html/<id>vN/…` (or `ar5iv.labs.arxiv.org/html/<id>` when arXiv HTML 404s). Figures are treated as academic/commentary use. (This is the one exception to papers' "no PDFs/assets stored" rule — that rule governs the daily **digest**, not flagship articles.)
 
+## Article films (`public/articles/<slug>/*-film.*`)
+Some articles open with a short film. Hand-drawn ones are built with the vendored **hand-drawn-canvas-animation** skill (`brand-crew/skills/hand-drawn-canvas-animation/`, read its `VENDORED.md` first), rendered outside the Next.js tree, and **only the output is committed** — an `.mp4`, a `.webm` and a `-poster.jpg`, never the `.html` source. Embed with `<Video src poster alt caption />` (globally registered), where `src` omits the extension.
+
+- **Look at the contact sheet before the full render** (`node render.mjs film.html --grid 28`). Layout collisions — a label under a caption rule, a grid running off-frame — are obvious there and invisible in code.
+- **Derive geometry, don't eyeball it.** Arrows that start near a hand instead of at it, and stacks that don't share a centre line with the character pointing at them, are the tell. Compute the anchor position from the puppet's own body plan and lay everything off it.
+- **Compress before committing.** The player is `muted` + `loop`, so drop the audio track; x264 `-crf 33 -tune animation` and VP9 `-crf 46` are invisible on flat vector art. The `.webm` is listed first in `<Video>`, so that is the file most browsers fetch — it is the one that has to be small.
+- **Narration is opt-in and changes the player.** A film with a voice track passes `narrated` to `<Video>`, which swaps autoplay-loop-muted for `controls` — browsers only autoplay muted, so a narrated film that autoplays is silent, and one that loops is rude. A narrated film also ships a WebVTT `captions` track; narration without captions is an accessibility regression. Voiced on CPU with **Kokoro-82M** (Piper is available for a draft but sounds it), one wav per beat, placed at its scene offset with a ~0.3s lead so the cut lands before the voice. Write the beat, then set the scene's `dur` to fit the speech — not the reverse — and keep ~0.25s of headroom on Kokoro, ~0.5s on Piper, which is stochastic and drifts up to 0.42s between runs. Spell initialisms out for the synth (`R L C D`) and map them back for the caption track, or the spelling hack ends up on screen.
+- **Manim is the other option, for a film that is arithmetic rather than argument.** Community Edition renders on CPU; it needs `libcairo2-dev libpango1.0-dev` and a LaTeX with `dvisvgm` for `MathTex`. Same narration pipeline: instrument the scene to print `self.renderer.time` per act, then write beats whose durations match those boundaries.
+- **The caption must say what the film is not.** These are drawn explanations, not recordings: if a film shows a distribution or a benchmark, the caption states plainly that the figures are illustrative and points at where the measured numbers are.
+
+## Discoverability (`lib/jsonld.tsx`, `lib/related.ts`)
+The technical SEO surface is already comprehensive — JSON-LD throughout, a `Person` entity with `sameAs` and `knowsAbout`, `@id` entity references, `BreadcrumbList`, `dateModified`, per-route OG images, `llms.txt`, `.md` twins and permissive AI-crawler directives. **Audit before adding to it**; a `knowsAbout` block was once added that already existed and was better scoped.
+
+Two things are load-bearing and easy to break:
+
+- **Articles emit `citation`.** `citationsFromBody()` pulls arXiv abstract pages, DOIs, GitHub and Hugging Face repos out of the body — deduplicated, capped at 20, order-stable so the JSON-LD does not churn between builds. 213 of 252 articles carry at least one. This is the most relevant signal the site has: an answer engine deciding whether a page is grounded reads the citation graph, not the prose. Articles are `TechArticle`, not `Article`.
+- **Every article gets `<RelatedArticles>`, and no article is an orphan.** The plan lives in `lib/related.ts` and is computed once per build over the whole corpus, because coverage is a property of the graph and ranking is per-page. Pass one is tag overlap, Jaccard-scored so a five-tag article cannot out-rank a tight pair by having more tags to collide on, tie-broken by recency. That alone took orphans from 122 to 20 — the recency tie-break piles the same recent hubs onto many lists (the busiest takes 40 inbound) and starves the tail. Pass two places each remaining orphan on the page it matches best, with deterministic tie-breaks so the HTML does not churn between builds. Result: in-degree min 1 / median 5. `pnpm validate:links` fails if that ever regresses — which it can only do when an article shares no tag with anything else, and the fix is a tag. The anchor text is the target's own title: descriptive and unique per target. Never "read more".
+
+What none of this fixes is **backlinks**, which come from other people citing the work. The lever there is `/amplify` plus Satyajit's approval, not markup.
+
 ## data/*.ts records (typed, hand-curated)
 `profile` (identity + `seedStats`), `resume` (feeds `/resume`, the PDF, `/resume.json`), `publications`, `patents`, `health` (Zod-validated **inline** at import — bad edit throws), `now` (bump `updated`), `uses`, `reading`, `interests` (arXiv categories + keyword weights driving the digest). Edit through the skills below; `pnpm typecheck` catches shape errors.
 
@@ -61,7 +81,10 @@ Rules for paper figures:
 - `pnpm typecheck` — `tsc --noEmit`
 - `pnpm validate:content` — load every MDX through the Zod content layer (loud failure)
 - `pnpm validate:mdx` — **compile** every MDX body the way the build does (same remark plugins), so JSX/MDX syntax errors fail here instead of at the Vercel build
-- `pnpm validate` — `typecheck` + `validate:content` + `validate:mdx`. **Run this after any content/data edit, before committing.**
+- `pnpm validate:math` — parse every MDX with the build's remark stack and report any `$…$` span that reads like English rather than like math (two literal dollar signs pairing up — see the guardrail below)
+- `pnpm validate:links` — assert no article is an orphan (see "Discoverability"), and print the in-degree spread
+- `pnpm validate:assets` — assert every `<Figure src>`, `<Video src>`, `poster` and `captions` path resolves to a committed file under `public/`. A broken `src` passes every other check and ships an empty box; asset directories need not match the slug (`/articles/fastlio2/` serves `fast-lio2-lidar-inertial-odometry`), so it resolves the literal path rather than guessing one
+- `pnpm validate` — `typecheck` + `validate:content` + `validate:mdx` + `validate:math` + `validate:links` + `validate:assets` + `check:models`. **Run this after any content/data edit, before committing.**
 - `pnpm check:spacing [slug…]` — renders articles in a headless browser and reports words fused together at JSX element boundaries (`the restskip`). Needs `pnpm dev` running, so it is deliberately outside `validate`. Run it after writing a component with prose that wraps around inline tags. A full run needs `NODE_OPTIONS=--max-old-space-size=8192 pnpm dev` — Turbopack holds every compiled route and the default heap dies around a hundred articles in.
 
 ## Guardrails (LOCKED)
@@ -82,6 +105,7 @@ Rules for paper figures:
 - **Never post to social without explicit approval.** `/amplify` only drafts into `drafts/<date>/`; Satyajit reviews and approves before anything is posted.
 - **No PDFs stored for papers** — paper links are derived from `arxivId`.
 - **MDX prose: escape a bare `<`.** In MDX a `<` starts a JSX tag, so `<2%`, `x < 3`, `<0.5` etc. in prose break the build (`validate:content` only checks frontmatter — `validate:mdx` catches these). Write `&lt;`, or wrap the expression in `` `code` `` or `$math$`.
+- **MDX prose: escape a literal `$`.** `remark-math` treats `$` like a code-span delimiter, so any two dollar signs on a page pair up: "it cost \$314 up front and \$1.02 per million" silently becomes one inline-math node reading *314 up front and*, rendered in italic serif with the dollars gone and unbreakable on narrow screens. `validate:mdx` compiles it happily — the document is valid, it just means something else. Write `\$314`. `pnpm validate:math` (inside `pnpm validate`) flags any math span that reads like English.
 - **JSX prose: put spaces where a line break can't.** JSX trims every line of a text node, so a space that lands next to a newline disappears — including a *leading* space, whenever its text runs onto a further line (`<code>x</code> and then prose that wraps` renders `xand`). Use `{" "}` between the element and the text, or a leading space inside the tag (`<em> word</em>`). `pnpm check:spacing` catches what slips through.
 - **Numbers that reach the DOM go through `lib/dmath`.** `Math.exp/log/pow/sin/cos/hypot/atan2` are only "implementation-dependent approximations" per spec, so Node and Chrome can differ by one ULP — enough to make an SVG coordinate serialize differently on server and client and trigger a hydration mismatch. Use the `m*` wrappers; `+ - * /`, `sqrt`, `round`, `min`, `max` are exact and fine as-is.
 - Quality gate: if there's nothing meaningful to publish, no-op — never post filler.

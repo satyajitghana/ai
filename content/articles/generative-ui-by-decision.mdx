@@ -1,0 +1,425 @@
+---
+title: "Generative UI in two model calls"
+description: "Vercel Labs put a decision model behind json-render: instead of an LLM emitting a component tree, Jev picks from options your code enumerated. I cloned the repo and ran the composer against a recording evaluator — an eight-element dashboard is exactly two evaluation calls, 50 questions, 161 options in the first one. The 'rendered in milliseconds' claim survives, but the denominator is not one decision per component, and the cost moved out of round trips and into a ~7,100-token request that carries your entire catalog on every single call."
+date: 2026-09-19
+interest: 4
+helpful: 5
+featured: true
+tags:
+  - explainer
+  - llm
+  - architecture
+  - agents
+  - systems
+draft: false
+---
+
+import { EmitVsChoose } from "@/components/articles/generative-ui-by-decision/emit-vs-choose"
+import { CallBudget } from "@/components/articles/generative-ui-by-decision/call-budget"
+import { CatalogueCeiling } from "@/components/articles/generative-ui-by-decision/catalogue-ceiling"
+import { IndependentSlots } from "@/components/articles/generative-ui-by-decision/independent-slots"
+
+[json-render](https://github.com/vercel-labs/json-render) is Vercel Labs' generative-UI
+framework: you define a catalog of components, an LLM streams a JSON spec, your registry
+renders it. Version 0.21.0, shipped yesterday, adds two functions that change which half of
+that sentence the model is doing. The announcement:
+
+<Callout type="note">
+**"New experiment: json-render + jev. The future Generative UI is instant. Your components,
+your actions, your design system. Rendered in milliseconds."**
+</Callout>
+
+The interesting word is *instant*, and the useful question is what it is instant relative
+to — but the architectural claim underneath it is the better story, and it is the same one
+this site has been chasing all week in [forms](/articles/cua-s1-forms) and
+[benchmarks](/articles/jev-scores-zero): a model that only ever *chooses* is a different
+kind of component than a model that *writes*.
+
+I cloned the repo, built the core package, and ran `experimental_composeSpec` against the
+playground's real catalog with an evaluator that records every byte it is handed. Everything
+below that is labelled measured came out of that harness.
+
+## What the two functions actually are
+
+**`experimental_composeSpec`** (680 lines, plus 288 for the batched path and 185 of tree
+helpers) is an async generator. You hand it a catalog, an array of **candidates**, a prompt
+and an `evaluate` function; it yields `step` events carrying a full spec snapshot, then a
+`complete` event with `stopReason: "finish" | "limit" | "unavailable"`.
+
+Three declarations in one file carry the whole design. The repo at the v0.21.0 release
+commit `3ad3818`, `packages/core/src/experimental-compose.ts`:
+
+```typescript
+// experimental-compose.ts — in source order, with the rest elided
+export interface Experimental_ChoiceQuestion {
+  type: "choice";
+  instructions: string;
+  criteria: Record<string, string>;
+}
+// …
+/** Custom adapters must return one of each question's offered criteria keys. */
+export type Experimental_CompositionEvaluator = (request: {
+  state: Record<string, unknown>;
+  questions: Record<string, Experimental_ChoiceQuestion>;
+  signal: AbortSignal;
+}) => Promise<Experimental_CompositionEvaluation>;
+// …
+export async function* experimental_composeSpec(
+  options: Experimental_ComposeSpecOptions,
+): AsyncGenerator<Experimental_CompositionEvent> {
+  // 680 lines. Delegates to composeBatch() unless you pass initialSpec.
+}
+```
+
+`criteria` is the option set: a map from a key the model may return to the English sentence
+explaining what returning it means. Nothing else crosses the boundary. A model is not a
+dependency here — it is a function type, and the composer never imports one.
+
+A candidate is not a component. It is a fully configured element — type, concrete props,
+state bindings, action bindings — that your application wrote. Here is one of the
+playground's 42, written through its own `add()` helper:
+
+```typescript
+// apps/web/lib/jev/grammar.ts — one call to the playground's own add() helper
+add(
+  "save",
+  "Button: Save changes. Bind press to setState to update the visible saved-status text. Local demo only.",
+  "Button",
+  { label: "Save changes", variant: "primary", disabled: false },
+  "action:save",                        // resource: sharers are mutually exclusive
+  {
+    press: {
+      action: "setState",
+      params: { statePath: "/status", value: "Changes saved locally." },
+    },
+  },
+);
+```
+
+The model never sees that object. It sees `"save"` and the description. When it answers
+`"use:save"`, the composer `structuredClone`s the recipe into the spec itself. Every prop in
+every candidate is validated against the catalog's Zod schema *before the first model call*,
+in `validateCandidate`, because the props were never the model's to choose.
+
+**`experimental_createEvaluator`** is 112 lines and does much less than its name suggests. It
+is a transport adapter: it POSTs `{ state, questions }` to
+`https://ai-gateway.vercel.sh/v4/ai/evaluation-model` with an `ai-model-id` header, parses
+the response with a small Zod schema, checks each returned `choice` is a key of the criteria
+that were offered, and lifts per-question confidence out of
+`providerMetadata.typesafe.confidence`. It does not score candidates, rank compositions,
+retry, or estimate cost — the docs say so in as many words. The model-neutrality is real:
+`model` is a plain string, and `typesafe-ai/jev` is described as "the current tested example"
+rather than a requirement. `packages/core/src/experimental-evaluator.ts`, same commit, is
+the entire round trip:
+
+```typescript
+// experimental-evaluator.ts — argument checks and abort plumbing elided
+return async ({ state, questions, signal }) => {
+  // …
+  const response = await fetch(
+    "https://ai-gateway.vercel.sh/v4/ai/evaluation-model",
+    {
+      method: "POST",
+      headers: { /* auth, protocol version, … */ "ai-model-id": model },
+      body: JSON.stringify({ state, questions }),
+      signal: controller.signal,
+      cache: "no-store",
+    },
+  );
+  if (!response.ok)
+    throw new Error(`Evaluation request failed (HTTP ${response.status}).`);
+  // … Zod-parse the body, then, for each question asked:
+  if (!answer || !Object.hasOwn(question.criteria, answer.choice))
+    throw new Error("Evaluator returned a choice outside the offered criteria.");
+  // …
+};
+```
+
+`JSON.stringify({ state, questions })` is the request. There is no prompt template, no
+retry, no system message, no streaming. The model identifier is an HTTP header.
+
+Vercel's Gateway lists Jev's **maximum output tokens as 0**. That is the whole trick in one
+field.
+
+## A slot is not a question
+
+The part I most wanted to know: how does a UI become a decision problem? Not one Choice per
+slot. The default batched strategy asks two rounds:
+
+**Round one — membership.** One `root` question ("which element is outermost", plus an
+`unavailable` escape), and then one question per *candidate group*. Candidates that share a
+`resource` string are mutually exclusive and share one question — the three avatar sizes are
+`omit / lg / md / sm`, the four submit-button labels are `omit` plus four. Reusable layout
+recipes with `maxUses > 1` get a cardinality question instead: *how many of these does the
+request need*, `0` through `14`.
+
+**Round two — layout.** For each non-root element that got selected: `parent_<id>` (which
+container and which named slot, as keys like `node_0:default`) and `order_<id>` (position
+among siblings). Slots are options *inside* the parent question, not questions of their own.
+
+Between the rounds the composer assembles a preview in catalog order and streams it, so
+something renders after the first call. If only one element was selected — or two with a
+single slot between them — the second call is skipped entirely. There is no separate "are we
+done" call: batching knows the membership answers, so finishing is implied.
+
+Follow-up edits drop back to the sequential protocol: a `next` question whose criteria
+include `replace:<id>`, `remove:<id>`, `move:<id>` for every element in the existing tree,
+where a replace or a move takes a second call to pick the recipe or the destination.
+
+<EmitVsChoose />
+
+## The denominator
+
+Here is the arithmetic the announcement skips, and it is better than I expected.
+
+The worry with decision-model UI is obvious: if a screen has a dozen slots and each slot is a
+round trip at 200&ndash;300 ms, "instant" is doing a lot of work. That is not what happens.
+I ran the docs' own suggested dashboard prompt — *"Generate a sales dashboard with an orders
+table at the top, then revenue, orders and new customers metrics in a row, then a weekly
+revenue chart"* — through the composer with a recording evaluator. The result is eight
+elements: a Stack root, a Grid, a Heading, a Table, three Metrics and a BarGraph.
+
+**Two calls.** 37 questions and 161 options in the first, 13 questions and 61 options in the
+second. The round-trip count does not depend on how many elements you end up with; it depends
+on nothing at all. It is two.
+
+<Receipts src="/articles/generative-ui-by-decision/data/call-budget.json" />
+
+<CallBudget />
+
+Multiply it out and "milliseconds" holds up. At TypeSafe's own cookbook round trip of
+111&ndash;114 ms, two calls is ~225 ms. At the 246.7 ms Bespoke measured, ~495 ms. At the
+338.6 ms [an independent benchmark measured remote](/articles/jev-scores-zero), ~680 ms.
+Against a generating model streaming a spec — seconds, on every published comparison — that
+is a real gap, and the shape of the gap is structural rather than a tuning win.
+
+Two honest dents in it. First, none of those published latencies was measured on a request
+like this one: they are 8- and 14-question rubrics of a few hundred tokens, and the select
+call here carries 37 questions and 161 options in roughly 7,100. Jev scores options
+independently, which is exactly why it is [unable to answer a question where one option
+refers to another](/articles/jev-scores-zero) — so 161 options is 161 scored items, and
+whether that stays flat is a claim nobody has measured in public. Second, the numbers above
+are the model only. They do not include your server, the Gateway hop, or the render.
+
+Second-order but worth having: the same eight-element result composed one operation at a time
+is **nine** calls and 33% more bytes, and every follow-up edit is sequential by design — a
+removal is two calls, a move is three. So the instant path is the first render. Iteration
+costs what iteration always cost.
+
+## Where the milliseconds went
+
+Batching does not make the work disappear; it moves it inside one request. The playground
+offers 42 candidate recipes, and here is what the first call is actually made of:
+
+<Receipts src="/articles/generative-ui-by-decision/data/select-anatomy.json" />
+
+Two things stand out. The option keys the model chooses between are barely a third of the
+payload. And the single largest line item is one 271-byte instruction string — *"Which of
+these elements does user_request need? …"* — repeated verbatim across 30 membership
+questions: 8,130 bytes, 28.4% of the request, re-sent on every request. There are eight
+distinct instruction strings across 37 questions. Whatever the Gateway's evaluation protocol
+does with that redundancy, the client is paying to serialize it.
+
+The consequence is that the request grows with your *catalog*, not with your *screen*. Every
+candidate is sent twice per call — once in `state.capabilities`, once as a criteria value —
+and the whole thing has to fit in one context window. I measured the slope with synthetic
+catalogs from 42 to 801 recipes: **668.6 bytes per candidate**, dead linear.
+
+<CatalogueCeiling />
+
+Which puts a ceiling on the design system you can offer in one shot. TypeSafe documents a 64k
+per-request cap; Vercel's Gateway model page lists Jev's context window as 32,000. Take the
+smaller one and a batched call fits on the order of 200 configured recipes at the
+playground's description length. That is plenty for a settings screen and not obviously
+enough for "your design system" in the sense a design-system owner means it — especially
+since the docs actively suggest building candidates from live records per request, which is
+exactly the thing that makes the catalog large.
+
+## Independent decisions can contradict each other
+
+There is a cost to answering thirty-seven questions at once, and it is not the one people
+expect.
+
+The independence is visible at the call site. Every `parent_` and `order_` question is built
+in one `forEach` over the selected elements and then handed to a single `call`, so the
+questions are serialized into the same request body before any of them is scored.
+`packages/core/src/experimental-composition-batch.ts`:
+
+```typescript
+// experimental-composition-batch.ts — the layout pass, criteria bodies elided
+// All IDs now exist, so ask their placements and sibling order together.
+// Assemble on a private clone, and validate the *whole* tree before publishing:
+// individually offered parents can still form a cycle or exceed maxDepth.
+const layout: Record<string, Experimental_ChoiceQuestion> = {};
+selected.slice(1).forEach((candidate, index) => {
+  const id = `node_${index + 1}`;
+  const parents = new Map(
+    [...destinations].filter(([, parent]) => parent.id !== id),
+  );
+  placements.set(id, parents);
+  if (parents.size > 1)
+    layout[`parent_${id}`] = { type: "choice", /* …every other slot… */ };
+  layout[`order_${id}`] = { type: "choice", /* …position among siblings… */ };
+});
+const arranged = await call("layout", { /* … */ }, layout);
+```
+
+The filter is the whole story. A node is kept out of its own parent list — `parent.id !== id`
+— and nothing else is excluded, because at the moment the questions are written nothing has
+an ancestor yet. So `parent_node_1` may legally answer `node_2:default` while `parent_node_2`
+answers `node_1:default`. Individually both are keys that were offered. Jointly they are a
+cycle.
+
+<IndependentSlots />
+
+The composer assembles the layout on a private clone and validates the *whole* tree before
+publishing it, so the cycle never reaches your renderer — but the request then throws from
+`indexTree` with *"Spec contains unreachable elements."*, and what you are left with is
+the first preview in catalog order, labelled partial. Same for a combined layout that exceeds
+`maxDepth`. The repo is honest about it in the place that counts: a test named *"preserves
+the first valid preview when independently chosen parents form a cycle"*, whose scripted
+answers are literally `parent_node_1: "node_2:default"` and `parent_node_2: "node_1:default"`
+— the pair drawn above — asserting `rejects.toThrow(/unreachable|cycle/)` and exactly one
+surviving event. The source comment says the rest plainly: *"individually offered parents can
+still form a cycle or exceed maxDepth."*
+
+So the bounded-output property is narrower than "the model cannot produce anything wrong". It
+bounds *which components, which props, which actions* — completely, by construction, because
+those are copied from your objects. It does not bound *tree shape*, because tree shape is the
+joint consequence of answers taken in parallel. That is a real and unavoidable trade for the
+round-trip count, and it is the one thing the sequential strategy buys you back.
+
+## The model never sees your data — except where you typed it in
+
+`state.capabilities` is `{ id, description }` and nothing else. No props, no bindings, no
+state values. The docs are explicit: *"Initial state, raw props, and binding values are not
+sent automatically. Put the information needed to choose candidates in their descriptions."*
+For an edit, the playground shares display labels only, and never entered form values.
+
+That is a genuinely good privacy property and it has a consequence people will trip over. The
+model cannot rank your metrics by which moved most, because it cannot see them. What it can
+do is read whatever you wrote in the description — and so the playground's grammar does
+this:
+
+```typescript
+add("revenue",
+  "Metric: total sales revenue, $48,250, up 12.8%. Synthetic platform data.",
+  "Metric", { label: "Revenue", value: "48,250", change: "+12.8%", ... })
+```
+
+The number reaches the model because a human typed it twice — once into the props the
+renderer reads, once into an English sentence the model reads. Which is the honest shape of
+the whole feature: `buildCandidates` is 322 lines of hand-authored
+recipes for 17 component types, and the docs say straight out that *"a catalog alone is not
+enough for Jev: open-ended string props and data still need values."* "Your components, your
+actions, your design system" is accurate. It is also work — this is not a compiler that reads
+your component types and derives an option set. You enumerate configured instances.
+
+## Confidence is produced, and nothing reads it
+
+Every answer can carry a confidence in [0, 1]. The adapter pulls it out of TypeSafe's
+provider metadata. The composer range-checks it and throws on `NaN`. It lands on
+`step.confidence`, `step.parentConfidence` and `step.answers[q].confidence`, gets serialized
+into the playground's NDJSON stream, and is displayed as raw text in a debug tab.
+
+Four files, in order, are its entire life. Every `confidence` in the repository outside a
+test is here:
+
+```typescript
+// 1. packages/core/src/experimental-evaluator.ts — lifted out of provider metadata
+confidence: result.data.providerMetadata?.typesafe?.confidence[name],
+
+// 2. packages/core/src/experimental-compose.ts — range-checked; a bad one is fatal
+if (answer.confidence !== undefined &&
+    (!Number.isFinite(answer.confidence) ||
+      answer.confidence < 0 || answer.confidence > 1))
+  throw new Error("Evaluator returned invalid confidence.");
+
+// 3. packages/core/src/experimental-composition-batch.ts — the batched step
+const step: Experimental_CompositionStep = {
+  index: steps.length,
+  choice: phase,          // "select" | "layout"
+  // …
+  confidence: null,       // ← dropped, unconditionally, for every batched call
+  parentConfidence: null,
+  answers: result.answers, // the per-question numbers ride along here
+};
+
+// 4. apps/web/lib/jev/response.ts — the last thing anyone does with it
+send({ __meta: "decision", ...event.step });   // JSON.stringify, to a debug tab
+```
+
+Step three is a literal `null`, not a fallback: in the batched path — the default path, the
+one the announcement is about — the step-level confidence is never computed from anything.
+Step four is `JSON.stringify`. Between the model producing a calibrated number and that
+number reaching a pane of text, no branch reads it.
+
+Nothing branches on it. There is no threshold, no fallback component, no degraded render, no
+human handoff — those four sites are the complete grep. The project says so itself, twice: *"Confidence is displayed without a quality gate"* and
+*"Confidence is not a calibrated quality threshold… a universal threshold has not been
+calibrated."*
+
+That is the right call for an experiment and the wrong end state, and it is
+[the same gap the rest of this category has](/articles/cua-s1-forms): a probability that
+nothing consumes is decoration. The interesting part is that the composer *does* ship a
+principled escape hatch, it just is not the number — `unavailable` is an option on the root
+and `next` questions, so declining is a choice the model can make inside the enumerated set
+rather than a threshold someone has to pick. An enumerated "I can't" is a better fallback
+than an uncalibrated float, and it is already there.
+
+## Is this shipping?
+
+It is a Vercel Labs experiment, Apache-2.0, with `experimental_` on both exports and an
+explicit *"may change in any release, pin exact versions"*. The playground caps itself at 14
+elements, 14 evaluations, depth four, 10 s per call and 55 s overall. Root selection,
+grouping and knowing when to stop are called out as weak: *"a vague request such as 'Generate
+a dashboard with the table at the top' can produce only a table."* Read it as a working
+prototype of an idea, not a product.
+
+One factual correction, in the project's favour. The docs page says **"these APIs are
+unreleased. You can try the source build below before they appear in a published npm
+version,"** and walks you through `pnpm pack`. That is stale: I pulled
+`@json-render/core@0.21.0` from npm (published 2026-09-18) and both functions are exported,
+with the Gateway URL and the batched-composition strings present in the shipped bundle. The
+source-build instructions are no longer necessary.
+
+## What it is
+
+Generative UI has meant an LLM emitting markup or a component tree: slow, priced per token,
+and unbounded — it can name a component you do not have and pass props you do not accept,
+which is why json-render carries a 536-line validator with thirteen error codes and a lossy
+repair pass. Putting a decision model behind it inverts the responsibility. The developer
+enumerates components, props and actions; the model returns keys; code does the assembling.
+Nothing is generated, so nothing has to be repaired, and the output space is a number you can
+print — 161.
+
+Two calls for a screen is a genuinely good number, and I did not expect the batching to be
+this thorough. What the demo understates is the price of admission: a hand-written recipe for
+every configured instance you want offered, the entire catalog on the wire every request, and
+a context window that says how big the catalog can get. The mechanism is real. It is smaller
+than "your design system, rendered in milliseconds" and considerably more interesting than
+another wrapper.
+
+<ChangeMyMind>
+
+<Falsifier claim="Composing a screen costs two evaluation calls regardless of element count.">
+Measured, for the batched path, by instrumenting the evaluator. It is falsified by any new tree that produces three or more calls without an error — or by `maxSteps: 1`, which the tests show stops after the select call with `stopReason: "limit"`. Note it is already false for edits: `initialSpec` forces the sequential protocol, and a move is three calls.
+</Falsifier>
+
+<Falsifier claim="Jev's latency does not grow materially from a 14-question rubric to a 37-question, 161-option, ~7,100-token composition request.">
+This is the load-bearing assumption behind every latency figure in this article and I could not test it — running the real thing needs a Gateway key with the `typesafe-ai` provider enabled. Send the recorded select payload to `typesafe-ai/jev` and time it against a single-question call. If the 37-question request lands nearer a second than 250 ms, "rendered in milliseconds" is a claim about the first paint after the select call, not about the finished layout, and the second round trip is where it goes.
+</Falsifier>
+
+<Falsifier claim="668.6 bytes per candidate, so one batched call tops out around 200 recipes at the Gateway's listed 32k context.">
+Fitted through five measured points with ~120-character descriptions. Halve the description length and the ceiling roughly doubles, so the crossing is soft. What is not soft is the slope: if someone measures a batched call whose body does not grow linearly with candidate count, the composer changed or I read `composeBatch` wrong.
+</Falsifier>
+
+<Falsifier claim="Nothing in json-render reads the confidence it collects.">
+A grep, so it is only as good as my grep. Point at any code path where a confidence value changes what renders — a threshold, a fallback element, a retry — and this is wrong. As of 0.21.0 the only consumer I can find is a debug stream.
+</Falsifier>
+
+<Falsifier claim="The option set is hand-declared, not derived from the design system.">
+`buildCandidates` is a 322-line literal and the docs say a catalog is not enough on its own. If a later release derives candidates from component prop schemas plus a data source — enumerating instances from records rather than from hand-written recipes — the most laborious part of this goes away and the "your design system" framing becomes straightforwardly true.
+</Falsifier>
+
+</ChangeMyMind>

@@ -1,0 +1,567 @@
+---
+title: "Any model can be Jev, for the price of a serving flag"
+description: "SGLang has shipped a /v1/score endpoint since June 2025 that returns a probability for each candidate token you name, on an ordinary generative checkpoint, in one forward pass with no decoding. That is the entire mechanism behind the System One readout, it was built for rerankers fifteen months before the category existed, and people are now pointing it at DeepSeek and LFM2.5 and getting decision models out. I read the handler, checked it against vLLM and llama.cpp, verified DiffusionGemma's parameter counts off the safetensors headers, and took the 63x speedup claim apart with a regression on its author's own committed rows. The serving half of a System One model is free. The half the category is named after is not, and you can tell which projects paid for it by who publishes a number."
+date: 2026-09-19
+interest: 5
+helpful: 5
+featured: true
+tags:
+  - explainer
+  - llm
+  - inference
+  - architecture
+  - calibration
+draft: false
+cover: /articles/any-model-can-be-jev/fig1.png
+---
+
+import { ScoreModes } from "@/components/articles/any-model-can-be-jev/score-modes"
+import { SpeedupAnatomy } from "@/components/articles/any-model-can-be-jev/speedup-anatomy"
+import { ConfidenceDivergence } from "@/components/articles/any-model-can-be-jev/confidence-divergence"
+
+The claim going around this week is short enough to quote whole: SGLang exposes a
+`/v1/score` endpoint alongside `/generate`; you hand it an input and a set of
+candidate answers and it hands back a probability per candidate. The worked
+example is *"what is most common letter in abcccde?"* against `a`, `b`, `c`,
+returning `(c, 0.9) (b, 0.05) (a, 0.05)`. Somebody built `deepseek-v4.1-flash-jev`
+that way, with one extra trick, and their own verdict on it is *"dsv4.1 flash is
+not as good as jev"*.
+
+Everything written here so far has been an argument about what Jev *is*. [RLCD is
+not constrained decoding](/articles/rlcd-calibrated-decisions) reasoned, from two
+sentences in TypeSafe's docs, that Jev must be a per-option scalar scorer. [A
+System One model in 706,048 parameters](/articles/cua-s1-forms) split the open
+reproductions into two families — vocabulary readout and per-option scorer — and
+showed you can tell them apart by reversing an option list. [Jev scores
+zero](/articles/jev-scores-zero) found the behavioural signature the scorer
+reading predicts.
+
+This one points the other way. **The readout is a serving feature, not a model
+feature.** There is nothing in a checkpoint that makes it a decision model. There
+is a way of calling it.
+
+Before the handler, the shape — because the question I keep being asked about
+these models is not *what are they for* but *what actually goes in, and what
+actually comes out*.
+
+<Video
+  src="/articles/any-model-can-be-jev/readout-io-film"
+  poster="/articles/any-model-can-be-jev/readout-io-film-poster.jpg"
+  narrated
+  captions="/articles/any-model-can-be-jev/readout-io-film.vtt"
+  alt="A narrated, captioned hand-drawn film, 69 seconds. An ordinary model writes one word per forward pass, each word fed back into the prompt. Inside, the last position holds a column of numbers, one per vocabulary entry, and the word written was simply the largest. The same model is then told to write nothing: it runs once, the output port closes, and the caller supplies the options instead. The column is read only at the rows those options name; every other row is computed and never read, and the three numbers that are read, normalised, are the whole output. The film then splits the two ways of arranging this. Put every option on one shared page and one pass reads them all, but each option sits somewhere, so swapping two moves the answer. Give every option a page of its own and there are three passes and three numbers, and swapping them changes nothing — at the cost that a question spanning two options has no page on which both appear, so the answer cannot be found and the bars come up empty."
+  caption="One pass, no words — the input and output of a decision model, drawn. This is an explanation, not a recording: the probabilities and the twelve-row column are illustrative, and the measured numbers are in the sections below and in /articles/jev-scores-zero. Narrated and captioned."
+/>
+
+## What `/v1/score` actually computes
+
+This is the crux, so I read the handler rather than the docs. SGLang at
+`3a64faa`, `python/sglang/srt/managers/tokenizer_manager_score_mixin.py`. The
+request it builds for a generative model has four arguments that do all the work:
+
+```python
+# tokenizer_manager_score_mixin.py — score_request(), the generation branch
+batch_request = GenerateReqInput(
+    text=text_prompts,
+    input_ids=input_ids,
+    token_ids_logprob=label_token_ids,
+    return_logprob=True,
+    logprob_start_len=0 if use_multi_item_scoring else -1,
+    stream=False,
+    sampling_params={"max_new_tokens": 0},
+    ...
+)
+```
+
+`max_new_tokens: 0`. Nothing is generated. The model does one prefill and stops,
+and the reply carries the logprobs of the token ids the caller named. Then:
+
+```python
+# the same file — what "score" means, in full
+def _convert_logprobs_to_scores(self, logprobs, label_token_ids, apply_softmax):
+    score_list = [logprobs.get(token_id, float("-inf")) for token_id in label_token_ids]
+    if apply_softmax:
+        score_list = torch.softmax(torch.tensor(score_list), dim=0).tolist()
+    else:
+        score_list = [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
+    return score_list
+```
+
+So, to answer the question directly, because it decides everything downstream:
+this is **not** a full-sequence logprob and it is **not** length-normalised. It
+is a **single-position vocabulary readout**. The code's own comment on the
+extraction says *"Extract logprobs for the first (and only) position."* The
+candidate text, when you pass candidates as `items`, is *conditioned on* — it goes
+into the prompt — and is never itself scored. Only the next-token distribution at
+the end of the prompt is read, and only at the rows you asked for.
+
+That matters more than it sounds. A naive "score each candidate by the
+log-probability of its text" is length-biased: longer answers score lower for
+being longer. This design does not have that problem, because it never scores the
+candidate's tokens at all. What it has instead is a constraint I will come back
+to: a candidate has to *be* a token id.
+
+Two smaller things in those seven lines, both of which will bite somebody.
+
+`apply_softmax` defaults to **False**, and the false branch returns
+`exp(logprob)` — the model's actual probability mass on that token, out of the
+whole vocabulary. Those do not sum to one, and they should not. Set it to `True`
+and you get a softmax over the slice, which renormalises the candidates against
+each other. That is the usual thing to want, and it quietly throws away the one
+signal a decision model most needs: the mass sitting on every token that is *not*
+one of your options. That mass is the model declining. Renormalisation deletes
+the abstention and hands you back a confident-looking distribution over a set the
+model may think is wrong.
+
+And `logprobs.get(token_id, float("-inf"))` falling through to `0.0` means a
+candidate the sampler never reported scores exactly zero rather than raising. In
+the normal path `token_ids_logprob` guarantees those rows come back, so it is a
+defensive branch; it is also a silent one.
+
+### It is fifteen months older than the category
+
+Worth saying plainly. Score serving landed in SGLang on **2025-06-21**, in PR
+#7399, titled *"[OAI refactor] Add rerank and score serving"*. It sits next to
+`/v1/rerank` in the docs, under the heading "decoder-only scoring", and the
+example in SGLang's own docstring is a relevance judgement:
+
+```python
+query = "<|user|>Is the following city the capital of France? "
+items = ["Paris <|assistant|>", "London <|assistant|>"]
+label_token_ids = [2332, 1223]  # "Yes" / "No"
+# -> [[0.9, 0.1], [0.2, 0.8]]
+```
+
+Nobody built this for decision models. It was built for rerankers and reward
+models, over a year before Jev launched, and it has been sitting in every SGLang
+install since. **Reasoned:** that is most of why the trick is "shockingly easy" —
+not because anyone made it easy, but because the capability was already in the
+box under a name nobody reads as *decision model*.
+
+## The same endpoint is two different model families
+
+Here is the part I did not expect. `/v1/score` does not commit you to a family.
+It will serve either one, depending only on how you map your problem onto
+`query`, `items` and `label_token_ids`, and the wire format looks the same both
+ways.
+
+<ScoreModes />
+
+Put the options in the **prompt** as lettered text and make `label_token_ids` the
+letters, and you have a vocabulary readout: one forward pass, all options sharing
+one context, three rows sliced out of one logit vector. That is precisely
+`openjev`'s `direct.py`, and the [cua-s1 piece](/articles/cua-s1-forms) measured
+what it costs — reversing the option order changed openjev's answer on **10 of 36
+cases, 27.8%**, because `A` and `B` are different tokens carrying different
+learned priors.
+
+Put the options in **`items`** and make `label_token_ids` a fixed `Yes`/`No`
+pair, and single-item mode builds one prompt per item —
+`text_prompts = [f"{query}{item}" for item in items_list]` — and runs a separate
+forward pass for each. Now no option can see any other option. That is the
+isolation property the whole scorer argument turned on, and you get it from a
+serving choice rather than from an architecture.
+
+It is not the same thing as Jev, and the difference is worth being precise about.
+The scalar in a per-option scorer is a *learned* number: `open-jev-deberta`'s head
+is a 3072 → 1024 → 1 MLP trained on the decision. The scalar here is
+`p(Yes | query + option)` from an untouched language model. Same shape, same
+isolation, nothing trained. **Reasoned:** mode C gets you Jev's structural
+property and none of its training, which is a decent first guess at why
+`deepseek-v4.1-flash-jev`'s author says it is not as good.
+
+### The constraint that shows up everywhere
+
+`label_token_ids` are token ids. Two candidates that share a first token are the
+same row. There is no way to ask this endpoint about `"positive"` versus
+`"positively"`.
+
+Everyone who builds this hits it and everyone solves it the same way. openjev
+ships `_slot_ids`, a guard that refuses to run unless each letter is *"one exact
+round-trip token"* — which is why its options are `LETTERS = "ABCDEFGHIJKLMNOP"`
+and cap at sixteen. The vLLM DiffusionGemma PR, a completely different
+architecture, states it as a rule: *"Each label must be a single token in the
+answer template, which the server checks with the tokenizer."* A discrete
+diffusion model denoising a canvas and an autoregressive decoder reading one
+position have almost nothing in common, and they arrive at the identical
+restriction, because it is a property of the readout and not of the model.
+
+## The closing think tag, and what it costs
+
+The reported extra trick: for DeepSeek you must append a closing think tag before
+the response to force a direct answer instead of a reasoning trace. This is true,
+it is necessary, and it is not a hack — it is the model's own documented switch.
+
+SGLang's `python/sglang/srt/entrypoints/openai/encoding_dsv4.py` builds the
+DeepSeek-V4 prompt, and after the user turn it appends the assistant marker and
+then one of two tokens:
+
+```python
+# encoding_dsv4.py — thinking_start_token is "<think>", thinking_end_token is "</think>"
+prompt += ASSISTANT_SP_TOKEN
+if not drop_thinking and thinking_mode == "thinking":
+    prompt += thinking_start_token
+elif drop_thinking and thinking_mode == "thinking" and index >= last_user_idx:
+    prompt += thinking_start_token
+else:
+    prompt += thinking_end_token
+```
+
+And the system prompt the same file assembles says it outright: *"If thinking_mode
+is enabled (triggered by `<think>`), you MUST output your complete reasoning
+inside `<think>...</think>` BEFORE any tool calls or final response. Otherwise,
+output directly after `</think>` with tool calls or final response."*
+
+So the reason the trick is needed is structural. `/v1/score` takes a raw `query`
+string, not a message list, so it does not run the chat template — you are
+assembling the prompt yourself, and if you stop at the assistant marker, the
+position you are scoring is the first token of a *reasoning trace*. Appending
+`</think>` moves the scored position to the first token of the answer. Going
+through `/v1/chat/completions` with thinking off would do this for you; scoring
+does not, because scoring is a lower-level door.
+
+What it costs is the interesting part, and I have not seen it stated. You are
+reading a reasoning model's answer distribution *at the position where its
+reasoning has been switched off*. For DeepSeek-V4.1-Flash — 40 layers, 384 routed
+experts, 6 active, 129,280 vocabulary — a large amount of post-training went into
+making the model good **after** a trace, not instead of one. Scoring the
+post-`</think>` position asks a System Two model for its System One answer.
+
+That is exactly what you want from a decision model, and it is also the
+distribution the model was trained to route around. *"dsv4.1 flash is not as good
+as jev"* is, I think, mostly this. **Reasoned**, and there is a falsifier at the
+bottom.
+
+## Is this "any model"? Only on SGLang
+
+<Receipts src="/articles/any-model-can-be-jev/data/endpoints.json" />
+
+vLLM has an endpoint at the same path with the same name, and it will not do
+this. `enable_scoring_api` in `vllm/entrypoints/pooling/utils.py` returns `True`
+only for `embed` and `token_embed` models, or for `classify` models with
+`num_labels == 1`. Point it at a generative checkpoint and `serving_scores` is
+`None` and the route raises *"The model does not support Rerank (Score) API"*.
+There is no logprob path in `vllm/entrypoints/pooling/scoring/` at all — I
+grepped the directory for `logprob` and `label_token` and got nothing. You can
+rebuild the readout client-side, because `/v1/completions` takes
+`allowed_token_ids` and `prompt_logprobs`, but that is you writing it.
+
+llama.cpp does not have the endpoint. Its `/reranking` needs a reranker model,
+and the nearest primitive on `/completion` is `n_probs`, which returns *"the
+probabilities of top N tokens"*. Top-N is the wrong shape: a decision model needs
+the probability of the candidates you asked about, and a candidate that is not in
+the top N simply is not in the reply.
+
+So "any open model becomes a decision model with a serving flag" is a true
+statement about SGLang and a false statement about the other two big servers.
+That is a narrower claim than the one being made, and it is still a striking one.
+
+## The purest case: nothing trained, nothing changed
+
+<ModelCard repo="notnotsamuel/LFM2.5-350M-RLCD" note="The clearest statement of the thesis in the whole batch: a byte-for-byte copy of LiquidAI's LFM2.5-350M with a 122-line inference engine beside it. Its own manifest records training_performed: false and weights_modified: false, with SHA-256 digests for every bundled file so you can verify that yourself." />
+
+The author's summary is *"No training (for now) just parallel decisions"*, and the
+repository is built to let you check it. `BASE_MODEL_MANIFEST.json` carries the
+upstream revision and a SHA-256 per file; `RELEASE_MANIFEST.json` records
+`"weights_modified": false` and `"training_performed": false` and digests
+everything else too. The [RLCD piece](/articles/rlcd-calibrated-decisions) noted
+that this repo is tagged `inference-only` — that the name says RLCD while the
+repo trains nothing. The author has now said so in their own words, which is the
+better version of that observation.
+
+The engine is 122 lines. The scoring is six of them, and the comment is the part
+to read:
+
+```python
+# rlcd/engine.py — constrained(), after one prefill shared across all branches
+out = self.model(ids, past_key_values=fork_cache(cache, len(branches)),
+                 attention_mask=mask, use_cache=True)
+# Full likelihood, not first-token proxy. No length normalization.
+for row, (_, _, start, value) in enumerate(metadata):
+    logp = out.logits[row, start - 1:start + len(value) - 1].float().log_softmax(-1)
+    score = logp.gather(1, self.tensor(value)[:, None]).sum()
+```
+
+Note that this is the **other** readout. SGLang reads one position and never
+scores the candidate's own text; this sums log-probabilities across every token
+of the candidate. It buys the thing SGLang cannot do — candidates that share a
+prefix are distinguishable — and it buys back the length bias, which the README
+flags: *"Scores depend on candidate wording, tokenization, length, and a newline
+terminator. They are not calibrated confidence."*
+
+I checked that caveat against the repo's own committed scores, because it is
+checkable. Across 237 unique (run, case, field) groups in `results/*.json`, within
+each group, the correlation between a candidate's length in characters and its
+log-likelihood is **r = −0.004** over 489 candidates, a slope of −0.013 log-prob
+per character. There is a trap here worth flagging: pool the candidates *across*
+groups without centring and you get r = −0.572, which looks like a strong length
+effect and is entirely an artefact of different fields having different score
+scales. **Measured:** within a decision, on this model and this corpus, length
+bias is not detectable. The author's caution is theoretically right and
+empirically inert here, and I would rather report the check than repeat the
+warning.
+
+## Where the 63x comes from
+
+The headline is *"63x faster on an L40S. 8x on MPS."* The committed number is
+62.91x, and both figures are real. Neither is a property of the method.
+
+<SpeedupAnatomy />
+
+The baseline is `model.generate()` emitting a whole JSON object one token at a
+time. The scored path does two forward calls: one prefill, then one batched pass
+over every candidate branch at once. So the ratio is *how many tokens the
+baseline had to type*, and the cases differ in almost nothing else. Fit the five
+L40S rows and the autoregressive line is
+**95.4 ms + 15.21 ms × generated_tokens, R² = 0.983**. The 62.91x case generated
+226 tokens. The 1.09x case generated 13.
+
+The hardware collapse tells you the same thing from the other side, and not in the
+way I expected. A decode step costs **15.21 ms on an L40S, 11.40 ms on an H100 and
+13.74 ms on an M2 Max** — essentially the same everywhere. A 350M model at fp16
+in eager PyTorch, one token at a time, is bound by per-step overhead, not by the
+machine; the release says as much (*"Optimized causal-conv1d, torch.compile,
+FlashAttention and MLX are not enabled"*). What changes across machines is the
+*batched* cost: 0.0392 ms per branch token on the L40S against **0.5732 on the
+M2 Max**, 14.6x worse. The GPU's advantage appears only in the path that has
+parallel work to give it. So "63x on an L40S, 8x on a Mac" is not the baseline
+being faster on the Mac. It is the scored path being slower there.
+
+To the author's credit, essentially all of this is already in their README:
+they publish all five cases, they report the 12-case suite at 6.25x–9.68x, and
+they volunteer that with 255 candidates on a Mac the constrained path is
+**3.23x slower**. They also report that neither method got the 28-field object
+fully right, and that field accuracy is 64.3% against the baseline's 53.6%. A
+release that hands you the row that undercuts its own headline is doing the thing
+the rest of this batch mostly does not.
+
+<Callout type="note">
+The honest one-line version: **the speedup is `(95.4 + 15.21·G) / (48.6 + 0.0392·B)`**, where `G` is how many tokens you made the baseline generate and `B` is how many padded branch tokens you scored. You pick the number by picking the workload. Comparing one prefill against 226 sequential decode steps is a fair comparison of *two ways to get an answer*; it is not a speedup of the same computation.
+</Callout>
+
+## DiffusionGemma, and a PR that has not landed
+
+The other System One claim this week is vLLM **PR #57250**, *"[Core] structured
+generation mode for DiffusionGemma model (Jev-like)"*. Say the status first,
+because nobody else does: **it is open and unmerged.** Fourteen commits, a `ready`
+label added on 19 September, and a review comment noting that three prerequisite
+PRs are stacked inside the branch *and* open standalone, which *"guarantees a
+mess"*. The model support — `vllm/model_executor/models/diffusion_gemma.py` — is
+on `main`. The decision server, `examples/features/diffusion_reads/`, is not.
+
+The parameter claim checks out exactly. I pulled the safetensors headers for
+`google/diffusiongemma-26B-A4B-it` with range requests across all eleven shards
+and summed the shapes:
+
+| quantity | measured |
+|---|---|
+| whole checkpoint | 25,823,781,228 |
+| vision tower | 572,794,416 |
+| text model | **25,250,986,812** |
+| active per token (top 8 of 128 experts) | **3,840,375,612** |
+
+25.25B and 3.84B, so "25.2B total / 3.8B active" is right and "26B-A4B" is the
+usual rounding. The routed experts are 22.84B of the 25.25B, which is why a
+25B-parameter model runs on a DGX Spark at all.
+
+The throughput numbers need their denominators read out, and the PR gives them:
+*"1-way 8.7 req/s at 0.12 s, 32-way 54.0 req/s at 0.58 s, about 162 decisions/s"*
+on one DGX Spark, three decisions per request. The arithmetic is exact —
+54.0 × 3 = 162 — and these are the author's own measurements, not anyone's
+independent benchmark. Three things the number does not say on its own:
+
+- The model served is **`nvidia/diffusiongemma-26B-A4B-it-NVFP4`**, a 4-bit
+  quantised checkpoint, not the bf16 one whose parameters I just counted.
+- It runs at **`--canvas 32`**. The model's own `config.json` has
+  `canvas_length: 256`. The separate claim of roughly 85 questions per canvas is
+  256 ÷ 3, and it needs the compressed answer template that the PR says kicks in
+  *"past ten questions"*. The throughput run is at a canvas eight times smaller
+  and three questions.
+- It is **read-only single reads**, `reads=1`. The accuracy demos in the same PR
+  run at `reads=4` — four noise draws averaged to get the ± figures — and take
+  420–530 ms. The 120 ms and the error bars are different configurations.
+
+None of that makes 162 decisions/s wrong. It makes it a number about one
+quantisation, one canvas size and one sampling policy, reported by the person
+proposing the change.
+
+Worth noting what is *not* in the PR, because it is the strongest thing going for
+the approach: on JevBench's public hard tier, `djev` — Maisa's diffusion-gemma
+build, the same model family — scores **67.6%** against Jev's 72.1%, the closest
+any open entrant gets. The bet that a canvas denoiser makes a good decision model
+looks like a reasonable one. The PR's numbers are about how fast you can serve it,
+and those are the two separate questions this article keeps having to pull apart.
+
+## jeff, and "only a mild hit in accuracy"
+
+[`logan-markewich/jeff`](https://github.com/logan-markewich/jeff) is a self-hosted
+System One server on a frozen GliFormer encoder, MIT, speaking TypeSafe's SDK. The
+claim made for it is that Jev *"can basically be boiled down to a classifier or an
+encoder, just like GliFormer. Latency is the same, cost is cheaper, with only a
+mild hit in accuracy."*
+
+Two of those three hold. jeff's own measurements put it at 266 ms p50 on an L4
+against Jev's 233 ms, and \$0.0173 per 1,000 decisions against \$0.0384 — same
+order on latency, less than half the cost. The third does not.
+
+<BenchBars
+  title="JevBench hard tier — 111 public items, accuracy %"
+  unit="%"
+  max={100}
+  bars={[
+    { label: "jeff (GliFormer-large, Modal L4)", value: 37.8, highlight: true },
+    { label: "open-jev-deberta-v3-large", value: 37.8 },
+    { label: "system-one-open (Gemma 4 E2B LoRA)", value: 48.6 },
+    { label: "SemIf / openjev (Qwen3.5-4B)", value: 61.3 },
+    { label: "djev (Maisa, diffusion-gemma)", value: 67.6 },
+    { label: "Jev 1.13", value: 72.1 },
+  ]}
+/>
+
+37.8% against 72.1% is not a mild hit. jeff scores **0 of 7** on ambiguous items
+and **1 of 19** on long policies with 3–4k-token states. On the standard tier it
+is 76.4% against 98.6%. The encoder reading is right about the *mechanism* — a
+frozen DeBERTa-family encoder with a scoring head really does reproduce the shape
+— and wrong about what the mechanism is worth on anything that needs inference
+rather than lexical cues.
+
+Which is, again, the article's point from a different angle: the shape is cheap.
+The competence is not.
+
+Credit where it is uncomfortable. Every number above is jeff's own, measured by
+jeff's author, against jeff's author's interest, using JevBench's own runner and
+scoring code. The repository also reports jeff's temperature-3.2 calibration,
+notes it is *"score renormalization, not a calibrated posterior"* in the source
+comment, and runs a probe confirming that Jev is *"unchanged on every metric"*
+when three unrelated questions are packed ahead of the labelled one — an
+independent confirmation of the question-isolation claim the earlier pieces argued
+for from the docs.
+
+## Compatible on the wire, incompatible in the field that matters
+
+Every project here advertises SDK compatibility. Point `TYPESAFE_BASE_URL` at it
+and the official client works. That is true, and it is a real achievement, and it
+conceals something.
+
+<ConfidenceDivergence />
+
+Three implementations, three different definitions of `confidence`, same field
+name, same contract. On a near-uniform `(0.40, 0.35, 0.25)`, one of them reads
+**0.016** and another reads **0.575**. A confidence-gated routing threshold at 0.5
+ships that decision unattended under one and escalates it to a person under the
+other two. TypeSafe declines to publish the formula — *"a specialized topic that
+we'll keep to a separate cookbook"* — so nobody is wrong, exactly. Everybody
+guessed, and they guessed differently, and the wire format cannot tell you which
+one you are talking to.
+
+## What none of this reproduces
+
+<Receipts src="/articles/any-model-can-be-jev/data/dropins.json" />
+
+The serving half is done. Six projects, six ways to get a typed request in and a
+probability per option out in one pass, and between them they cover every family:
+single-position readout, full-sequence likelihood, canvas slots, independent
+sigmoids, learned scalar heads. If a `/v1/score` endpoint turns any model into a
+decision model, then "System One model" is not a kind of checkpoint. It is a
+**serving discipline plus a training objective**, and the serving discipline is
+now thoroughly, publicly, redundantly reproduced.
+
+The training objective is the half the category is named after — RLCD is
+*reinforcement learning for calibrated decisions* — and it is where the projects
+separate. Look at the last column. The three that are pure serving tricks publish
+no calibration number, and two of the three say so in their own words. The three
+that fit or train something publish one.
+
+That is not a coincidence and it is not really a criticism. **Calibration is the
+one property you cannot get from the serving layer**, because measuring it costs
+something the serving layer never touches: labelled outcomes. `exp(logprob)` from
+an untouched checkpoint is whatever pretraining left there, and Kadavath et al.
+showed that is [surprisingly good on multiple
+choice](/articles/rlcd-calibrated-decisions) and that preference optimisation then
+wrecks it. So a serving trick inherits its base model's calibration, whatever that
+happens to be, and not one of these projects went and found out.
+
+Which is the smaller, more annoying version of the finding. Nobody needed a
+training run to publish a reliability number. A few hundred labelled decisions and
+an afternoon would have done it, for any of them, and it is the one number that
+would tell a reader whether the probability on the wire means anything.
+
+The exception is the one that is the most useful thing in the batch:
+
+<Figure
+  src="/articles/any-model-can-be-jev/fig1.png"
+  alt="A chart titled 'kev family vs. Jev on sources kev never trained on', subtitled 'Same 764 records for every model, top-1 accuracy, Jev via Vercel AI Gateway, kev checkpoints are the published research previews'. A horizontal bar chart on the left shows per-source accuracy for kev-0.6b, kev-4b, kev-8b and Jev across eleven sources: QNLI, SciQ, TweetEval offensive, PAWS, MMLU 4-way, Emotion-6, Policy authorization, Policy deadline, and three rule-composition tasks. Jev leads on most, with large gaps on MMLU 4-way (90 against kev-8b's 69), Policy deadline (92 against 70) and the rule tasks (97 against 62, 78 against 53). A panel on the right plots overall transfer accuracy against backbone parameters, rising from about 60 percent at 0.6B to about 78 percent at 8B, under a flat line marking Jev at 85.7 percent. A read-outs list below it records Brier out of domain: kev-8b 0.339, Jev 0.211."
+  caption="The only out-of-domain comparison in the batch, and it reports a proper scoring rule: Brier 0.339 for kev-8b against 0.211 for Jev, on 764 records from six public sources kev never trained on. Every other open release in this category benchmarks in-domain against a cold Jev; this one measures itself on someone else's data and loses. (jaredpalmer/kev, docs/kev-family.png.)"
+/>
+
+[`kev`](https://github.com/jaredpalmer/kev) is a LoRA adapter plus a pointer head
+on Qwen backbones from 0.5B to 8B, Apache-2.0, trainable on a laptop —
+`kev-0.5b` is 9.3M trained parameters on a frozen Qwen2.5-0.5B, about an hour and
+three quarters on an Apple M5. Its model card carries `ECE 0.065`, and `0.031`
+after fitting a temperature of 1.47 on even-indexed records and testing on odd. It
+also carries this, which I would put on the wall:
+
+<Callout type="warning">
+**"Direct probability outputs look authoritative. A `confidence: 0.92` from this model is a statistic about its own distribution over three options, not a verified probability of being right. Do not threshold on it for consequential decisions without measuring calibration on your own labelled outcomes first."** — `kev/MODEL_CARD.md`
+</Callout>
+
+And it measured the thing the [cua-s1 piece's falsifier](/articles/cua-s1-forms)
+asked somebody to measure:
+
+<Figure
+  src="/articles/any-model-can-be-jev/fig2.png"
+  alt="A chart titled 'kev vs. Jev', marked preliminary baseline snapshot, comparing Qwen2.5-0.5B plus LoRA against Jev on a frozen development suite of 588 requests and 852 questions. A horizontal bar chart shows per-task accuracy across eight tasks: kev leads on AG News (91.25 against 81.25) and Yelp yes/no (86.25 against 82.50), Jev leads on BoolQ (92.50 against 78.75), MNLI, Banking77, SST-5 and Yelp score. A panel on the right reports a macro-task difference of minus 1.80 percentage points with a 95 percent confidence interval from minus 5.47 to plus 1.72, noting the interval includes zero and that this is not evidence of equivalence. An aggregates table below gives kev and Jev side by side: macro accuracy 78.12 against 79.92, micro accuracy 79.72 against 81.11, mean confidence 86.91 against 88.81, ECE 0.081 against 0.077, and permutation flip rate over 36 items of 2.78 percent against 0.00 percent."
+  caption="The option-order experiment, run. Reordering a question's options flips kev's answer on 2.78% of 36 perturbation items and flips Jev's on 0.00% — the behaviour a per-option scorer predicts, measured from the outside by somebody with an interest in the other result. ECE on the same run: kev 0.081, Jev 0.077. (jaredpalmer/kev, docs/kev-vs-jev.png.)"
+/>
+
+**0.00% on 36 permutations.** The cua-s1 article measured openjev's vocabulary
+readout flipping on 27.8% of reversals and argued that a per-option scorer cannot
+express the failure. Here is the other half of that experiment, on the hosted
+model, from a third party. It is 36 items and it is one run, so it is a weak
+number in the statistical sense and a strong one in the structural sense: a
+vocabulary readout does not produce 0.00% by luck.
+
+One correction to my own earlier piece while I am here. [The cua-s1
+article](/articles/cua-s1-forms) ended on *"not one of these projects reports a
+calibration number."* That was true of the three projects in front of me a day
+ago. It is not true of this week's: jeff publishes ECE and Brier on two tiers and
+measures Jev's alongside, and kev publishes ECE before and after temperature
+scaling plus an out-of-domain Brier. Both are worse than the hosted model they
+measured against, and both shipped the comparison. The pattern I described was
+real and it has already partly broken, which is the better outcome.
+
+So the through-line, stated as narrowly as I can make it. The readout is a serving
+feature; SGLang has had it since June 2025; it works on essentially any
+generative checkpoint, one endpoint, one flag, and it gives you either model
+family depending on where you put the options. What it does not give you is the
+thing the name RLCD points at. **Everyone has reproduced the serving half.
+Whether a project publishes a calibration number is now the fastest way to tell
+whether it did anything else.**
+
+<ChangeMyMind>
+
+<Falsifier claim="SGLang's /v1/score is a single-position vocabulary readout, not a full-sequence or length-normalised likelihood.">
+Serve any small model, send one item with a long candidate and one with a short candidate as `items` with the same `label_token_ids`, and compare against scoring the same pairs with `prompt_logprobs` on `/v1/completions`. If the `/v1/score` numbers move with candidate length, I have read the handler wrong and it is scoring the item's tokens somewhere I did not find.
+</Falsifier>
+
+<Falsifier claim="deepseek-v4.1-flash-jev is weaker than Jev mainly because scoring after `</think>` reads the distribution the model was post-trained to route around.">
+Run the same decision set three ways on the same checkpoint: scored at the post-`</think>` position; generated with thinking on and the answer parsed out; and scored at a position appended after a real generated trace. If the thinking runs are no better than the direct score, the gap is capability rather than the readout position, and my explanation is wrong.
+</Falsifier>
+
+<Falsifier claim="The 62.91x is a token-count ratio, not a property of the method.">
+The fit is `95.4 + 15.21·G` on five points, which is five points. Run the same harness on ten schemas with generation lengths spread from 10 to 400 tokens and plot speedup against `G`. If the line bends — if the speedup grows faster or slower than the baseline's token count — there is something in the method I have not accounted for. Alternatively, run the baseline with torch.compile and CUDA graphs: if the per-step cost falls well below 15 ms, the denominator was overhead and the honest ratio is smaller still.
+</Falsifier>
+
+<Falsifier claim="Nothing about LFM2.5 in particular makes this work; the same trick works on any model of that size.">
+The engine's only model-specific code is `fork_cache`, which exists because LFM2's convolution state does not support generic batch repeat-interleave. Port the 122 lines to a plain attention-only 350M model, where the cache forks trivially, and re-run the stress suite. If the speedups land in the same range, the architecture is irrelevant and my reading holds. If they do not, LFM2's hybrid conv/attention stack is doing something for the branched prefill that I have missed.
+</Falsifier>
+
+<Falsifier claim="Jev's 0.00% option-order flip rate reflects options that never share a context.">
+36 items is thin. Re-run the permutation probe at n = 500 across option counts from 2 to 16. A per-option scorer should stay at or very near zero at every cardinality. If flips appear and grow with the option count, something in the hosted pipeline does see the ordering, and the scorer reading needs revisiting.
+</Falsifier>
+
+<Falsifier claim="A serving trick inherits its base model's calibration, and nobody has measured what that is.">
+Take any stock checkpoint through `/v1/score`, run a few hundred labelled decisions through it, and report ECE raw and after one fitted temperature. I expect raw ECE in the 0.1–0.3 range on an instruct-tuned model and much better on a base one, following Kadavath and the GPT-4 report. If a stock instruct checkpoint's readout comes out near 0.03 untouched, the calibration half of this article's argument mostly evaporates: the serving trick would be giving you a calibrated decision model for free, and the training would be buying accuracy rather than honesty.
+</Falsifier>
+
+</ChangeMyMind>

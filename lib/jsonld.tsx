@@ -137,7 +137,9 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
   const ogImage = absoluteUrl(`/articles/${article.slug}/opengraph-image`)
   return {
     "@context": "https://schema.org",
-    "@type": "Article",
+    // TechArticle rather than Article: these are technical explainers, and the
+    // more specific type is the one Google and the answer engines match on.
+    "@type": "TechArticle",
     headline: article.title,
     description: article.description,
     image: article.cover ? [absoluteUrl(article.cover), ogImage] : [ogImage],
@@ -153,7 +155,37 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
     isAccessibleForFree: true,
     author: { "@id": `${siteUrl}/#person` },
     publisher: { "@id": `${siteUrl}/#person` },
+    // The primary sources the piece is built on, made machine-readable. Every
+    // article here cites papers and repositories inline; an answer engine
+    // deciding whether a page is grounded reads this rather than the prose.
+    ...(() => {
+      const cites = citationsFromBody(article.body)
+      return cites.length ? { citation: cites } : {}
+    })(),
   }
+}
+
+// Pull the primary sources out of an article body: arXiv abstract pages,
+// DOIs and source repositories. Deduplicated, capped, and order-stable so the
+// emitted JSON-LD does not churn between builds.
+const CITATION_PATTERNS = [
+  /https?:\/\/arxiv\.org\/abs\/\d{4}\.\d{4,5}(?:v\d+)?/g,
+  /https?:\/\/doi\.org\/10\.\d{4,9}\/[-._;()/:a-z0-9A-Z]+/g,
+  /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/g,
+  /https?:\/\/huggingface\.co\/(?:datasets\/)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/g,
+]
+
+export function citationsFromBody(body: string, limit = 20): string[] {
+  const seen = new Set<string>()
+  for (const re of CITATION_PATTERNS) {
+    for (const m of body.matchAll(re)) {
+      // strip trailing punctuation that markdown link syntax drags in
+      const url = m[0].replace(/[).,;:]+$/, "")
+      if (!seen.has(url)) seen.add(url)
+      if (seen.size >= limit) return [...seen]
+    }
+  }
+  return [...seen]
 }
 
 // Breadcrumb trail (Home › Section › Page) — a Google rich-result signal that

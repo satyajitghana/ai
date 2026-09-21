@@ -1,0 +1,669 @@
+---
+title: "grep, but the pattern is a proposition"
+description: "jev-semgrep is 309 lines of zero-dependency Node that asks a decision model, line by line, 'does this line match the meaning of X?' and thresholds the probability. The idea is genuinely good and the argument against vector search is right: cosine distance has no complement, so 'about a refund but not a request' is not expressible as similarity, while 1 − P(proposition) is. I read the source, worked out the request shape and the real bill ($0.11 and 83 seconds for one pass over this site), found that the boolean algebra is only classical at --level normal — loose is paraconsistent, strict has a truth-value gap, and the project's own tuned optimum is one of the inconsistent ones — and then, because Satyajit asked, wrote the other half: where a decision-model call belongs in Next.js 16.3, what is actually cached by default (nothing), and why the threshold must never enter the cache key."
+date: 2026-09-19
+interest: 5
+helpful: 5
+featured: true
+tags:
+  - explainer
+  - search
+  - llm
+  - calibration
+  - nextjs
+draft: false
+---
+
+import { PropositionSeparator } from "@/components/articles/search-by-meaning/proposition-separator"
+import { ThresholdLogic } from "@/components/articles/search-by-meaning/threshold-logic"
+import { CacheBoundary } from "@/components/articles/search-by-meaning/cache-boundary"
+
+[`uehaj/jev-semgrep`](https://github.com/uehaj/jev-semgrep) is a grep whose pattern is a sentence.
+
+```sh
+npx @uehaj/semgrep -e "ネットワーク障害" app.log
+```
+
+It is 309 lines of Node with no dependencies, one file, MIT, by Junji Uehara. For every
+non-blank line in the file it asks [Jev](/articles/jev-system-one-models) — TypeSafe's
+decision model, which returns probabilities rather than text — a yes/no question:
+*does line L007 match the meaning "ネットワーク障害"?* It gets a probability back,
+compares it to a threshold, and prints the line. The flags are grep's: `-e` ORs,
+`-a` ANDs, `-v` AND-NOTs, plus `-r`, `-l`, `-c`, `-n`, `-A/-B/-C`, `--color`, and
+`--level loose|normal|strict` to move the cutoff.
+
+<Figure
+  src="/articles/search-by-meaning/fig1.png"
+  alt="A dark terminal screenshot. The command line reads: semgrep -n -p --color=always -t 0.6 -T 0.4 -e (a Japanese phrase meaning network or remote connection failure) -e 'customer is asking for a refund' tests/corpus.txt. Nine output lines follow, each with a green line number, the matched text, and two bracketed probabilities coloured green when high and red when low. Line 4, an ERROR about a connection reset by peer, reads 0.95 and 0.01. Line 5, an INFO line about retrying a payment-gateway request, reads 0.73 and 0.01. Line 13, 'network unreachable: no route to host', reads 0.96 and 0.01. Line 14, a Japanese customer message asking for a refund, reads 0.02 and 0.99. Line 30, the Python fragment 'except ConnectionError as e:', reads 0.61 and 0.01."
+  caption="Two meanings in two languages against one mixed-language log, with -p printing each meaning's probability. Note line 5 — an INFO line about a retry — at 0.73 on 'network or remote connection failure'; it comes back later. (jev-semgrep's own docs/color.svg, rasterised and committed rather than hotlinked.)"
+/>
+
+The pitch that makes this worth a full article is not the grep interface. It is the claim,
+stated plainly in the README, that **this is a different operation from vector search** — and
+that the difference buys you boolean logic over meanings. That claim is correct, it is more
+interesting than the author sells it as, and it comes with a bill and a dependency that the
+README does not price. All three below.
+
+## What the request actually is
+
+The batching is the first thing worth reading, because the README's throughput numbers only
+make sense once you have. From `semgrep.mjs`:
+
+```js
+async function evaluate(chunk) {
+  const id = i => `L${String(i).padStart(3, '0')}`;
+  const state = Object.fromEntries(chunk.map((l, i) => [id(i), l.text.slice(0, 2000)]));
+  const questions = {};
+  chunk.forEach((_, i) => meanings.forEach((text, m) => {
+    questions[`${id(i)}_${m}`] = { type: 'noul', instructions: `Does line ${id(i)} match the meaning: "${text}"?` };
+  }));
+  // ... one POST to https://api.typesafe.ai/v1/systemone
+}
+```
+
+So it is **not** thirty separate calls, and it is not one call per line. One POST carries a
+`state` object of thirty numbered lines and **thirty × (number of meanings)** `noul` questions,
+each naming a line by its id. Jev reads the state once and answers every question against it in
+one parallel pass — that shape is the entire reason the model exists, and it is what makes a
+per-line decision affordable at all.
+
+Three consequences fall straight out of that code, and the third is the important one.
+
+**Requests, not tokens, are the scarce resource.** TypeSafe publishes two limits for
+`jev-1.13.0`: 250,000 tokens per second and 1,200 requests per minute. A thirty-line chunk with
+two meanings is about 3,000 input tokens, so 1,200 requests a minute is about 3.6M tokens a
+minute — 60,000 tokens per second, against a cap of 250,000. You run out of requests with
+three quarters of your token budget unspent. Chunking is not a latency optimisation; it is the
+only mechanism that converts that unused token headroom into throughput. Thirty lines per
+request turns the request cap into 36,000 lines per minute.
+
+**The "210-line file finishes in under a second" claim is one round trip, and the number is
+load-bearing.** The defaults are `--chunk 30` and `-j 8`, so eight requests fire at once and
+240 lines is exactly one wave. The demo file is 210 lines. Under a second is a single Jev round
+trip (TypeSafe documents 70–500 ms) plus Node startup, and the wall clock steps up at 241 lines,
+481, 721. It is an honest number for the file it was measured on; it is not a rate.
+
+**The probability for a line is conditioned on the other twenty-nine.** All thirty lines go into
+one shared `state`, and the question points at one of them by id. The README admits the
+consequence: *"Very large chunks start losing lines near the threshold, hence the default of 30."*
+That sentence is doing more work than it looks like. It means `P(line ⊨ proposition)` is not a
+function of the line and the proposition alone — it is a function of the line, the proposition,
+and its neighbours — and that `--chunk` is a quality knob disguised as a performance knob. It
+also means the same line scored in two different chunks can land on two different sides of the
+threshold. Hold onto that; it comes back when we try to cache this.
+
+One real bug-shaped gap while we are in here. TypeSafe's documented budget is 64k tokens per
+request, with 32k for `state` plus the longest single question. `semgrep.mjs` guards the state —
+it caps a chunk at 20,000 characters — but nothing guards the question count, which grows as
+`--chunk × meanings`. At the README's own upper bound of 420 questions that is fine; at
+`--chunk 500` with six meanings it is 3,000 questions against a 64k ceiling, and the state cap
+passes happily on the way to a 4xx.
+
+## The argument against vector search, made properly
+
+Here is the case as the README makes it. The six `tests/contrast.txt` lines below are all about
+a refund. Only two are a customer asking for one.
+
+<PropositionSeparator />
+
+An embedding cannot make that split, and the reason is structural rather than a matter of model
+quality. A bi-encoder computes `enc(line)` **before it has seen your query** — that is the
+entire point of an index — so one fixed vector has to serve every question anyone will ever ask
+about that line. What it can encode is what the line is *about*. Who did what to whom, whether
+the event has happened or is being requested, and whether the sentence is negated are all
+properties of the line *relative to a question*, and there is nowhere to put them.
+
+Jev reads the line and the question together. That is a cross-encoder shape, and the distinction
+is not a hunch — it is the finding of the benchmark built for exactly this, Orion Weller, Dawn
+Lawrie and Benjamin Van Durme's [NevIR: Negation in Neural Information
+Retrieval](https://arxiv.org/abs/2305.07614):
+
+<BenchBars
+  title="NevIR — pairwise accuracy on pairs differing only by negation (arXiv 2305.07614)"
+  unit="%"
+  max={100}
+  bars={[
+    { label: "human · n=10", value: 100 },
+    { label: "MonoT5 3B · cross-enc", value: 50.6, highlight: true },
+    { label: "random baseline", value: 25 },
+    { label: "ColBERTv1 · late-int", value: 19.7 },
+    { label: "multi-qa-mpnet · bi", value: 11.1 },
+    { label: "SPLADEv2 · sparse", value: 8.7 },
+    { label: "TF-IDF · lexical", value: 2.0 },
+  ]}
+/>
+
+Read the ordering, then read the baseline. The metric is pairwise accuracy over 2,556 contrastive
+document pairs that differ only by a negation: the model must rank both the query and its negated
+twin correctly, so random guessing scores **25%**, and the paper lists that as a row. The best
+bi-encoder in the table — `multi-qa-mpnet-base-dot-v1` — gets **11.1%**. Not near chance.
+*Below* it, because these models do not merely fail to notice a negation, they systematically
+rank the same document higher for a query and for its opposite. The paper's own sentence:
+*"nearly all IR systems ignore the negation, generally scoring one document of the two higher for
+both queries."*
+
+Two refinements the summary bars hide, and both cut against an over-reading. First, cross-encoding
+by itself is not the fix — the cross-encoder family in Table 2 runs from **22.4%** (RocketQA v2)
+and **24.9%** (`stsb-roberta-large`), both at or under random, up to 50.6%, and the clean trend
+inside it is size: MonoT5 at 27.7% → 34.9% → 45.8% → 50.6% from small to 3B. The architecture
+buys you the *ability* to condition on the query; scale is what turns the ability into accuracy.
+Second, the 100% human bar is three annotators on **ten** sampled test instances — a sanity check
+that the task is trivial for people, not a measured human baseline, and I would not quote it as
+one without saying so.
+
+That is the published version of jev-semgrep's claim, and it supports the direction of the
+argument while flatly refusing to support a strong form of it. Cross-encoding is the right
+family. It is not a solved problem in that family.
+
+### Why negation is the whole thing
+
+The README frames the advantage as "boolean AND and NOT are plain boolean operations." It is
+worth being precise about why, because the OR is not actually the interesting half — you can
+fake OR in vector search by issuing two queries and unioning the results, and you can fake AND by
+intersecting. **You cannot fake NOT**, and the reason is a one-line fact about the geometry.
+
+Cosine similarity ranges over `[-1, 1]` and it is a measure of *alignment*, not of truth. The
+complement of a direction in embedding space is not "not that direction" — it is
+*everything else*, which includes every unrelated topic in the corpus. `1 − cos(q, d)` is not
+`P(¬q holds of d)`; it is distance, and "the customer is not asking for a refund" is at maximum
+distance from "the customer is asking for a refund" in exactly the same way that "the weather is
+nice" is. Subtracting a query vector does not give you its negation either, because the
+embedding of a sentence and the embedding of its negation land next to each other — which is the
+NevIR result above, measured.
+
+A probability has a complement. `P(x)` and `1 − P(x)` partition the unit interval, `¬` is
+subtraction, `∧` and `∨` are operations you can actually define over the results, and the whole
+thing composes. That is the real content of the project, and it deserves the flagship treatment
+the author does not quite give it.
+
+## The boolean algebra is only classical at one setting
+
+This is the part I did not expect to find, and it is the one thing in this article that is not
+in the repository's documentation anywhere.
+
+The matcher is a single line of `semgrep.mjs`:
+
+```js
+if (!expr.some(term => term.every(([m, not]) => (not ? p[m] < tNeg : p[m] >= tPos)))) continue;
+```
+
+A positive literal is true when `p >= tPos`. A negative literal is true when `p < tNeg`. Two
+independent cutoffs — not two sides of one. And the `--level` presets set them in **opposite**
+directions:
+
+<ThresholdLogic />
+
+Only `normal` makes the two cutoffs meet. Everywhere else a band opens between them, and the
+sign of the band decides which law of classical logic you have given up:
+
+- Under `--level loose`, a line at `p = 0.5` satisfies **both** `-e X` and `-v X`. The predicate
+  and its negation are simultaneously true; non-contradiction fails. This is a paraconsistent
+  logic, and it is the setting the help text recommends for "catch more, accept some noise."
+- Under `--level strict`, that same line satisfies **neither**. Excluded middle fails; a line can
+  be neither X nor not-X. This is a truth-value gap — Kleene's third value in all but name.
+
+The help text discloses the second half (*"with -t 0.6 -T 0.3 a line at 0.3..0.6 matches neither X
+nor not-X"*) and never mentions the first. And here is the twist: the project's own threshold
+sweep, committed in `tests/report.md`, reports its best-F1 operating point as `-t 0.45 -T 0.65`.
+That is a 0.20-wide overlap. **The empirically best configuration is one of the inconsistent
+ones** — which makes sense, because widening both sides raises recall on both the positive and
+the negative literals, and F1 on this fixture rewards recall.
+
+I want to be fair about what this is. It is not a bug; the two-threshold design is deliberate and
+it is a reasonable way to express "I am not confident either way." It is a documentation gap and
+a conceptual one. A tool whose headline claim is *"logical AND and NOT are plain boolean
+operations, not a trick"* ships a default preset set in which two of the three presets are not
+plain boolean operations, and the one tuning run in the repository lands on a fourth that is not
+either.
+
+## The bill
+
+Now the part the README prices at one sentence and does not extend.
+
+grep is `O(lines)` byte comparisons against a compiled DFA, running at memory bandwidth on your
+own machine, for free. This is `O(lines)` model calls against a metered API in someone else's
+data centre, and — the asymmetry that matters — **you pay the whole corpus again on every
+query**, because there is no index. The README says this itself, to its credit: *"for repeated
+queries over a large, fixed corpus a vector index is cheaper and faster."*
+
+<Receipts src="/articles/search-by-meaning/data/cost.json" />
+
+The two measured rows are the tool's own stderr summary quoted from the README; the rest is a
+token model fitted to them, and the method is in the table. The row to sit with is the third:
+one semantic-grep pass over this site's own prose — 275 MDX files, 49,490 non-blank lines — is
+about **2.7 million input tokens, eleven cents, and 1,650 requests**, which at the published
+1,200-per-minute cap cannot complete in less than **83 seconds**. Per query. For one meaning.
+
+Eleven cents is, in absolute terms, nothing. That is the honest headline: at \$0.042 per million
+input tokens with output metered free, a decision per line is *shockingly* affordable compared
+to any LLM doing the same job, and [the ecosystem has been rediscovering this all
+month](/articles/jev-ecosystem). But the unit is wrong for a search box. Eleven cents and 83
+seconds per query is a batch job, not an interaction, and it is charged to you rather than to the
+person typing.
+
+There is also a concurrency detail worth naming. The default is `-j 8`, and the README quotes
+0.2 s per request. Eight in flight at 0.2 s each is 2,400 requests a minute against a documented
+cap of 1,200. Past a few thousand lines you are not running at concurrency 8; you are running
+inside the `429` backoff loop at the bottom of `evaluate()`, which retries six times at
+500 ms × 2ⁿ. It works — that is what the loop is for — but the effective rate is set by the
+limiter, not by `-j`.
+
+## The threshold is a calibration bet, and nobody has published the odds
+
+`--level loose|normal|strict` is a threshold on a probability. That is not a metaphor: it is
+literally `0.3`, `0.5`, `0.7` compared against a number the model emits. Which makes this tool an
+instance of the pattern TypeSafe itself markets as confidence-gated routing, and makes it depend
+on exactly the quantity nobody has measured.
+
+I went looking for that measurement in [RLCD is not constrained
+decisions](/articles/rlcd-calibrated-decisions): TypeSafe's docs corpus is 835,504 bytes and
+contains zero occurrences of `Brier`, `expected calibration`, `reliability diagram` or
+`proper scoring`, and `ECE` as a whole word appears nowhere across the docs, the launch post, the
+manifesto or `evals.typesafe.ai`. RLCD — *Reinforcement Learning for Calibrated Decisions* — is
+published as three sentences of output contract and no method, no loss, no data and no number.
+The only reliability diagram that exists for anything in this family is [the one I computed from
+openjev's committed logits](/articles/rlcd-calibrated-decisions), and openjev is a different
+model: 79.4% accuracy at 85.5% mean confidence, ECE 0.071, over 252 rows.
+
+So when you type `--level strict` you are asserting that 0.7 means something stable. Three things
+in this repository say it might not.
+
+<Callout type="warning">
+**One.** The README states the run-to-run drift directly: *"Probabilities drift by about ±0.05
+between runs."* The gap between `loose` and `strict` is 0.4 — eight drift-widths, which sounds
+comfortable until you notice that `normal` to `strict` is four, and that the reported best
+threshold sits 0.05 from `normal`.
+
+**Two.** The probability depends on the chunk, by the README's own admission about large chunks.
+
+**Three.** The same proposition in two languages moves the number. The README prints the same six
+refund lines scored by a Japanese meaning and by a Russian one: `0.98 0.97 0.97 0.97 0.97 0.97`
+against `0.94 0.97 0.92 0.89 0.92 0.89`. Every line is still above every threshold, so the demo
+is unaffected — but the deltas run to **0.08**, larger than the stated run-to-run drift, and a
+line sitting at 0.55 would flip on the choice of query language alone.
+</Callout>
+
+And then there is the single most informative number in the whole repository, which is in the
+figure at the top of this article. Line 5 of the corpus is
+`2026-09-19 08:02:31 INFO retrying payment-gateway request (attempt 2/3)`. Against the meaning
+"network or remote connection failure" it scores **0.73**.
+
+That is the one line in a 51-line corpus that two independent readers can reasonably disagree
+about: it is an INFO line, it names no failure, and it implies one. The LLM judge in
+`tests/judge.mts` marks it as *not* a match, twice, in two separate cases. A calibrated model
+asked a genuinely ambiguous question should return something near 0.5. Jev returns 0.73 —
+above `strict`. One data point is not an ECE, and I am not claiming it is. But it is the
+observation that a calibration number would settle, and it is sitting in the project's own
+promotional screenshot.
+
+## What the evaluation is, named by its denominator
+
+The README's headline is *"precision 0.94, recall 0.98."* It is better than that number
+usually is, and worse.
+
+Better, because the harness is real and the design has a piece of genuine care in it. `judge.mts`
+asks Claude Sonnet which lines match **each meaning separately**, and then evaluates the AND/OR/NOT
+expression over those per-meaning verdicts in the runner. The judge never sees the boolean
+expression. That is the correct way to test a boolean algebra over predicates — it isolates the
+algebra from the judging — and it is a better methodological instinct than most released
+evaluations have. It also runs semgrep exactly once at `-t 0` to extract raw probabilities and
+then sweeps 361 threshold pairs offline, never calling the API again. Remember that; it is the
+right architecture, and it turns up again in Part Two.
+
+Worse, because of the denominators.
+
+<Receipts src="/articles/search-by-meaning/data/eval.json" />
+
+Ninety true positives, and sixty-two of them — **69%** — come from two queries:
+"not a timestamped server log line," which matches 39 of the 51 lines by construction, and
+"source code or SQL, or not written in English," which matches 23. The other eight queries
+produce 28 true positives between them. One case, `and/net-and-retry`, scores 0.00 precision and
+0.00 recall, because the judge says nothing matches and semgrep returns one line — and that line
+is L5, the retry at 0.73.
+
+Two further things to state plainly. The ground truth is a language model's opinion, instructed
+to *"Be strict: only clear matches,"* which biases the reference toward fewer positives and
+therefore mechanically inflates the false-positive count of anything measured against it. And the
+361-pair threshold sweep is fit on exactly the ten cases it reports, with no held-out set — so
+the "best `-t 0.45 -T 0.65`" row is tuned on its own test set. The author does the right thing
+here and quotes the **default** thresholds in the README, which is the un-tuned number. I would
+just say the word "tuned" out loud next to the other one.
+
+## The multilingual result is a demo, and a good one
+
+`tests/multi.txt` is fourteen lines. Six are refund requests, in French, Russian, German,
+Spanish, Chinese and Korean; six are thank-you notes in the same six languages; two are server
+errors in French and Russian. A Japanese query finds all six refund requests and none of the
+other eight. A Russian query does the same.
+
+That is a real and non-obvious capability, and it is worth being impressed by: no translation
+step, no per-language index, no tuning, six languages found by a Japanese query, which is a seventh. It is also
+fourteen lines with six positives and eight negatives, and the eight negatives are thank-you
+notes and connection timeouts — topically about as far from a refund request as a fixture can
+get. "Zero misses, zero false positives" on that set is the expected outcome, not evidence about
+the general case. N = 14 cannot carry the sentence.
+
+The README is, again, more honest than it needs to be about the limit next door: *"TypeSafe
+documents English as the most accurate language, and in our tests Japanese meanings wobble a
+little more near the threshold. When a query is borderline, phrasing the meaning in English is
+the safer choice."* That is a disclosure published directly against the interest of a tool whose
+author writes its documentation in Japanese first, and it is the most credible sentence in the
+file.
+
+---
+
+# Part two — where this goes in Next.js 16
+
+Satyajit's instruction for this half was three words: *figure out Next.js best practice for
+this.* The answer has moved. This repository runs **Next.js 16.3.5**, and the version-matched
+documentation ships inside the package at `node_modules/next/dist/docs/` — every claim below is
+from those files rather than from memory of Next 14.
+
+## Where the call belongs: a Route Handler, and it is not close
+
+Three places could host a decision-model call. Only one survives contact with this workload.
+
+**Not a Server Action.** The `server-actions` guide states the disqualifying property in its
+second section: *"Next.js dispatches Server Actions one at a time per client. If a user triggers
+three actions in quick succession, the second waits for the first to finish."* The whole
+performance story of this pattern is eight concurrent chunk requests. From the browser, eight
+Server Actions are eight sequential round trips. The docs even name the remedy, and it is the
+answer to this question: *"do not rely on `Promise.all` to parallelize Server Actions from the
+client... use a Route Handler for non-mutation requests."* A search is not a mutation. Two more
+reasons stack on top: a Server Action is identified by an action ID that Next rotates at most
+every 14 days, so a long-lived search tab that survives a deploy gets
+`Failed to find Server Action`; and the request body limit is **1 MB by default**
+(`serverActions.bodySizeLimit`), which a pasted log blows through without trying.
+
+**Not a Server Component**, for a user-typed query. A Server Component is the right home for a
+*fixed* set of propositions evaluated over *known* content — a page that labels every article
+with "states a measured benchmark number," say — because then it prerenders and caches. Point it
+at `searchParams` and you have made the route runtime-dependent, you have put the corpus in a
+URL, and you have bought a full re-render per keystroke.
+
+**A Route Handler**, then: `app/api/semantic-grep/route.ts`, `POST`, streaming. Two Next 16
+facts to hold while writing it. Route Handlers *"are not cached by default"* — `GET` can opt in
+with `export const dynamic = 'force-static'`, and other methods never cache. And `use cache`
+**cannot appear inside a Route Handler body**; the docs are explicit: *"extract it to a helper
+function."* Which is exactly where you want it anyway.
+
+## Caching: nothing is cached by default, and the threshold must not be in the key
+
+Start from the version-specific baseline, because the internet's memory of this is wrong. In
+Next 16 the `fetch` default is `auto no cache`, and the docs say it in one sentence:
+**"Caching is opt-in."** Route Handlers are uncached. Nothing about a Jev call gets cached
+unless you say so.
+
+Two mechanisms are available, and they are not equivalent.
+
+**The `fetch` cache**, which needs no configuration at all and has a property that fits this
+workload perfectly:
+
+> `force-cache`: Next.js looks for a matching request in its server-side cache. **A request
+> matches on its URL, method, headers, and body**, so requests that differ in any of these are
+> cached separately. […] Caching is opt-in. Set `cache: 'force-cache'` to cache any request,
+> including `POST`.
+
+A Jev call is a `POST` whose body is `{ model, state, questions }`. Matching on the body means
+the framework cache key *is* `(the thirty lines, the propositions, the model)` — the exact key
+you would have designed. One option object and you have a content-addressed decision cache:
+
+```ts
+const res = await fetch("https://api.typesafe.ai/v1/systemone", {
+  method: "POST",
+  headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+  body: JSON.stringify({ model: "jev-1.13.0", state, questions }),
+  cache: "force-cache",
+  next: { revalidate: false, tags: ["jev-1.13.0"] },
+})
+```
+
+Three details in that options object, and a fourth that is not in it. `revalidate: false` is right, and it is right for an unusual reason:
+`P(line ⊨ proposition)` under a **pinned** model is a pure function with no time dimension at all,
+so there is nothing to revalidate *on a clock*. It revalidates on a model version. That is what
+the tag is for — `revalidateTag("jev-1.13.0")` when you move. Which is also why the body says
+`jev-1.13.0` and not `jev-latest`: caching an alias caches a moving target. And the docs warn
+that `force-cache` will happily cache a request carrying an `authorization` header — fine when
+the key is your server's, a serious footgun the day it is a user's.
+
+The one that is not in the object is easy to miss and it costs money. React's automatic `fetch` memoisation — the thing
+that collapses two identical calls inside a single render pass — **does not apply in Route
+Handlers**, because a Route Handler is not part of the component tree. Two identical chunks in
+one request are two calls and two bills unless the persistent cache catches them, and on a cold
+serverless instance it will not. Deduplicate chunks yourself, before dispatch.
+
+**`use cache`**, which needs `cacheComponents: true` in `next.config.ts`. This site does not have
+it enabled, so on this codebase today the `fetch` cache and `unstable_cache` are what exist. When
+you do turn it on, the key is *"build ID + function ID + serializable arguments"*, including
+anything captured from an enclosing scope. Which brings us to the one design decision that is
+worth more than every other knob in this pattern:
+
+<CacheBoundary />
+
+The threshold does not belong in the cache key. Jev returns a probability; `-t`, `-T` and
+`--level` are a comparison against it. Put the cutoff inside the cached function and every value
+a reader tries is a fresh entry and a fresh `O(lines)` bill. Apply it to the cached return value
+and switching `loose → strict` costs zero calls and zero cents.
+
+The jev-semgrep CLI gets this wrong and its own test harness gets it right. Change `--level` on
+the command line and all 49,490 lines go back over the wire; `tests/judge.mts` calls semgrep once
+at `-t 0`, harvests the raw probabilities, and sweeps 361 threshold pairs with no further API
+traffic. The correct architecture is already committed to the repository — it just lives in the
+tests instead of in the tool.
+
+### What the hit rate actually is
+
+The docs give a blunt warning about cache keys: *"If cache keys have mostly unique values per
+request (search filters, price ranges, user-specific parameters), cache utilization will be
+near-zero."* A line of text is a high-cardinality key, so it is fair to ask what the hit rate
+would be. I measured it on this site's corpus: of 49,490 non-blank lines, 40,716 are distinct —
+a 17.7% duplicate rate, but **86% of those duplicates are markup**: bare `---`, code-fence
+markers, `/>` and `</Callout>`. Strip those and the substantive repeat rate is **2.5%**.
+
+So the docs are right for prose and wrong for the workload this tool was built for. Prose lines
+are nearly unique; log lines are templated, which is the entire premise of every log-parsing
+system ever written, and the same `ERROR connection reset by peer while calling payment-gateway`
+appears ten thousand times in one file. Per-line caching is close to worthless on an essay and
+close to free money on a log — and the way to find out which you have is to count distinct lines
+before you design the cache, not after.
+
+The bigger win is not within a query anyway. It is across queries: the same corpus, scored
+against the same proposition, next week. That is where a **durable** cache earns its keep, and
+it is where Next 16's defaults will quietly betray you. With the default in-memory handler,
+serverless entries *"typically don't persist across requests,"* and **no** cache directive
+survives a deploy, because the build ID is in the key. Refilling a 2.7M-token cache after every
+deploy is eleven cents and 83 seconds, every time. The docs name the fix and name this exact
+situation while doing it: `'use cache: remote'` is for *"Rate-limited APIs: your upstream service
+has rate limits or request quotas that you risk hitting."* For entries that must outlive a
+deploy, it is `unstable_cache` or the `fetch` cache — the two that key on something other than
+the build.
+
+## Batching, server-side
+
+Everything from Part One transfers: chunk to thirty, cap the chunk by characters, bound
+concurrency, and remember the rate limit is on **requests**. The one thing to add on the server
+is a queue that is shared across requests rather than per-request, because eight concurrent
+chunks per user is eight per *user* — twenty simultaneous readers is 160 in flight against a
+1,200-per-minute cap, which is a 429 storm arriving as a p99 latency graph. A single module-scope
+semaphore sized to your actual quota is the whole fix, and it is one of the few genuinely good
+reasons to keep state at module scope in a Next server.
+
+## Streaming partial results, and why Suspense is the wrong tool here
+
+Suspense streams *rendered UI*, and a boundary resolves once — all of its content at once, not
+progressively. For a set of chunks known at render time, sibling boundaries are exactly right and
+the streaming guide covers the pattern well: each `<Suspense>` resolves independently and paints
+as it lands. For a user-typed query, it does not fit, because every keystroke is a new render
+tree and you want one long-lived response that emits verdicts as they resolve.
+
+The docs' own answer for that is a Route Handler returning a `ReadableStream` — they give the
+recipe under "Streaming in Route Handlers" — and NDJSON is the natural body: one JSON object per
+line per verdict, flushed as each chunk's promise settles, in corpus order via a small reorder
+buffer so the output matches grep's.
+
+Three things will silently eat your stream, and all three are documented in the same guide:
+
+- **Safari buffers until 1,024 bytes have arrived.** A verdict line is maybe 60 bytes, so about
+  seventeen results appear at once and then it flows. Pad the first chunk or send a header record.
+- **Reverse proxies and CDNs buffer.** `X-Accel-Buffering: no` for nginx; check your CDN.
+  Compression buffers too, which is its job.
+- **Platform support is not universal.** Vercel streams natively; AWS Lambda needs response
+  streaming mode explicitly enabled, and it is not the default.
+
+## Runtime: the question has been answered for you
+
+This is the part where a pre-release Next matters most, because the received wisdom — *"put your
+lightweight API calls on the edge, it's closer to the user"* — is now actively wrong. From
+`node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/02-route-segment-config/runtime.md`:
+
+<Callout type="note">
+- **`'nodejs'`** (default)
+- **`'edge'`** (deprecated)
+
+> The Edge Runtime is deprecated. **Remove the `runtime` export from your route files.**
+</Callout>
+
+So: Node, and there is no decision to agonise over. It would have been the right answer anyway —
+this workload is a fan-out of eight HTTPS calls to one origin, where the round trip to
+`api.typesafe.ai` dominates and being 20 ms closer to the user buys nothing.
+
+The constraint that does bite is `maxDuration`. A 10,000-line corpus is 334 requests; at the
+1,200-per-minute cap that is 17 seconds of pure rate-limit floor before any backoff, and default
+serverless timeouts are not generous. Two things help, in this order: **don't accept a whole
+corpus in one request** (cap lines server-side before chunking, and paginate), and stream, which
+keeps the connection producing bytes instead of sitting silent until a platform kills it.
+
+## Rate limiting and cost control, which this pattern makes mandatory
+
+The dangerous property of a semantic grep is that the ratio of *user effort* to *your spend* is
+about as bad as it gets. One paste, one click, `ceil(lines / 30)` upstream calls. A 50,000-line
+paste is 1,667 requests — 83 seconds of your entire organisation's rate limit, consumed by one
+person who has not finished reading the page yet.
+
+Four controls, cheapest first:
+
+1. **Cap the input before you chunk.** A line limit per request is one `slice()` and it is the
+   only control that cannot be circumvented by the caller.
+2. **Cache.** A repeat query costs zero calls, which makes the cache a rate limiter that also
+   happens to be fast. This is the argument for `'use cache: remote'` over in-memory, stated as
+   a budget rather than as a latency number.
+3. **A per-session token budget**, checked before dispatch, not after. Jev bills on input tokens
+   and you know the input exactly before you send it — `chars/T + questions` — so this is the rare
+   case where you can enforce a budget *predictively* instead of reconciling a bill.
+4. **Record spend out of band with `after()`**, so logging the token count never adds latency to
+   the response.
+
+And treat the endpoint as public. The docs say it about Server Actions — *"reachable via a direct
+POST request, not just through your application's UI"* — and it is trivially true of a Route
+Handler, which is just a URL. Auth goes inside the handler, above the chunker.
+
+## Would this suit `/api/search`? No — and there is a better shape
+
+This site already has search. [`/api/search`](/api/search?q=attention) is a `GET` handler over
+`lib/search.ts`: BM25 — [the ranking function, explained](/articles/bm25) — over
+contextualised chunks, where each chunk is prefixed with its document title, description, tags
+and nearest heading before indexing. The index is built once from `content/`, cached in a module
+variable, and scored through a postings map. No model, no key, no per-query cost, no network.
+
+Replacing that with a semantic grep would be a straight downgrade, and the cost table above says
+why: eleven cents and a hard floor of 83 seconds per query, against something that currently
+returns in single-digit milliseconds for free, on a public unauthenticated `GET` that anyone can
+call in a loop. That is not a close call. It is the same trade [tgrep](/articles/tgrep) makes
+from the other direction — pay once to build an index so queries are cheap — and the reason both
+answers are "index it" is that this site's corpus is fixed and its query set is open.
+
+But there is a shape that fits, and it is the interesting one. Flip the loop. A semantic grep
+costs `O(queries × lines)`. Precomputation costs `O(propositions × lines)`, once. So pick a small
+fixed set of propositions — *"this passage reports a measured benchmark number," "this passage is
+about training rather than inference," "this passage states a limitation of the work"* — score
+the corpus against them **at build time**, and commit the probabilities as a column next to each
+chunk. Then `/api/search` keeps BM25 for the query and gains free boolean filters over meanings:
+`?q=attention&is=measurement&not=marketing`. Eleven cents per proposition per build, zero per
+query, no model on the request path.
+
+That is the same move Next 16's whole caching model is built around — do the expensive thing when
+the inputs are known, serve the cheap thing at request time — and it is the version of
+jev-semgrep's idea that survives contact with a public endpoint.
+
+## What I would tell the author
+
+Four things, in order of how much I think they would improve the tool:
+
+1. **Split the run from the threshold.** `judge.mts` already proves the design: score once, cache
+   the probabilities, apply `-t`/`-T` locally. A `--cache` flag keyed on
+   `(line, proposition, model)` would make `--level` free and turn threshold tuning from a
+   repeated bill into an instant one.
+2. **Document the overlap.** The help text explains the gap under `strict` and never mentions
+   that `loose` makes a line and its negation both true. One sentence.
+3. **Guard the question budget**, not just the state — `--chunk × meanings` against 64k.
+4. **Publish a reliability diagram.** The pieces are already committed: `judge.mts` harvests raw
+   probabilities at `-t 0`, and `verdicts.json` holds per-meaning ground truth. Binning those
+   probabilities against those verdicts is about twenty lines and would produce the first
+   calibration measurement anyone has published for a Jev `noul` — the number on which every
+   `--level` in this tool depends, and which [TypeSafe has not
+   published](/articles/rlcd-calibrated-decisions) for its own model.
+
+<ChangeMyMind>
+  <Falsifier claim="The boolean algebra is only classical at --level normal.">
+    Read as code, `-e X` is `p >= tPos` and `-v X` is `p < tNeg`, and `loose` sets those to 0.3
+    and 0.7 while `strict` sets them to 0.7 and 0.3. Run
+    `semgrep --level loose -p -e "X" file` and `semgrep --level loose -p -v "X" file` on a corpus
+    with a line between 0.3 and 0.7 and find that line absent from one of them, and I am wrong —
+    the matcher would have to be doing something other than what line 275 says.
+  </Falsifier>
+
+  <Falsifier claim="One pass over this site's corpus is about 2.7M input tokens and eleven cents.">
+    Two measured rows anchor a fitted token model; everything else is extrapolation, and the model
+    assumes 4 characters per token for English. Run the tool over `content/` with a key and read
+    the `input tokens` figure it prints to stderr. If it lands outside roughly 2.0M–3.4M, my
+    chars-per-token constant is wrong and every extrapolated row moves with it. The requests
+    column and the 83-second floor do not move — those are `ceil(49490/30)` and the published
+    1,200/minute.
+  </Falsifier>
+
+  <Falsifier claim="Negation is the capability that vector search structurally cannot have.">
+    NevIR measures bi-encoders below a random baseline on pairs differing only by negation, which
+    is strong evidence, and the mechanism — the document is encoded before the query exists — is
+    not a quality problem. A bi-encoder that scores meaningfully above random on NevIR-style pairs
+    without cross-encoding at query time would falsify the structural half of the claim. Note the
+    reverse is already conceded: the best cross-encoder in that table gets 50.6%, so "cross-encoders
+    solve negation" is not something I am asserting.
+  </Falsifier>
+
+  <Falsifier claim="Line 5 scoring 0.73 is evidence of a calibration question, not a model error.">
+    This is a single data point and I have labelled it as one. What would settle it is a
+    reliability diagram: bin Jev's `noul` probabilities against the judged verdicts already
+    committed in `verdicts.json` and see whether the 0.7–0.8 bin is right about 75% of the time.
+    If it is, the model is calibrated and my discomfort with 0.73 on an ambiguous line is just my
+    disagreement with the judge. Nobody has run this, which is the actual finding.
+  </Falsifier>
+
+  <Falsifier claim="A Route Handler, not a Server Action, is where this belongs in Next 16.3.">
+    The load-bearing fact is the documented sequential dispatch of Server Actions per client. If a
+    future version parallelises client-side dispatch — or if a measurement shows eight actions
+    fired with `startTransition` overlapping rather than serialising — the main argument collapses
+    to the weaker ones (body size limit, action-ID rotation, and search not being a mutation),
+    which are real but would not by themselves decide it.
+  </Falsifier>
+
+  <Falsifier claim="The evaluation's headline rests on two broad queries.">
+    Transcribed from `tests/report.md`, and the arithmetic reconciles to its own stated totals
+    (TP 90 / FP 7). Adding cases with narrow expected sets, or reporting macro-averaged per-case
+    P/R instead of micro-averaged totals, would change the picture — and would be the right fix.
+    Ten cases on one 51-line file is the limit here, not the method.
+  </Falsifier>
+</ChangeMyMind>
+
+## The one-paragraph version
+
+The idea is right and under-sold. Asking a model for the truth of a proposition, rather than the
+distance to a topic, gives you a quantity with a complement — and a complement is the thing
+embedding search cannot manufacture, which NevIR measures and which is why "mentions refunds but
+is not a request" is one command here and not expressible at all in a vector index. The
+implementation is clean, honest about most of its limits, and cheap enough that per-line
+inference stops being absurd. What it does not have is the number the whole design rests on:
+`--level` is a threshold on a calibration nobody has published, its own screenshot shows 0.73 on
+the corpus's most ambiguous line, and two of its three presets quietly give up a law of classical
+logic. On the engineering side, the pattern maps cleanly onto Next 16 — Route Handler, streamed,
+Node runtime, batched thirty at a time — provided you put the threshold outside the cache key and
+count your distinct lines before you believe in the cache at all.

@@ -49,8 +49,16 @@ export default function Page() {
         <p className="font-mono text-xs text-muted-foreground">
           <span className="text-foreground/70">$</span>{" "}whoami
         </p>
+        {/* The H1 carries the name AND what the site is about. A bare name is a
+            weak document title: it gives a search engine, and a reader landing
+            from a link, nothing about the subject. The visible line stays a
+            name-first hierarchy by styling the qualifier down rather than by
+            leaving it out. */}
         <h1 className="font-heading mt-3 text-4xl font-bold tracking-tight text-balance sm:text-5xl">
           {profile.name}
+          <span className="mt-1 block text-xl font-semibold text-muted-foreground sm:text-2xl">
+            {profile.title}, AI &amp; 3D Perception
+          </span>
         </h1>
         <p className="mt-2 font-mono text-sm text-muted-foreground">
           {profile.title} ·{" "}
