@@ -9,10 +9,12 @@
 //
 // Stage timings are sd.cpp's own -v instrumentation:
 // `get_learned_condition completed`, `sampling completed`,
-// `decode_first_stage completed`, `generate_image completed in`. The load
-// segment is the residual: total minus the three measured stages, which is the
-// three model_loader passes plus graph planning. Peak RSS is VmHWM sampled from
-// /proc every 0.5 s by the wrapper that launched the process.
+// `decode_first_stage completed`, `generate_image completed in`. The three
+// stages sum to the total to within 0.02 s in every run, because sd.cpp loads
+// each component's weights inside the stage that first needs them: 1.80 s for
+// the text encoder, 0.81 s for the denoiser, 0.82 s for the VAE. Peak RSS is
+// VmHWM sampled from /proc every 0.5 s by the wrapper that launched the
+// process.
 //
 // Zero JS: this renders on the server and ships no client bundle.
 // Arithmetic is +, -, *, / and toFixed only.
@@ -69,17 +71,26 @@ const RUNS: Run[] = [
     steps: 8,
     rss: 9959.9,
   },
+  {
+    label: "256² · 8 steps",
+    config: "cfg 4.0 — guidance on, so two denoiser passes per step",
+    encode: 8.17,
+    sample: 449.79,
+    decode: 16.64,
+    total: 474.6,
+    perStep: 56.22,
+    steps: 8,
+    rss: 8108.3,
+  },
 ]
 
 const SEGMENTS = [
-  { key: "load", label: "weights + graph", cls: "bg-foreground/15" },
-  { key: "encode", label: "text encode", cls: "bg-foreground/35" },
+  { key: "encode", label: "text encode", cls: "bg-foreground/30" },
   { key: "sample", label: "sampling", cls: "bg-foreground/75" },
-  { key: "decode", label: "VAE decode", cls: "bg-foreground/50" },
+  { key: "decode", label: "VAE decode", cls: "bg-foreground/45" },
 ] as const
 
 const parts = (r: Run) => ({
-  load: r.total - r.encode - r.sample - r.decode,
   encode: r.encode,
   sample: r.sample,
   decode: r.decode,
@@ -137,10 +148,10 @@ export function CpuLedger() {
       <figcaption className="border-t px-4 py-3 text-xs text-muted-foreground">
         Measured on this site&rsquo;s build box: 4 cores of an Intel Xeon at
         2.80GHz, 15 GB of RAM, no GPU of any kind. Bars are to scale against the
-        longest run; the leading segment is the residual between the total and
-        the three instrumented stages, which is loading 8.26 GB of weights off
-        disk and planning the graphs. Peak RSS is VmHWM, sampled from{" "}
-        <code>/proc</code> while the process ran.
+        longest run. Each stage includes reading that component&rsquo;s weights
+        off disk, 3.43 s across all three for 8.27 GB, which is why the segments
+        sum to the total. Peak RSS is VmHWM, sampled from <code>/proc</code>{" "}
+        while the process ran.
       </figcaption>
     </figure>
   )
