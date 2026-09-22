@@ -112,13 +112,13 @@ export function PoolGrowth() {
         <line
           x1={x(0)}
           y1={y(START_EXPERTS)}
-          x2={x(X_MAX)}
-          y2={y(START_EXPERTS + X_MAX / 2)}
+          x2={x(2 * (Y_MAX - START_EXPERTS))}
+          y2={y(Y_MAX)}
           className="stroke-foreground/45"
           strokeWidth={1.5}
           strokeDasharray="6 5"
         />
-        <text x={x(300)} y={y(START_EXPERTS + 300 / 2) - 8} textAnchor="middle" className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
+        <text x={x(268)} y={y(START_EXPERTS + 268 / 2) - 9} textAnchor="middle" className="fill-muted-foreground font-mono" style={{ fontSize: 10 }}>
           ceiling: growth.every_chars 2M, k 1
         </text>
 

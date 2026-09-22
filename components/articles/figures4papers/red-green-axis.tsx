@@ -68,12 +68,13 @@ function deuteranope(hex: string): string {
 }
 
 // figure_VIGIL/plot_comparison_radar.py — the four POPE_Adv entries of
-// data_comparison['results'], in file order.
+// data_comparison['results'], in file order. Backbone names are shortened to
+// fit the tick row on a 390px screen; the article spells them out.
 const SPOKES = [
-  { backbone: "Qwen2.5-VL-7B", v: [82.8, 84.2, 86.9] },
-  { backbone: "LLaVA-OV-7B", v: [82.8, 84.2, 86.9] },
-  { backbone: "InternVL2.5-26B", v: [85.5, 86.8, 89.4] },
-  { backbone: "Qwen2.5-VL-72B", v: [84.5, 87.4, 89.8] },
+  { backbone: "Qwen-7B", v: [82.8, 84.2, 86.9] },
+  { backbone: "LLaVA-7B", v: [82.8, 84.2, 86.9] },
+  { backbone: "InternVL-26B", v: [85.5, 86.8, 89.4] },
+  { backbone: "Qwen-72B", v: [84.5, 87.4, 89.8] },
 ]
 
 const SERIES = [
@@ -92,84 +93,93 @@ const PAIRS = [
   { a: "#D4685F", b: "#DA7B73", label: "red ramp, steps 1-2", note: "CellSpliceNet: one hue, ordered by rank", before: 5.2, after: 4.6 },
 ]
 
-const W = 700
+// One SVG per panel rather than one wide one, so the pair stacks on a phone
+// instead of halving the type size.
+const W = 350
 const H = 212
+const X0 = 32
+const PANEL_W = 300
 const PT = 14
 const PB = 44
 const PH = H - PT - PB
 const LO = 80
 const HI = 91
-const PANEL_W = 300
-const GAP = 40
-const X0 = 26
-const X1 = X0 + PANEL_W + GAP
 
 const yOf = (v: number) => PT + PH - ((v - LO) / (HI - LO)) * PH
-const xOf = (x0: number, i: number) => x0 + 26 + (i * (PANEL_W - 44)) / (SPOKES.length - 1)
+const xOf = (i: number) => X0 + 26 + (i * (PANEL_W - 44)) / (SPOKES.length - 1)
 
-function Panel({ x0, title, sim }: { x0: number; title: string; sim: boolean }) {
+function Panel({ title, sim }: { title: string; sim: boolean }) {
   return (
-    <g>
-      <rect x={x0} y={PT} width={PANEL_W} height={PH} fill="#ffffff" />
-      <text x={x0} y={PT - 4} className="fill-muted-foreground font-mono" fontSize={9}>
-        {title}
-      </text>
+    <div>
+      <div className="mb-1 font-mono text-[10px] text-muted-foreground">{title}</div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        role="img"
+        aria-label={
+          sim
+            ? "The same three series simulated for deuteranopia: DPO and DA-DPO are both a muted olive and hard to separate; VIGIL is still clearly a distinct violet-blue."
+            : "POPE-Adv scores for DPO in pink, DA-DPO in green and VIGIL in dark blue, across four vision-language backbones."
+        }
+      >
+        <rect x={X0} y={PT} width={PANEL_W} height={PH} fill="#ffffff" />
 
-      {[82, 85, 88, 91].map((t) => (
-        <g key={t}>
-          <line x1={x0} y1={yOf(t)} x2={x0 + PANEL_W} y2={yOf(t)} stroke="#e6e6e6" strokeWidth={0.8} />
-          <text x={x0 - 4} y={yOf(t) + 3} textAnchor="end" className="fill-muted-foreground font-mono" fontSize={7.5}>
-            {t}
-          </text>
-        </g>
-      ))}
-
-      {SERIES.map((s, si) => {
-        const colour = sim ? deuteranope(s.hex) : s.hex
-        const pts = SPOKES.map((sp, i) => `${xOf(x0, i)},${yOf(sp.v[si])}`).join(" ")
-        return (
-          <g key={s.name}>
-            <polyline points={pts} fill="none" stroke={colour} strokeWidth={2.4} />
-            {SPOKES.map((sp, i) => (
-              <circle key={i} cx={xOf(x0, i)} cy={yOf(sp.v[si])} r={2.6} fill={colour} />
-            ))}
-          </g>
-        )
-      })}
-
-      <line x1={x0} y1={PT + PH} x2={x0 + PANEL_W} y2={PT + PH} stroke="var(--foreground)" strokeWidth={1.6} />
-
-      {SPOKES.map((sp, i) => (
-        <text
-          key={sp.backbone}
-          x={xOf(x0, i)}
-          y={PT + PH + 12}
-          textAnchor="middle"
-          className="fill-muted-foreground font-mono"
-          fontSize={6.5}
-        >
-          {sp.backbone}
-        </text>
-      ))}
-
-      {/* series labels, drawn in their own colour — which is the problem */}
-      {SERIES.map((s, si) => {
-        const colour = sim ? deuteranope(s.hex) : s.hex
-        return (
-          <g key={s.name}>
-            <rect x={x0 + si * 100} y={PT + PH + 20} width={9} height={9} fill={colour} />
-            <text
-              x={x0 + si * 100 + 13}
-              y={PT + PH + 27.5}
-              className="fill-muted-foreground font-mono"
-              fontSize={7.5}
-            >
-              {s.name}
+        {[82, 85, 88, 91].map((t) => (
+          <g key={t}>
+            <line x1={X0} y1={yOf(t)} x2={X0 + PANEL_W} y2={yOf(t)} stroke="#e6e6e6" strokeWidth={0.8} />
+            <text x={X0 - 5} y={yOf(t) + 3} textAnchor="end" className="fill-muted-foreground font-mono" fontSize={8}>
+              {t}
             </text>
           </g>
-        )
-      })}
-    </g>
+        ))}
+
+        {SERIES.map((s, si) => {
+          const colour = sim ? deuteranope(s.hex) : s.hex
+          const pts = SPOKES.map((sp, i) => `${xOf(i)},${yOf(sp.v[si])}`).join(" ")
+          return (
+            <g key={s.name}>
+              <polyline points={pts} fill="none" stroke={colour} strokeWidth={2.4} />
+              {SPOKES.map((sp, i) => (
+                <circle key={i} cx={xOf(i)} cy={yOf(sp.v[si])} r={2.8} fill={colour} />
+              ))}
+            </g>
+          )
+        })}
+
+        <line x1={X0} y1={PT + PH} x2={X0 + PANEL_W} y2={PT + PH} stroke="var(--foreground)" strokeWidth={1.6} />
+
+        {SPOKES.map((sp, i) => (
+          <text
+            key={sp.backbone}
+            x={xOf(i)}
+            y={PT + PH + 12}
+            textAnchor="middle"
+            className="fill-muted-foreground font-mono"
+            fontSize={7.5}
+          >
+            {sp.backbone}
+          </text>
+        ))}
+
+        {/* series labels, drawn in their own colour — which is the problem */}
+        {SERIES.map((s, si) => {
+          const colour = sim ? deuteranope(s.hex) : s.hex
+          return (
+            <g key={s.name}>
+              <rect x={X0 + si * 100} y={PT + PH + 21} width={9} height={9} fill={colour} />
+              <text
+                x={X0 + si * 100 + 13}
+                y={PT + PH + 28.5}
+                className="fill-muted-foreground font-mono"
+                fontSize={8.5}
+              >
+                {s.name}
+              </text>
+            </g>
+          )
+        })}
+      </svg>
+    </div>
   )
 }
 
@@ -182,15 +192,10 @@ export function RedGreenAxis() {
       </div>
 
       <div className="p-3 sm:p-4">
-        <svg
-          viewBox={`0 0 ${W} ${H}`}
-          className="w-full"
-          role="img"
-          aria-label="Two line charts of the same three VIGIL series across four backbones. In the left chart DPO is pink, DA-DPO is green and VIGIL is dark blue. In the right chart, simulated for deuteranopia, DPO and DA-DPO are both a muted olive and the blue is still distinct."
-        >
-          <Panel x0={X0} title="as published" sim={false} />
-          <Panel x0={X1} title="deuteranopia, simulated" sim={true} />
-        </svg>
+        <div className="grid gap-4 sm:grid-cols-2 sm:gap-3">
+          <Panel title="as published" sim={false} />
+          <Panel title="deuteranopia, simulated" sim={true} />
+        </div>
 
         <div className="mt-4 space-y-2 border-t pt-3">
           {PAIRS.map((p) => (

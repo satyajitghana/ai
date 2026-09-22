@@ -58,7 +58,12 @@ export function AcceptanceCurve() {
   const x = (ctx: number) =>
     left + ((mlog(ctx) - LX0) / (LX1 - LX0)) * (right - left)
   const yTps = (t: number) => bottom - (t / 500) * (bottom - top)
-  const yAcc = (a: number) => bottom - ((a - 88) / 14) * (bottom - top)
+  // The acceptance series gets its own band low in the plot, between the
+  // MTP-10 line above and the MTP0 line below, so the two never cross.
+  const ACC_TOP = 200
+  const ACC_BOTTOM = 290
+  const yAcc = (a: number) =>
+    ACC_BOTTOM - ((a - 88) / 12) * (ACC_BOTTOM - ACC_TOP)
 
   const path = (pts: Point[], f: (p: Point) => number) =>
     pts.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.ctx)},${f(p)}`).join(" ")
@@ -200,7 +205,7 @@ export function AcceptanceCurve() {
         ))}
         <text
           x={right + 8}
-          y={top - 14}
+          y={ACC_TOP - 12}
           className="fill-muted-foreground font-mono"
           style={{ fontSize: 10 }}
         >

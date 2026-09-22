@@ -141,8 +141,8 @@ export function TheDenominator() {
           )
         })}
 
-        <text x={dx(5.5452) + 4} y={rowTop + ARMS.length * rowH + 8} className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
-          ln 256 = 5.5452
+        <text x={dx(5.5452) - 4} y={rowTop + ARMS.length * rowH + 8} textAnchor="end" className="fill-muted-foreground font-mono" style={{ fontSize: 9 }}>
+          ln 256 = 5.5452 ↑
         </text>
         <text x={L} y={rowTop + ARMS.length * rowH + 24} className="fill-muted-foreground font-mono" style={{ fontSize: 9.5 }}>
           the two large arms agree to 0.0077 nats ⇒ L₀ ≈ 1.02 nats/char

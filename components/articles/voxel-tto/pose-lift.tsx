@@ -29,7 +29,7 @@ const ROWS: Row[] = [
 ]
 
 const W = 700
-const TOP = 58
+const TOP = 76
 const ROW_H = 30
 const LAB_W = 122
 const PLOT_L = 132
@@ -41,7 +41,7 @@ const X = (v: number) => PLOT_L + (mlog10(v) - LO) * UNIT
 const TICKS = [0.2, 0.5, 1, 2, 5]
 
 export function PoseLift() {
-  const H = TOP + ROWS.length * ROW_H + 52
+  const H = TOP + ROWS.length * ROW_H + 58
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/20 to-transparent">
@@ -154,12 +154,19 @@ export function PoseLift() {
           />
           <text
             x={20}
-            y={H - 20}
+            y={H - 22}
             className="fill-muted-foreground font-mono"
             fontSize={9.5}
           >
-            On Tanks and Temples the 20 LoRA steps take 1.636° to 0.262° —
-            6.2× — and the test-view gap falls from 9.03 dB to 1.66 dB with it.
+            On Tanks and Temples the 20 LoRA steps take 1.636° to 0.262° — 6.2×.
+          </text>
+          <text
+            x={20}
+            y={H - 9}
+            className="fill-muted-foreground font-mono"
+            fontSize={9.5}
+          >
+            The test-view PSNR gap falls from 9.03 dB to 1.66 dB with it.
           </text>
         </svg>
       </div>

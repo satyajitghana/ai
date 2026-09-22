@@ -46,7 +46,7 @@ const W = 700
 const ROW_H = 26
 const TOP = 40
 const BAR_X = 104
-const BAR_W = 360
+const BAR_W = 300
 const UNIT = BAR_W / 0.32 // the widest single-view total sets the scale
 const SUM_X = 486
 
