@@ -68,11 +68,11 @@ export function AcceptanceGap() {
 
   const worst = ROWS.reduce(
     (acc, r, i) => Math.max(acc, ((r.mal - naive[i]) / r.mal) * 100),
-    0,
+    0
   )
   const fitWorst = ROWS.reduce(
     (acc, r, i) => Math.max(acc, Math.abs((fitted[i] - r.mal) / r.mal) * 100),
-    0,
+    0
   )
 
   return (
@@ -164,7 +164,12 @@ export function AcceptanceGap() {
 
         {ROWS.map((r, i) => (
           <g key={r.n}>
-            <circle cx={x(r.n)} cy={y(r.mal)} r={3.4} className="fill-foreground" />
+            <circle
+              cx={x(r.n)}
+              cy={y(r.mal)}
+              r={3.4}
+              className="fill-foreground"
+            />
             <circle
               cx={x(r.n)}
               cy={y(naive[i])}
@@ -235,18 +240,17 @@ export function AcceptanceGap() {
             className="fill-muted-foreground font-mono"
             style={{ fontSize: 10 }}
           >
-            worst error, formula fed the reported rate:{" "}
-            {worst.toFixed(0)}% low &middot; worst error, formula fed a single
-            &alpha;={FITTED}: {fitWorst.toFixed(1)}%
+            worst error, formula fed the reported rate: {worst.toFixed(0)}% low
+            &middot; worst error, formula fed a single &alpha;={FITTED}:{" "}
+            {fitWorst.toFixed(1)}%
           </text>
         </g>
       </svg>
       <figcaption className="border-t px-3 py-2 text-xs leading-relaxed text-muted-foreground">
         Two different quantities are both called the acceptance rate. The one a
-        serving stack logs is{" "}
-        <em>accepted tokens over proposed tokens</em>, which counts the
-        positions a round never reached and therefore falls as you propose more.
-        The one the formula takes is{" "}
+        serving stack logs is <em>accepted tokens over proposed tokens</em>,
+        which counts the positions a round never reached and therefore falls as
+        you propose more. The one the formula takes is{" "}
         <em>per-position conditional acceptance</em>, which here is nearly flat.
         Put the first into the formula and it tells you that widening the draft
         window past three makes rounds{" "}

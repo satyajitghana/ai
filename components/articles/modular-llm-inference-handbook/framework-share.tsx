@@ -100,7 +100,7 @@ export function FrameworkShare() {
                 className="fill-muted-foreground font-mono"
                 style={{ fontSize: 9.5 }}
               >
-                {own ? "Modular's own" : "third party"}
+                {own ? "Modular\u2019s own" : "third party"}
               </text>
 
               <rect
@@ -164,10 +164,17 @@ export function FrameworkShare() {
           style={{ fontSize: 10 }}
         >
           {WORDS_BEFORE.toLocaleString("en-US")} &rarr;{" "}
-          {WORDS_AFTER.toLocaleString("en-US")} words (+
-          {(((WORDS_AFTER - WORDS_BEFORE) / WORDS_BEFORE) * 100).toFixed(0)}
-          %) &middot; 9 of the 10 framework tab groups now list MAX first, and
-          Docusaurus preselects the first tab
+          {WORDS_AFTER.toLocaleString("en-US")} words, +
+          {(((WORDS_AFTER - WORDS_BEFORE) / WORDS_BEFORE) * 100).toFixed(0)}%
+        </text>
+        <text
+          x={left}
+          y={top + ROWS.length * rowH + 30}
+          className="fill-muted-foreground font-mono"
+          style={{ fontSize: 10 }}
+        >
+          9 of the 10 framework tab groups now list MAX first, and Docusaurus
+          preselects the first tab
         </text>
       </svg>
       <figcaption className="border-t px-3 py-2 text-xs leading-relaxed text-muted-foreground">
