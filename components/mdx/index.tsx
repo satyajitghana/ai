@@ -8,6 +8,7 @@ import { Diagram } from "@/components/mdx/diagram"
 import { ModelCard } from "@/components/mdx/model-card"
 import { Plot } from "@/components/mdx/plot"
 import { Receipts } from "@/components/mdx/receipts"
+import { RepoCard } from "@/components/mdx/repo-card"
 import { StepThrough } from "@/components/mdx/step-through"
 import { Video } from "@/components/mdx/video"
 import { Zoomable } from "@/components/mdx/zoomable"
@@ -73,19 +74,19 @@ function Figure({
 export const mdxComponents: MDXComponents = {
   h1: (props: ComponentPropsWithoutRef<"h1">) => (
     <h1
-      className="font-heading mt-10 mb-4 scroll-mt-24 text-3xl font-bold tracking-tight text-balance"
+      className="mt-10 mb-4 scroll-mt-24 font-heading text-3xl font-bold tracking-tight text-balance"
       {...props}
     />
   ),
   h2: (props: ComponentPropsWithoutRef<"h2">) => (
     <h2
-      className="font-heading mt-10 mb-3 scroll-mt-24 text-2xl font-semibold tracking-tight"
+      className="mt-10 mb-3 scroll-mt-24 font-heading text-2xl font-semibold tracking-tight"
       {...props}
     />
   ),
   h3: (props: ComponentPropsWithoutRef<"h3">) => (
     <h3
-      className="font-heading mt-8 mb-2 scroll-mt-24 text-xl font-semibold"
+      className="mt-8 mb-2 scroll-mt-24 font-heading text-xl font-semibold"
       {...props}
     />
   ),
@@ -162,6 +163,7 @@ export const mdxComponents: MDXComponents = {
   ModelCard,
   Plot,
   Receipts,
+  RepoCard,
   StepThrough,
   Video,
 }

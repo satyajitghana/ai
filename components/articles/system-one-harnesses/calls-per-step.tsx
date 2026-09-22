@@ -20,6 +20,9 @@ type Row = {
   conditional: number
   generative: number
   detail: string
+  // What the bar counts, when it is not "per step". Printed beside the figure
+  // so a 1 that means "per search result" is never read as "per step".
+  unit?: string
   headline?: boolean
 }
 
@@ -52,6 +55,7 @@ const ROWS: Row[] = [
     conditional: 3,
     generative: 0,
     detail: "one denoise read answers the whole schema; first-read entropy over 0.1 buys three more noise draws",
+    unit: "per schema",
   },
   {
     name: "djev · --engine ar",
@@ -59,6 +63,7 @@ const ROWS: Row[] = [
     conditional: 0,
     generative: 0,
     detail: "one restricted next-token read per question, in order, behind a cached prefix — so the floor is per question, not per schema",
+    unit: "per question",
   },
   {
     name: "webctl",
@@ -66,6 +71,7 @@ const ROWS: Row[] = [
     conditional: 0,
     generative: 0,
     detail: "not a step loop: one Jev call per search result, 8 in flight, plus one batch for the candidate duplicate pairs",
+    unit: "per result",
   },
 ]
 
@@ -176,8 +182,8 @@ export function CallsPerStep() {
                 {r.generative > 0
                   ? `${r.floor} + ${r.generative} generative`
                   : r.conditional > 0
-                    ? `${r.floor}, up to ${r.floor + r.conditional}`
-                    : `${r.floor}`}
+                    ? `${r.floor}, up to ${r.floor + r.conditional}${r.unit ? ` ${r.unit}` : ""}`
+                    : `${r.floor}${r.unit ? ` ${r.unit}` : ""}`}
               </text>
 
               <text

@@ -1,0 +1,287 @@
+---
+title: "VoxelTTO spends 93% of a scene fixing the poses"
+description: "Feed-forward 3D Gaussian Splatting degrades when the poses drift, and the damage is invisible on input views — it only shows on the views you did not hand the model. VoxelTTO anchors Gaussians to voxels instead of pixels and adapts LoRA modules at test time against pose supervision, with the vision foundation model frozen. The mechanism works: mean rotation error on Tanks and Temples goes 1.636° to 0.262°, and a 9.03 dB test-view gap closes to 1.66 dB. The cost is the number that decides whether you can use it, and the paper's own two runtime figures do not reconcile until you notice which precision the 2.304 s was measured at."
+date: 2026-09-22
+interest: 4
+helpful: 4
+tags:
+  - 3d
+  - gaussian-splatting
+  - paper
+  - explainer
+  - benchmarks
+draft: false
+cover: /articles/voxel-tto/fig1.jpg
+---
+
+import { TtoBudget } from "@/components/articles/voxel-tto/tto-budget"
+import { ViewGap } from "@/components/articles/voxel-tto/view-gap"
+import { PoseLift } from "@/components/articles/voxel-tto/pose-lift"
+
+There is a failure mode in feed-forward 3D Gaussian Splatting that every
+benchmark table in the field is structurally bad at showing, and
+[VoxelTTO](https://arxiv.org/abs/2609.21498) (arXiv:2609.21498, 18 September
+2026) is built around it.
+
+Here is the shape of it. A feed-forward model takes N images, runs one forward
+pass, and emits a Gaussian scene. Render those same N images back out and score
+them, and you have mostly measured whether the Gaussians fit the pixels they
+were regressed from — which they had better, since that was the loss. Render a
+view the model never saw, at a pose *you* supply, and you are measuring
+something else entirely: whether the scene sits where the poses say it does.
+
+Pose error lives in the gap between those two numbers and nowhere else.
+
+<ViewGap />
+
+Look at YoNoSplat on Replica: **24.52 dB on input views, 11.57 on test views**.
+Nearly thirteen decibels. A reader who saw only the input-view column would
+conclude it was the second-best method in the table. It is the worst. AnySplat
+loses 5.47 dB on Replica and 4.63 on Tanks and Temples. The paper's Figure 4
+shows what that looks like in pixels, and it is not blur — it is the furniture
+being somewhere else:
+
+<Figure
+  src="/articles/voxel-tto/fig3.jpg"
+  alt="Six renders of the same office interior in two groups of three. On the left, labelled Input View, AnySplat, VoxelTTO and GroundTruth all show a grey armchair with a small wooden side table beside it, boxed in red, in almost the same place. On the right, labelled Test View, AnySplat's render puts the chair and table noticeably left and lower in the frame with black wedges of missing geometry at the edges, while VoxelTTO's render places them where the ground truth does."
+  caption="The failure this paper is about: the input view is fine and the test view is misaligned, so the object lands in the wrong part of the frame rather than merely looking soft. (VoxelTTO, Figure 4.)"
+/>
+
+## What it changes
+
+Two things, and they are independent — which the ablation table takes seriously
+enough to separate.
+
+**Voxels instead of pixels.** Most feed-forward 3DGS regresses one Gaussian
+primitive *per pixel*, which is convenient and wrong: neighbouring views see
+the same surface, so the same slab of geometry gets several overlapping
+Gaussians, and overlap is exactly what produces the floaters and shells you see
+in AnySplat's renders above. VoxelTTO upsamples the frozen backbone's patch
+tokens with DPT, fuses them into a **global voxel grid**, encodes that with a
+sparse 3D U-Net, and decodes Gaussians from voxel features with a decoupled
+geometry/appearance MLP that splits each voxel into `n` primitives. The
+pixel-to-Gaussian correspondence is broken on purpose.
+
+**LoRA at test time, against pose.** The backbone is DA3-GIANT, frozen —
+1.39B parameters, of which **75.3M** are trainable, and training touches only
+the voxel-aligned reconstruction module. TTO adds LoRA to the Q, K and V
+projections of layers 13–40 (the alternating single-view/global attention
+layers; layers 1–12 are single-view only and get nothing), with a shared
+down-projection `A` per layer and independent up-projections `B`.
+
+<Figure
+  src="/articles/voxel-tto/fig1.jpg"
+  alt="A two-part pipeline diagram. The upper half, labelled Test-Time Optimization VFM, shows posed images entering as camera tokens and DINOv2 patch tokens, passing through alternating attention blocks each marked frozen with a snowflake and carrying a LoRA module, then splitting into a frozen DPT producing a depth map, a frozen MLP producing camera parameters that feed a Test-Time Loss box, and a feature DPT producing patch tokens. Orange dashed backward arrows run only from the Test-Time Loss back into the LoRA blocks. The lower half, labelled Voxel-Aligned Feed-forward 3DGS, takes fused sparse feature voxels into a sparse 3D voxel U-Net, then a detached n-split Gaussian decoder with separate geometry and appearance branches, then stochastic solids volume rendering to a rendered RGB-D image scored by a Train-Time Loss."
+  caption="The two loops. Orange is backward: at training time it reaches the voxel branch only, and at test time it reaches the LoRA modules only. Everything with a snowflake — the backbone, the depth DPT, the camera MLP — never moves. (VoxelTTO, Figure 2.)"
+/>
+
+The test-time loss is the part worth pausing on, because it is **not
+photometric**. It compares the backbone's decoded camera parameters against the
+poses you supplied:
+
+$$
+\mathcal{L}_{\mathrm{TTO}} = \lambda_{\mathrm{pose}}\left(\mathcal{L}_{\mathrm{rot}} + w_t \mathcal{L}_{\mathrm{trans}}\right) + \lambda_K \mathcal{L}_{\mathrm{intrinsics}}
+$$
+
+with the rotation term built from the relative rotation between predicted and
+ground-truth poses,
+
+$$
+\mathcal{L}_{\mathrm{rot}} = \frac{1}{2M}\sum_{i=1}^{M}\left[3 - \operatorname{tr}\!\left((\mathbf{R}^{p}_{i})^{\top}\mathbf{R}^{g}_{i}\right)\right],
+$$
+
+the first ground-truth pose pinned to identity (VGGT-style backbones use the
+first image as the world frame), translations mean-normalised on both sides to
+kill the scale ambiguity, and SmoothL1 on the normalised translations and on
+`(fx, fy, cx, cy)` directly.
+
+So this is not test-time *training* in the self-supervised sense. It is a
+twenty-step least-squares fit, run per scene, that bends the frozen backbone's
+attention until its camera head agrees with the poses you already have. The
+Gaussians move because the features move.
+
+## The mechanism works
+
+<PoseLift />
+
+On Tanks and Temples the twenty steps take mean rotation error from **1.636° to
+0.262°** — 6.2× — and beat DepthAnything3's 0.682° with the same backbone
+underneath. Mean translation error goes 0.047 m to 0.020 m. On Replica, where
+the no-TTO model was already at 0.301°, it goes to 0.220°.
+
+That pose improvement is what closes the test-view gap. VoxelTTO without TTO
+loses **9.03 dB** between input and test views on Tanks and Temples; with TTO
+it loses **1.66 dB**. On Replica, 3.45 dB becomes 1.37 dB. Depth follows: test-
+view RMSE on Tanks and Temples goes 63.93 cm to 46.22 cm, and δ₁.₀₅ — the
+fraction of pixels within 5% of ground truth — goes from 52.39% to **86.75%**.
+
+<Figure
+  src="/articles/voxel-tto/fig2.jpg"
+  alt="A grid of twelve renders in two rows of six columns, labelled MVSplat, DA3, AnySplat, VoxelTTO without TTO, VoxelTTO, and GroundTruth. The top row is a meeting room with a red wall and a wooden table; PSNR rises across the row from 17.470 for MVSplat to 25.393 for VoxelTTO. The bottom row is a garage exterior with a lattice balcony; MVSplat and AnySplat show large black holes and speckle, DA3 shows scattered dark artefacts against the sky, and the two VoxelTTO columns are clean, rising from 17.164 to 22.115."
+  caption="Test-view renders with per-image scores burned in. The black wedges and speckle in the MVSplat and AnySplat columns are the pixel-aligned overlap problem; the gap between the two VoxelTTO columns is the twenty LoRA steps. (VoxelTTO, Figure 5.)"
+/>
+
+The ablation is unusually clean about which half is doing what. Replacing
+stochastic solid volume rendering with ordinary 3DGS rasterisation at **both**
+training and inference costs 7.02 dB on test-view PSNR (28.54 → 21.52) and
+quadruples depth RMSE (6.95 → 27.58 cm). Training with volume rendering and
+rasterising at inference costs only 1.43 dB, so most of the benefit is in the
+supervision, not the renderer. Removing the depth loss costs 0.29 dB. Two
+Gaussian splits per voxel beat one; four is not better than two.
+
+## What it costs per scene
+
+This is the number that decides whether any of the above is usable, and the
+paper states it in a way that does not add up on first reading.
+
+Section 4.7, in full: *"For ten 518×518 images, VoxelTTO without TTO takes
+2.304 s, compared with 2.293 s for DA3… BF16 reduces backbone runtime from
+1.959 s to 0.1956 s. Each TTO step requires 0.2662 s forward and 0.075 s
+backward, so 20 steps complete in under 7 s and total runtime is under 7.4 s."*
+
+Twenty steps at 0.3412 s is 6.824 s, and 6.824 + 2.304 is **9.13 s**, which is
+not under 7.4. The resolution is the sentence in the middle. The 2.304 s is the
+figure used for the like-for-like comparison against baselines at their own
+official precision, so it carries the **FP32** backbone. Strip that out and put
+the BF16 backbone back:
+
+```
+non-backbone work   = 2.304 − 1.959   = 0.345 s   (voxels, U-Net, decoder, render)
+feed-forward, BF16  = 0.345 + 0.1956  = 0.5406 s
+TTO, 20 steps       = 20 × 0.3412     = 6.824 s
+                                        ───────
+total                                   7.3646 s
+```
+
+Which is "under 7.4 s", to three significant figures. That reconciliation is
+mine, not the paper's, and it is the one piece of arithmetic here I would most
+like someone to check.
+
+<TtoBudget />
+
+Taking it at face value: **test-time optimisation is 92.7% of the per-scene
+cost, and 12.6× the reconstruction it is correcting.** The voxel branch is
+genuinely free — 2.304 s against DA3's 2.293 s, an 0.5% overhead for breaking
+the pixel-to-Gaussian correspondence. Everything expensive is the LoRA fit.
+
+That is a good trade or a bad one depending entirely on what you are doing.
+Seven seconds a scene is nothing against per-scene 3DGS optimisation, which is
+minutes; the entire pitch of feed-forward 3DGS is that it replaces that with
+one forward pass, and VoxelTTO is still two orders of magnitude inside it.
+Seven seconds is a lot against 0.54 s if you were planning to reconstruct
+anything at interactive rates, and it is a lot against DA3's 2.293 s if you were
+choosing between them on throughput. The ablation in Figure 7 shows LPIPS and
+AbsRel still improving as the step count rises past twenty, so twenty is a
+budget choice rather than a convergence point — which means the real cost is
+whatever you decide to spend, and the paper picked the knee.
+
+Three qualifications the paper does not put next to the number, and should:
+
+- **No GPU is named for inference.** Training is 40 hours on 2× RTX PRO 6000
+  (the abstract's "80 GPU hours"), but §4.7 gives no card. Every second above
+  is unanchored.
+- **Ten images, 518×518.** TTO's forward is a full backbone pass over all
+  frames, so the per-step cost scales with the image count. Thirty images is
+  not 7 s.
+- **TTO needs the poses.** The loss is supervised by the camera parameters you
+  supply. With no poses, there is no TTO and you are reading the "w/o TTO"
+  rows — which is still the best feed-forward model in the table on Replica,
+  and loses 9 dB on Tanks and Temples.
+
+## What the trade actually costs
+
+One number in the paper should stop anyone about to adopt this, and to their
+credit the authors print it without softening.
+
+On Tanks and Temples, TTO makes **input views worse**. RGB PSNR goes 23.74 →
+20.89 (−2.85 dB), SSIM 0.767 → 0.656, depth RMSE 82.07 → 90.63 cm, δ₁.₀₅
+96.35% → 90.12%. Test views go 14.71 → 19.23 dB in exchange.
+
+<Callout type="warning">
+The LoRA fit is minimising pose error, not reconstruction error. On an outdoor
+capture where the backbone's poses were 1.6° out, agreeing with the supplied
+poses means moving geometry away from where the input pixels wanted it. You are
+buying test-view alignment with input-view fidelity, and on Replica — where the
+poses were already good to 0.3° — you get both, because there was nothing to
+trade.
+</Callout>
+
+This is worth sitting with, because it inverts the usual reading of a
+test-time-optimisation result. TTO is not making the model better. It is
+choosing whose coordinate frame wins when the backbone and your poses disagree,
+and it always picks yours. If your poses are the ones that are wrong — a
+COLMAP run that drifted, a rig calibration that is stale — TTO will faithfully
+drag the scene onto them.
+
+There is a second, smaller thing in the ablation that is easy to miss. The
+voxel-size sweep runs 0.0015 / 0.002 / 0.003 / 0.005 m, and **0.0015 wins on
+every single metric**: 29.34 dB against 0.002's 28.54, LPIPS 0.142 against
+0.172, depth RMSE 6.62 cm against 6.95. The shipped setting is 0.002,
+"balancing performance and computation, and following prior work". The
+computation cost of the finer grid is not reported anywhere. That is a leading
+0.8 dB sitting unclaimed behind a hyperparameter inherited from AnySplat.
+
+## Reproducibility
+
+The code is at two `anonymous.4open.science` URLs — this is an ICLR 2027
+submission under review, with an AI-use statement declaring generative AI for
+language editing only. Training sets are ScanNet, Infinigen, ARKitScenes and
+DL3DV-10K; evaluation is Replica, Tanks and Temples and DTU. There is no
+released checkpoint and no project page, so there is no turntable, no
+drifted-pose sweep, and nothing to look at beyond the figures above — which is
+a shame for a claim whose whole evidence is what a scene looks like from a pose
+you did not train on.
+
+On DTU the surface-alignment table isolates the design one more time: Chamfer
+accuracy 5.556 without TTO, 3.719 with camera *encoding* (poses injected
+through the backbone's own MLP, the AnySplat/DA3 approach), 2.952 with TTO.
+Injecting the poses helps; fitting to them helps twice as much. That is the
+paper's real argument, and it holds.
+
+<ChangeMyMind>
+
+<Falsifier claim="Test-time optimisation is 92.7% of VoxelTTO's per-scene runtime, and the feed-forward pass it corrects is 0.54 s.">
+This is my reconstruction, not a published decomposition. The paper gives
+2.304 s for the no-TTO pass, 1.959 s → 0.1956 s for the backbone under BF16,
+0.3412 s per TTO step, and "under 7.4 s" total; the only reading that makes
+those four consistent is that the 2.304 s carries the FP32 backbone. Profile
+the released code with BF16 on and TTO off: if that pass is 2.3 s rather than
+0.54 s, my split is wrong, the total should be ~9.1 s, and the paper's "under
+7.4 s" needs its own explanation.
+</Falsifier>
+
+<Falsifier claim="Pose error is invisible on input views and shows only on held-out views, which is why the input/test gap is the right thing to read in Table 1.">
+Strongly supported by the table — YoNoSplat at 24.52/11.57 on Replica, AnySplat
+at 23.25/17.78 — but it is a claim about a mechanism, inferred from two columns.
+Partition the evaluation by measured per-scene pose error and check that the gap
+tracks it. If methods with near-identical pose error show wildly different gaps,
+something other than drift (overlap artefacts, extrapolation distance, exposure)
+is doing the work and the diagnostic is weaker than I am treating it as.
+</Falsifier>
+
+<Falsifier claim="On Tanks and Temples, TTO buys test-view alignment by giving up input-view fidelity: −2.85 dB in, +4.52 dB out.">
+Straight from Table 1 and Table 2, so overturning it means the tables are wrong.
+What is falsifiable is my explanation — that the loss minimises pose error
+rather than reconstruction error, so it moves geometry off the input pixels when
+the two disagree. Add the photometric term to the TTO objective and re-run: if
+input-view PSNR recovers without losing the test-view gain, the trade is a
+choice of loss and not a property of the problem.
+</Falsifier>
+
+<Falsifier claim="The shipped voxel size of 0.002 m is not the best setting in the paper's own ablation; 0.0015 m wins on all eight reported metrics.">
+Table 5, read directly. The paper justifies 0.002 by "balancing performance and
+computation" and by following prior work, but publishes no runtime or memory
+figure for 0.0015. A measurement showing the finer grid costs materially more
+time or VRAM would make the choice defensible and this observation trivial —
+which is exactly why it should have been printed.
+</Falsifier>
+
+<Falsifier claim="VoxelTTO's voxel branch is essentially free: 2.304 s against DepthAnything3's 2.293 s on the same ten images.">
+The paper's own Figure 8 comparison, at ten 518×518 images. Both numbers are
+reported by the same authors on unnamed hardware, and the voxel grid's cost
+scales with scene extent and occupied volume, not with image count. A large
+outdoor capture at the same image count could move the sparse U-Net's share
+substantially, and nothing in the paper measures that.
+</Falsifier>
+
+</ChangeMyMind>
