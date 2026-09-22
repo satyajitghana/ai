@@ -34,8 +34,16 @@ type MathNode = {
 // Words that appear in prose but effectively never inside a formula. A span has
 // to contain one of these *and* look wordy to be reported, which keeps the check
 // quiet enough to live inside `pnpm validate`.
+// Single letters are excluded on purpose: `a`, `i` and friends are variable
+// names far more often than they are English, and `$a = 0.931$` is an equation,
+// not swallowed prose. Including `a` here produced exactly that false positive.
 const PROSE_WORDS =
-  /\b(the|and|per|for|with|from|about|into|than|that|each|every|a|an|is|are|was|were|it|to|of|in|on|at|by|up|or|but|not|as|its|their|this|these|those|million|billion|thousand|cost|costs|month|year|call|calls|token|tokens|hour|day|run|runs)\b/i
+  /\b(the|and|per|for|with|from|about|into|than|that|each|every|an|is|are|was|were|it|to|of|in|on|at|by|up|or|but|not|as|its|their|this|these|those|million|billion|thousand|cost|costs|month|year|call|calls|token|tokens|hour|day|run|runs)\b/i
+
+// A short span built around a relational operator is an equation. Prose that has
+// been swallowed by a stray `$` does not look like this — it has no operator, or
+// it has many words around one.
+const EQUATION = /[=<>≤≥≈∼~±]/
 
 function looksLikeProse(value: string): boolean {
   const v = value.trim()
@@ -44,6 +52,9 @@ function looksLikeProse(value: string): boolean {
   if (/[\\^_{}]/.test(v)) return false
   const words = v.split(/\s+/).filter(Boolean)
   if (words.length < 3) return false
+  // `x = 3`, `p < 0.05`, `n ≈ 100` — an operator with only a few tokens around
+  // it is an equation however many of those tokens happen to be English.
+  if (EQUATION.test(v) && words.length <= 5) return false
   return PROSE_WORDS.test(v)
 }
 

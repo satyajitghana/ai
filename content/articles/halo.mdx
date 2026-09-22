@@ -1,0 +1,344 @@
+---
+title: "Halo's 2.8× over TRL is not a kernel, and its own benchmark proves it"
+description: "A post-training framework claiming up to 2.8× stock TRL's throughput at less peak memory, on native HuggingFace checkpoints. The usual suspicion — beating an untuned baseline — mostly does not survive contact: the baseline is current TRL on transformers v5 with FSDP2, FlashAttention-4, Liger with fused-linear cross-entropy and the same grouped-GEMM expert kernel, the runner script is committed, and TRL and Halo land within 1% of the same loss over 200 seeded steps. The real asymmetry is sharding — 2.8× is Halo's ZeRO-2 against TRL's ZeRO-3, and matched at ZeRO-3 it is 1.25× at 4k and 2.68× at 16k, which is the number Halo's own README quotes. Where the gap actually comes from is token routing: transformers' expert-parallel path all-reduces the full MoE output on every rank, and I verified that in transformers' own source."
+date: 2026-09-22
+interest: 4
+helpful: 5
+tags:
+  - explainer
+  - training
+  - mixture-of-experts
+  - distributed
+  - benchmarks
+  - mlops
+draft: false
+---
+
+import { ShardingGrid } from "@/components/articles/halo/sharding-grid"
+import { NotTheKernel } from "@/components/articles/halo/not-the-kernel"
+
+[Halo](https://github.com/whitecircle/halo) is White Circle's open-source
+post-training framework, released 20 August 2026 under Apache-2.0. The claim on
+the README is specific:
+
+> On 8× B300, Halo delivers up to ~2.8× the training throughput of stock TRL
+> (2.7× at 25% less peak memory when both sides shard ZeRO-3), with larger
+> margins over the other frameworks benchmarked.
+
+<RepoCard repo="whitecircle/halo" />
+
+Two things about that sentence before anything else. It states its hardware. And
+it volunteers, in parentheses, the *matched-configuration* number — which is
+lower — without being asked. That is not how a framework comparison usually
+opens.
+
+The reflex when reading "2.8× stock TRL" is that TRL's defaults are not tuned,
+and beating an untuned baseline is a weaker claim than beating a tuned one. That
+reflex is right often enough to be worth applying every time. So: what was stock
+TRL configured as, where does the gap actually come from, and does the training
+loop do what the docs say?
+
+I cloned the repository at
+[`4c1e6c6`](https://github.com/whitecircle/halo/commit/4c1e6c6) — 83,866 lines of
+Python across `src/` — read the EP layer and the benchmark runner, and checked
+the one claim Halo makes about somebody else's code against that code.
+
+<Callout type="note">
+There are no B300s here, so **every throughput and memory figure below is
+Reported**: read out of `agent-docs/optimization/halo-vs-stock-trl.md` and
+`human-docs/performance.md` in the repository. What I checked independently is
+the source on both sides — Halo's dispatcher and EP forward, and the
+`EpRouterParallel` / `MoeExpertsParallel` classes in transformers on `main` that
+Halo's argument rests on.
+</Callout>
+
+## What stock TRL was configured as
+
+This turns out to be the easiest question in the piece, because the answer is a
+committed file and a table headed *"What differs between the two sides"*.
+
+| | stock TRL baseline | Halo |
+|---|---|---|
+| Trainer | `trl.SFTTrainer` on transformers v5 | `DistributedSFTTrainer` |
+| Precision | bf16 + FA4 bf16 compute | *identical* |
+| Optimizer | `adamw_torch_fused` — fp32 moments, 12 B/param | `AdamWBF16` + stochastic rounding — 6 B/param |
+| Sharding | FSDP2 `full_shard` — ZeRO-3 | FSDP2 ZeRO-2 default + Expert Parallelism |
+| Expert kernel | `grouped_mm` — transformers v5 default | `grouped_mm` + EP token distribution |
+| Liger / loss | Liger on → fused-linear CE (the MoE applier's default) | Liger on, plain Liger CE |
+
+Held constant on both sides: bf16, FlashAttention-4, Liger, `learning_rate=2e-5`,
+seed 42, 10 steps with 3 warmup, `gradient_accumulation_steps=1`, `drop_last`,
+global batch = 8 × per-device, gradient checkpointing on, 8× B300 SXM6. The
+dataset is deliberately synthetic — `create_benchmark_dataset` builds 64 filler
+examples tokenised to *exactly* `seq` tokens — which removes packing as a
+variable, and the doc says so: *"It is a shape fixture, not real data."*
+
+The baseline runner is in the tree, with a docstring that pre-empts the
+complaint:
+
+```python
+# tests/gpu/profiling/benchmark_trl_baseline.py
+# Expert compute is transformers' OWN grouped GEMM (torch.nn.functional.grouped_mm,
+# the default experts_implementation for gpt-oss) — the same grouped-GEMM CLASS as
+# Halo, NOT an eager loop. So this is a grouped-vs-grouped baseline on the expert
+# kernel; Halo's lead comes from EP token distribution + AdamWBF16 + FSDP2, not
+# from "grouped GEMM vs loop".
+```
+
+And the doc states outright that the baseline gets the *stronger* option where the
+two differ: *"The baseline gets the strongest stock options — ZeRO-3 and Liger's
+FLCE, which is why TRL fits 128k/256k."* Halo's default is plain Liger CE, which
+materialises logits and is worse at long context; on gpt-oss's 201k vocab that
+costs real memory, and the doc benchmarks it separately rather than quietly
+enabling it.
+
+So the honest verdict on the baseline is: **tuned, current, documented, and
+runnable.** That is a higher bar than most framework comparisons clear. One cell
+is missing, and it is the one that matters.
+
+## The asymmetry: ZeRO-2 against ZeRO-3
+
+<ShardingGrid />
+
+TRL runs FSDP2 `full_shard`, which is ZeRO-3 — it re-gathers all 20.7B parameters
+every micro-step. Halo's default is ZeRO-2, `reshard_after_forward=False`, which
+keeps them resident. That is a memory-for-speed trade, and it is a large one on a
+short step: the doc measures Halo's *own* EP1 at ZeRO-3 as −38% against its ZeRO-2
+at 4k·b1, falling to −5% at 16k·b1, because a fixed re-gather cost is a bigger
+share of a shorter step.
+
+Which means the headline 2.8× is comparing two different sharding strategies as
+well as two frameworks. Halo handles this the right way: it publishes an EP1
+ZeRO-3 column expressly to isolate the framework gap — *"both sides shard every
+param 8-way with the same kernel"* — and that column reads **1.43×, 1.25×, 1.49×
+at 4k** and **2.68×, 2.51× at 16k**, at lower peak memory in every row.
+
+The README's own sentence reproduces exactly from the 16k·b1 row:
+17,464 ÷ 6,513 = 2.68, at 37.9 GB against 50.6 GB, which is 25.1% less. *"2.7× at
+25% less peak memory when both sides shard ZeRO-3."* Four for four.
+
+So there are two true statements and the shorter one travelled:
+
+- **2.3–2.8×**, Halo's recommended configuration against TRL's recommended
+  configuration. A legitimate "what should I run" comparison, and the one a user
+  actually faces.
+- **1.25–2.68×**, matched at ZeRO-3, at less memory. The framework-versus-framework
+  number, and a strong one at 16k.
+
+The cell I would still like is the third: **TRL at ZeRO-2**. The benchmark script
+already takes `--fsdp_sharding shard_grad_op` for exactly that, and no ZeRO-2 TRL
+row is published. It would probably narrow the 4k gap and barely touch the 16k
+one — the doc's own reasoning about re-gather cost predicts that — but "probably"
+is doing work there, and one `torchrun` would replace it.
+
+<Callout type="tip">
+The other missing cell is `--optim flash_adamw`, which the baseline script also
+accepts. `AdamWBF16` is worth *"a 17% shorter step"* by Halo's own lever table,
+and it is a Halo component rather than a framework property, so a TRL run with it
+would separate the optimiser from the architecture. Both missing runs are
+one-line invocations of scripts that are already committed, which is a good
+problem for a benchmark to have.
+</Callout>
+
+## It is not the kernel, and Halo's own numbers prove it
+
+The natural hypothesis for a 2.8× is fused kernels. Halo is loaded with them —
+FlashAttention-4, Liger, DeepGEMM, grouped GEMM, a bf16 Adam in Triton — so it
+would be an easy story to tell. The repository declines to tell it.
+
+<NotTheKernel />
+
+Both frameworks default to a grouped-GEMM expert kernel, and both expose the slow
+per-expert loop as an opt-in, so the comparison is a clean 2×2. The decisive cell
+is bottom-left: **Halo running the loop at EP1 does 5,545 tok/s/GPU, against
+TRL's 3,885 with the fast kernel.** Handicap Halo with the worse kernel and it is
+still 1.43× ahead. Whatever the gap is, it survives the kernel being removed.
+
+The kernel uplift itself is interesting for a separate reason. TRL gains +100%
+from grouped GEMM, Halo EP1 +62%, EP2 +79% — and EP8 only **+14%**, because at
+four experts per rank each expert sees a larger `M` and the loop's per-shape tile
+already fits. The more you shard experts, the less a grouped kernel buys you. That
+is a useful rule of thumb and it is not in any paper I know of.
+
+## Where the gap actually is
+
+Halo names it: *"Most of the gap is structural rather than kernel-level."* Three
+things, in descending order.
+
+**1. Token routing.** This is the one Halo makes a claim about somebody else's
+code, so it is the one worth verifying. The assertion is that transformers v5's
+expert-parallel path never moves tokens: every rank holds the whole batch, zeroes
+the routing scores of experts it does not own, and all-reduces the full
+`[tokens, hidden]` MoE output.
+
+That is exactly what transformers says about itself, in the docstring of the class
+in question:
+
+```python
+# transformers/distributed/tensor_parallel.py — EpRouterParallel
+"""Expert-parallel router: forward-only slicing of router outputs to local experts.
+...
+- zeroes scores for non-local experts
+- remaps surviving global indices to local indices (`fmod` after masking non-local slots)
+- sets dropped slots to sentinel `num_local_experts` (skipped by grouped_gemm experts forward)
+
+Downstream `moe_tp_experts` allreduce-sums partial per-rank expert outputs.
+"""
+```
+
+and `MoeExpertsParallel.transform_output_post_forward` ends in
+`_AllReduceForward.apply(output, process_group)` over the whole output tensor.
+Halo's characterisation of the baseline is accurate, checked against the
+baseline's own source rather than taken on trust.
+
+<Figure
+  src="/articles/halo/fig3.png"
+  alt="A diagram titled EP token routing, labelled ep 2, 32 experts to 16 per rank, dp 2. Two rank boxes on the left each hold a flat batch of hidden states with a per-token top-k router. Purple arrows marked DeepEP dispatch all-to-all cross between them into two expert boxes, one holding experts 0 to 15 and one experts 16 to 31, each running a grouped matmul over tokens sorted by expert. A second set of crossing arrows marked DeepEP combine all-to-all returns the rows to two output boxes, same rows in the same order, weighted by the top-k probabilities. A dashed footer reads: EP is orthogonal to DP — every token returns to the rank it came from, so rank 0 still trains on batch A."
+  caption="What Halo does instead: each token is sent once to the rank owning its expert and comes back to where it started, so the wire carries top_k/num_experts of the batch per layer rather than a full-tensor reduction on every rank. For gpt-oss-20b that fraction is 4/32. (Halo, agent-docs/assets/diagrams/ep_token_routing.png, Apache-2.0 — licence committed at /articles/halo/HALO-LICENSE.txt.)"
+/>
+
+The forward path in `src/distributed/expert_parallel/base_layer.py` is the
+diagram, almost line for line — fp32 router logits, `route_tokens_to_experts`,
+then a single `_dispatch_compute_combine_shared` that hands the flattened tokens
+to a DeepEP V2 dispatcher, runs the local experts, and combines back.
+
+**2. The optimiser.** `AdamWBF16` keeps weights and both Adam moments in bf16
+with stochastic rounding — 6 bytes per parameter against `adamw_torch_fused`'s 12
+— and Halo prices it at *"a 17% shorter step"*. The stochastic rounding is not
+decoration: the kernel's docstring gives the reason, that nearest rounding would
+truncate a sub-ULP `lr*step` update to zero and inflate the non-negative second
+moment. Its RNG is seeded identically on every rank so replicated parameters round
+the same way, which is the sort of detail that only gets written down after it has
+gone wrong once.
+
+**3. The sharding default**, discussed above, which is a choice rather than an
+advantage.
+
+## The check that makes the rest credible
+
+A throughput benchmark that does not also show convergence is measuring how fast
+you can compute the wrong thing.
+
+<Figure
+  src="/articles/halo/fig2.png"
+  alt="A line chart of training loss over 200 steps for four configurations — stock TRL at ZeRO-3, Halo dense at expert-parallel size one, Halo at EP2 and Halo at EP8 — on the same seeded data at the same global batch and a constant learning rate. All four curves fall together and are visually indistinguishable after about step 100, converging on the same value near 0.002."
+  caption="Two hundred steps, same seeded data, same global batch of 16, constant learning rate. All four land at about 0.00205 and are within ~1% of each other by step 100 — so expert parallelism, grouped GEMM and bf16 Adam with stochastic rounding preserve the optimisation dynamics. This is the figure that licenses reading the throughput chart as a speed result. (Halo, agent-docs/assets/benchmarks/convergence_loss.png, Apache-2.0.)"
+/>
+
+<Figure
+  src="/articles/halo/fig1.png"
+  alt="A grouped bar chart of throughput in tokens per second per GPU for gpt-oss-20b with gradient checkpointing on, across five shapes from 4k times batch 1 to 16k times batch 2. Five series: stock TRL at ZeRO-3 in grey, always the shortest bar between 3,885 and 7,466; Halo EP1 at ZeRO-2 in orange, the tallest or near-tallest between 9,009 and 20,730; Halo EP1 at ZeRO-3 in red, between 5,560 and 18,742; Halo EP2 at ZeRO-2 in green, between 10,479 and 17,219; and Halo EP8 at ZeRO-2 in blue, between 8,320 and 10,128."
+  caption="The throughput table drawn. Note the red series — Halo's EP1 at ZeRO-3, the only one sharing TRL's sharding — nearly meeting the orange at 16k and falling well short of it at 4k. That gap between red and orange is the part of the headline that is a memory strategy rather than a framework. (Halo, agent-docs/assets/benchmarks/throughput_4k16k.png, Apache-2.0.)"
+/>
+
+## The small-hardware end
+
+The headline is a datacentre number, and the framing that Halo is about small
+hardware is not quite right — 8× B300 SXM6 is 2.3 TB of HBM. But the repository
+ships an explicit small end, and it is the more interesting part for anyone who is
+not White Circle.
+
+<ModelCard repo="LiquidAI/LFM2.5-8B-A1B" note="The first of the two shipped MoE fine-tuning recipes. 32 routed experts, 4 active — a 1B-active model in an 8B body, which is the shape that makes EP2 on two GPUs a sensible starting point rather than a research project." />
+
+<ModelCard repo="LiquidAI/LFM2-24B-A2B" note="The second, and the same recipe: 64 routed experts, 4 active. The cookbook says change the checkpoint and the EP size, and the repository's own GPU test exercises this one in both plain FSDP and EP modes." />
+
+The runnable config is 42 lines and reads like a normal TRL YAML, which is the
+whole design argument:
+
+```yaml
+# examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml
+model_name_or_path: LiquidAI/LFM2.5-8B-A1B
+expert_parallel_size: 2              # 32 routed experts → 16/rank
+moe_balancing: bias_update           # LFM2 has no router auxiliary loss
+save_sharded_ep: false               # gather a standard HF checkpoint on save
+use_grouped_gemm: true
+fp32_router: true
+attn_implementation: flash_attention_2
+packing: true
+max_length: 8192
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+optim: adamw_torch_fused
+learning_rate: 5.0e-06
+```
+
+Three lines in there are the entire product. `expert_parallel_size: 2` wraps the
+MoE blocks in place rather than swapping in a separate distributed model.
+`save_sharded_ep: false` gathers a standard SafeTensors checkpoint on save, so
+`from_pretrained` still works afterwards. And `moe_balancing: bias_update` handles
+a family-specific fact — LFM2 has no router auxiliary loss, so balancing has to
+go through the expert-selection bias instead — which is the kind of thing that
+decides whether a framework actually supports a model or merely lists it.
+
+The cookbook is also honest about what does not work: **CP is unsupported for
+LFM2**, because the short-convolution layers operate across the sequence axis and
+cannot take a Ulysses split. A support matrix with a "No" in it is worth more than
+one without.
+
+<Callout type="warning">
+The *"larger margins over the other frameworks benchmarked"* clause is the
+weakest thing on the README, and it is worth separating from the TRL result. The
+committed receipts for that comparison —
+`agent-docs/assets/benchmarks/runs/*.json`, six files against Axolotl, MS-SWIFT
+and Unsloth on Gemma 4 26B-A4B — show Halo's own run using a different dataset
+group and a decaying learning rate where Axolotl's is constant, with losses that
+do not track. For a tokens-per-second measurement at a fixed shape none of that
+changes the answer, but it is not the same standard of matched run as the TRL
+comparison, and the two should not be quoted in one breath.
+</Callout>
+
+## What I would actually ship
+
+- **Read the performance doc before the README.** `human-docs/performance.md` has
+  a table headed *"Levers that do not help here"* — fp8/fp4 compute buys nothing
+  because fine-grained experts are weight-bandwidth-bound, native DeepGEMM runs at
+  0.05–0.17× of bf16 at production shapes, `torch_compile` adds 2% over what Liger
+  already fuses. A framework that tells you which of its own features to leave off
+  is unusual and the list is worth more than the benchmark.
+- **Pick the lowest EP that fits, not the highest.** *"`ep1` runs about 2× `ep8`
+  on the same model."* Expert parallelism trades local parameters for all-to-all
+  traffic. Sharding buys capacity and you pay in tokens per second — which is the
+  opposite of how EP is usually pitched.
+- **Get `M = per_device_batch_size × sequence_length` above ~8k before judging
+  anything.** Below that the step is latency-bound and you are measuring your
+  launch overhead. Batch 1 → 4 is worth 1.5–2.1× on MoE by itself.
+- **The 2.8× is a real number about a real choice; the 1.25–2.68× is the
+  framework.** Quote whichever answers your question, and say which one you are
+  quoting.
+- **If you are publishing a framework benchmark, copy this structure.** Baseline
+  runner committed, differences tabulated in advance, convergence shown, the
+  matched-configuration number volunteered in the README's own headline
+  sentence. The one improvement is the cell that is missing, and it is one
+  `torchrun` away.
+
+<ChangeMyMind>
+
+<Falsifier claim="The 2.8x compares Halo at ZeRO-2 against TRL at ZeRO-3, and matched at ZeRO-3 the gap is 1.25x to 2.68x.">
+Divide the published columns row by row: Halo EP1 ZeRO-2 over stock TRL gives 2.32, 2.80, 2.78, 2.81, 2.78; Halo EP1 ZeRO-3 over the same gives 1.43, 1.25, 1.49, 2.68, 2.51. If the EP1 ZeRO-3 column is not what I think it is — if it carries some other difference the table does not name — the isolation argument fails. The run that settles it in the other direction is the missing one: `benchmark_trl_baseline.py --fsdp_sharding shard_grad_op`, TRL at ZeRO-2, against Halo at ZeRO-2. If that closes most of the gap at 4k, the headline is mostly a sharding default.
+</Falsifier>
+
+<Falsifier claim="The expert kernel is not where the gap comes from.">
+Halo's per-expert loop at EP1 is 5,545 tok/s/GPU and stock TRL's grouped GEMM is 3,885, both at 4k batch 1 on 8 B300s. Reproduce with `--no_grouped_gemm` on the Halo side and the default on the TRL side. If Halo's loop path falls below TRL's grouped path on other hardware or other shapes — plausible at EP8, where the uplift is only +14% and the margins are thinner — the claim is shape-specific rather than general.
+</Falsifier>
+
+<Falsifier claim="transformers v5's expert-parallel path all-reduces the full MoE output on every rank.">
+`EpRouterParallel`'s own docstring in `transformers/distributed/tensor_parallel.py` says it zeroes scores for non-local experts and that `moe_tp_experts` allreduce-sums the partial outputs; `MoeExpertsParallel.transform_output_post_forward` ends in `_AllReduceForward.apply(output, process_group)`. If a later transformers release adds a token-dispatch path — and there is no reason it will not — the structural half of Halo's advantage evaporates and this section dates badly. Profiling both with NCCL counters is the direct check: bytes on the wire per MoE layer, full tensor versus top_k/num_experts of the batch.
+</Falsifier>
+
+<Falsifier claim="The baseline is current, tuned TRL rather than a straw man.">
+`tests/gpu/profiling/benchmark_trl_baseline.py` runs `trl.SFTTrainer` on transformers v5 with FSDP2 `full_shard`, `adamw_torch_fused`, bf16, FA4, Liger with the gpt-oss applier's fused-linear cross-entropy, and `experts_implementation=grouped_mm`. If a stock TRL option worth more than a few percent is off — `packing` is the obvious candidate, though the fixture makes every row exactly `seq` long so there is nothing to pack — then the baseline is weaker than it looks. Turning that option on and re-running is the whole test.
+</Falsifier>
+
+<Falsifier claim="Throughput costs nothing in convergence.">
+200 steps, same seeded data, global batch 16, constant LR: TRL, Halo dense, EP2 and EP8 all reach ~0.00205 and are within ~1% by step 100. Two hundred steps on a shape fixture is a short run and a loss of 0.002 on filler data is nearly a memorisation check, so the honest version is that nothing diverges *early*. A real SFT run to convergence on real data, comparing final eval loss and a downstream score, is the measurement that would actually establish it — and it is the one nobody publishes, here or anywhere.
+</Falsifier>
+
+<Falsifier claim="The comparison against Axolotl, MS-SWIFT and Unsloth is not matched the way the TRL one is.">
+The six committed receipts under `agent-docs/assets/benchmarks/runs/` carry a `dataset_group` field on the Halo run and not on the others, a decaying learning rate against Axolotl's constant 2e-5, and loss traces that do not track. If tokens per second at a fixed sequence length and batch is genuinely invariant to all of that — which it largely is — then the comparison stands on its own terms and my caution is over-cautious. The direct fix is to state the fixture for every framework in the receipt, as the TRL doc does.
+</Falsifier>
+
+</ChangeMyMind>
+
+---
+
+*No B300s were involved. Every throughput and memory figure is Reported: read out of [`whitecircle/halo`](https://github.com/whitecircle/halo) at commit `4c1e6c6`, cloned rather than summarised, Apache-2.0 — principally `agent-docs/optimization/halo-vs-stock-trl.md`, `human-docs/performance.md` and the six run receipts under `agent-docs/assets/benchmarks/runs/`. The three figures are the repository's own. What I read rather than reported: `src/distributed/expert_parallel/base_layer.py` and `dispatcher.py` for the forward path, `src/optimizers/adamw_bf16.py` for the optimiser, `tests/gpu/profiling/benchmark_trl_baseline.py` for the baseline's configuration, and `examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml` with `human-docs/cookbooks/halo-lfm2-moe-cookbook.md` for the MoE recipes. The claim about the baseline's routing was checked against [`huggingface/transformers`](https://github.com/huggingface/transformers) on `main`, in `src/transformers/distributed/tensor_parallel.py`. For what the expert-parallel mechanism is from first principles: [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch).*
