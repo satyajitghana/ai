@@ -28,7 +28,7 @@ type Run = {
   decode: number
   /** sd.cpp `generate_image completed in Ns` */
   total: number
-  /** the per-step numbers sd.cpp prints, steady state (first step excluded) */
+  /** sampling seconds divided by step count */
   perStep: number
   steps: number
   /** VmHWM, MB */
@@ -54,7 +54,7 @@ const RUNS: Run[] = [
     sample: 177.38,
     decode: 17.34,
     total: 203.32,
-    perStep: 21.99,
+    perStep: 22.17,
     steps: 8,
     rss: 8108.8,
   },
@@ -62,23 +62,12 @@ const RUNS: Run[] = [
     label: "512² · 8 steps",
     config: "cfg 1.0 — four times the latent tokens of the row above",
     encode: 6.23,
-    sample: 731.98,
-    decode: 71.65,
-    total: 812.85,
-    perStep: 91.27,
+    sample: 804.11,
+    decode: 91.36,
+    total: 901.72,
+    perStep: 100.51,
     steps: 8,
-    rss: 8776.5,
-  },
-  {
-    label: "256² · 8 steps",
-    config: "cfg 4.0 — guidance on, so two denoiser passes per step",
-    encode: 6.19,
-    sample: 353.02,
-    decode: 17.29,
-    total: 378.03,
-    perStep: 43.92,
-    steps: 8,
-    rss: 8109.7,
+    rss: 9959.9,
   },
 ]
 

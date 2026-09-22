@@ -52,7 +52,12 @@ const FIXED = GDN_STATE + GDN_CONV
 
 const SHORT = 2048
 
-type Step = { label: string; sub: string; bytes: number; tone: "bad" | "mid" | "good" }
+type Step = {
+  label: string
+  sub: string
+  bytes: number
+  tone: "bad" | "mid" | "good"
+}
 
 const STEPS: Step[] = [
   {
@@ -62,13 +67,13 @@ const STEPS: Step[] = [
     tone: "bad",
   },
   {
-    label: "÷ 8 — grouped-query attention",
+    label: `÷ ${Q_HEADS / KV_HEADS} — grouped-query attention`,
     sub: `${Q_HEADS} query heads share ${KV_HEADS} cached KV heads`,
     bytes: GQA_ONLY,
     tone: "mid",
   },
   {
-    label: "÷ 4 — hybrid attention",
+    label: `÷ ${LAYERS / FULL_LAYERS} — hybrid attention`,
     sub: `only ${FULL_LAYERS} of ${LAYERS} layers keep a cache at all`,
     bytes: TRUE,
     tone: "good",
@@ -167,13 +172,14 @@ export function CacheLadder() {
           strokeDasharray="4 3"
         />
         <text
-          x={x(SIMPLE) + 6}
+          x={x(SIMPLE) - 8}
           y={top - 30}
+          textAnchor="end"
           className="fill-destructive font-mono"
           style={{ fontSize: 10 }}
         >
-          same calculator, &ldquo;simplified&rdquo; mode (H&times;D = hidden_size{" "}
-          {HIDDEN}) &rarr; {gib(SIMPLE).toFixed(0)} GiB
+          same calculator, &ldquo;simplified&rdquo; mode (H&times;D =
+          hidden_size {HIDDEN}) &rarr; {gib(SIMPLE).toFixed(0)} GiB
         </text>
 
         <g transform={`translate(${left - 14}, ${top + 3 * rowH + 4})`}>
@@ -201,8 +207,8 @@ export function CacheLadder() {
             className="fill-muted-foreground font-mono"
             style={{ fontSize: 10 }}
           >
-            192 GiB does not fit on an H200. 6 GiB fits on a laptop card with
-            room to spare.
+            {gib(CALC).toFixed(0)} GiB does not fit on an H200 (131 GiB).{" "}
+            {gib(TRUE).toFixed(0)} GiB fits on a laptop card with room to spare.
           </text>
           <text
             x={14}
@@ -222,9 +228,8 @@ export function CacheLadder() {
         and both are in the same <code>config.json</code> the handbook tells you
         to read &mdash; just not in the fields it names. The calculator&rsquo;s
         own two modes also disagree with each other by 2&times; here, because
-        this model&rsquo;s{" "}
-        <code>num_attention_heads &times; head_dim</code> is twice its{" "}
-        <code>hidden_size</code>.
+        this model&rsquo;s <code>num_attention_heads &times; head_dim</code> is
+        twice its <code>hidden_size</code>.
       </figcaption>
     </figure>
   )
