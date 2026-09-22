@@ -61,7 +61,7 @@ export function ResidueLadder() {
   const schemaX = 132
   const grammarX = 404
   const menuX = 680
-  const rowTop = 84
+  const rowTop = 92
   const rowH = 44
 
   return (

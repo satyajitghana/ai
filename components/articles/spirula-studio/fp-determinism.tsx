@@ -23,7 +23,7 @@ const MEAN64 = 96.1
 const MEAN32 = (96.5 + 92.3 + 91.5) / 3 // 93.433…
 
 const W = 700
-const H = 232
+const H = 248
 const LO = 90
 const HI = 98
 const PLOT_L = 92
@@ -70,15 +70,6 @@ export function FpDeterminism() {
               </text>
             </g>
           ))}
-
-          <text
-            x={16}
-            y={30}
-            className="fill-foreground font-mono"
-            fontSize={10}
-          >
-            same capture, same flags, same machine
-          </text>
 
           {RUNS.map((r, i) => {
             const y = TOP + i * ROW_H
@@ -187,21 +178,36 @@ export function FpDeterminism() {
           <line
             x1={16}
             x2={W - 16}
-            y1={H - 34}
-            y2={H - 34}
+            y1={H - 46}
+            y2={H - 46}
             stroke="currentColor"
             className="text-border"
             strokeWidth={1}
           />
           <text
             x={16}
-            y={H - 16}
+            y={H - 33}
             className="fill-muted-foreground font-mono"
             fontSize={9.5}
           >
-            fp32 would be worth 25–35% of the mapping stage. It is not taken:
-            the flag exists (--ba-real-coarse float) and the default does not
-            use it.
+            Same capture, same flags, same machine — only the scalar differs.
+          </text>
+          <text
+            x={16}
+            y={H - 20}
+            className="fill-muted-foreground font-mono"
+            fontSize={9.5}
+          >
+            fp32 would be worth 25–35% of the mapping stage.
+          </text>
+          <text
+            x={16}
+            y={H - 7}
+            className="fill-muted-foreground font-mono"
+            fontSize={9.5}
+          >
+            It is not taken: --ba-real-coarse float exists, and is not the
+            default.
           </text>
         </svg>
       </div>

@@ -1,0 +1,418 @@
+---
+title: "The free fine-tune deletes the confidence head"
+description: "Cactus ships two ways to customise Needle 3. The local one is real, runs on your laptop and writes a deployable binary. It also drops the confidence head on the floor — `needle build --lora` deletes the tensor group outright, and `confidence` comes back `None`. I pulled the head out of the shipped safetensors: six tensors, 71,077 parameters, 37,276 bytes, a two-stage attention probe over 21 depths that collapses the whole forward pass to one logit, read under `stop_gradient`. That last detail is why local tuning cannot keep it. Also: the local path exports at 4 bits because `WEIGHT_BITS = 4` and the packer raises on anything else, so a locally tuned 20-layer archive is 63.44 MB against the shipped 35.34 MB — arithmetic that reproduces the shipped file to the byte."
+date: 2026-09-22
+interest: 5
+helpful: 5
+tags:
+  - edge-inference
+  - tool-calling
+  - quantization
+  - fine-tuning
+  - calibration
+  - explainer
+draft: false
+---
+
+import { ConfidenceProbe } from "@/components/articles/needle-3-finetune/confidence-probe"
+import { ArchiveLadder } from "@/components/articles/needle-3-finetune/archive-ladder"
+import { RefusalGates } from "@/components/articles/needle-3-finetune/refusal-gates"
+
+Cactus has published [the fine-tuning guide for Needle 3](https://cactuscompute.com/blog/finetuning-needle),
+and it does the thing a guide should: it tells you what the free path does not
+do. Two sentences, in a section called *"What a fine-tune does not change"*:
+
+> The confidence head. Local fine-tuning does not train it, so `needle build`
+> leaves it out of the archive and `Needle(weights=...)` reports `confidence` as
+> `None`, with one warning.
+
+That is the whole article, in a sense, and it is stated plainly by the vendor
+rather than dug out. What is not stated is how much is being handed over in that
+sentence, why it cannot be otherwise, and what the local path costs in bytes on
+top of it. So I went and read the weights.
+
+<Callout type="note">
+This builds on [Needle 3: one checkpoint, five models](/articles/needle-3), which
+covers the ladder, the CQ2-bit scheme, the "passes DeepSeek V4 Flash" claim and
+the 35.34 MB file that the page says is 29 MB. It also established what is
+*missing* from the calibration story — no reliability diagram, no ECE, no
+false-positive rate, and one figure that captions itself "illustrative." I am
+not re-arguing any of that. This piece is about what the head *is*, what training
+it optimises, and what happens to it when you fine-tune.
+</Callout>
+
+| | |
+|---|---|
+| Local | `needle finetune` &middot; LoRA r=16 on five attention projections, base frozen &middot; **4-bit** export &middot; **no confidence head** |
+| Platform | `needle platform finetune` &middot; full model, every depth from 2 layers up &middot; your data mixed with Cactus's own &middot; **2-bit** &middot; **head retrained on your tools** |
+| Checked here | `Cactus-Compute/needle3` safetensors header and `.cact` tensor directory, `cactus-needle` 3.0.4 source |
+| Not checked | anything requiring the engine to run, or a platform key |
+
+## What the confidence head actually is
+
+Needle's confidence guide describes the score, not the head:
+
+> `confidence` is the minimum of two signals. A calibrated post-hoc head scores
+> the full prompt together with the call the model just produced; that is a
+> judgement on the finished call, not a guess made before decoding. The second
+> signal is the decoding probability of the call tokens themselves.
+
+The head itself is six tensors in the published checkpoint, and reading them
+takes two range requests — eight bytes for the safetensors header length, then
+the header:
+
+```text
+confidence_head/probes       F16  [21, 4, 768]
+confidence_head/gain         F16  [21, 4]
+confidence_head/query        F16  [4, 768]
+confidence_head/row_bias     F16  [4, 21, 4]
+confidence_head/proj/kernel  F16  [3072, 1]
+confidence_head/proj/bias    F16  [1]
+```
+
+Every dimension there is legible. **21** is the embedding output plus each of
+the twenty blocks — the head reads the residual stream at every depth. **4** is
+`mhc_lanes`, and `config.json` carries `confidence_probes: 4` and
+`confidence_queries: 4` to confirm it. **768** is the model width. **3072** is
+4 &times; 768, and it projects to **1**.
+
+One output. `out_dim` is literally 1 in the source — `class ConfidenceHead(ProbeHead): key, code, out_dim = "confidence_head", 2, 1`.
+Whatever is happening in between, the entire forward pass over the prompt and
+the finished call collapses to a single scalar.
+
+<ConfidenceProbe />
+
+The middle of it is `probe_pool` in `needle/model/architecture.py`, and it is
+two attention passes stacked. First, each of the 84 (depth, lane) probe vectors
+scores every non-padding position, softmaxes over the sequence, and pools it
+into one 768-vector — 84 summaries of the whole trace, one per place in the
+network you could look. Then four query vectors attend over those 84 summaries,
+softmaxing across depth and lane this time, and the four pooled results
+concatenate into 3072 and project to the logit.
+
+Two details in that code matter more than the shapes.
+
+**The head reads the backbone under `stop_gradient`.**
+
+```python
+# needle/model/architecture.py
+def _head_cells(self, tokens, quant=False, window=0, sink=None, exit_depth=None):
+    cells = jax.lax.stop_gradient(
+        self.hidden_cells(tokens, quant=quant, window=window, sink=sink,
+                          exit_depth=exit_depth))
+    keep = (tokens != self.config.pad_token_id).astype(jnp.float32)
+    return cells, keep, ladder_row_keep(self.config, exit_depth)
+```
+
+Training the confidence head cannot move a single weight of the model it is
+judging. It is a detached read-out, in the literal sense.
+
+**And the row mask is how one head serves nineteen models.** `ladder_row_keep`
+returns a 21-vector that is 1 for the embedding and for every block whose ladder
+rank is below the exit depth, and `probe_pool` sets the masked rows to
+`-inf` before the second softmax. Slice the network to eight layers and the head
+renormalises over the nine rows that still exist. It is a small, neat piece of
+engineering, and it is the reason `needle build --layers 8` can keep a
+confidence head at all: `ladder_slice` gathers the right rows out of `probes`,
+`gain` and `row_bias`, and the head comes along.
+
+The whole thing is **71,077 parameters** — 0.059% of the model's 121,021,910 —
+and **37,276 bytes** in the shipped archive, 0.105% of the file. The entire
+calibrated half of the refusal contract weighs less than the tokenizer.
+
+## What it optimises
+
+One logit, sigmoid, and a score you are told to threshold. The objective is a
+binary one and the target is not hard to name: **was this finished call
+correct?** The head is a learned verifier over the trace that produced a call —
+not a confidence estimate read off the decoder, which is the *other* term of the
+minimum, and which the engine takes separately.
+
+That split is the design, and the guide is clear about the failure mode it buys:
+
+> A call is accepted only when both agree, so the failure mode is escalation
+> rather than wrong execution: a fluent call the head doubts scores low, and a
+> call the head likes but the decoder stumbled through scores low too.
+
+"Calibrated," then, is a claim about that one logit: that when its sigmoid reads
+0.8, roughly 80% of the calls scoring 0.8 are right. Not ordered — calibrated.
+[Needle 3](/articles/needle-3) already established that no reliability diagram,
+ECE, Brier figure or false-positive rate is published anywhere to check it
+against, and the one illustration that gestures at it labels itself
+"illustrative calls." Nothing in the fine-tuning guide changes that. What it
+adds is a second, sharper question: a head calibrated on which model?
+
+## Why a local fine-tune cannot keep it
+
+The checkpoint answers this itself. Its safetensors `__metadata__` carries the
+run that produced it, and one field is the whole story:
+
+```json
+"merged_heads": [["confidence_head", 10000, "checkpoints/needle3d_qapt_ch.pkl"]]
+```
+
+The head was trained in a **separate run**, from a **separate checkpoint file**,
+and merged into the published weights at step 10,000. Combined with the
+`stop_gradient`, that makes it a post-hoc artefact in the strictest sense: it was
+never in the main training graph, so there is no gradient path by which your
+LoRA could update it.
+
+And what the package does is exactly what that implies. From
+`build_main` in `needle/model/finetune.py`:
+
+```python
+if ConfidenceHead.key in params:
+    params = {k: v for k, v in params.items() if k != ConfidenceHead.key}
+    print(f"  {'dropped':<9} the confidence head; it is not trained locally, "
+          f"so confidence reports None")
+```
+
+The tensors are deleted from the parameter dict before export. The `.cact`
+format spec is explicit about what that produces: *"`extra == 0` means no
+heads"* — the archive carries no head manifest at all, not an untrained one. The
+Python wrapper then detects the absence by walking the tensor directory, warns
+once at construction, and overwrites `response["confidence"] = None` on every
+reply.
+
+Notice that deleting is the *honest* option. A head fitted to the base model's
+error distribution, applied to a model whose accuracy just moved 18 to 36 points
+on DroidCall, is not a calibrated head — it is a head predicting failures that
+no longer happen, at a threshold you are being told to route on. Shipping it
+would be worse than shipping nothing. The platform's answer is the only other
+correct one: retrain the head with the model, on your tools.
+
+## What is left of "empty list, not a guess"
+
+Needle 3's refusal contract is three mechanisms, and [the earlier piece](/articles/needle-3)
+took them apart. A local fine-tune removes exactly one, and it is the only one
+that produces a number.
+
+<RefusalGates />
+
+The grammar's empty call and the rule-based grounding gates both live outside
+the weights, so both survive. The confidence floor does not, and here I have to
+stop short of a claim I would like to make. The engine applies a hard floor of
+0.1 *inside* `needle_complete`, redirecting anything below it into
+`suppressed_calls`, before the Python layer ever sees the response. With the
+head gone, `min(head, decode probability)` has one argument left. Whether the
+engine then floors on the decode probability alone — which for a
+grammar-constrained call is nearly always high, so the floor would effectively
+stop firing — or does something else, is not documented in the guide, the format
+spec or the package, and I did not run the engine to find out. It is marked
+unknown above rather than guessed.
+
+I flag it because there is a reported failure with exactly this shape.
+[GitHub issue #117](https://github.com/cactus-compute/needle/issues/117) against
+Needle 2 described a LoRA-tuned `.cact` where JAX greedy decoding on the exported
+weights reproduced the trained refusal on eight held-out rows, while the native
+engine, on bit-identical weights, emitted a real tool call on six of them —
+*"what's the capital of France?"* producing a `search_site` call in the engine
+and a correct refusal in JAX. Different generation, different engine version, and
+the issue is closed with no visible comment thread. But it is the same workflow
+(fine-tune locally, export, run), the same symptom (a call where a refusal was
+trained), and the mechanism above is a plausible explanation that nobody has
+ruled out in public. One printed `suppressed_calls` from a tuned archive would
+settle it in a minute.
+
+## The bits, which nobody has counted
+
+The guide says the local path exports at 4 bits and the platform at 2. The
+package says something stronger. `WEIGHT_BITS = 4` in
+`needle/model/quantize.py`, and the packer refuses anything else outright:
+
+```python
+def _cq_pack(w, bits, group):
+    if bits != WEIGHT_BITS:
+        raise ValueError(f"CQ packing supports bits={WEIGHT_BITS}; got bits={bits}")
+```
+
+There is no 2-bit packer in the installable package. Not disabled — absent. The
+shipped `needle3.cact` was written by tooling you do not have, which is also why
+its mixed `embedding=4, mhc=4, default=2` scheme cannot be reproduced by
+`_tensors`, whose signature takes a single `bits`.
+
+So what does a locally tuned archive weigh? The shipped file answers it. One
+range request for the first 128 KiB reads the 196-byte header, the 28-float
+codebook and all **581 tensor records** — dtype, shape, offset, byte length,
+group size and bit width for each. Seven are CQ4 (the embedding, the three
+lane-mixing maps, and the head's three matrices), 115 are CQ2, 456 are FP16, two
+FP32, one the raw tokenizer. Recompute every blob from Cactus's own documented
+CQ layout, align to 64 bytes, sum, and you get 35,335,380 bytes — the shipped
+file, to the byte, zero error. That reconstruction is what licenses the rest of
+the arithmetic.
+
+<ArchiveLadder />
+
+<Receipts src="/articles/needle-3-finetune/data/archive-sizes.json" />
+
+A locally fine-tuned 20-layer Needle 3 is **63,437,076 bytes: 63.44 MB**, 1.80x
+the shipped file and 2.19x the 29 MB ceiling the product page advertises. The
+multiplier is not a flat 2x because the embedding table and the mHC gates were
+already at 4 bits; it grows with depth, from 1.54x at two layers to 1.80x at
+twenty, because the deeper rungs are the ones carrying the most 2-bit tensors to
+lose.
+
+For a model whose entire pitch is microcontrollers and \$200 phones, that is not
+a footnote. The free path's deliverable is the thing you flash onto the device,
+and it is nearly twice the size of the artefact the size claims were made about.
+
+<Callout type="tip">
+One loose end from the earlier piece closes here. Cactus's page states its range
+twice and disagrees with itself on the floor — "8-29 MB" in the hero, "9 to
+29 MB" in the laddering section. Computed from the shipped archive's own
+directory, the platform 2-layer build is **8.64 MB** and the 4-layer build is
+**9.79 MB**. Both "8" and "9" are that floor, rounded from different rungs. The
+ceiling is still wrong; the floor was only ever sloppy.
+</Callout>
+
+## About "lossless"
+
+The 2-bit algorithm is the platform's other exclusive, and the word attached to
+it in Cactus's own material is *lossless* — the phrasing being circulated is that
+the quantisation needs your original dataset to be lossless.
+
+Take the ordinary meaning first and it cannot be right. CQ2 maps 128 rotated
+weights onto 2-bit codebook indices plus one shared 16-bit norm. That is a
+many-to-one function. You cannot reconstruct the float from the index, and no
+amount of training data changes the arithmetic. If "lossless" meant
+reconstruction, it would be false by inspection of the format spec.
+
+The reading that *is* defensible is the one the checkpoint supports, and
+[Needle 3](/articles/needle-3) already traced it: the anneal in the
+`__metadata__` runs `bits_start: 4.0` to `bits_end: 2.0` over the first half of a
+10,000-step run, with a final phase pinning the embedding and mHC tensors at 4
+bits. The 2-bit model *is* the model that was trained. There is no
+higher-precision original to have lost anything relative to. Under that reading
+"lossless" is a statement about the pipeline, not about a compression ratio, and
+it is honest — but it is also a statement about a training run, which is exactly
+why it needs your data.
+
+That is the tell, and it is worth saying out loud because it explains the
+business model better than the pricing page does. The platform does not need
+your dataset in order to compress well. It needs your dataset because the
+compression is a training stage — quantisation-aware post-training over your
+distribution — and a training stage cannot run on data it does not have. The
+same is true of the confidence head: it is not calibrated on your tools because
+Cactus is withholding a knob, it is calibrated on your tools because calibration
+is a fit, and a fit needs samples.
+
+What would make "lossless" checkable is one table: your tuned model's accuracy
+at 4 bits and at 2 bits, on the same held-out set, per depth. The platform prints
+validation and test accuracy for every depth already. Printing the 4-bit column
+beside the 2-bit one would turn the word into a number, and it is the number I
+would want before paying for it.
+
+## What the platform is actually selling
+
+Strip the feature list to what the free path cannot do and three things are
+left, in descending order of how much I would pay for them.
+
+**Calibration.** A confidence head refitted on your tool distribution is the only
+one of these you cannot build yourself, because the head is a post-hoc probe over
+a residual stream you would have to instrument, trained against a correctness
+label you would have to produce at scale. It is also the thing that turns a
+121M-parameter model running a lock or a payment from a gamble into a routed
+decision. Everything the confidence guide tells you to do — *"act above your
+threshold, show the call and its reasoning below it"* — is unavailable on the
+free path by construction.
+
+**Bits.** Half the file, at the size class where half the file is the difference
+between an ESP32-P4 and no deployment.
+
+**Not unlearning.** Mixing Cactus's original dataset back in during full-depth
+training, so the tuned model keeps what the base knew. Real, and also the one an
+honest LoRA at rank 16 on five attention projections partly buys you already —
+freezing the base is a blunt version of the same protection.
+
+The guide's recommended workaround for the missing head is the sentence I keep
+coming back to: *"keep the base model for the decision and the tuned one for the
+call."* Two archives, two forward passes, on a device chosen because it has 28 MB
+of RAM. It is a sound suggestion and it is also the second time in a week this
+site has watched a decision layer need a second model beside it — the
+[WindTunnel board](/articles/webmcp-windtunnel) needs Mercury 2.5 to write the
+arguments Jev picks the tool for. A small model that returns a calibrated
+decision is a genuinely useful primitive. It keeps turning out to be a primitive
+you deploy in pairs.
+
+## The ledger
+
+**Real and checked.** The confidence head's architecture, read out of the
+published safetensors: six tensors, 71,077 parameters, a two-stage attention
+probe over 21 depths and 4 lanes collapsing to one logit, read under
+`stop_gradient`, merged from a separate checkpoint at step 10,000. The deletion
+on `--lora`, quoted from the shipped package. `WEIGHT_BITS = 4` and a packer that
+raises on anything else. The archive arithmetic, validated by reproducing the
+shipped 35,335,380 bytes exactly.
+
+**Real and disclosed by Cactus.** That local tuning leaves the head untrained;
+that `confidence` reports `None`; that the 2-bit path is platform-only; that
+non-English text fragments to roughly 1.7x the tokens. All of it is in the
+guide, in a section headed with what a fine-tune does *not* change. That is a
+better disclosure posture than most of what this site reviews.
+
+**Unresolved.** What the engine's 0.1 floor does with one of its two inputs
+missing. Whether issue #117's symptom has this cause. Whether "lossless" survives
+a 4-bit-versus-2-bit accuracy column. And the calibration question the earlier
+piece left open, which the platform now answers with a fit rather than a figure:
+*calibrated on your tools* is a process claim, and it will stay one until a
+reliability diagram ships beside it.
+
+<ChangeMyMind>
+
+<Falsifier claim="`needle build --lora` deletes the confidence head, and a locally tuned archive carries no head at all.">
+Quoted from `cactus-needle` 3.0.4's own `build_main`, and cross-checked against
+the `.cact` format spec's `extra == 0` case and the wrapper's `_confidence_head_present`
+walk. It falls if a later release keeps an untrained head in the archive, or if
+`--lora` combined with some flag I did not find preserves it. I read the package,
+I did not run it.
+</Falsifier>
+
+<Falsifier claim="With the head deleted, the engine's 0.1 confidence floor stops doing its job.">
+This is the one thing in the piece I did not verify and would most like to be
+wrong about. Build a LoRA archive, run a request no declared tool can serve, and
+print `suppressed_calls` and the raw engine envelope before the wrapper nulls
+`confidence`. If suppression still fires at the documented rate on
+out-of-scope requests, the floor has a fallback the docs do not mention and the
+refusal contract survives a local fine-tune intact.
+</Falsifier>
+
+<Falsifier claim="A locally tuned 20-layer archive is 63.44 MB, 1.80x the shipped file.">
+Computed, not downloaded — I do not have a tuned archive. The method reproduces
+the shipped 35,335,380 bytes to the byte from the same records, which is strong
+evidence the layout model is right, but one real `needle build --lora --out x.cact`
+and one `ls -l` settles it. If it comes back near 35 MB, the local path has a
+2-bit route I did not find in the package.
+</Falsifier>
+
+<Falsifier claim="The confidence head optimises a binary correctness judgement on the finished call.">
+Inferred from `out_dim = 1`, from the head reading prompt *and* call, and from
+Cactus's own description of it as "a judgement on the finished call." It would
+fall if the head were trained against something else entirely — a regression on
+argument-level F1, say, or a ranking objective — which a published training
+recipe would show. No loss function for the head is published anywhere I looked.
+</Falsifier>
+
+<Falsifier claim="Slicing the ladder preserves the head's rows but not necessarily its calibration.">
+`ladder_slice` gathers `probes`, `gain` and `row_bias` by row, so an 8-layer
+build keeps a working head — that much is in the source. What I am claiming
+beyond it is that a head fitted while twenty blocks ran is not guaranteed to be
+calibrated over the nine rows an 8-layer stack produces. A per-depth reliability
+diagram from the base model would settle it, and the platform's per-depth
+validation table is one column away from being that.
+</Falsifier>
+
+</ChangeMyMind>
+
+---
+
+*Sources: [Fine-tuning Needle](https://cactuscompute.com/blog/finetuning-needle)
+and [Leveraging Needle's Confidence](https://cactuscompute.com/blog/needle-confidence)
+for the quoted product behaviour; `cactus-needle` 3.0.4 from PyPI for every
+source excerpt; `Cactus-Compute/needle3` on Hugging Face for the safetensors
+header, `config.json` and the `.cact` tensor directory, read on 2026-09-22 by
+HTTP range request. Neither Cactus post publishes a raster figure — their charts
+are rendered live in the page — so there is nothing to mirror here; the diagrams
+above are mine, drawn from the tensor shapes and the `probe_pool` source. The
+archive sizes are arithmetic over the shipped file's own records, validated by
+reconstructing its total exactly; only the 20-layer platform row is a measured
+file.*

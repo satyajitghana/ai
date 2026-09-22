@@ -105,11 +105,11 @@ export function TaskLadder() {
               <rect x={x(0)} y={y + h} width={Math.max(1, x(r.husky) - x(0))} height={h} className="fill-foreground/80" />
               <rect x={x(0)} y={y + 2 * h} width={Math.max(1, x(r.flash) - x(0))} height={h} className="fill-destructive" />
 
-              <text x={x(r.flash) + 6} y={y + 15} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
+              <text x={x(r.flash) + 6} y={y + 12} className="fill-foreground font-mono" style={{ fontSize: 9 }}>
                 {(r.flash / r.mlx).toFixed(2)}×
               </text>
-              <text x={x(Math.max(r.husky, 0)) + 6} y={y + 15} textAnchor="end" className="fill-background font-mono" style={{ fontSize: 0 }}>
-                {r.husky}
+              <text x={x(r.flash) + 6} y={y + 22} className="fill-muted-foreground font-mono" style={{ fontSize: 8 }}>
+                {r.mlx} / {r.husky} / {r.flash}
               </text>
             </g>
           )

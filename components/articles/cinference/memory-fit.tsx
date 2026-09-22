@@ -119,7 +119,7 @@ export function MemoryFit() {
         />
         <text
           x={x(CARD_GIB) + 6}
-          y={top - 20}
+          y={top - 34}
           className="fill-destructive font-mono"
           style={{ fontSize: 10 }}
         >

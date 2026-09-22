@@ -119,10 +119,14 @@ export function ViewGap() {
                         strokeWidth={1.6}
                       />
                       <circle cx={X(b)} cy={y} r={4} fill={c} />
+                      {/* the delta sits ABOVE the segment's midpoint: anchored
+                          to either end, a long segment reaching the axis floor
+                          (YoNoSplat, −12.95) pushes its label into the row
+                          labels. */}
                       <text
-                        x={b >= a ? X(b) + 8 : X(b) - 8}
-                        y={y + 3.5}
-                        textAnchor={b >= a ? "start" : "end"}
+                        x={(X(a) + X(b)) / 2}
+                        y={y - 7}
+                        textAnchor="middle"
                         fill={c}
                         className="font-mono"
                         fontSize={8.5}

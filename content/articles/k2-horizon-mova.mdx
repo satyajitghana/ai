@@ -1,0 +1,355 @@
+---
+title: "MoVA: routing the value vectors, and why the KV cache does not notice"
+description: "IFM's K2-Horizon-MoVA-36B-A4B replaces attention's v_proj with a router over 64 value experts, top-4 per token. The obvious objection is that routed values must cost cache: if every token picks a different mixture, the cache has to store the mixture. It does — and that is the trick. Reading modeling_k2_horizon.py, the routed experts are summed into a single 8x128 tensor before past_key_values.update is called, so the cache holds exactly the GQA shapes and FlashAttention never learns routing happened. What it costs instead is weights: 7,549,747,200 parameters of value experts, 20.2% of the model, a 64x multiplier on one projection for a 4x multiplier on its decode FLOPs. I counted 37.44B stored and 5.95B active. The 15x comparison in the card is real and it wins on the index; the 20x one I was asked about names no model. And Artificial Analysis records this model at 0 on Terminal-Bench 4.0 while the card reports 58.6 on Terminal-Bench 2.1."
+date: 2026-09-22
+interest: 5
+helpful: 4
+tags:
+  - llm
+  - attention
+  - mixture-of-experts
+  - kv-cache
+  - inference-optimization
+  - explainer
+draft: false
+---
+
+import { MovaPath } from "@/components/articles/k2-horizon-mova/mova-path"
+import { ValueBudget } from "@/components/articles/k2-horizon-mova/value-budget"
+import { CacheLedger } from "@/components/articles/k2-horizon-mova/cache-ledger"
+
+Attention has been picked apart from every direction except one. Queries got
+grouped ([GQA](/articles/attention-mechanisms)), keys and values got compressed
+into a shared latent (MLA), keys got
+[reconstructed from values](/articles/grouped-value-attention) so the key stream
+could be dropped, whole layers got
+[replaced with sliding windows](/articles/mimo-v2-flash) or linear recurrences.
+The feed-forward network, meanwhile, got sparsified twenty different ways and
+[every open frontier model now ships a mixture of experts](/articles/mixture-of-experts-from-scratch).
+
+What nobody had shipped is MoE sparsity *inside* attention. **K2-Horizon-MoVA-36B-A4B**,
+from IFM, does exactly that: it deletes `v_proj` and puts a router and sixty-four
+value experts in its place.
+
+<ModelCard repo="IFM/K2-Horizon-MoVA-36B-A4B" />
+
+The card above reports **37.44B parameters** — my own count from the headers
+agrees to the parameter — and **5.17 TB of repository storage**, which is not a
+typo. The repository carries every intermediate checkpoint of every training
+stage as a git branch. More on that at the end; it is the best thing about this
+release.
+
+The architectural claim is a short list, and the third item is the one that
+should make you stop:
+
+- compatible with FlashAttention, GQA and sparse attention;
+- **no additional KV cache cost compared to standard GQA.**
+
+That reads wrong on its face. If every token selects a different mixture of
+value experts, then every token has a different value vector, and the cache has
+to store *something* per token. So either the cache grows, or the routing is not
+really per-token, or it is doing something clever. The repository ships
+`modeling_k2_horizon.py`, so the question is answerable in an afternoon rather
+than arguable.
+
+It is doing something clever, and the clever thing is an ordering.
+
+## Where the routing happens
+
+Here is `K2HorizonMoVAAttention.forward`, reduced to the four lines that matter:
+
+```python
+# modeling_k2_horizon.py
+router_logits = F.linear(flat_hidden_states, self.v_router.weight)   # 2560 -> 64
+routing_weights, selected = calc_router_weights(
+    router_logits, self.v_router.bias, "sigmoid", top_k=4, scaling_factor=2.5)
+
+mixed_value_states = combine_routed_experts(                          # Σ wₖ·SiLU(Vₖx)
+    flat_hidden_states, routing_weights, selected, self.v_experts, activation=F.silu)
+
+value_states = mixed_value_states.view(*input_shape, -1, 128).transpose(1, 2)
+# ... rope on q and k ...
+key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+```
+
+`self.v_experts` is a `ModuleList` of **64** `nn.Linear(2560, 8 * 128)` — sixty-four
+complete GQA value projections. The router picks four, runs them, applies SiLU to
+each, and weights them by the renormalised sigmoid scores scaled by 2.5. The
+result, `mixed_value_states`, is `(tokens, 1024)`. Reshaped, it is
+`(batch, 8 heads, tokens, 128)`.
+
+Which is exactly the shape a plain GQA `v_proj` would have produced.
+
+<MovaPath />
+
+That is the whole answer. **The mixture is collapsed before the cache is
+touched.** `past_key_values.update` receives one 8 × 128 value tensor per token,
+indistinguishable in shape, dtype and layout from what an ordinary
+grouped-query model writes. The router's decision is a property of *how the
+value was computed*, not of what is stored — it is baked into the numbers and
+then thrown away.
+
+Everything downstream follows from that. The attention kernel is called through
+`ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]` with no special
+casing at all, so FlashAttention, SDPA, a paged kernel, or a sparse-attention
+backend all work unmodified — they are being handed a GQA tensor. The
+`num_key_value_groups = 32 / 8 = 4` repeat is the standard one. The
+`sliding_window` argument is passed straight through. All three compatibility
+claims are true, and they are true for the same single reason.
+
+<Callout type="note">
+**The thing that is genuinely different.** In every other attention variant the
+value is a *linear* map of the hidden state. Here it is `Σ wₖ · SiLU(Vₖ x)` — a
+gated, non-linear, input-dependent mixture. That is an FFN-shaped computation
+sitting in the value path. It does not change the cache, but it does mean the
+absorption tricks that MLA and [GVA](/articles/grouped-value-attention) rely on —
+folding a learned map into the query so it never has to touch the cache — have
+nothing to bite on here. MoVA is not in that family; it is an MoE block wearing
+attention's shape.
+</Callout>
+
+## So what does it cost?
+
+Not cache. Weights.
+
+<ValueBudget />
+
+Forty-five of the forty-eight layers are MoVA layers (`mlp_only_layers: [0, 1, 2]`
+keeps the first three dense, with an ordinary `v_proj` of 2.62M parameters each).
+Each MoVA layer stores 64 × 2560 × 1024 = **167.8M** parameters of value experts
+where a GQA layer would store 2.6M. Across 45 layers that is
+**7,549,747,200 parameters — 20.2% of the entire model** — sitting in the value
+projection alone.
+
+Per token it runs four of them: 10.49M multiply-accumulates against a plain
+GQA `v_proj`'s 2.62M, plus a 164K-parameter router. So the trade is:
+
+| | weights | decode FLOPs | KV cache |
+|---|---:|---:|---:|
+| MoVA vs plain GQA `v_proj` | **64×** | **4×** | **1×** |
+
+That is the honest statement of the design, and it is a good one. Parameters are
+cheap to store and expensive only when you read them; cache is expensive at every
+context length and cannot be amortised across a batch. Moving cost from the
+second column to the first is the same bet the whole MoE field made, applied
+where nobody had applied it.
+
+What it is *not* is free. A 4× multiplier on the value projection at decode time
+is real work in the regime where decode is memory-bound, and four experts is four
+scattered weight reads instead of one contiguous one. `combine_routed_experts` in
+the released code is the naive loop — one `index_add_` per touched expert — which
+is fine for correctness and is not what you would serve; the SGLang recipe passes
+`xllm_source_router_gemm_partitions` to get a fused path.
+
+## "No additional cache cost" and "a small cache" are different sentences
+
+The claim is exact. It is also worth seeing next to the absolute number,
+because K2-Horizon spent its architecture budget on the opposite axis from
+everyone else this month.
+
+`use_sliding_window` is `false`, `sliding_window` is `null`. All 48 layers are
+full attention. 8 KV heads × 128 dims × 2 tensors × 48 layers × 2 bytes =
+**196,608 bytes = 192 KiB per token**.
+
+<CacheLedger />
+
+At the model's native 512K context that is **96 GiB of KV cache for a single
+sequence** in BF16, 48 GiB in FP8 — several times the 72 GB of weights. MoVA
+does not make that worse than GQA, which is the claim and it holds. But the same
+week, [MiMo-V2.6](/articles/mimo-v2-6) shipped 60 of its 70 layers as
+sliding-window attention with a 128-token window, so 6/7 of its layers stop
+growing past 128 tokens.
+
+Two releases, one day apart, making opposite bets about where attention should be
+cheap: IFM buys representational capacity in the value path and pays full
+freight on the cache; Xiaomi buys cache and pays with locality. Neither is wrong.
+But a reader seeing "no additional KV cache cost" should not come away thinking
+this is a long-context-cheap model. It is a long-context-*capable* model with a
+2020-shaped cache.
+
+## The paired comparison that would settle it
+
+The one experiment I want and cannot find is the obvious one: **K2-Horizon-36B
+with MoVA against K2-Horizon-36B with a plain `v_proj`, matched on tokens and
+everything else.** Without it, MoVA's contribution is confounded with 22.9T
+pretraining tokens, four midtraining stages and two SFT phases.
+
+The family gives a partial substitute, because IFM shipped
+`K2-Horizon-32B`, `K2-Horizon-7B`, `K2-Horizon-3.7B` and `K2-Horizon-0.9B`
+alongside it. On Artificial Analysis' Intelligence Index:
+
+<BenchBars
+  title="Artificial Analysis Intelligence Index v4.3 · the K2-Horizon family and its named comparators"
+  unit=""
+  max={35}
+  bars={[
+    { label: "K2-Horizon-375B-A23B", value: 30.5 },
+    { label: "K2-Horizon-MoVA-36B-A4B", value: 25.3, highlight: true },
+    { label: "Nemotron 3 Ultra 550B-A55B", value: 22.93 },
+    { label: "G9v3-39A5B", value: 21.83 },
+    { label: "K2-Horizon-7B (dense)", value: 20.6 },
+    { label: "Gemma 4 31B-it", value: 18.98 },
+    { label: "Muse Glimmer 30B", value: 17.48 },
+    { label: "K2-Horizon-3.7B (dense)", value: 15.61 },
+    { label: "Qwen3.6-35B-A3B", value: 15.23 },
+    { label: "Nemotron 3 Super 120B-A12B", value: 12.83 },
+  ]}
+/>
+
+The 25.30 is confirmed on AA's own board, and the interesting row is the top one:
+the 375B sibling, more than ten times the stored parameters and nearly five times
+the active ones, scores 30.50. The 36B recovers **83% of its family's flagship
+index at a tenth of the size.** That is the most controlled comparison available
+and it is a genuinely strong result — stronger, I think, than beating another
+lab's 550B model, because at least the data and the recipe are held roughly
+fixed.
+
+## The size comparison, checked
+
+The card's own wording is *"outscores open weight dense (approximately 30B model
+size) and MoE models up to 15× its size."* The largest model in its comparison
+table and figure is **Nemotron 3 Ultra 550B-A55B**, and 550 / 36 = 15.3. So the
+15× is exactly right and names a real model.
+
+I was asked about a claim of "over 20× the total parameters." **Nothing in the
+model card, the benchmark figure or the GGUF card says 20×**, and no comparator
+in either the table or the figure is above 15.3× — the list is Nemotron 3 Ultra
+550B-A55B, Nemotron 3 Super 120B-A12B, G9v3-39A5B, Qwen3.6-35B-A3B, Muse Glimmer
+30B, Gemma 4 31B-it, and GPT 5.6 luna (medium) as the closed baseline. If 20× is
+circulating, it did not come from the artifact.
+
+The other thing to say about that table is that **K2-Horizon leads two of its
+nine rows.**
+
+<Figure
+  src="/articles/k2-horizon-mova/fig1.png"
+  alt="Six grouped bar charts comparing K2-Horizon-MoVA-36B-A4B against Nemotron 3 Ultra 550B-A55B, Nemotron 3 Super 120B-A12B, G9v3-39A5B, Qwen3.6-35B-A3B, Muse Glimmer 30B, Gemma 4 31B-it and GPT 5.6 luna. K2-Horizon leads tau3-Banking at 26.8 and Terminal-Bench 2.1 at 58.6, and trails on Humanity's Last Exam at 25.2, AA-LCR at 66.3, SciCode at 38.9 and CritPt at 2.1."
+  caption="The card's own figure. Two clear wins on the agentic panels, four panels where the 36B is mid-pack or last; the card's markdown table adds GPQA Diamond (80.8 against Nemotron Ultra's 86.7) and two AA-Omniscience rows, all losses (model card, benchmark figure)."
+/>
+
+That is not damning — an aggregate index can be won by a model that loses most
+individual rows, because the index averages across ten evaluations and these are
+six of them. But "outscores models up to 15× its size" is doing a lot of work
+for a table where the 15× model wins seven of nine printed comparisons. The
+precise version is: *the 36B wins the index, and it wins it on the agentic
+evaluations while losing the knowledge and science ones,* which is exactly the
+profile you would predict for a model with 4B active parameters and a 512K
+context.
+
+## The zero nobody has mentioned
+
+Artificial Analysis' record for this model carries
+`"terminalBench40": 0` — a literal zero on Terminal-Bench 4.0, one of the ten
+evaluations that make up the 25.30 index. The card reports **58.6 on
+Terminal-Bench 2.1**, which is a strong score, and does not report 4.0 at all.
+
+A zero on an agentic benchmark is almost never a capability result; it is a
+harness result — a tool-call format the scaffold cannot parse, a container that
+never starts, a reasoning-effort setting that runs out of budget. The card is
+unusually specific about exactly the things that would cause it: *always* pass
+`reasoning_effort: "high"`, enable the `k2_horizon` reasoning parser, enable the
+`k2_horizon` tool-call parser, and note that the model supports `json`, `xml` and
+`xml_typed` tool-call formats with `xml` as the default. Miss any of those and a
+terminal agent produces text that no harness will execute.
+
+Two things make this worth stating rather than dismissing. First, the headline
+index of 25.30 is achieved **with a zero in it** — whatever is broken, fixing it
+can only move the number up. Second, Nemotron 3 Ultra, the 550B comparator,
+scores 1/198 on the same benchmark, so this is not a K2-Horizon peculiarity; it
+is a harness compatibility problem that eats open-weight models on Terminal-Bench
+4.0 specifically, which is the sort of thing
+[a harness comparison](/articles/harness-effect) exists to warn about.
+
+## The release around the model
+
+I have been hard on the benchmark framing, so let me be equally direct that the
+*release* is the most open one I have read this year, and by a distance.
+
+- **22.9T pretraining tokens**, then four midtraining stages that walk the
+  context from 8K to 32K to 128K to 512K (1.1T + 498B + 110B + 199B tokens), then
+  two SFT phases (219B + 50B). Every stage has its step count and token budget
+  printed.
+- **Intermediate checkpoints as git branches on the model repo** —
+  `pretrain_*`, `mid_1_*` … `sft_2_2500` — loadable directly with vLLM's
+  `--revision`. Not a final checkpoint with a story about training; the training,
+  as artifacts.
+- **The W&B run is public.** The loss curves below are reconstructed from it by
+  IFM themselves, with the checkpoint-resume lineage drawn rather than smoothed
+  away.
+- **Apache 2.0**, with the pretraining and midtraining datasets named in the card
+  metadata, and an artifact index that marks the technical report and the `xllm`
+  code repository as *In Progress* with dates rather than pretending they exist.
+
+<Figure
+  src="/articles/k2-horizon-mova/fig2.png"
+  alt="Five training-loss panels for K2-Horizon-36B. Pretraining falls from 3.6 to about 1.1 over 22.9 trillion tokens. Midtraining stage 1 falls from 0.815 to 0.73 over 1.1 trillion tokens at 32K sequence length. Stage 2 falls from 0.566 to 0.517 over 498 billion tokens. Stage 3 is flat around 0.50 over 110 billion tokens and visibly noisier. Stage 4 falls from 0.479 to 0.438 over 199 billion tokens."
+  caption="Training loss by stage, reconstructed from the public W&B run. The discontinuities between panels are the context extensions and data-mix changes, not instability; stage 3 at 512K is the noisiest because the batch holds far fewer sequences (model card, assets/k2-horizon-36b-training-loss-vs-tokens.png)."
+/>
+
+Publishing that figure at all is a choice. The stage-3 panel is visibly flat and
+noisy — 110B tokens at 512K sequence length that barely move the loss — and most
+labs would have cropped it.
+
+## The take
+
+MoVA is a real idea, cleanly implemented, and the compatibility claims survive
+reading the code because they all reduce to one design decision: **collapse the
+mixture before the cache, and everything downstream stays ordinary.** That is
+worth stealing. It is also the answer to the objection in the title — the cache
+stores the mixture's *output*, one vector per token, exactly as GQA does, and the
+routing information is not retained because nothing downstream needs it.
+
+The cost is 20% of the model's parameters in a projection that used to be 0.3% of
+it, and a 4× multiplier on that projection's decode work. Whether that buys more
+than spending the same parameters on eight more FFN experts is the experiment
+IFM has not run, or at least has not published, and it is the only experiment
+that would settle whether MoVA is a contribution or a decoration.
+
+What I would want next, in order: the ablation; a fused decode kernel measured
+against a matched GQA baseline on the same hardware; and someone to find out why
+this model scores zero on Terminal-Bench 4.0, because a 4B-active model that
+does 58.6 on 2.1 should not be doing that, and the index it is already winning
+has that zero inside it.
+
+<ChangeMyMind>
+
+<Falsifier claim="MoVA's routed value mixture is collapsed before the KV cache is written, so the cache is shape-identical to GQA.">
+Read `K2HorizonMoVAAttention.forward` in `modeling_k2_horizon.py`: `mixed_value_states` is reshaped and passed to `past_key_values.update` as a single (batch, 8, tokens, 128) tensor. If a production serving path caches the router indices and the per-expert outputs instead — to recompute or to re-mix on a later pass — then the cache does grow in that path and the claim holds only for the reference implementation.
+</Falsifier>
+
+<Falsifier claim="K2-Horizon-MoVA-36B-A4B stores 37.44B parameters and activates 5.95B per token, of which the value experts are 7.55B stored and 0.47B active.">
+Summed from the safetensors headers of all 48 shards. Load the model and print `sum(p.numel() for p in model.parameters())`. The card says 36B and 4B; those are round numbers under some convention — the closest I can construct is 4.66B, excluding both the embedding lookup and the output head. If someone shows a convention that lands on 4.0B, my accounting is missing a term.
+</Falsifier>
+
+<Falsifier claim="No comparator in the release is more than 15.3× K2-Horizon's total parameters.">
+The full comparator list is in the card's table and its benchmark figure: 550B, 120B, 39B, 35B, 30B, 31B, plus one closed model. If IFM publishes a comparison against a 750B-plus model, or the forthcoming technical report adds one, the 20× framing has a source and this section is out of date.
+</Falsifier>
+
+<Falsifier claim="Artificial Analysis records K2-Horizon-MoVA-36B-A4B at 0 on Terminal-Bench 4.0.">
+Read from the embedded `terminalBench40` field on AA's model page on 2026-09-22, where it is the number 0 rather than `null` — other models on the same page carry `null` where the evaluation was not run, which is why I read it as measured. If AA confirms it means "not evaluated", the section is wrong and the index of 25.30 is computed over nine evaluations rather than ten with a zero.
+</Falsifier>
+
+<Falsifier claim="MoVA's benefit cannot be separated from the rest of the recipe without an ablation.">
+Falsified the moment IFM publishes a matched `mova_num_experts: 0` run at the same scale and token budget — the config supports it, the class falls back to `K2HorizonAttention` with a plain `v_proj`, and the intermediate checkpoints make a shorter matched run cheap. If such a run exists in the forthcoming technical report, this is the section to delete.
+</Falsifier>
+
+</ChangeMyMind>
+
+---
+
+*The mechanism is Measured from
+[`modeling_k2_horizon.py`](https://huggingface.co/IFM/K2-Horizon-MoVA-36B-A4B/blob/main/modeling_k2_horizon.py)
+and `config.json` in
+[`IFM/K2-Horizon-MoVA-36B-A4B`](https://huggingface.co/IFM/K2-Horizon-MoVA-36B-A4B),
+read on 2026-09-22. Parameter counts are Measured: summed from the safetensors
+headers of all 48 shards, fetched by HTTP range request. KV-cache figures are
+arithmetic on the two models' configs. Benchmark figures are Reported — from the
+model card's own table and figure, and from
+[Artificial Analysis](https://artificialanalysis.ai/evaluations/artificial-analysis-intelligence-index)
+for the index and the comparator scores. No model was run; there is no GPU here.
+Both figures are IFM's; the diagram, the parameter table and the cache ledger are
+mine. Related: [Grouped Value Attention](/articles/grouped-value-attention) for
+the other 2026 attempt to change what the value stream is for,
+[Mixture of Experts from scratch](/articles/mixture-of-experts-from-scratch) for
+the routing machinery MoVA borrows, and [MiMo-V2.6](/articles/mimo-v2-6) for the
+release that made the opposite bet on the same day.*

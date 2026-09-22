@@ -38,7 +38,7 @@ const ROWS: Row[] = [
   },
   {
     ctx: "1M",
-    note: "context override; native limit is 262,144",
+    note: "override; native limit 262,144",
     fp8: 1,
     nvfp4: 2,
     requested: 2,
