@@ -12,12 +12,24 @@ import { cn } from "@/lib/utils"
 // Server-rendered, zero JS. The tally at the bottom is the whole point: it is
 // the same arithmetic any reader would do, just done.
 
-type Row = { bench: string; group: string; mimo: number; opus: number; gpt: number }
+type Row = {
+  bench: string
+  group: string
+  mimo: number
+  opus: number
+  gpt: number
+}
 
 const ROWS: Row[] = [
   { group: "Code", bench: "DeepSWE v1.1", mimo: 71.9, opus: 74.0, gpt: 73.0 },
   { group: "Code", bench: "ProgramBench", mimo: 26.5, opus: 37.0, gpt: 25.0 },
-  { group: "Code", bench: "MiMo Code Bench", mimo: 63.2, opus: 68.6, gpt: 59.3 },
+  {
+    group: "Code",
+    bench: "MiMo Code Bench",
+    mimo: 63.2,
+    opus: 68.6,
+    gpt: 59.3,
+  },
   {
     group: "General agent",
     bench: "AutomationBench v1.0.6",
@@ -67,7 +79,13 @@ const ROWS: Row[] = [
     opus: 83.4,
     gpt: 83.0,
   },
-  { group: "General agent", bench: "JobBench", mimo: 62.0, opus: 65.7, gpt: 45.4 },
+  {
+    group: "General agent",
+    bench: "JobBench",
+    mimo: 62.0,
+    opus: 65.7,
+    gpt: 45.4,
+  },
   { group: "Cyber", bench: "ExploitGym", mimo: 17.8, opus: 22.1, gpt: 30.3 },
   { group: "Cyber", bench: "ExploitBench", mimo: 47.9, opus: 70.0, gpt: 78.5 },
   {
@@ -92,7 +110,11 @@ function verdict(r: Row): Verdict {
   return "behind"
 }
 
-const MARK: Record<Verdict, string> = { ahead: "ahead", par: "par", behind: "behind" }
+const MARK: Record<Verdict, string> = {
+  ahead: "ahead",
+  par: "par",
+  behind: "behind",
+}
 
 export function ParityCheck() {
   const verdicts = ROWS.map(verdict)
@@ -106,13 +128,17 @@ export function ParityCheck() {
     { g: 0, bench: "", gap: 0 }
   )
 
-  let lastGroup = ""
+  // Group headings are derived up front rather than tracked with a mutable
+  // cursor during render, so nothing is reassigned mid-render.
+  const isFirstOfGroup = ROWS.map(
+    (r, i) => i === 0 || ROWS[i - 1].group !== r.group
+  )
 
   return (
     <figure className="my-8 overflow-hidden rounded-md border">
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
-        MiMo-V2.6-Pro against the two frontier models it names · the card&rsquo;s
-        own table
+        MiMo-V2.6-Pro against the two frontier models it names · the
+        card&rsquo;s own table
       </div>
       <div className="overflow-x-auto">
         <table className="my-0 w-full min-w-[520px] border-collapse text-sm">
@@ -138,8 +164,7 @@ export function ParityCheck() {
           <tbody>
             {ROWS.map((r, i) => {
               const v = verdicts[i]
-              const head = r.group !== lastGroup
-              lastGroup = r.group
+              const head = isFirstOfGroup[i]
               return (
                 <tr key={r.bench} className="border-b last:border-b-0">
                   <td className="px-3 py-1.5">
@@ -148,6 +173,10 @@ export function ParityCheck() {
                         {r.group}
                       </div>
                     ) : null}
+                    {/* The group label is a block, so this space is invisible on
+                        screen -- but without it textContent fuses the two, and
+                        the .md twin of this page reads "VisualMiMo VisualCoding". */}
+                    {" "}
                     {r.bench}
                   </td>
                   <td

@@ -76,8 +76,7 @@ const MODELS: Model[] = [
 function bytes(m: Model, tokens: number, bytesPerScalar: number): number {
   const perLayerPerToken = 2 * m.kvHeads * m.headDim * bytesPerScalar
   const full = m.layersFull * tokens * perLayerPerToken
-  const local =
-    m.layersLocal * Math.min(tokens, m.window) * perLayerPerToken
+  const local = m.layersLocal * Math.min(tokens, m.window) * perLayerPerToken
   return full + local
 }
 
@@ -128,7 +127,11 @@ export function CacheLedger() {
         {MODELS.map((m, i) => (
           <div key={m.id}>
             <div className="flex flex-wrap items-baseline justify-between gap-x-3 font-mono text-xs">
-              <span className={m.accent ? "text-foreground" : "text-muted-foreground"}>
+              <span
+                className={
+                  m.accent ? "text-foreground" : "text-muted-foreground"
+                }
+              >
                 {m.label}
               </span>
               <span className="tabular-nums">{fmt(vals[i])}</span>
@@ -164,10 +167,10 @@ export function CacheLedger() {
 
       <figcaption className="border-t px-3 py-2 font-mono text-xs text-muted-foreground">
         Per sequence, one batch element, from each model&rsquo;s own
-        `config.json`. The MiMo row caches a 160-wide entry per KV head because
-        its query/key head dim is 192 and its value head dim is 128; the exact
-        number does not change the shape of the comparison, which is 60 layers
-        that stop growing at 128 tokens.
+        <code>config.json</code>. The MiMo row caches a 160-wide entry per KV
+        head because its query/key head dim is 192 and its value head dim is
+        128; the exact number does not change the shape of the comparison, which
+        is 60 layers that stop growing at 128 tokens.
       </figcaption>
     </figure>
   )

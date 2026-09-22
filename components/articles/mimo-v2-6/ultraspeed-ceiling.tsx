@@ -67,7 +67,7 @@ export function UltraSpeedCeiling() {
   const path = xs
     .map((q, i) => {
       const y = tokensPerStep(q) / (1 + r)
-      const px = PL + (q * (W - PL - PR)) / 1
+      const px = PL + q * (W - PL - PR)
       const py = PT + (H - PT - PB) * (1 - y / maxY)
       return `${i === 0 ? "M" : "L"}${px.toFixed(2)},${py.toFixed(2)}`
     })
@@ -234,10 +234,11 @@ export function UltraSpeedCeiling() {
       </div>
 
       <figcaption className="border-t px-3 py-2 font-mono text-xs text-muted-foreground">
-        Measured from the shipped `dflash/config.json` and `dflash.py`:
-        block_size 8, one draft pass and one verification pass per step. The
-        acceptance rate and the draft-cost fraction are yours to set — I have no
-        way to measure either without serving the model.
+        Measured from the shipped <code>dflash/config.json</code> and{" "}
+        <code>dflash.py</code>: block_size 8, one draft pass and one
+        verification pass per step. The acceptance rate and the draft-cost
+        fraction are yours to set — I have no way to measure either without
+        serving the model.
       </figcaption>
     </figure>
   )

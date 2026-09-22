@@ -144,7 +144,11 @@ export function MovaPath() {
               markerHeight="6"
               orient="auto"
             >
-              <path d="M0,0 L8,4 L0,8 z" fill="currentColor" fillOpacity="0.55" />
+              <path
+                d="M0,0 L8,4 L0,8 z"
+                fill="currentColor"
+                fillOpacity="0.55"
+              />
             </marker>
           </defs>
 
@@ -187,15 +191,13 @@ export function MovaPath() {
 
           {/* key */}
           <Arrow x1={X_IN + 46} y1={Y_K + 24} x2={X_PROJ - 52} y2={Y_K} />
-          <Box
-            x={X_PROJ}
-            y={Y_K}
-            w={104}
-            h={34}
-            label="k_proj"
-            sub="8 × 128"
+          <Box x={X_PROJ} y={Y_K} w={104} h={34} label="k_proj" sub="8 × 128" />
+          <Arrow
+            x1={X_PROJ + 52}
+            y1={Y_K}
+            x2={X_CACHE - 44}
+            y2={Y_CACHE - 40}
           />
-          <Arrow x1={X_PROJ + 52} y1={Y_K} x2={X_CACHE - 44} y2={Y_CACHE - 40} />
           <Box
             x={X_CACHE}
             y={Y_CACHE - 40}
@@ -329,9 +331,9 @@ export function MovaPath() {
       </div>
       <figcaption className="border-t px-3 py-2 font-mono text-xs text-muted-foreground">
         The routed mixture is collapsed to one 8 × 128 tensor before
-        `past_key_values.update` is called, so the cache stores exactly the GQA
-        shapes and the attention kernel never learns that routing happened.
-        Transcribed from `modeling_k2_horizon.py`.
+        <code>past_key_values.update</code> is called, so the cache stores
+        exactly the GQA shapes and the attention kernel never learns that
+        routing happened. Transcribed from <code>modeling_k2_horizon.py</code>.
       </figcaption>
     </figure>
   )
