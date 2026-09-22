@@ -155,7 +155,7 @@ function Asserted() {
       viewBox={`0 0 ${W} ${H}`}
       className="w-full"
       role="img"
-      aria-label="The revisit's claim plotted against base-model capability. A filled point marks the measured staging gain of about 15 percent at Claude Opus 4.7. A hollow point marks the asserted near-zero gain at a stronger model; its height is unknown because no number was published. Three different curves — a late step, a smooth knee, and a straight line — all pass through both points, so the words sharp threshold do not distinguish between them."
+      aria-label="The revisit's claim plotted against base-model capability. A filled point marks the measured staging gain of about 15 percent at Claude Opus 4.7, the only backbone the paper reports. A hollow point marks the asserted near-zero gain at a stronger model; its height is unknown because no number was published. Three different curves — a late step, a smooth knee, and a straight line — all pass through both points, so the words sharp threshold do not distinguish between them."
     >
       {/* axes */}
       <line x1={left} y1={base} x2={right} y2={base} className="stroke-border" strokeWidth={1.5} />
@@ -186,7 +186,7 @@ function Asserted() {
         Opus 4.7
       </text>
       <text x={xMeasured} y={base + 27} textAnchor="middle" className="fill-muted-foreground font-mono" style={{ fontSize: 8.5 }}>
-        measured, n = 48 images
+        measured, 2 datasets
       </text>
 
       {/* asserted point */}
