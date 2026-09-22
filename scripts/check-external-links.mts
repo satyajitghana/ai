@@ -56,7 +56,8 @@ function bootstrap(): void {
 // Extraction
 // ---------------------------------------------------------------------------
 
-type Ref = { file: string; line: number; target: string }
+/** `code` marks a URL that came out of a fenced block or an inline `code` span. */
+type Ref = { file: string; line: number; target: string; code?: boolean }
 
 // Markdown inline link / image destination. Deliberately not a full parser:
 // destinations in this corpus are plain, and a regex keeps the line number.
@@ -66,6 +67,9 @@ const MD_LINK = /\]\(\s*(<[^>]*>|[^()\s]+)(?:\s+"[^"]*")?\s*\)/g
 const BARE_URL = /https?:\/\/[^\s)<>"'`\\|]+/g
 const WIKILINK = /\[\[([^\]|[]+?)(?:\|[^\]]*)?\]\]/g
 const HEADING = /^(#{1,6})\s+(.+?)\s*#*\s*$/
+// A frontmatter line whose whole value is one URL (`repo: https://…`, or a
+// list item). Anything else holding a URL is prose we are quoting.
+const FM_VALUE = /^\s*(?:[\w-]+:|-)\s*"?'?https?:\/\/\S+"?'?\s*$/
 const FENCE = /^\s*(?:```|~~~)/
 
 function walk(dir: string): string[] {
@@ -122,10 +126,15 @@ function parse(file: string): Parsed {
     }
     if (inFrontmatter) {
       if (line.trim() === "---") inFrontmatter = false
-      // frontmatter still carries `cover:` paths and the odd URL; only the
-      // URLs are worth checking and BARE_URL below handles them.
+      // A URL that IS a frontmatter value (`repo:`, `demo:`) becomes a link on
+      // the page and counts as ours. A URL sitting inside a longer value does
+      // not: the arXiv digests quote each paper's abstract verbatim, and those
+      // abstracts advertise repositories the authors never published. Fixing
+      // one would falsify the quotation, so they are reported, never failed.
       for (const m of line.matchAll(BARE_URL)) {
-        external.push({ file, line: n, target: clean(m[0]) })
+        const url = clean(m[0])
+        if (!url || isPlaceholder(url)) continue
+        external.push({ file, line: n, target: url, code: !FM_VALUE.test(line) })
       }
       continue
     }
@@ -134,11 +143,18 @@ function parse(file: string): Parsed {
       inFence = !inFence
     }
 
-    // URLs are worth checking wherever they appear, code fences included —
-    // a `pip install git+https://…` that 404s is as dead as one in prose.
+    // URLs are collected wherever they appear, code included — but a URL in
+    // code is flagged, because it is usually a fragment rather than a page: a
+    // shell line-continuation cuts it in half, an API `base_url` 404s by
+    // design when you GET it, and one article quotes a PyPI URL precisely
+    // *because* it 404s. Those are reported, never failed.
+    const spans = inlineCodeSpans(line)
     for (const m of line.matchAll(BARE_URL)) {
       const url = clean(m[0])
-      if (url && !isPlaceholder(url)) external.push({ file, line: n, target: url })
+      if (!url || isPlaceholder(url)) continue
+      const idx = m.index ?? 0
+      const code = inFence || spans.some(([a, b]) => idx >= a && idx < b)
+      external.push({ file, line: n, target: url, code })
     }
 
     if (inFence) continue
@@ -172,6 +188,17 @@ function parse(file: string): Parsed {
   return { file, anchors, internal, external, wiki }
 }
 
+/** Character ranges covered by `inline code` on one line. */
+function inlineCodeSpans(line: string): [number, number][] {
+  const spans: [number, number][] = []
+  const re = /(`+)(?:(?!\1).)*\1/g
+  for (const m of line.matchAll(re)) {
+    const i = m.index ?? 0
+    spans.push([i, i + m[0].length])
+  }
+  return spans
+}
+
 // Markdown drags trailing sentence punctuation and closing brackets into a
 // bare URL; a real URL almost never ends in one of these.
 function clean(url: string): string {
@@ -180,8 +207,10 @@ function clean(url: string): string {
 
 function isPlaceholder(url: string): boolean {
   return (
-    /[<>{}]|\.\.\.|\$\{|YOUR_|<id>|example\.com|localhost|127\.0\.0\.1/i.test(url) ||
-    url.length < 12
+    // template holes, and the reserved names RFC 2606/6761 set aside for docs
+    /[<>{}]|\.\.\.|\$\{|YOUR_|example\.(?:com|net|org)\b|\.(?:example|invalid|test|local)(?:[/:?#]|$)|localhost|127\.0\.0\.1/i.test(
+      url,
+    ) || url.length < 12
   )
 }
 
@@ -445,6 +474,19 @@ async function check(url: string): Promise<Result> {
   return { url, status: null, verdict: "blocked", note: last || "unknown" }
 }
 
+// Two hosts answer in a way that hides a dead link behind a "blocked" status,
+// so say so next to the result instead of letting it read as fine.
+function hint(url: string, status: number | null): string {
+  if (status === 401 && url.includes("huggingface.co")) {
+    return "  ← HF answers 401 for gated AND missing repos; confirm with" +
+      " https://huggingface.co/api/models?author=<owner>&search=<name>"
+  }
+  if (status === 403 && url.includes("github.com")) {
+    return "  ← the sandbox proxy 403s all of github.com; unverified, not dead"
+  }
+  return ""
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** One queue per host, at most HOST_CONCURRENCY hosts in flight. */
@@ -550,13 +592,31 @@ async function main() {
       )
       for (const u of [...blocked, ...timeouts]) {
         const r = results.get(u)!
-        console.log(`  ${r.status ?? "—"}  ${u}  (${r.note})`)
+        console.log(`  ${r.status ?? "—"}  ${u}  (${r.note})${hint(u, r.status)}`)
       }
     }
 
-    if (broken.length) {
-      console.error(`\n✖ ${broken.length} external link(s) are gone (404/410).\n`)
-      for (const u of broken) {
+    // A 404 only counts against us where a reader was promised a page. The
+    // same status on a URL that only ever appears in code is almost always an
+    // artifact of pulling it out of code in the first place.
+    const inProse = (u: string) => where.get(u)!.some((r) => !r.code)
+    const gone = broken.filter(inProse)
+    const fragments = broken.filter((u) => !inProse(u))
+
+    if (fragments.length) {
+      console.log(
+        `\nℹ ${fragments.length} 404/410 URL(s) appear only inside code — ` +
+          `a split line, an API base or a deliberate example. Not failures.`,
+      )
+      for (const u of fragments) {
+        console.log(`  ${u}`)
+        for (const ref of where.get(u)!) console.log(`        ${ref.file}:${ref.line}`)
+      }
+    }
+
+    if (gone.length) {
+      console.error(`\n✖ ${gone.length} external link(s) in prose are gone (404/410).\n`)
+      for (const u of gone) {
         const r = results.get(u)!
         console.error(`  ${r.status}  ${u}`)
         for (const ref of where.get(u)!) console.error(`        ${ref.file}:${ref.line}`)
@@ -564,11 +624,11 @@ async function main() {
       console.error("")
       failed = true
     } else {
-      console.log(`\n✓ external links OK — no 404/410 among ${urls.length} URL(s)`)
+      console.log(`\n✓ external links OK — no 404/410 in prose among ${urls.length} URL(s)`)
     }
 
     console.log(
-      `  ${ok.length} reachable · ${broken.length} gone · ` +
+      `  ${ok.length} reachable · ${gone.length} gone · ${fragments.length} code-only 404 · ` +
         `${blocked.length} blocked · ${timeouts.length} timeout`,
     )
   }
