@@ -1,0 +1,728 @@
+---
+title: "The single writer is a Go map"
+description: "Google open-sourced ax, a distributed agent runtime, on the strength of two design claims: a single-writer architecture for consistent session state, and a durable event log with automatic recovery. I read both. The unit of ownership is the conversation id, the exclusion is a map[string]struct{} guarded by a mutex inside one process, and the reference manifest deployed three of those processes against one shared log. The event log is an audit trail beside mutable state, not a source of truth — replay reconstructs two fields. I measured what that costs: one interrupted turn plus one follow-up message ran the same work three times and took fourteen irreversible actions where six were asked for. Then, on September 19, the project deleted all of it — and the deletion is what finally makes 'not a framework' true."
+date: 2026-09-22
+interest: 5
+helpful: 5
+featured: true
+tags:
+  - explainer
+  - agents
+  - systems
+  - architecture
+  - open-source
+draft: false
+cover: /articles/google-ax/fig1.png
+---
+
+import { OwnershipScope } from "@/components/articles/google-ax/ownership-scope"
+import { ReplayLedger } from "@/components/articles/google-ax/replay-ledger"
+import { SurfaceShift } from "@/components/articles/google-ax/surface-shift"
+
+Eighteen articles on this site are about what an agent *decides*. Decision
+models, rubrics, confidence gates, option enumeration, the arithmetic of a
+router that has to pick one of nine workflows and then defend the pick. That
+whole thread assumes something it never examines: that the process holding the
+decision is still alive to act on it.
+
+[google/ax](https://github.com/google/ax) is about the other end. Process
+isolation, state durability, recovery. It is the layer that decides whether your
+decision layer gets to finish. A router that answers in 178 ms is worth very
+little if the harness around it loses four hours of accumulated state to a pod
+eviction, and nothing in the decision-model literature has anything to say about
+that — by construction, because the decision tier's whole appeal is that it is
+stateless and cheap to call again. Somebody has to hold the state it is called
+*about*.
+
+So this is a read of the runtime, not the reasoner. Google announced it in May
+as "Google's open-source runtime standard for agent execution, resumption, and
+distributed deployment," built by the team behind Google's internal agent
+runtime, and the [announcement](https://cloud.google.com/blog/products/ai-machine-learning/agent-executor-googles-distributed-agent-runtime)
+makes two design claims specific enough to check:
+
+> In distributed agent workflows, multiple components may attempt to update
+> shared session state at the same time. Agent Executor's built-in
+> **single-writer architecture** helps maintain consistency and reduces the risk
+> of corruption in that state.
+
+> Long-running execution requires the ability to resume after outages or agentic
+> interruptions such as human-in-the-loop (HITL) confirmations. Agent Executor
+> provides this backend resilience automatically for any actor (e.g., an agent,
+> agent harness, skill, tool, or sandbox) through its **event log** and
+> snapshotting.
+
+<Figure
+  src="/articles/google-ax/fig1.png"
+  alt="A diagram labelled Agent Executor. Inside a grey panel, two white cards sit side by side: Controller on the left and Event Log on the right, joined by a pair of arrows pointing both ways. A single arrow runs down from Controller to a wide card below labelled Actors, with the parenthetical Harnesses / Agents / Skills / Tools / Sandboxes."
+  caption="The architecture as the project draws it: one Controller, one Event Log, many Actors. Every claim in this article is about the two arrows at the top (Google Cloud, Agent Executor announcement, figure 1)."
+/>
+
+Both claims are real trades rather than features, and both are checkable by
+reading. I did that, and then I ran the thing to check what reading told me.
+
+## Read the date before you read the code
+
+On **19 September 2026**, three days before this piece, commit `dc4f36c`
+landed: *"Restructure AX into a general-purpose orchestration layer for agentic
+tasks."* One commit, 151 files, +16,191 / −19,988 lines. It deleted
+`internal/controller/eventlog/` entirely. It deleted `internal/harness/`, the
+`HarnessService` proto, the `Step` and `Content` message families, the Python
+Antigravity sidecar, and the skills registry client. It was tagged **v0.3.0**
+the same day.
+
+So there are two `ax` projects, and the claims above describe the first one.
+
+| | v0.2.3 · `b777313` | v0.3.0 · `d8ed0fe` |
+|---|---|---|
+| Shape | a harness runtime you plug agents into | a `kubectl`-shaped orchestrator for sandboxed tasks |
+| Primitives | conversations, executions, harnesses | `Task`, `Workspace`, `Gateway`, `Model` |
+| Durable state | Postgres/SQLite event log | Redis hashes + Redis Streams work queue |
+| Go source | 68 files, 16,311 lines, 22 test files | 32 files, 14,178 lines, 10 test files |
+| Single writer | named in three package docs | the phrase does not appear |
+| Event log | `internal/controller/eventlog/` | deleted |
+
+Neither version is vapourware, and the project has been worked on properly: 625
+commits since 21 January 2026, thirteen contributors, 413 commits from
+`@google.com` addresses, six tags, Apache 2.0, and a `README` that opens with a
+breaking-changes warning it has honoured. But the advice you give a reader
+depends entirely on which of those two columns they are looking at, so the rest
+of this piece checks the claims against the code that made them, then checks
+what survived.
+
+## Claim one: the single writer
+
+Single-writer means exactly one component may mutate a given piece of state.
+What you buy is serialisability without distributed locking. What you pay is
+write throughput and a failover question: when the writer dies, who takes over,
+and what stops the old one from writing after the new one starts?
+
+The first question is what the *unit* of ownership is. In `ax` it is the
+**conversation id** — and the proto says so, in the comment on the message that
+carries it:
+
+```proto
+// proto/ax.proto — a conversation cannot be continued before the last
+// execution is completed or failed.
+message StepEvent {
+  string conversation_id = 1;
+  string interaction_id = 2;
+  string agent_id = 3;
+  ...
+}
+```
+
+The same id is also the name of the sandbox. `SubstrateHarness.Start` calls
+`CreateActor(ctx, conversationID)`, `ResumeActor(ctx, conversationID)`, and on
+close `SuspendActor(ctx, conversationID)`. One conversation, one actor, one
+writer. That is a clean design: the unit of isolation, the unit of durability
+and the unit of exclusion are the same object, which is exactly what you want.
+
+So where is the exclusion enforced? Here, in full:
+
+```go
+// internal/server/server.go — the entire single-writer mechanism
+type Server struct {
+	proto.UnimplementedInteractionsServiceServer
+	controller *controller.Controller
+	grpcServer *grpc.Server
+	inFlight   map[string]struct{}
+	inFlightMu sync.Mutex
+}
+
+func (s *Server) markInFlight(id string) (exists bool, cleanup func()) {
+	s.inFlightMu.Lock()
+	defer s.inFlightMu.Unlock()
+	if _, ok := s.inFlight[id]; ok {
+		return true, func() {}
+	}
+	s.inFlight[id] = struct{}{}
+	return false, func() {
+		s.inFlightMu.Lock()
+		delete(s.inFlight, id)
+		s.inFlightMu.Unlock()
+	}
+}
+```
+
+And at the top of the RPC:
+
+```go
+inFlight, cleanup := s.markInFlight(req.ConversationId)
+if inFlight {
+	return status.Errorf(codes.FailedPrecondition,
+		"conversation %q is already in flight", req.ConversationId)
+}
+defer cleanup()
+```
+
+That is it. Ownership is acquired by inserting a key into a Go map and released
+by a deferred delete when the RPC returns. There is no lease, no TTL, no
+renewal, no fencing token, no `SETNX`, no row in a table, nothing in Redis, and
+no `Lock` outside `sync.Mutex` anywhere in the tree — I grepped every
+non-generated Go file for `lease`, `owner`, `fencing` and `singleflight` and the
+only hits are in comments about closing resources.
+
+The failure path is where this is either good or a liability, so take it in two
+halves.
+
+**When the writer dies mid-write, the design is fine.** A crash takes the map
+with it, so there is no stale lock to break and no lease to wait out — the
+degenerate failure mode of a lease-based design, where a live writer is fenced
+out for thirty seconds because a GC pause looked like a death, cannot happen
+here. The log append itself is a single transaction, so a torn event is
+impossible. The cursor file the harness persists is written temp-file-plus-
+rename, so a torn cursor is impossible too. Nobody was sloppy.
+
+**The problem is that nothing was ever excluded in the first place.** A Go map
+is a per-process object. It excludes a second caller arriving at *the same
+process*. It has no opinion about a second caller arriving at a second process,
+and the reference deployment ships three of them:
+
+```yaml
+# manifests/ax-deployment.yaml
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: ax-server
+spec:
+  replicas: 3
+  ...
+            - name: AX_EVENTLOG_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: ax-eventlog-postgres
+                  key: dsn
+```
+
+Three replicas, one shared Postgres event log, and — I checked — no
+`kind: Service` in front of them anywhere in that manifest tree. The only
+Service in `manifests/` is the one in front of Postgres, and the documented way
+to reach the control plane is `kubectl port-forward -n ax rs/ax-server
+8494:8494`, which attaches to one arbitrary pod of the set. Nothing hashes a
+conversation to a replica. Nothing pins one. Restart the port-forward mid-run
+and you may land somewhere else.
+
+<OwnershipScope />
+
+This matters more than a race usually does, because the layer below *documents
+that it is relying on the invariant*. From the harness interface:
+
+```go
+// internal/harness/harness.go
+// Single-writer expectation: the controller must ensure that at most one
+// Execution exists per conversation id at a time. Harness implementations rely
+// on this invariant -- for example, a harness that durably persists
+// per-conversation state may use a last-write-wins store without
+// compare-and-swap, which is correct only because there is a single writer per
+// conversation.
+type Harness interface {
+	Start(ctx context.Context, conversationID string, config []byte) (Execution, error)
+}
+```
+
+And the shipped harness takes them up on it:
+
+```go
+// internal/harness/antigravityinteractions/cursorstore.go
+// It assumes a single writer per conversation (the controller guarantees at
+// most one Execution per conversation), so writes are last-write-wins with no
+// compare-and-swap.
+```
+
+Read those two comments next to `replicas: 3`. The contract is stated
+precisely, the consumer is written against it, and the deployment does not
+provide it. This is not an oversight in the sense of nobody having thought about
+it — somebody thought about it carefully enough to write the paragraph.
+
+### What two replicas actually do
+
+I did not want to argue this from reading, so I built the pre-restructure tree
+(`go build ./...`, clean) and stood up two `ax-server` instances in one process
+tree, each with its own `Controller` and its own event-log handle, both pointed
+at the same SQLite file. Then two clients, same conversation id, at the same
+time. A fake harness emits five steps at 40 ms each so the turns overlap.
+
+Both were admitted — no `FailedPrecondition` on either side, which is the
+expected result and the whole point. What I did not expect is the second-order
+effect:
+
+```
+replica A: err=<nil> frames=10
+replica B: err=<nil> frames=5
+durable log holds 20 events for conversation "same-conversation"
+  step  1  state=STATE_PENDING    interaction_id=""  go
+  step  2  state=STATE_PENDING    interaction_id=""  B-step-0
+  step  3  state=STATE_PENDING    interaction_id=""  A-step-0
+  ...
+  step 11  state=STATE_COMPLETED  interaction_id=""
+  step 12  state=STATE_PENDING    interaction_id=""  A-step-4
+  step 13  state=STATE_COMPLETED  interaction_id=""
+  step 14  state=STATE_PENDING    interaction_id=""  go
+  step 15  state=STATE_PENDING    interaction_id=""  A-step-0
+  ...
+  step 20  state=STATE_COMPLETED  interaction_id=""
+events with empty interaction_id: 20/20
+```
+
+Replica A ran the turn **twice** for one client request. The mechanism is in
+`Controller.Exec`: it first reads the conversation's resumption state, and if
+that state is `STATE_PENDING` it runs the harness once to finish the pending
+work *and then* runs it again with the new inputs. A's state read landed after
+B had already appended its input event, so A saw a pending conversation that was
+in fact B's in-progress turn, "resumed" it, completed it, and then did its own.
+Ten output frames for one request.
+
+Two details in that dump are worth keeping. `state=STATE_COMPLETED` appears at
+step 11 while the conversation is still running — a completion written by one
+writer about the other's work. And `interaction_id` is empty on all twenty
+events. The schema has exactly one field for telling turns apart, and
+`internal/controller/controller.go` declares it on the logger struct, reads it
+into every event, and never assigns it:
+
+```go
+type logger struct {
+	conversationID string
+	interactionID  string   // declared, read twice, assigned never
+	el             eventlog.EventLog
+	harnessID      string
+}
+```
+
+So the durable record of a conversation cannot distinguish two concurrent
+executions after the fact. Not "it is hard to" — the field is there and it is
+always `""`.
+
+### Do readers see stale state?
+
+Mostly the question does not arise, which is itself the finding. There are no
+independent readers. `EventLog` has exactly three methods — `Append`, `Events`,
+`Close` — and `Events` does a full scan of the conversation ordered by step. The
+only in-tree caller is `ResumptionState`, on the write path. There is no watch,
+no tail, no cursor, no read replica, and no `WatchTask`-style streaming of the
+log to anyone. The blog promises that "Agent Executor lets clients reconnect to
+agents and backfills responses from the last sequence seen by the client"; the
+request message is
+
+```proto
+message CreateInteractionEvent {
+  string conversation_id = 1;
+  repeated Step inputs = 2;
+  reserved 3;
+  string agent_id = 4;
+  bytes agent_config = 5;
+}
+```
+
+There is nowhere to put a last-seen sequence. `Step.index` is populated on the
+way out, so the client can *observe* a sequence number, but there is no field,
+RPC or code path that lets it ask for a range. Same for the announcement's
+trajectory branching: no branch, fork or checkpoint API exists at any commit I
+searched. Those two are roadmap described in the present tense.
+
+## Claim two: the durable event log
+
+For an event log the question is always the same. Is the log the source of
+truth, with state derived by replaying it? Or is it an audit trail sitting
+beside mutable state that lives somewhere else? The two behave completely
+differently on recovery, and the interface doc-comment promises the first one:
+
+```go
+// EventLog is the persistent, append-only record of all actions taken in an
+// exec. Every entry is an atomic step: replaying the log in order brings
+// the executor back to a consistent state from which execution can resume.
+type EventLog interface { ... }
+```
+
+Here is the whole of replay:
+
+```go
+// internal/controller/controller.go
+func (l *logger) ResumptionState(ctx context.Context) (proto.State, string, error) {
+	events, err := l.el.Events(ctx, l.conversationID)
+	if err != nil {
+		return proto.State_STATE_UNSPECIFIED, "", err
+	}
+	var state proto.State
+	var harnessID string
+	for _, ev := range events {
+		if harnessID == "" && ev.AgentId != "" {
+			harnessID = ev.AgentId
+		}
+		if ev.State != proto.State_STATE_UNSPECIFIED {
+			state = ev.State
+		}
+	}
+	return state, harnessID, nil
+}
+```
+
+Replay reads every event of the conversation and reduces them to **two scalars**:
+the last non-unspecified state, and the first harness id it saw. Nothing is
+reconstructed. No conversation history, no tool results, no working set, no
+filesystem. The log is not the source of truth for anything the agent knows.
+
+The truth lives in two other places, both of them mutable:
+
+1. **The Substrate actor.** `snapshotsConfig` with `onPause: Data` and a
+   `durableDir` volume, so the actor's filesystem — and, on gVisor, its memory —
+   is checkpointed on suspend and restored on resume. That is a real durability
+   mechanism, and it is Agent Substrate's, not `ax`'s.
+2. **A cursor file.** `cursorStore` writes one JSON file per conversation
+   holding `prev_interaction_id`, the tail of the model provider's own
+   server-side interaction chain. Resumption of the *conversation* is delegated
+   to the provider; `ax` remembers the pointer.
+
+So the honest description is: **an append-only audit trail beside mutable state,
+plus a two-field state machine driving a re-run.** That is a perfectly
+reasonable architecture. It is not event sourcing, and the difference shows up
+the moment you ask what recovery does.
+
+### The log's concurrency control is the single writer
+
+`Append` computes the next step number inside a transaction:
+
+```go
+// internal/controller/eventlog/sql.go
+tx, err := l.db.BeginTx(ctx, nil)
+...
+if err := tx.QueryRowContext(ctx,
+	"SELECT COALESCE(MAX(step), 0) + 1 FROM conversation_log WHERE conversation_id = $1",
+	event.ConversationId).Scan(&step); err != nil { ... }
+...
+tx.ExecContext(ctx,
+	"INSERT INTO conversation_log (conversation_id, step, payload) VALUES ($1, $2, $3)",
+	event.ConversationId, step, string(payload))
+```
+
+Read-modify-write on `MAX(step)`. The table has `PRIMARY KEY (conversation_id,
+step)`, so a collision fails loudly rather than corrupting — good. SQLite opens
+with `_txlock=immediate` and a 10-second busy timeout, which takes the write
+lock up front and genuinely serialises writers — also good, and clearly
+deliberate. Postgres gets no such treatment, and the function says so:
+
+```go
+// OpenPostgresEventLog connects to the PostgreSQL database described by dsn and
+// initializes the event log schema. Caller is responsible to ensure it is safe
+// for concurrent use.
+```
+
+Under `READ COMMITTED`, two concurrent appends to one conversation both read the
+same `MAX(step)` and one loses the primary key. The event log's correctness is
+delegated, in a comment, to the single-writer property that the deployment does
+not provide. And the loser is not retried:
+
+```go
+// internal/controller/controller.go — OnMessage
+logStep, err := a.logger.LogOutputs(ctx, []*proto.Step{step}, proto.State_STATE_PENDING)
+if err != nil {
+	slog.WarnContext(ctx, "Failed to log streamed message to event log", ...)
+}
+// ...execution continues
+```
+
+A failed append is a warning line. The agent keeps going. The durable record of
+what it did quietly has a hole in it, which is the one thing an audit trail is
+not allowed to have.
+
+## What happens to effects that already escaped
+
+An agent that sent an email before crashing cannot un-send it on replay. Any
+runtime built for long-running agents has to have an answer: exactly-once with
+transactional effects, or at-least-once with idempotency keys, or an explicit
+statement that effects are the caller's problem. I grepped the whole tree and
+its whole history for `idempot`, `dedup`, `exactly-once`, `at-least-once`. There
+are three hits and none of them is a mechanism:
+
+- `substrate.go`: "CreateActor is idempotent here" — about the actor lifecycle.
+- `antigravityinteractions.go`: "Creating an interaction is not idempotent, so
+  only 429 — which is rejected before any interaction is created — is retried
+  here." Careful, correct, and about the model API, not about tools.
+- `eventlog.go`: the replay promise quoted above.
+
+That third one is the tell. The project thought hard about non-idempotency at
+the provider boundary and did not carry the thought across to the tool loop. In
+the interactions harness, the loop is: post a turn, get back a list of tool
+calls, execute every one of them, post the results. The side effect happens in
+step two; the cursor advances in step three. Crash in between and the cursor
+still points at the interaction that *issued* those calls.
+
+So I measured it. Same pre-restructure tree, one server, one conversation, and a
+harness whose every step performs one irreversible action. The client
+disconnects after two steps — a network drop, a pod eviction, a closed laptop.
+Then the user comes back and sends one more message.
+
+```
+after interruption:   runs=1  effects=2
+turn 2 streamed 12 frames;   total runs=3  total effects=14
+durable log holds 18 events
+```
+
+<ReplayLedger />
+
+One interruption and one follow-up message produced **three executions of the
+same turn and fourteen irreversible actions where six were asked for**. The
+resume branch does not skip the work that already happened, because nothing
+records that it happened: `HarnessStart` carries `agent_config` and `steps` and
+nothing else. There is no resume flag, no last-executed index, no call id list.
+A harness cannot tell a resume from a first attempt except by its own persisted
+cursor, and a harness that keeps no cursor — the fake one here, and any custom
+harness written against the documented interface — redoes everything.
+
+To be fair about scope: the *shipped* interactions harness does keep a cursor,
+so its model-side chain would not restart from zero the way my fake one does.
+But that is a property of one harness, not of the runtime, and the runtime is
+what the README invites you to extend. "Bring your own harness implementation by
+implementing `HarnessService`" comes with no guidance on this at all.
+
+It is also worse than the number suggests for the harness that *does* keep a
+cursor. `Controller.Exec` opens with a TODO:
+
+```go
+// TODO(jbd): Resume an incomplete execution if there exists one.
+```
+
+— under a README advertising "Automatic recovery from failures or
+interruptions." And on the interactions harness the resume branch cannot
+succeed, because `Run` refuses to run with nothing queued:
+
+```go
+input := e.drainQueue()
+if len(input) == 0 {
+	if prevID == "" {
+		return fmt.Errorf("no input messages queued for the initial turn")
+	}
+	return fmt.Errorf("Run called with no queued input and no work pending")
+}
+```
+
+The controller's resume branch calls `Start` then `Run` with no `Queue`. Both
+arms of that condition are errors, and `Exec` propagates them. So
+`ax --conversation <id> --resume` fails on the flagship harness — and because
+the resume branch runs *before* the input branch, a conversation whose last
+event is `STATE_PENDING` cannot take new input either. A conversation ends in
+`STATE_PENDING` exactly when it was interrupted, which is the case the feature
+exists for.
+
+<Callout type="note">
+I am describing a mechanism I read and a probe I ran on a fake harness, not a
+production incident. The probe isolates the controller's control flow; it does
+not prove what the Antigravity harness does against a live model endpoint, which
+I could not exercise. The two error returns above are the code, though, and they
+are unambiguous about what happens when `Run` is called with an empty queue.
+</Callout>
+
+## Testing "not a framework" instead of repeating it
+
+Every framework says it is not a framework. The old README said it twice:
+
+> **A managed service.** AX is self-hosted and not a managed service.
+> **An agentic framework.** AX is agnostic of the framework used to build agents.
+
+The honest test is not the disclaimer, it is the import list. What must your
+code implement, and could you run an existing harness under it unmodified?
+
+<SurfaceShift />
+
+**Before the restructure, it was a framework, and a fairly opinionated one.**
+You implemented `HarnessService`, a bidirectional gRPC stream, and spoke `ax`'s
+own 236-line message family — `Step`, `ContentStep`, `ThoughtStep`,
+`ToolCallStep`, `FunctionResultStep`. You adopted its turn shape: exactly one
+`start` frame in, zero or more `outputs` frames out, exactly one terminal `end`.
+And you gave up capability at the boundary, which the code is admirably honest
+about:
+
+```go
+// Note: mid-run steering (injecting extra human input while a turn is running)
+// is intentionally NOT supported here. The execution can accept steering via
+// Queue, but the HarnessRequest oneof only defines {start, cancel} -- there is
+// no wire frame to carry additional input after start -- so a client cannot
+// deliver steering over Connect.
+```
+
+You cannot take a Claude Code or an OpenHands loop and run it unmodified against
+that. You rewrite it as a `HarnessService` and lose mid-turn steering on the
+way. That is what a framework is.
+
+**After the restructure, it is an orchestrator, and the claim is true.** The
+runner contract in `docs/runner.md` demands things of your *image*, not your
+agent: an executable at `/usr/local/bin/ax-task-runner`, HTTP on port 80 with
+`/healthz` and `/readyz`, read `AX_TASK_YAML`, start `spec.command`, stay up as
+PID 1, forward `SIGTERM`. Your agent is opaque argv. It imports nothing from
+`ax` and knows none of its types. An existing harness runs unmodified if you can
+containerise it, and the docs say outright: "AX ships a default runner. You do
+not have to use it."
+
+That is the right answer, and it is worth saying that the restructure is the
+project's own correction. `ax` stopped being a framework by deleting the
+framework.
+
+<Figure
+  src="/articles/google-ax/fig2.png"
+  alt="A diagram with Agent Executor at the centre of a cross. Four cards point at it with two-way arrows: Antigravity (or custom harness) above, Custom agents managed by Google on the left, Frontier agents from Google on the right, and Self-managed agents below."
+  caption="The positioning claim: harness-agnostic, a runtime under whatever agent you already have. It is true of v0.3.0, where your agent is an opaque command in a container. It was not true of v0.2.3, where the box in the middle defined the protocol every other box had to speak (Google Cloud, Agent Executor announcement, figure 2)."
+/>
+
+### Where the protocol claim does not hold up
+
+"Built-in support for MCP tools and skills" is the part of the pitch that would
+substantiate "speaks existing protocols rather than defining new ones," and it
+is the weakest thing in the repository.
+
+**MCP.** At v0.3.0 a `Workspace` declares MCP servers and registries, and the
+proto is properly modelled — `MCPConfig`, `MCPRegistry`, `MCPServer{name,
+endpoint, command, args}` — with a round-trip test. There is no MCP client. The
+string `modelcontextprotocol` appears exactly once in the tree, in a test
+fixture's `args` array. `go.mod` has no MCP dependency. `SetupWorkspace` clones
+git repos, creates a skills directory and optionally runs a bootstrap agent; it
+writes no MCP configuration, although `docs/runner.md` tells third-party runner
+authors that they should. The only code that consumes the field passes
+`mcpConfig != nil` — a boolean — into an LLM prompt asking it to plan an
+environment. I searched the full history: there has never been an MCP client in
+this repository.
+
+**Skills.** This one genuinely regressed. v0.2.3 had a real implementation:
+`internal/skills/` with a Gemini Enterprise registry client that downloaded and
+materialised skill packages, a local-directory source, and a
+`SkillsSystemInstruction` builder that told the agent where its skills lived and
+listed them. The restructure deleted all of it. What replaced it is:
+
+```go
+// internal/workspace/setup.go — the entire skills implementation at v0.3.0
+func setupSkills(skills *v1alpha1.SkillsConfig) string {
+	if skills == nil || skills.Path == "" {
+		return ""
+	}
+	if err := os.MkdirAll(skills.Path, dirPerm); err != nil {
+		slog.Warn("creating skills dir", "path", skills.Path, "error", err)
+	}
+	return skills.Path
+}
+```
+
+`mkdir -p`. The `skills.registries` field in the example manifest, with its
+`provider: google` and `query: "skills.tags:nodejs"`, resolves to nothing.
+
+This is the cost of the restructure stated plainly: the new shape is the right
+shape, and it arrived with the integrations stripped out. Declaring a thing in a
+CRD is not supporting it, and a reader evaluating `ax` for MCP or skills support
+today should know they are evaluating a schema.
+
+## Isolation, resumption, scale, maturity
+
+**What "isolated" means.** Not much of it is `ax`'s. Isolation is Agent
+Substrate's, and `ax` is a client of its Control API — `CreateActor`,
+`ResumeActor`, `SuspendActor`, `CreateActorEgressPolicy`. Substrate runs actors
+in [gVisor or microVM sandboxes](https://github.com/agent-substrate/substrate)
+on Kubernetes workers, multiplexing many idle actors onto few pods. What `ax`
+adds on top is the `Gateway`: an egress allowlist of hosts and ports, applied to
+the actor before it is resumed, which is the correct order. It is applied
+best-effort, though:
+
+```go
+if err := r.client.ApplyEgressPolicy(ctx, atespace, actorName, egressAllowlist); err != nil {
+	slog.Warn("could not apply egress policy (continuing)", "actor", actorName, "error", err)
+	r.setCondition(task, condGatewayReady, "False", "PolicyApplyFailed", err.Error(), now)
+}
+```
+
+The condition goes False, the reconcile continues, and the actor resumes. A
+network fence that fails open is worth saying out loud, because the README's
+one-line pitch is "AX sandboxes it, wires up its workspace, **fences its
+network**."
+
+**Resumption granularity** is the whole actor at turn boundaries. `Close()`
+suspends it; the next turn resumes it; Substrate snapshots the durable volume on
+pause and restores it into a fresh container. There is no mid-tool checkpoint and
+no partial-turn resume — `cursorstore.go` says a richer cursor is a future
+possibility, "e.g. partial function-call results for mid-tool-loop recovery,"
+which is a precise statement of what does not exist yet.
+
+**Scale figures.** The README says `ax` is "built to run billions of tasks per
+cluster." There is no measurement of that anywhere in the repository — no
+benchmark, no load test, not one `func Benchmark` in 32 Go files. Substrate,
+one layer down, does publish numbers (sub-500 ms resumes, 500+ suspend/resume
+activations per second, ~250 actors multiplexed onto 8 pods), and it ships a
+`benchmarking/` directory to reproduce them. Treat the `ax` number as an
+architectural intention.
+
+**Maturity.** Eight months, 625 commits, thirteen contributors, v0.3.0, Apache
+2.0. This is not a fresh open-sourcing of mature internal code — the README is
+careful to say only that `ax` is "developed and maintained by the team actively
+working on Google's internal runtime" and that "the two projects operate at
+different layers today." What you are looking at is a public rewrite by people
+who have built this before, which is a different and slower thing. The current
+control plane is honest about being early: one `ax-controller` replica, one
+Redis `Deployment` with no PVC and no `appendonly` configured, so the entire
+control-plane state lives in one pod's memory. `UpdateTaskStatus` is a get
+followed by a set with no `resourceVersion` and no CAS. Workers consume a Redis
+Streams group where "every event is handled by exactly one of them" — a
+competing-consumer queue, which does not partition by key, so scaling the
+controller past one replica reintroduces concurrent reconciles of the same task
+against a last-write-wins store. And a failed reconcile is acknowledged anyway,
+deliberately, "so a bad task cannot wedge the queue" — a defensible trade that
+also means no retry.
+
+## So what would I actually do with it
+
+Three different answers depending on who is asking.
+
+**If you want the sandbox**, you probably want [Agent
+Substrate](https://github.com/agent-substrate/substrate) directly. It is the
+part with the isolation, the snapshot/restore, the density numbers and the
+reproducible benchmarks. `ax` is a declarative front end over it plus an egress
+allowlist, and if all you need is "run this agent in a gVisor sandbox and
+suspend it when idle," the front end is optional.
+
+**If you want the orchestrator**, v0.3.0 is the right shape and the
+`Workspace` idea is the best thing in the repository — pre-wiring repos, tools
+and skills once and binding them from many tasks is the piece every team
+rebuilds badly. Use it knowing that the tool-wiring half is declarations today,
+that the control plane stores state in an unpersisted Redis, and that the API is
+`v1alpha1` under a banner promising breaking changes.
+
+**If you came for the durability claims**, read them as design intent rather
+than as behaviour you can lean on. The unit of ownership is right, the failure
+handling around individual writes is careful, and nobody was sloppy — but
+single-writer is enforced inside one process and deployed as three, the event
+log is an audit trail that replay reduces to two fields, and effects are
+at-least-once with no dedup key in the system. Those are not exotic distributed
+systems problems; they are the ordinary ones, and they are the reason the
+decision layer is the easy half. Making a decision cheap is a modelling problem.
+Making sure the decision is only *acted on* once is a systems problem, and this
+runtime has not solved it yet.
+
+<ChangeMyMind>
+
+<Falsifier claim="The single-writer exclusion is per process, so the reference three-replica deployment does not enforce it.">
+The whole section falls if the exclusion is enforced somewhere I did not look — a Substrate-side admission check that rejects a second Connect stream to an already-busy actor, or a routing layer outside the manifest that hashes conversation ids to replicas. I only read `google/ax` and the Substrate client it uses; I did not read Substrate's control plane. If `CreateActor`/`ResumeActor` refuse concurrent activations of one actor, then the Go map is a fast path in front of a real guarantee and my framing is wrong. Run two `ax-server` pods against one Substrate cluster and open two turns on one conversation: if the second is refused below `ax`, I have over-read the gap.
+</Falsifier>
+
+<Falsifier claim="The event log is an audit trail beside mutable state, not a source of truth that replay reconstructs from.">
+Falsified by any code path that rebuilds agent-visible state from `Events()`. I found one caller, `ResumptionState`, reducing the log to a state enum and a harness id. If a harness in a private branch — or Google's internal runtime, which the README says operates at a different layer — feeds the log back into a model context on resume, then the open-source `ax` is a partial extract and the claim belongs to the system I cannot see rather than the one I read.
+</Falsifier>
+
+<Falsifier claim="Side effects are at-least-once with no dedup, and one interruption plus one follow-up ran the same turn three times.">
+My probe used a fake harness with no internal cursor, which maximises re-execution; the shipped interactions harness persists `prev_interaction_id` and would not redo the model-side chain the same way. Instrument the Antigravity harness against a real endpoint, interrupt it mid-tool-loop, and count actual tool invocations across the resume. If its cursor plus the provider's interaction chain together make tool execution effectively once-only, then the gap is a documentation gap for custom harnesses rather than a runtime-wide property, and "at-least-once" overstates it.
+</Falsifier>
+
+<Falsifier claim="'Not a framework' is true of v0.3.0 and was not true of v0.2.3.">
+Straightforwardly testable, and I would like to be wrong about the second half. Take an existing harness — Claude Code, OpenHands, an ADK agent — and run it against `b777313` without rewriting its loop as a `HarnessService`. If an adapter that is genuinely thin does it, "framework" is too strong a word for what v0.2.3 demanded, and the arc I am describing is a smaller change than I have made it.
+</Falsifier>
+
+<Falsifier claim="MCP and skills support at v0.3.0 is declarative only — a schema with no client.">
+One MCP client commit falsifies this, and it may exist by the time you read it; the restructure is three days old and the roadmap explicitly lists integrations. Check `go.mod` for an MCP dependency and `internal/workspace/setup.go` for code that writes a server config into the sandbox. If the runner materialises `spec.mcp.servers` into something an agent can call, this paragraph is stale and should be read as a note about one week in September.
+</Falsifier>
+
+</ChangeMyMind>
+
+---
+
+*Read at `d8ed0fe` (v0.3.0, 19 Sep 2026) and its parent `b777313` (v0.2.3, 19
+Aug 2026). Code excerpts are verbatim from [google/ax](https://github.com/google/ax),
+Apache 2.0. The two figures are from Google Cloud's [Agent Executor
+announcement](https://cloud.google.com/blog/products/ai-machine-learning/agent-executor-googles-distributed-agent-runtime)
+(20 May 2026), reproduced for commentary; the repository itself ships no
+architecture image, only a logo. The three diagrams are my own drawings of
+mechanisms I read, not screenshots. Both probes ran against the pre-restructure
+tree built from source with a fake harness; they measure the controller's
+control flow, not a live model endpoint.*
