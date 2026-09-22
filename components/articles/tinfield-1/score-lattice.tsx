@@ -41,7 +41,8 @@ export function ScoreLattice() {
     ticks.push((i / denom) * 100)
 
   const nearest = ticks.reduce(
-    (best, t) => (Math.abs(t - REPORTED) < Math.abs(best - REPORTED) ? t : best),
+    (best, t) =>
+      Math.abs(t - REPORTED) < Math.abs(best - REPORTED) ? t : best,
     ticks[0] ?? 0
   )
   const gap = Math.abs(nearest - REPORTED)
@@ -97,7 +98,10 @@ export function ScoreLattice() {
       <div className="px-4 pt-5 pb-2">
         <div className="relative h-16">
           {/* lattice */}
-          <div className="absolute inset-x-0 top-8 h-px bg-border" aria-hidden />
+          <div
+            className="absolute inset-x-0 top-8 h-px bg-border"
+            aria-hidden
+          />
           {ticks.map((t) => (
             <span
               key={t}
@@ -137,7 +141,7 @@ export function ScoreLattice() {
       </div>
 
       <div className="border-t px-4 py-3 font-mono text-xs">
-        <span className={reachable ? "text-foreground" : "text-foreground"}>
+        <span className="text-foreground">
           nearest reachable score: {nearest.toFixed(3)}
         </span>
         <span className="text-muted-foreground">

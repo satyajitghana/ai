@@ -76,6 +76,9 @@ export function RlLedger() {
             <tr key={r.label} className="border-b last:border-b-0">
               <td className="px-3 py-2 align-top">
                 {r.label}
+                {/* ml-1 separates these visually; the space keeps them separate
+                    in textContent too, for the .md twin and for copy-paste. */}
+                {r.note ? " " : null}
                 {r.note ? (
                   <span className="ml-1 font-mono text-xs text-muted-foreground">
                     ({r.note})

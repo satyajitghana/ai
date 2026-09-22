@@ -23,11 +23,11 @@ type Row = {
 const ROWS: Row[] = [
   {
     name: "Isolated paths",
-    who: "Jev · cua-s1-forms · open-jev-deberta",
+    who: "cua-s1-forms · open-jev-deberta · Jev, by argument",
     layout: "isolated",
     meet: "at the softmax, as scalars",
-    order: { ok: true, note: "exact, by construction" },
-    cross: { ok: false, note: "none — 0/100 on relational choice" },
+    order: { ok: true, note: "exact in the shape; the hosted model still flips 12 of 100" },
+    cross: { ok: false, note: "none — 0 of 100 on relational choice" },
   },
   {
     name: "One shared sequence",
@@ -230,10 +230,11 @@ export function ThreeArrangements() {
       </div>
 
       <figcaption className="border-t px-3 py-2 font-mono text-xs leading-5 text-muted-foreground">
-        The first two rows are the fork this site has been describing for four articles: no
-        model pays both prices. The third row does not sit on the fork. It pays neither,
-        because the only place its candidates meet is a two-layer transformer that was
-        given no positional embeddings to meet at.
+        The first two rows are the fork this site has been describing for four articles.
+        Each pays exactly one of the two prices, and I have written more than once that you
+        have to pay one. The third row does not sit on the fork and pays neither, because
+        the only place its candidates meet is a two-layer transformer that was given no
+        positional embeddings to meet at.
       </figcaption>
     </figure>
   )

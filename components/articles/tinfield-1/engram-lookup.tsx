@@ -71,7 +71,7 @@ function bucket(ids: number[], head: number): number {
   const order = head < 8 ? 2 : 3
   let acc = 0
   for (let i = 3 - order; i < 3; i++) {
-    acc = (acc + ((MULTIPLIERS[i] % p) * (ids[i] % p)) % p) % p
+    acc = (acc + (((MULTIPLIERS[i] % p) * (ids[i] % p)) % p)) % p
   }
   return acc
 }
@@ -162,8 +162,8 @@ export function EngramLookup() {
       <figcaption className="border-t px-3 py-2 font-mono text-xs text-muted-foreground">
         Measured: the shard shapes, the 16 prime moduli, the three multipliers
         and the offsets, read from the checkpoint. Inferred: that those
-        constants compose into this polynomial hash, and that the heads split
-        8 bigram / 8 trigram. Token ids are stand-ins — the arithmetic is the
+        constants compose into this polynomial hash, and that the heads split 8
+        bigram / 8 trigram. Token ids are stand-ins — the arithmetic is the
         point, not the vocabulary.
       </figcaption>
     </figure>

@@ -147,19 +147,17 @@ export function ValueBudget() {
       <div className="border-t px-4 py-3 font-mono text-xs">
         <span className="text-foreground">
           value projection: {(7_549_747_200 / (45 * PLAIN_VPROJ)).toFixed(0)}×
-          the weights of a plain GQA `v_proj`, {(4).toFixed(0)}× the decode
+          the weights of a plain GQA <code>v_proj</code>, 4× the decode
           multiply-accumulates
         </span>
-        <span className="text-muted-foreground">
-          {" "}
-          · 0× the cache
-        </span>
+        <span className="text-muted-foreground"> · 0× the cache</span>
       </div>
       <figcaption className="border-t px-3 py-2 font-mono text-xs text-muted-foreground">
-        Active counts assume every routed expert is a distinct weight read, which
-        is the worst case for a single token and the right case for a batch. The
-        card names 4B active and 36B stored; counting the output head but not the
-        embedding lookup gives 5.31B, and counting neither gives 4.66B.
+        Active counts assume every routed expert is a distinct weight read,
+        which is the worst case for a single token and the right case for a
+        batch. The card names 4B active and 36B stored; counting the output head
+        but not the embedding lookup gives 5.31B, and counting neither gives
+        4.66B.
       </figcaption>
     </figure>
   )
