@@ -1,8 +1,8 @@
 // The two perturbations, on one logarithmic axis.
 //
-// Move an option to a different position and its logit moves by one unit in the
-// last place of a float32. Change WHICH other options are on the list and it
-// moves by a tenth of a logit, sometimes by six tenths. A per-option scalar
+// Move an option to a different position and its logit moves by a few units in
+// the last place of a float32. Change WHICH other options are on the list and it
+// moves by about a tenth of a logit, and by seven tenths at the worst. A per-option scalar
 // scorer would put both bars at exactly zero — its softmax is taken after the
 // scalars exist, so nothing about the set can reach an individual score. A
 // vocabulary readout would put both bars in the same place, because it cannot
@@ -14,9 +14,10 @@
 
 import { mlog10 } from "@/lib/dmath"
 
-// Filled from aj/analyse.py over the committed run.
-const PERM = { median: 2.384e-7, max: 7.153e-7, label: "reposition an option" }
-const COMP = { median: 0.0835, max: 0.6235, label: "change which options are on the list" }
+// Measured: 57 questions, 2,520 permutations and 780 leave-one-out deltas,
+// float32 on CPU through the repository's own serving code.
+const PERM = { median: 4.76837e-07, max: 9.53674e-07, label: "reposition an option" }
+const COMP = { median: 0.0880083, max: 0.70885, label: "change which options are on the list" }
 
 const LO = -8 // 1e-8
 const HI = 0 // 1e0
@@ -65,7 +66,7 @@ export function SetVsOrder() {
         viewBox={`0 0 ${W} ${H}`}
         className="w-full min-w-[520px]"
         role="img"
-        aria-label="A logarithmic axis from 1e-8 to 1. Two horizontal bands. The upper band, repositioning an option, runs from a median of 2.4e-7 to a maximum of 7.2e-7 — a sliver at the extreme left, marked as one float32 unit in the last place. The lower band, changing which options are on the list, runs from a median of 0.08 to a maximum of 0.62, near the right-hand end. The two bands are about six decades apart and do not overlap."
+        aria-label="A logarithmic axis from 1e-8 to 1. Two horizontal bands, about six decades apart and nowhere overlapping. The upper band is what repositioning an option does to its logit: a sliver at the extreme left, sitting on a marked line for two to the minus twenty-three, the last place of a float32. The lower band is what changing which other options are on the list does to the same logit: near the right-hand end, around a tenth of a logit and reaching seven tenths. Each band runs from the median to the worst case, with a dot at the median."
       >
         {DECADES.map((d) => {
           const px = X0 + ((d - LO) / (HI - LO)) * PLOT
@@ -108,8 +109,10 @@ export function SetVsOrder() {
       <figcaption className="border-t px-3 py-2 font-mono text-xs leading-5 text-muted-foreground">
         Both perturbations leave the candidate&apos;s own text and the state untouched, and
         both leave its backbone vector bit-identical, so everything here happens in the 2.4M
-        parameters of the head. Six decades separate them. That separation is the whole
-        claim: position carries no information and composition carries a lot.
+        parameters of the head. The upper band is summarised per question — each question
+        contributes its worst permutation out of all of them — so it is the pessimistic
+        reading. Six decades still separate the two. That separation is the whole claim:
+        position carries no information and composition carries a lot.
       </figcaption>
     </figure>
   )

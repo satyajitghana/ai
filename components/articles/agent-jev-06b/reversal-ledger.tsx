@@ -55,8 +55,8 @@ const ROWS: Row[] = [
     model: "AgentJev-0.6B",
     family: "shared prefix, private branches, set head",
     flips: 0,
-    n: 28,
-    magnitude: "4.8e-07 logits — one float32 ULP",
+    n: 50,
+    magnitude: "9.5e-07 logits — a few float32 ULPs",
     source: "measured here",
     highlight: true,
   },
@@ -147,8 +147,10 @@ export function ReversalLedger() {
         tension: a true 12% rate produces 0 of 36 about one time in a hundred. The likeliest
         reconciliation is cardinality — the 12% suite permutes 77 Banking77 labels, kev&apos;s
         36 items carry a handful of options each. The AgentJev row is a different kind of
-        number: the answer did not change because nothing in the arithmetic changed by more
-        than one unit in the last place of a float32.
+        number: the answer did not change because nothing in the arithmetic moved by more
+        than a few units in the last place of a float32. Its denominator is the 50 questions
+        I could afford to run end to end; the permutation sweep in the receipts below covers
+        2,520.
       </figcaption>
     </figure>
   )
