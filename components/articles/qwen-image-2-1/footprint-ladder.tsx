@@ -25,6 +25,8 @@ type Rung = {
   /** peak GPU memory in GiB, as measured by the source */
   vram: number | null
   vramNote?: string
+  /** shown instead of "not published" when a null means something else, e.g. no GPU at all */
+  vramText?: string
   /** seconds for one image, on `where` */
   seconds: number | null
   at: string
@@ -94,7 +96,7 @@ const RUNGS: Rung[] = [
     where: "no timing published",
     host: 16e9 / 1073741824,
     hostKind: "reported",
-    hostText: "16 GB, stated",
+    hostText: "16 GB*",
     hostNote: "the project's stated RAM requirement",
   },
   {
@@ -118,7 +120,7 @@ const RUNGS: Rung[] = [
     where: "Unsloth's guide, no measurement published",
     host: 16e9 / 1073741824,
     hostKind: "reported",
-    hostText: "12–16 GB, stated",
+    hostText: "12–16 GB*",
     hostNote: "stated for CPU-only, as an estimate and not a tested minimum",
   },
   {
@@ -169,6 +171,32 @@ const RUNGS: Rung[] = [
     hostKind: "measured",
     hostNote: "process RSS in the report's tightest profile",
   },
+  {
+    label: "This box · Q2_K",
+    note: "leejet Q2_K denoiser, Qwen's Q4_K_M encoder GGUF, bf16 VAE, stable-diffusion.cpp with --mmap — measured for this article",
+    bytes: L_Q2K + Q_ENC_Q4KM + BF16_VAE,
+    vram: null,
+    vramText: "no GPU",
+    seconds: 1656.77,
+    at: "512²/20",
+    where: "4 Xeon cores at 2.80GHz, no GPU",
+    host: 10098.6 / 1024,
+    hostKind: "measured",
+    hostNote: "peak RSS including the memory-mapped weights, at 512²",
+  },
+  {
+    label: "This box · Q4_K",
+    note: "leejet Q4_K denoiser, same encoder and VAE — the configuration behind the headline image and the gallery",
+    bytes: L_Q4K + Q_ENC_Q4KM + BF16_VAE,
+    vram: null,
+    vramText: "no GPU",
+    seconds: 1822.84,
+    at: "512²/20",
+    where: "4 Xeon cores at 2.80GHz, no GPU; 40 steps took 3,863 s wall-clock",
+    host: 11671.8 / 1024,
+    hostKind: "measured",
+    hostNote: "peak RSS including the memory-mapped weights, at 512²",
+  },
 ]
 
 const MODES = [
@@ -186,16 +214,15 @@ function value(r: Rung, mode: Mode) {
   if (mode === "bytes") return { n: r.bytes, text: gb(r.bytes) }
   if (mode === "vram")
     return r.vram == null
-      ? { n: 0, text: "not published" }
+      ? { n: 0, text: r.vramText ?? "not published" }
       : { n: r.vram, text: `${r.vram.toFixed(2)} GiB` }
   if (mode === "host")
     return r.host == null
       ? { n: 0, text: "not published" }
       : {
           n: r.host,
-          text:
-            r.hostText ??
-            `${r.host.toFixed(2)} GiB${r.hostKind === "reported" ? " (stated)" : ""}`,
+          text: r.hostText ?? `${r.host.toFixed(2)} GiB${r.hostKind === "reported" ? "*" : ""}`,
+          stated: r.hostKind === "reported",
         }
   return r.seconds == null
     ? { n: 0, text: "not published" }
@@ -210,7 +237,7 @@ export function FootprintLadder() {
     <figure
       className="my-8 overflow-hidden rounded-md border"
       data-footprint-ladder={mode}
-      aria-label="Every published way to run Qwen-Image-2.1, by weights downloaded, peak GPU memory and seconds per image"
+      aria-label="Every published way to run Qwen-Image-2.1, by weights downloaded, peak GPU memory, host memory and seconds per image"
     >
       <div className="flex flex-wrap gap-2 border-b px-4 py-3">
         {MODES.map((m) => (
@@ -243,7 +270,12 @@ export function FootprintLadder() {
               <div className="relative h-6 flex-1 rounded-sm bg-muted/50">
                 {!missing ? (
                   <div
-                    className="absolute inset-y-0 left-0 rounded-sm bg-foreground/70"
+                    className={cn(
+                      "absolute inset-y-0 left-0 rounded-sm",
+                      "stated" in v && v.stated
+                        ? "border border-dashed border-foreground/50 bg-foreground/15"
+                        : "bg-foreground/70"
+                    )}
                     style={{ width: `${(v.n * 100) / max}%` }}
                   />
                 ) : (
@@ -293,10 +325,13 @@ export function FootprintLadder() {
 
       <figcaption className="border-t px-4 py-3 text-xs text-muted-foreground">
         Byte counts are exact, from the safetensors indexes, the installers&rsquo;
-        pinned manifests and the ncnn repository&rsquo;s file listing. Memory and
-        time are each source&rsquo;s own measurement on its own hardware, so the
-        rows are not a controlled comparison — the bottom three come from one
-        RTX 3090 and the second row from a GB300. The bottom two figures were
+        pinned manifests and the Hub&rsquo;s file listings for the ncnn, Unsloth
+        and leejet repositories. Memory and time are each source&rsquo;s own
+        measurement on its own hardware, so the rows are not a controlled
+        comparison — three come from one RTX 3090, one from a GB300 and the last
+        two from this site&rsquo;s four-core build box. Host-memory figures
+        with an asterisk and a dashed bar are requirements or estimates a source
+        wrote down, not measurements. The bottom two figures were
         produced by telling a 24 GiB card to reserve most of itself, which the
         report is explicit is a placement hint and not a hard allocator cap, so
         read them as evidence for trying a small card rather than a promise about
