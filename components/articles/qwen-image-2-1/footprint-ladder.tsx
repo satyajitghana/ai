@@ -29,6 +29,12 @@ type Rung = {
   seconds: number | null
   at: string
   where: string
+  /** peak host memory in GiB; `hostKind` says whether it was measured or only stated */
+  host?: number
+  hostKind?: "measured" | "reported"
+  hostNote?: string
+  /** a stated figure in the source's own words and units; `host` is then its upper end in GiB, for the bar */
+  hostText?: string
 }
 
 const T = 14_230_249_472 // transformer, bf16
@@ -41,6 +47,22 @@ const INT8_ENC = 9_350_798_360
 const BF16_VAE = 675_509_688
 const GGUF_DIT = 4_604_557_984
 const NCNN = 31_191_738_224
+
+// Unsloth's repos, byte counts from the Hub API at unsloth/Qwen-Image-2.1-GGUF
+// 2c31ccd and unsloth/Qwen-Image-2.1-FP8 9e52064, and the encoder its CPU
+// recipe names, unsloth/Qwen3-VL-8B-Instruct-GGUF b93a7ee.
+const U_Q2K = 2_466_137_824
+const U_Q4KM = 4_199_565_024
+const U_FP8_DIT = 7_122_877_560
+const U_FP8_ENC = 9_394_530_592
+const U_VAE = 675_508_656
+const U_ENC_Q4KXL = 5_148_699_488
+
+// The runs on this site's build box: leejet's GGUFs (cc11433), Qwen's own
+// Q4_K_M encoder GGUF (f982a07) and the ComfyUI bf16 VAE.
+const L_Q2K = 2_561_716_256
+const L_Q4K = 4_197_494_816
+const Q_ENC_Q4KM = 5_027_784_800
 
 const RUNGS: Rung[] = [
   {
@@ -70,6 +92,43 @@ const RUNGS: Rung[] = [
     seconds: null,
     at: "—",
     where: "no timing published",
+    host: 16e9 / 1073741824,
+    hostKind: "reported",
+    hostText: "16 GB, stated",
+    hostNote: "the project's stated RAM requirement",
+  },
+  {
+    label: "Unsloth FP8",
+    note: "FP8 denoiser, FP8 Qwen3-VL and the bf16 VAE from unsloth/Qwen-Image-2.1-FP8 — a GPU route",
+    bytes: U_FP8_DIT + U_FP8_ENC + U_VAE,
+    vram: null,
+    vramNote: "stated: 24 GB of VRAM, or 6 GB with offloading at under 2x the time — estimates, not tested minimums",
+    seconds: null,
+    at: "—",
+    where: "Unsloth's guide, no measurement published",
+  },
+  {
+    label: "Unsloth Q4_K_M",
+    note: "Unsloth Dynamic Q4_K_M denoiser with the UD-Q4_K_XL encoder, the configuration its guide gives for a CPU-only machine",
+    bytes: U_Q4KM + U_ENC_Q4KXL + U_VAE,
+    vram: null,
+    vramNote: "stated: 11 GB of VRAM for the GGUF route",
+    seconds: null,
+    at: "—",
+    where: "Unsloth's guide, no measurement published",
+    host: 16e9 / 1073741824,
+    hostKind: "reported",
+    hostText: "12–16 GB, stated",
+    hostNote: "stated for CPU-only, as an estimate and not a tested minimum",
+  },
+  {
+    label: "Unsloth Q2_K",
+    note: "the smallest rung Unsloth publishes, 2.77 bits per parameter, with the same UD-Q4_K_XL encoder",
+    bytes: U_Q2K + U_ENC_Q4KXL + U_VAE,
+    vram: null,
+    seconds: null,
+    at: "—",
+    where: "no memory or timing published for this rung",
   },
   {
     label: "ComfyUI INT8",
@@ -106,12 +165,16 @@ const RUNGS: Rung[] = [
     seconds: 195.28,
     at: "512²/40",
     where: "RTX 3090 held to a 4 GiB budget, 15.21 GiB of host RAM",
+    host: 15.21,
+    hostKind: "measured",
+    hostNote: "process RSS in the report's tightest profile",
   },
 ]
 
 const MODES = [
   { key: "bytes", label: "weights downloaded" },
   { key: "vram", label: "peak GPU memory" },
+  { key: "host", label: "host memory" },
   { key: "seconds", label: "seconds per image" },
 ] as const
 
@@ -125,6 +188,15 @@ function value(r: Rung, mode: Mode) {
     return r.vram == null
       ? { n: 0, text: "not published" }
       : { n: r.vram, text: `${r.vram.toFixed(2)} GiB` }
+  if (mode === "host")
+    return r.host == null
+      ? { n: 0, text: "not published" }
+      : {
+          n: r.host,
+          text:
+            r.hostText ??
+            `${r.host.toFixed(2)} GiB${r.hostKind === "reported" ? " (stated)" : ""}`,
+        }
   return r.seconds == null
     ? { n: 0, text: "not published" }
     : { n: r.seconds, text: `${r.seconds.toFixed(1)} s` }
@@ -203,6 +275,11 @@ export function FootprintLadder() {
             ) : mode === "vram" ? (
               <span className="font-mono">
                 {r.vramNote ? `${r.vramNote}; ` : ""}
+                {r.where}
+              </span>
+            ) : mode === "host" ? (
+              <span className="font-mono">
+                {r.hostNote ? `${r.hostNote}; ` : ""}
                 {r.where}
               </span>
             ) : (
