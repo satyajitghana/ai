@@ -61,9 +61,12 @@ export function CrelloProvenance() {
 
       <div className="space-y-2 px-4 py-4">
         {ROWS.map((r) => (
-          <div key={r.name} className="flex items-center gap-3">
-            <span className={cn("inline-block h-2 w-2 shrink-0 rounded-xs", SOURCE[r.source].tone)} />
-            <span className="w-40 shrink-0 truncate font-mono text-[11px] sm:w-64" title={r.name}>
+          <div key={r.name} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span
+              className="basis-full truncate font-mono text-[11px] sm:w-64 sm:shrink-0 sm:basis-auto"
+              title={r.name}
+            >
+              <span className={cn("mr-1.5 inline-block h-2 w-2 rounded-xs align-middle", SOURCE[r.source].tone)} />
               {r.name}
             </span>
             <div className="relative h-4 flex-1 rounded-sm bg-muted/50">
@@ -72,7 +75,7 @@ export function CrelloProvenance() {
                 style={{ width: `${(r.l1[0] * 100) / MAX_L1}%` }}
               />
             </div>
-            <span className="w-28 shrink-0 text-right font-mono text-[11px] tabular-nums">
+            <span className="w-36 shrink-0 text-right font-mono text-[11px] tabular-nums">
               {r.l1[0].toFixed(4)}
               <span className="text-muted-foreground"> &middot; IoU {r.iou[0].toFixed(3)}</span>
             </span>
