@@ -189,8 +189,9 @@ export function CpuRewriters() {
           <span className="font-mono text-foreground tabular-nums">
             {(teacher.wall / FASTEST).toFixed(0)}x
           </span>{" "}
-          as long per rewrite as the 0.8B through llama.cpp, most of it decoding
-          its own reasoning before it writes a word of the answer. It does fit:
+          as long per rewrite as the 0.8B through llama.cpp: about a sixth of it
+          reading its system prompt, and about half decoding its own reasoning
+          before the first word of the answer. It does fit:
           this box ran it in{" "}
           <span className="font-mono text-foreground tabular-nums">
             {(teacher.rss / 1024).toFixed(1)} GiB
