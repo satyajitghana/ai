@@ -82,6 +82,16 @@ const PASSES: Pass[] = [
         rss: 10098.6,
       },
       {
+        label: "Unsloth Q2_K · 20 steps",
+        config: "2.77 bits, the shared modulation quantised too",
+        encode: 4.47,
+        sample: 1622.17,
+        decode: 42.41,
+        total: 1669.06,
+        perStep: 79.64,
+        rss: 10020.7,
+      },
+      {
         label: "Q2_K · 8 steps",
         config: "the first pass's step count, on the vendor's schedule",
         encode: 4.36,
