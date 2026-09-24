@@ -207,7 +207,10 @@
       // an operator circle grows to hold its word
       if (kind === 'op') { const lb = fitR('head', n.label, 46, 26, 150, 1), r = Math.max(48, lb.lines[0].width / 2 + 20); nodes[n.id] = { ...n, kind, cx, cy, w: r * 2, h: r * 2, r, lb }; continue }
       // a sub-label may take two lines rather than being cut off
-      const lb = fitR('body', n.label, 32, 24, 250, 2), sb = n.sub ? fitR('mono', n.sub, 25, 19, 300, 2) : null
+      // one line if it fits at any size, two only if it doesn't (no lone word on a second line)
+      const lb = fitR('body', n.label, 32, 24, 250, 2)
+      let sb = n.sub ? fitR('mono', n.sub, 25, 19, 300, 1) : null
+      if (sb && sb.lines.length > 1) sb = fitR('mono', n.sub, 25, 19, 300, 2)
       let w = Math.max(150, Math.max(...lb.lines.map(l => l.width), ...(sb ? sb.lines.map(l => l.width) : [0])) + 60) + (kind === 'grid' ? 64 : 0)
       let h = lb.lines.length * lb.px * 1.15 + 44 + (sb ? sb.px * (.3 + sb.lines.length) : 0)
       if (kind === 'user') { w = Math.max(w - 40, 130); h += 70 }
