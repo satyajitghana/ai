@@ -241,7 +241,7 @@ const STYLES = (() => {
     },
     flat(pts, col, a = 1) { G.save(); pathOf(pts, true); G.fillStyle = hexA(col, a); G.fill(); G.restore() },
     write(str, x, y, f, col, o = {}) {
-      G.save(); G.shadowColor = col === this.ink ? P().b : col; G.shadowBlur = (col === this.ink ? 10 : 22) * SCALE
+      G.save(); G.shadowColor = col; G.shadowBlur = 22 * SCALE
       text(str, x, y, f, col, o); G.restore()
     },
     hl(x, y, w, h, col, k) {
@@ -291,7 +291,9 @@ const STYLES = (() => {
 
   // --------------------------------------------------------------------- riso
   const riso = {
-    name: 'riso', dark: false, ink: '#262140', dim: '#5E5873', paper: '#F5EFE0', music: 'marimba', bpm: 116, trans: 'blocks',
+    // knockout: on an ink darker than this, text is left as bare paper, as a
+    // riso print does, since dark ink on violet or teal disappears
+    name: 'riso', dark: false, ink: '#262140', dim: '#5E5873', paper: '#F5EFE0', knockout: .56, music: 'marimba', bpm: 116, trans: 'blocks',
     font: { head: { fam: FAM.hanken, w: 900, k: 1.02 }, body: { fam: FAM.hanken, w: 700 }, mono: { fam: FAM.plex, w: 600 }, label: { fam: FAM.hanken, w: 800, caps: true } },
     pals: {
       'pink-blue': { a: '#FF48B0', b: '#0078BF', hi: '#FFE800', light: '#FFC9E5', wash: '#D8ECF8' },
@@ -317,10 +319,12 @@ const STYLES = (() => {
       if (o.fill) { G.save(); G.globalCompositeOperation = 'multiply'; pathOf(S, true); G.fillStyle = hexA(o.fill, .9 * (o.op ?? .75) / .75); G.fill(); G.restore() }
       if (o.ink !== null) this.line(S, o.sw ?? 1, o.ink || this.ink, { closed: true, curv: 0 })
     },
-    flat(pts, col, a = 1) { G.save(); G.globalCompositeOperation = 'multiply'; pathOf(pts, true); G.fillStyle = hexA(col, a); G.fill(); G.restore() },
+    // inks overprint; paper is laid down plainly, since it is there to hide
+    // what is under it (the cards behind a stack's front card, an edge label's plate)
+    flat(pts, col, a = 1) { G.save(); if (col !== this.paper) G.globalCompositeOperation = 'multiply'; pathOf(pts, true); G.fillStyle = hexA(col, a); G.fill(); G.restore() },
     write(str, x, y, f, col, o = {}) {
-      G.save(); G.globalCompositeOperation = 'multiply'
-      if (col === this.ink) text(str, x + 3, y + 3, f, hexA(P().a, .75), o)
+      // ink overprints; a knockout is bare paper, which multiplying would erase
+      G.save(); if (col !== this.paper) G.globalCompositeOperation = 'multiply'
       text(str, x, y, f, col, o); G.restore()
     },
     hl(x, y, w, h, col, k) { if (k <= 0) return; G.save(); G.globalCompositeOperation = 'multiply'; G.fillStyle = hexA(col, .9); G.fillRect(x - 10, y + h * .15, (w + 20) * k, h * .95); G.restore() },
