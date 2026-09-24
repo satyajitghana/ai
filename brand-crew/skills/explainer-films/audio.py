@@ -54,6 +54,15 @@ PRONOUNCE = {
     "ViT": "vˈɪt", "RoPE": "ɹˈOp", "SwiGLU": "swˈɪɡlu", "MoE": "ˌɛmˌOˈi", "YAML": "jˈæməl", "JSON": "ʤˈAsᵊn",
     "Gaussian": "ɡˈWsiən", "Gaussians": "ɡˈWsiənz", "softmax": "sˈɔftmˌæks", "Softmax": "sˈɔftmˌæks",
     "logits": "lˈɑʤɪts", "tokenizer": "tˈOkənˌIzəɹ", "tokenizers": "tˈOkənˌIzəɹz", "detokenize": "ditˈOkənˌIz",
+    "Laguna": "læɡˈunə", "Lanyon": "lˈænjən", "Leanstral": "lˈinstɹˌɑl", "LeVJEPA": "lə vˈi ʤˈɛpə", "SIGReg": "sˈɪɡ ɹˈɛɡ", "Pareas": "pˈɛɹiəs",
+    "simdjson": "sˈɪmdˌi ʤˈAsᵊn",
+    "Sinkhorn": "sˈɪŋkhɔɹn", "FoX": "fˈɑks", "Zhang": "ʤˈɑŋ", "Khattab": "kətˈɑb", "HauhauCS": "hˈWhˌW sˌiˈɛs", "Hy": "ˌAʧwˈI", "HY": "ˌAʧwˈI",
+    "Detokenize": "ditˈOkənˌIz",
+    "Gigatoken": "ɡˈɪɡətˌOkən", "XSTest": "ˌɛksˈɛs tˈɛst", "GLiNER": "ɡlˈɪnəɹ", "GEPA": "ɡˈɛpə", "SIMD": "sˈɪmdˌi",
+    "Noul": "nˈul", "Nemotron": "nˈɛmətɹˌɑn", "dMel": "dˈi mˈɛl", "Instella": "ɪnstˈɛlə", "Mobius": "mˈObiəs",
+    "HumanEval": "hjˈumən ɪvˈæl", "iLLaDA": "ˈI lˈɑdə", "LLaDA": "lˈɑdə", "SWE": "swˈi",
+    "Verified": "vˈɛɹəfˌId", "Unembed": "ˌʌnɛmbˈɛd", "Backpropagate": "bˌækpɹˈɑpəɡˌAt",
+    "Flex-π": "flˈɛks pˈI", "π": "pˈI",
     "webctl": "wˈɛb kəntɹˈOl", "fastbrowse": "fˈæst bɹˈWz", "djev": "dˈi ʤˈɛv", "DiT": "dˈɪt", "FiLM": "fˈɪlm", "XGEN": "ˈɛks ʤˈɛn",
     "Cinference": "sˈi ˈɪnfəɹəns", "PhD": "pˌiˌAʧdˈi", "SKILL.md": "skˈɪl dˈɑt ˌɛmdˈi", "Argmax": "ˈɑɹɡmˌæks", "argmax": "ˈɑɹɡmˌæks", "ZeRO": "zˈɪɹO",
     "Limite": "lˈimitˌA", "Violetto": "vˌiOlˈɛtO", "Kev": "kˈɛv", "MoVA": "mˈOvə", "README": "ɹˈidmˌi",
@@ -89,7 +98,7 @@ def speakable(s):
     s = re.sub(r"\bvs\.?\b", "versus", s)
     s = re.sub(r"[\[\]{}()<>`_*|\\]", " ", s)   # code punctuation reads as noise
     # model names: "Qwen3.8-Flash-Next" is said "Qwen three point eight flash next"
-    s = re.sub(r"(?<=[A-Za-z])(?=\d)", " ", s)
+    s = re.sub(r"(?<=[A-Za-z])-?(?=\d)", " ", s)   # "GLM-5.3" too, or it reads "five three"
     s = re.sub(r"(?<=[A-Za-z0-9])-(?=[A-Z])", " ", s)
     s = _PRON.sub(_say, s)
     # an override glued to a hyphen ("CIFAR-10") merges with the next word, and
