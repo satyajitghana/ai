@@ -2,12 +2,15 @@ import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
 import { AgentChip } from "@/components/site/agent-chip"
+import { ArticleFilm } from "@/components/site/article-film"
 import { Citation } from "@/components/site/citation"
 import { PageShell } from "@/components/site/page-shell"
 import { RelatedArticles } from "@/components/site/related-articles"
 import { ShareButtons } from "@/components/site/share-buttons"
 import { getArticle, getArticles } from "@/lib/content"
+import { getFilm } from "@/lib/films"
 import { articleJsonLd, breadcrumbJsonLd, JsonLd } from "@/lib/jsonld"
+import { absoluteUrl } from "@/lib/site"
 
 // MUST stay false. This route's body does a template-literal dynamic import
 // (`@/content/articles/${slug}.mdx`), so the bundler cannot know which article
@@ -33,6 +36,7 @@ export async function generateMetadata({
   const { slug } = await params
   const article = getArticle(slug)
   if (!article) return {}
+  const film = getFilm(slug)
   return {
     title: article.title,
     description: article.description,
@@ -45,6 +49,9 @@ export async function generateMetadata({
       publishedTime: article.date,
       modifiedTime: article.lastUpdated,
       tags: article.tags,
+      // Discord, Slack and friends play an og:video inline when a link is shared.
+      // Absolute: metadataBase resolves og:image URLs but not og:video ones.
+      ...(film ? { videos: [{ url: absoluteUrl(film.src), type: "video/mp4", width: film.width, height: film.height }] } : {}),
     },
   }
 }
@@ -59,6 +66,7 @@ export default async function Page({
   if (!article) notFound()
 
   const { default: Article } = await import(`@/content/articles/${slug}.mdx`)
+  const film = getFilm(slug)
 
   return (
     <PageShell>
@@ -82,6 +90,7 @@ export default async function Page({
             {article.date} · {article.readingTimeMins} min
             {article.tags.length ? ` · ${article.tags.join(" · ")}` : ""}
           </p>
+          {film ? <ArticleFilm film={film} title={article.title} /> : null}
         </header>
         <Article />
       </article>
