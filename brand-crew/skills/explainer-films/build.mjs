@@ -146,7 +146,7 @@ function thumbs(list) {
   const man = existsSync(TMAN) ? JSON.parse(readFileSync(TMAN, 'utf8')) : { thumbs: {} }
   const files = list.map(slug => { const f = join(tmp, `${slug}.json`); writeFileSync(f, JSON.stringify({ ...load(slug), date: articleDate(slug) })); return f })
   for (let i = 0; i < files.length; i += 40) {
-    const r = spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'thumb', ...files.slice(i, i + 40), `--out=${out}`], { encoding: 'utf8', maxBuffer: 1 << 26 })
+    const r = spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'thumb', ...files.slice(i, i + 40), `--out=${out}`, `--workers=${opt.workers || 3}`], { encoding: 'utf8', maxBuffer: 1 << 26 })
     if (r.status !== 0) throw new Error(r.stderr)
     for (const line of r.stdout.trim().split('\n').filter(l => l.startsWith('{'))) {
       const j = JSON.parse(line)

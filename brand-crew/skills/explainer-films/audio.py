@@ -54,9 +54,31 @@ PRONOUNCE = {
     "ViT": "vˈɪt", "RoPE": "ɹˈOp", "SwiGLU": "swˈɪɡlu", "MoE": "ˌɛmˌOˈi", "YAML": "jˈæməl", "JSON": "ʤˈAsᵊn",
     "Gaussian": "ɡˈWsiən", "Gaussians": "ɡˈWsiənz", "softmax": "sˈɔftmˌæks", "Softmax": "sˈɔftmˌæks",
     "logits": "lˈɑʤɪts", "tokenizer": "tˈOkənˌIzəɹ", "tokenizers": "tˈOkənˌIzəɹz", "detokenize": "ditˈOkənˌIz",
+    "webctl": "wˈɛb kəntɹˈOl", "fastbrowse": "fˈæst bɹˈWz", "djev": "dˈi ʤˈɛv", "DiT": "dˈɪt", "FiLM": "fˈɪlm", "XGEN": "ˈɛks ʤˈɛn",
+    "Cinference": "sˈi ˈɪnfəɹəns", "PhD": "pˌiˌAʧdˈi", "SKILL.md": "skˈɪl dˈɑt ˌɛmdˈi", "Argmax": "ˈɑɹɡmˌæks", "argmax": "ˈɑɹɡmˌæks", "ZeRO": "zˈɪɹO",
+    "Limite": "lˈimitˌA", "Violetto": "vˌiOlˈɛtO", "Kev": "kˈɛv", "MoVA": "mˈOvə", "README": "ɹˈidmˌi",
+    "AuK": "ˈɔk", "Omni": "ˈɑmni", "Telecom": "tˈɛləkˌɑm", "Girard": "ʒəɹˈɑɹd", "Lucene": "lusˈin", "Elasticsearch": "əlˈæstɪksˌɜɹʧ",
+    "Walsh": "wˈɔlʃ", "Hadamard": "ˌhædəmˈɑɹ",
+    # hosts: every film's sign-off says the host's name
+    "Nacho": "nˈɑʧO", "Bramblewood": "bɹˈæmbᵊlwˌʊd", "Chive": "ʧˈIv", "Cosmo": "kˈɑzmO", "Donut": "dˈOnˌʌt",
+    "Jellybean": "ʤˈɛlibˌin", "Yoyo": "jˈOjO", "Ziggy": "zˈɪɡi",
+    "Fara": "fˈɑɹə", "Kalman": "kˈælmən", "Vicuna": "vɪkjˈunə", "Robomimic": "ɹˈObOmˌɪmɪk", "Extropic": "ɛkstɹˈɑpɪk", "Extropic's": "ɛkstɹˈɑpɪks",
+    "Microsoft": "mˈIkɹəsˌɔft", "Tanh": "tˈænʧ", "tanh": "tˈænʧ", "Livox": "lˈIvˌɑks",
+    "cuda": "kˈudə", "MNIST": "ˈɛmnˌɪst", "CIFAR": "sˈIfɑɹ", "Darwin": "dˈɑɹwᵊn", "Markov": "mˈɑɹkɔf", "DCFormer": "dˌisˈi fˈɔɹməɹ",
+    "Backprop": "bˈækpɹˌɑp", "backprop": "bˈækpɹˌɑp",
+    "Tencent": "tˈɛnsˈɛnt", "Hunyuan": "hwˈʊnjuˈɛn", "Alibaba": "ˌæləbˈɑbə", "Kaggle": "kˈæɡᵊl", "Gödel": "ɡˈɜdᵊl",
+    "Goodfire": "ɡˈʊdfˌIəɹ", "Weng": "wˈʌŋ", "Apodex": "ˈæpədˌɛks", "GDPval": "ʤˌidˌipˈi vˈæl", "Antidoom": "ˈæntidˌum",
+    "AIRA": "ˈIɹə", "ABot": "ˈAbˌɑt", "DFly": "dˈi flˈI",
+    "Colibri": "kˌOlibɹˈi", "Cornell": "kɔɹnˈɛl", "Elo": "ˈilO", "Unsloth": "ʌnslˈɔθ", "Readahead": "ɹˈidəhˌɛd",
+    "Jev": "ʤˈɛv", "Jev's": "ʤˈɛvz", "AgentJev": "ˈAʤənt ʤˈɛv", "Laya": "lˈɑjə", "Machina": "mˈækɪnə",
     "Arcee": "ˈɑɹsi", "cua": "sˌijˌuˈA", "Musou": "mˈusO", "Spirula": "spˈɪɹjələ", "Tinfield": "tˈɪnfˌild",
 }
-_PRON = re.compile(r"(?<![\w.])(" + "|".join(re.escape(k) for k in sorted(PRONOUNCE, key=len, reverse=True)) + r")(?![\w])")
+_PRON = re.compile(r"(?<![\w.])(" + "|".join(re.escape(k) for k in sorted(PRONOUNCE, key=len, reverse=True)) + r")((?:'|’)s)?(?![\w])")
+def _say(m):
+    w, poss = m.group(1), m.group(2)
+    ph = PRONOUNCE[w]
+    if poss and not w.endswith("'s"): ph += "s" if ph[-1] in "ptkfθ" else "z"   # a possessive, voiced or not like the word's end
+    return f"[{w}{poss or ''}](/{ph}/)"
 
 def speakable(s):
     s = s.replace("ai.thesatyajit.com", "ai dot the satyajit dot com")
@@ -69,7 +91,10 @@ def speakable(s):
     # model names: "Qwen3.8-Flash-Next" is said "Qwen three point eight flash next"
     s = re.sub(r"(?<=[A-Za-z])(?=\d)", " ", s)
     s = re.sub(r"(?<=[A-Za-z0-9])-(?=[A-Z])", " ", s)
-    s = _PRON.sub(lambda m: f"[{m.group(1)}](/{PRONOUNCE[m.group(1)]}/)", s)
+    s = _PRON.sub(_say, s)
+    # an override glued to a hyphen ("CIFAR-10") merges with the next word, and
+    # every later override in the sentence then lands one word off
+    s = re.sub(r"\)-(?=\w)", ") ", s)
     return re.sub(r"\s+", " ", s).strip()
 
 def guessed_names(texts):

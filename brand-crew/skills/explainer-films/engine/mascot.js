@@ -382,7 +382,7 @@ function drawMascot(x, y, u, o = {}) {
     if (pointSide < 0) aL = a; else aR = a
   }
   // a wave goes out to the side and up, so the paw clears the cheek
-  if (o.wave) { const w = .22 * Math.sin(t * 8); waveSide = pointSide < 0 ? 1 : -1; if (waveSide > 0) aR = -Math.PI / 2 + 1.0 + w; else aL = -Math.PI / 2 - 1.0 - w }
+  if (o.wave) { const w = .22 * Math.sin(t * 8); waveSide = pointSide > 0 ? -1 : 1; if (waveSide > 0) aR = -Math.PI / 2 + 1.0 + w; else aL = -Math.PI / 2 - 1.0 - w }
   const sleeve = B.outfit === 'labcoat' ? '#FFFFFF' : B.outfit === 'hoodie' ? acc : fur
   const pawCol = sp === 'fox' ? '#3A2A2A' : fur
   const holdSide = !B.prop || B.prop === 'none' ? 0 : B.prop === 'pointer' ? (pointSide || -1) : (pointSide ? -pointSide : -1)
@@ -448,7 +448,10 @@ function drawMascot(x, y, u, o = {}) {
     S.shape(whole, { fill: sleeve, op: 1, ink: null })
     if (sleeve !== pawCol) S.shape(paw, { fill: pawCol, op: 1, ink: null })
     if (side === holdSide) {
-      drawProp(B.prop, [ex + Math.cos(ea) * .05 * u, ey + Math.sin(ea) * .05 * u, a], u, sw, ink, acc)
+      // a pointer stops just short of what it points at, rather than covering it
+      let reach
+      if (side === pointSide && o.point) { const d = Math.hypot(o.point[0] - x - ex, o.point[1] - y - dy - ey); reach = clamp(d - 1.1 * u, 1.2 * u, 2.8 * u) }
+      drawProp(B.prop, [ex + Math.cos(ea) * .05 * u, ey + Math.sin(ea) * .05 * u, a, reach], u, sw, ink, acc)
       S.shape(paw, { fill: pawCol, op: 1, ink: null })
     }
     if (sleeve !== pawCol) cuff()
@@ -541,7 +544,7 @@ function drawProp(p, hand, u, sw, ink, acc) {
   if (!p || p === 'none') return
   const S = STYLE, [hx, hy, a] = hand, L = (n, w, col) => S.line(n, sw * w, col || ink, { curv: 0 })
   const blob = (pts, fill, w = .9) => S.shape(pts, { fill, op: .9, ink: S.dark ? mixCol(fill, '#FFFFFF', .3) : S.ink, sw: sw * w })
-  if (p === 'pointer') { L([[hx, hy], [hx + Math.cos(a) * 2.8 * u, hy + Math.sin(a) * 2.8 * u]], 1.2, '#8A5A3A'); S.shape(ellPts(hx + Math.cos(a) * 2.85 * u, hy + Math.sin(a) * 2.85 * u, .16 * u, .16 * u, 10), { fill: acc, op: 1, ink: null }); return }
+  if (p === 'pointer') { const len = hand[3] ?? 2.8 * u; L([[hx, hy], [hx + Math.cos(a) * len, hy + Math.sin(a) * len]], 1.2, '#8A5A3A'); S.shape(ellPts(hx + Math.cos(a) * (len + .05 * u), hy + Math.sin(a) * (len + .05 * u), .16 * u, .16 * u, 10), { fill: acc, op: 1, ink: null }); return }
   push(); translate(hx, hy)
   if (p === 'clipboard') { blob(rrPts(-.5 * u, -1.3 * u, 1.1 * u, 1.4 * u, .1 * u), '#C8935B'); blob(rectPts(-.38 * u, -1.15 * u, .86 * u, 1.1 * u), '#FFFFFF', .5); L([[-.25 * u, -.85 * u], [.3 * u, -.85 * u]], .5); L([[-.25 * u, -.6 * u], [.3 * u, -.6 * u]], .5) }
   else if (p === 'wrench') { rotate(-.6); blob(rrPts(-.14 * u, -1.6 * u, .28 * u, 1.6 * u, .1 * u), '#9AA3AD'); blob(ellPts(0, -1.75 * u, .36 * u, .36 * u, 14), '#9AA3AD') }

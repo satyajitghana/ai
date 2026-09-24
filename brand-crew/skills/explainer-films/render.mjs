@@ -212,9 +212,11 @@ const main = async () => {
       console.log(JSON.stringify(out))
     } else if (mode === 'thumb') {
       const out = opt.out || 'thumbs'; mkdirSync(out, { recursive: true })
-      const page = await openPage(browser), w = +(opt.w || 1200), q = +(opt.q || .72)
-      for (const f of files) {
-        const sb = loadSb(f)
+      const w = +(opt.w || 1200), q = +(opt.q || .72), queue = [...files]
+      await Promise.all(Array.from({ length: Math.min(Math.max(1, +(opt.workers || 3)), queue.length) }, async () => {
+      const page = await openPage(browser)
+      while (queue.length) {
+        const sb = loadSb(queue.shift())
         const r = await page.evaluate(({ sb, w, q }) => {
           const info = FILM.thumb(sb), src = document.getElementById('c'), h = Math.round(w * 630 / 1200)
           const c = document.createElement('canvas'); c.width = w; c.height = h
@@ -227,6 +229,7 @@ const main = async () => {
         writeFileSync(file, Buffer.from(r.url.split(',')[1], 'base64'))
         console.log(JSON.stringify({ slug: sb.slug, file, bytes: statSync(file).size, scene: r.scene, style: r.style, mascot: r.mascot }))
       }
+      }))
     } else if (mode === 'film') {
       const out = opt.out || 'out'; mkdirSync(out, { recursive: true })
       // pages are shared out between films; fewer films than pages means

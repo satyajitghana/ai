@@ -16,7 +16,9 @@ function roleOf(r) { return STYLE.font[r] || STYLE.font.body }
 // a style may set a floor (the pixel style: nothing under ~9 of its own pixels)
 function F(r, px) { const R = roleOf(r); return fnt(R.fam, R.w, Math.max(px * (R.k || 1), STYLE.minPx || 0)) }
 function caps(r, s) { return roleOf(r).caps ? String(s).toUpperCase() : String(s) }
-function measure(txt, f, ls = 0) { G.save(); G.font = f; G.letterSpacing = ls + 'px'; const w = G.measureText(txt).width; G.restore(); return w }
+// a style may space its letters (the pixel style: one of its pixels, or its
+// narrow capitals touch and "ff" reads as one letter)
+function measure(txt, f, ls = 0) { G.save(); G.font = f; G.letterSpacing = (ls + (STYLE.ls || 0)) + 'px'; const w = G.measureText(txt).width; G.restore(); return w }
 function wrap(str, f, maxW, ls = 0) {
   const ws = String(str).split(/\s+/).filter(Boolean), sp = measure(' ', f, ls), lines = []
   let cur = [], cw = 0
@@ -39,7 +41,7 @@ function fitR(r, str, maxPx, minPx, maxW, maxLines, lsK = 0) {
   const f = F(r, minPx); return { px: Math.max(minPx * k, STYLE.minPx || 0), f, ls: lsK * minPx, lines: wrap(str, f, maxW, lsK * minPx), str }
 }
 function text(str, x, y, f, col, o = {}) {
-  G.save(); G.font = f; G.letterSpacing = (o.ls || 0) + 'px'; G.textAlign = o.align || 'left'; G.textBaseline = o.base || 'alphabetic'
+  G.save(); G.font = f; G.letterSpacing = ((o.ls || 0) + (STYLE.ls || 0)) + 'px'; G.textAlign = o.align || 'left'; G.textBaseline = o.base || 'alphabetic'
   if (o.alpha != null) G.globalAlpha *= clamp(o.alpha)
   if (o.shadow) { G.fillStyle = o.shadow; G.fillText(str, x + (o.sx ?? 5), y + (o.sy ?? 6)) }
   G.fillStyle = col; G.fillText(str, x, y); G.restore()
