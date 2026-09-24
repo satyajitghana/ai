@@ -47,7 +47,7 @@ function text(str, x, y, f, col, o = {}) {
   G.fillStyle = col; G.fillText(str, x, y); G.restore()
 }
 // every scene writes through the style, which may glow, chalk or misregister it
-function write(str, x, y, f, col, o = {}) { (STYLE.write || text)(str, x, y, f, col, o) }
+function write(str, x, y, f, col, o = {}) { STYLE.write ? STYLE.write(str, x, y, f, col, o) : text(str, x, y, f, col, o) }
 // lines revealed left to right, like a pass of the pen
 function wipeLines(lt, b, x, y, lh, t0, gap, col, o = {}) {
   b.lines.forEach((line, i) => {

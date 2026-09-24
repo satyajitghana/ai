@@ -21,8 +21,13 @@
   const bgCol = () => (STYLE.dark ? P().bg : STYLE.paper)
   const tone = k => ({ a: P().a, b: P().b, hi: P().hi, light: P().light, ink: STYLE.ink }[k] || P().light)
   const luma = c => { const n = parseInt(c.slice(1), 16); return (.299 * (n >> 16 & 255) + .587 * (n >> 8 & 255) + .114 * (n & 255)) / 255 }
-  // text colour on a filled shape: the style's ink, except where fills are opaque and bright
-  const textOn = c => (STYLE.name === 'pixel' ? (luma(c) > .5 ? '#000000' : '#FFF1E8') : STYLE.ink)
+  // text colour on a filled shape: the style's ink, except where fills are
+  // opaque and bright (pixel), kept bright on a dark ground (pastel: light ink
+  // on a peach blob does not read, so there the ink is the ground, deepened),
+  // or printed solid and dark (riso knocks the text out to bare paper)
+  const textOn = c => STYLE.name === 'pixel' ? (luma(c) > .5 ? '#000000' : '#FFF1E8')
+    : STYLE.dark && STYLE.keepFill && luma(c) > .55 ? mixCol(P().bg, '#000000', .62)
+    : STYLE.knockout && luma(c) < STYLE.knockout ? STYLE.paper : STYLE.ink
 
   // beats laid end to end: each lasts its spoken line plus a breath, or its reading minimum
   function beatTimes(v, mins, lead = .35, gap = .5) {
@@ -297,7 +302,7 @@
     else {
       const tot = lb.lines.length * lb.px * 1.15 + (n.sb ? n.sb.px * (.3 + n.sb.lines.length) : 0), y0 = -tot / 2 + lb.px * .85 + (K === 'db' ? 10 : 0)
       lb.lines.forEach((l, i) => write(l.text, off, y0 + i * lb.px * 1.15, lb.f, tc, { align: 'center' }))
-      if (n.sb) n.sb.lines.forEach((l, i) => write(l.text, off, y0 + lb.lines.length * lb.px * 1.15 + n.sb.px * (.2 + i * 1.05), n.sb.f, STYLE.name === 'pixel' ? tc : (STYLE.subInk || STYLE.dim), { align: 'center' }))
+      if (n.sb) n.sb.lines.forEach((l, i) => write(l.text, off, y0 + lb.lines.length * lb.px * 1.15 + n.sb.px * (.2 + i * 1.05), n.sb.f, STYLE.name === 'pixel' || tc !== STYLE.ink ? tc : (STYLE.subInk || STYLE.dim), { align: 'center' }))
     }
     pop()
   }
@@ -407,10 +412,13 @@
     geo(sc) {
       // the top slab, and the output label above it, stay clear of the heading
       // however many lines it wraps to
-      const n = sc.layers.length, th = 46, cx = 660, wSlab = 620, dx = 58, dy = -30
+      // A repeat bracket and a side component both want the right-hand side:
+      // with both, the side component moves left of a narrower stack
+      const both = !!(sc.side && sc.repeat)
+      const n = sc.layers.length, th = 46, cx = both ? 760 : 660, wSlab = both ? 540 : 620, dx = 58, dy = -30
       const top = headBottom(sc.title) + (sc.output ? 236 : 120), gap = Math.min(100, (800 - top) / Math.max(1, n - 1))
       const ys = sc.layers.map((_, i) => 800 - i * gap)
-      return { n, th, cx, wSlab, dx, dy, ys, gap }
+      return { n, th, cx, wSlab, dx, dy, ys, gap, sideLeft: both }
     },
     draw(t, lt, sc, dur) {
       const bi = THUMB ? sc.steps.length - 1 : beatOf(sc, lt), step = sc.steps[bi] || {}, t0 = sc._b[bi], g = STACK.geo(sc)
@@ -446,11 +454,12 @@
       }
       if (sideOn) {
         const si = sc.steps.findIndex(s => s.side), k = THUMB ? 1 : seg(lt, sc._b[si], sc._b[si] + .4), to = sc.side.to ?? 0
-        const y = g.ys[to] - g.th / 2, bx = 1170, lb = fitR('body', sc.side.label, 32, 22, 280, 2), w = Math.max(...lb.lines.map(l => l.width)) + 60, h = lb.lines.length * lb.px * 1.15 + 44
+        const y = g.ys[to] - g.th / 2, lb = fitR('body', sc.side.label, 32, 22, 280, 2), w = Math.max(...lb.lines.map(l => l.width)) + 60, h = lb.lines.length * lb.px * 1.15 + 44
+        const bx = g.sideLeft ? g.cx - g.wSlab / 2 - 60 - w / 2 : 1170
         G.save(); G.globalAlpha *= clamp(k * 2)
         STYLE.shape(rrPts(bx - w / 2, y - h / 2, w, h, 16), { fill: P().hi, sw: 1.2 })
         lb.lines.forEach((l, i) => write(l.text, bx, y - h / 2 + 22 + lb.px * .85 + i * lb.px * 1.15, lb.f, textOn(P().hi), { align: 'center' }))
-        const from = [bx - w / 2 - 12, y], toP = [g.cx + g.wSlab / 2 + g.dx * .5 + 18, y - 6]
+        const from = g.sideLeft ? [bx + w / 2 + 12, y] : [bx - w / 2 - 12, y], toP = g.sideLeft ? [g.cx - g.wSlab / 2 - 14, y - 6] : [g.cx + g.wSlab / 2 + g.dx * .5 + 18, y - 6]
         drawEdge({ _pts: partial([from, toP], 1), A: null, B: null }, easeOut(k), P().a)
         G.restore()
       }
