@@ -57,4 +57,16 @@ export function filmSha(sb, date) {
   return createHash('sha256').update(engineSha() + '\n' + date + '\n' + canon(sb) + '\n' + JSON.stringify(lexiconFor(sb))).digest('hex').slice(0, 16)
 }
 
+// what metrics.json was measured from: the type code, the fonts, and the
+// lines of styles.js that choose a style's fonts or space its letters (not
+// its palettes or media, which change far more often and move no glyph).
+// The checker warns when the table is older than these.
+export function fontsSha() {
+  const h = createHash('sha256')
+  const fonts = readdirSync(join(SKILL_DIR, 'fonts')).filter(f => f.endsWith('.woff2')).sort().map(f => `fonts/${f}`)
+  for (const f of ['engine/type.js', ...fonts]) { h.update(f + '\0'); h.update(readFileSync(join(SKILL_DIR, f))) }
+  h.update(readFileSync(join(SKILL_DIR, 'engine/styles.js'), 'utf8').split('\n').filter(l => /\bfont:\s*\{|\bls:|\bminPx\b/.test(l)).join('\n'))
+  return h.digest('hex').slice(0, 16)
+}
+
 export const rel = p => relative(ROOT, p)

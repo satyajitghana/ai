@@ -34,6 +34,8 @@ const STYLES = (() => {
   }
   const P = () => STYLE.P, P0 = P
   const lumOf = c => { const n = parseInt(c.slice(1), 16); return (.299 * (n >> 16 & 255) + .587 * (n >> 8 & 255) + .114 * (n & 255)) / 255 }
+  // the colour a multiply lay-down leaves: `c` on paper `p`
+  const mulCol = (c, p) => { const a = parseInt(c.slice(1), 16), b = parseInt(p.slice(1), 16); return '#' + [16, 8, 0].map(s => Math.round((a >> s & 255) * (b >> s & 255) / 255).toString(16).padStart(2, '0')).join('') }
   const lenOf = pts => { let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return L }
 
   // ------------------------------------------------------------- watercolour
@@ -403,10 +405,20 @@ const STYLES = (() => {
       // stipple) paints its colours part-way to the paper to keep them readable
       // every medium keeps its fills readable under its own ink: on paper a
       // fill is lifted until dark text reads on it, on a dark ground it is
-      // sunk until light text does; a dense medium (tint) starts further along
+      // sunk until light text does; a dense medium (tint) starts further along.
+      // What is judged is the colour that lands, not the one asked for: the
+      // medium paints darker than its colour (PB.landed measures by how much)
+      // and multiplying onto toned paper darkens it again. So a fill is lifted
+      // toward white, since lifting it toward the paper would count the
+      // paper's tone twice; a medium that can never land light enough (heavy
+      // charcoal) stops at the lightest it can. Ruled hatching and washes land
+      // lighter on average than their colour, but a full-strength stroke still
+      // crosses the letters, so a fill is judged by the darker of the two
       let fill = o.fill
       if (fill && !this.keepFill) {
-        const to = this.paper || P0().bg, ok = c => this.dark ? lumOf(c) <= .6 : lumOf(c) >= .68
+        const paper = this.paper || P0().bg, mul = !this.dark && !this.cover, to = mul ? '#FFFFFF' : paper
+        const seen = c => !mul ? lumOf(c) : Math.min(lumOf(mulCol(c, paper)), PB.ok ? PB.landed(this.fill, lumOf(c)) * lumOf(paper) : 1)
+        const ok = c => this.dark ? seen(c) <= .6 : seen(c) >= .68
         let k = this.tint || 0; while (!ok(mixCol(fill, to, k)) && k < .85) k += .05
         fill = mixCol(fill, to, k)
       }
