@@ -636,8 +636,13 @@
       const caseMatters = /[a-z]/.test(sc.value)
       const vb = fitR(caseMatters ? 'body' : 'head', sc.value, 290, 100, 1100, 1), vw = vb.lines[0].width, vy = 200 + vb.px * .82
       STYLE.shape(ellPts(M + vw / 2, vy - vb.px * .32, vw / 2 + 110, vb.px * .55, 30), { fill: P().a, op: .5 * easeOut(seg(lt, 0, .4)), ink: null })
-      const k = THUMB ? 1 : seg(lt, .15, sc._t.land), shown = RF_COUNT(sc.value, k)
-      push(); translate(M, vy); scale(1 + .06 * spring(lt, sc._t.land, 8, 26)); write(caps(caseMatters ? 'body' : 'head', shown), 0, 0, vb.f, STYLE.ink, { alpha: easeOut(seg(lt, .1, .3)) }); pop()
+      // the figure is written on left to right, never counted up: an odometer's
+      // in-between frames are numbers nobody published
+      const k = THUMB ? 1 : easeOut(seg(lt, .15, sc._t.land))
+      push(); translate(M, vy); scale(1 + .06 * spring(lt, sc._t.land, 8, 26))
+      G.save(); G.beginPath(); G.rect(-30, -vb.px * 1.3, (vw + 60) * k, vb.px * 1.8); G.clip()
+      write(caps(caseMatters ? 'body' : 'head', sc.value), 0, 0, vb.f, STYLE.ink, { alpha: easeOut(seg(lt, .1, .3)) })
+      G.restore(); pop()
       const lb = fitR('body', sc.label, 56, 36, 1120, 2)
       wipeLines(THUMB ? 99 : lt, lb, M, vy + 70 + lb.px, lb.px * 1.18, .5, .14, STYLE.ink)
       stamp(lt, 1.2, sc.stamp, Math.min(M + vw * 1.06 + 170, 1320), vy - vb.px * .55)
@@ -662,7 +667,7 @@
         lb.lines.forEach((l, li) => write(l.text, x0 - 30, y + rowH * .5 - (lb.lines.length - 1) * lb.px * .55 + li * lb.px * 1.1 + lb.px * .35, lb.f, STYLE.ink, { align: 'right' }))
         const col = it.hl ? P().a : P().b
         boilSeed('bar' + i); STYLE.shape(rectPts(x0, y + rowH * .18, w, rowH * .64), { fill: col, op: .85, sw: 1 })
-        write(RF_COUNT(String(it.value), k) + (sc.unit || ''), x0 + w + 20, y + rowH * .5 + 18, F('head', 48), STYLE.ink, { alpha: k })
+        write(String(it.value) + (sc.unit || ''), x0 + w + 20, y + rowH * .5 + 18, F('head', 48), STYLE.ink, { alpha: k })
       })
       stamp(lt, .6 + n * .35, sc.stamp, 1260, 250)
       note(lt, sc.note, 1 + n * .35)
@@ -762,16 +767,6 @@
       host(t, { x: 1610, u: 94, mood: 'happy', wave: lt > sc._b[1], look: -.3, ...j })
       if (k2 > 0) write(`— ${MASCOT.name}`, M, 1010, F('body', 34), STYLE.dim, { alpha: k2 })
     },
-  }
-
-  // the odometer: intermediate values keep the target's decimals and grouping
-  const RF_COUNT = (str, k) => {
-    const m = String(str).match(/^([^\d\-]*)(-?[\d,]*\.?\d+)(.*)$/)
-    if (!m || k >= 1) return str
-    const raw = m[2], dec = raw.includes('.') ? raw.split('.')[1].length : 0, v = parseFloat(raw.replace(/,/g, '')) * easeOut(k)
-    let s = v.toFixed(dec)
-    if (raw.includes(',')) { const [i, d] = s.split('.'); s = i.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (d ? '.' + d : '') }
-    return m[1] + s + m[3]
   }
 
   const SCENES = { title: TITLE, idea: IDEA, diagram: DIAGRAM, stack: STACK, steps: STEPS, compare: COMPARE, grid: GRID, equation: EQUATION, stat: STAT, bars: BARS, tally: TALLY, quote: QUOTE, takeaway: TAKEAWAY, end: END }
