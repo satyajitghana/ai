@@ -180,9 +180,12 @@ is under it), and chalkboard, blueprint and notebook draw their lines and
 fills with real pastel, rotring, pen and marker. Three brushes are ours,
 built from p5.brush's parts: `sumi` (a round ink brush that swells and lifts),
 `nib` (a broad nib at 45 degrees) and `stipple`. p5.brush needs
-WebGL2; with no GPU, Chromium runs it on SwiftShader (`render.mjs` passes the
-flags), where one wash costs 0.1-3 s depending on its area, far too slow to
-paint per frame. So each shape and line is painted once, alone, on white, and
+WebGL2; with no GPU, `render.mjs` runs it on Mesa llvmpipe through a private
+Xvfb, falling back to SwiftShader, and even there a wash costs tens to
+hundreds of milliseconds, far too slow to paint per frame. The vendored copy
+carries one local patch, noted at its head: its blend pass read a texel past
+the region it had copied, which on llvmpipe drew a thin grey line beside every
+stroke on a dark ground. So each shape and line is painted once, alone, on white, and
 kept, keyed by its geometry; a frame lays the kept paintings down with
 `multiply`, which is what transparent pigment on paper does. Fades apply
 opacity at lay-down and a highlight sweeping on is the finished painting
