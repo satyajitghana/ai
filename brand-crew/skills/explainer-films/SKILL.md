@@ -69,11 +69,11 @@ parentheses, no code punctuation, numbers the way a person says them
 
 **Names have to be sayable.** The voice (Kokoro) spells out any word missing
 from its dictionary, which is how "Qwen" came out "Q-wen". `audio.py`'s
-`PRONOUNCE` table says how to read model and product names (Qwen, CUDA,
+`pronounce.json` table says how to read model and product names (Qwen, CUDA,
 LiDAR, llama.cpp…), and `build.mjs` refuses to voice a film with a name or
 acronym the voice would have to guess. Before you finish a storyboard, run
 `python3 brand-crew/skills/explainer-films/audio.py words`: it lists every such
-word with the guess. Add a line to `PRONOUNCE` for each (misaki phonemes; copy
+word with the guess. Add a line to `pronounce.json` for each (misaki phonemes; copy
 the style of the entries there) rather than respelling the name in `say`,
 because the captions show `say` as written.
 

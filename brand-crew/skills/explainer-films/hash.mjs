@@ -42,8 +42,19 @@ function canon(v) {
   return JSON.stringify(v)
 }
 
+// The pronunciation table is data, not engine: a film depends only on the
+// entries its own narration (or its host's name, said in the sign-off) uses,
+// so a name added for one film does not make every other film stale.
+let LEX = null
+function lexiconFor(sb) {
+  if (!LEX) { const all = JSON.parse(readFileSync(join(SKILL_DIR, 'pronounce.json'), 'utf8')); LEX = Object.entries(all).filter(([k]) => !k.startsWith('_')) }
+  const said = JSON.stringify(sb)
+  const esc = k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return LEX.filter(([k]) => new RegExp(`(?<![\\w.])${esc(k)}(?![\\w])`).test(said)).sort(([a], [b]) => (a < b ? -1 : 1))
+}
+
 export function filmSha(sb, date) {
-  return createHash('sha256').update(engineSha() + '\n' + date + '\n' + canon(sb)).digest('hex').slice(0, 16)
+  return createHash('sha256').update(engineSha() + '\n' + date + '\n' + canon(sb) + '\n' + JSON.stringify(lexiconFor(sb))).digest('hex').slice(0, 16)
 }
 
 export const rel = p => relative(ROOT, p)

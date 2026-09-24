@@ -44,44 +44,10 @@ UNITS = [
 # Words the voice gets wrong, in misaki's phoneme alphabet: Kokoro reads
 # `[word](/phonemes/)` as an override. A word missing from misaki's dictionary
 # is otherwise spelled out letter by letter ("Qwen" came out "Q-wen"), and some
-# it knows it spells when people don't (CUDA, LiDAR). `python3 audio.py words`
-# lists every narrated word the voice does not know; add those here.
-PRONOUNCE = {
-    "Qwen": "kwˈɛn", "Kimi": "kˈimi", "Mixtral": "mˈɪkstɹᵊl", "Ollama": "Olˈɑmə", "LLaMA": "lˈɑmə", "Kokoro": "kˈOkəɹO",
-    "CUDA": "kˈudə", "ROCm": "ɹˈɑkəm", "Vulkan": "vˈʌlkən", "JAX": "ʤˈæks", "PyTorch": "pˈItˌɔɹʧ", "ONNX": "ˈɑnɪks",
-    "LangChain": "lˈæŋʧˌAn", "SGLang": "ˌɛsʤˈi lˈæŋ", "llama.cpp": "lˈɑmə dˈɑt sˌipˌipˈi",
-    "LiDAR": "lˈIdɑɹ", "RANSAC": "ɹˈænsæk", "COLMAP": "kˈOlmæp", "NeRF": "nˈɜɹf", "DINOv": "dˈinO vˈi",
-    "ViT": "vˈɪt", "RoPE": "ɹˈOp", "SwiGLU": "swˈɪɡlu", "MoE": "ˌɛmˌOˈi", "YAML": "jˈæməl", "JSON": "ʤˈAsᵊn",
-    "Gaussian": "ɡˈWsiən", "Gaussians": "ɡˈWsiənz", "softmax": "sˈɔftmˌæks", "Softmax": "sˈɔftmˌæks",
-    "logits": "lˈɑʤɪts", "tokenizer": "tˈOkənˌIzəɹ", "tokenizers": "tˈOkənˌIzəɹz", "detokenize": "ditˈOkənˌIz",
-    "Laguna": "læɡˈunə", "Lanyon": "lˈænjən", "Leanstral": "lˈinstɹˌɑl", "LeVJEPA": "lə vˈi ʤˈɛpə", "SIGReg": "sˈɪɡ ɹˈɛɡ", "Pareas": "pˈɛɹiəs",
-    "simdjson": "sˈɪmdˌi ʤˈAsᵊn",
-    "Sinkhorn": "sˈɪŋkhɔɹn", "FoX": "fˈɑks", "Zhang": "ʤˈɑŋ", "Khattab": "kətˈɑb", "HauhauCS": "hˈWhˌW sˌiˈɛs", "Hy": "ˌAʧwˈI", "HY": "ˌAʧwˈI",
-    "Detokenize": "ditˈOkənˌIz",
-    "Gigatoken": "ɡˈɪɡətˌOkən", "XSTest": "ˌɛksˈɛs tˈɛst", "GLiNER": "ɡlˈɪnəɹ", "GEPA": "ɡˈɛpə", "SIMD": "sˈɪmdˌi",
-    "Noul": "nˈul", "Nemotron": "nˈɛmətɹˌɑn", "dMel": "dˈi mˈɛl", "Instella": "ɪnstˈɛlə", "Mobius": "mˈObiəs",
-    "HumanEval": "hjˈumən ɪvˈæl", "iLLaDA": "ˈI lˈɑdə", "LLaDA": "lˈɑdə", "SWE": "swˈi",
-    "Verified": "vˈɛɹəfˌId", "Unembed": "ˌʌnɛmbˈɛd", "Backpropagate": "bˌækpɹˈɑpəɡˌAt",
-    "Flex-π": "flˈɛks pˈI", "π": "pˈI",
-    "webctl": "wˈɛb kəntɹˈOl", "fastbrowse": "fˈæst bɹˈWz", "djev": "dˈi ʤˈɛv", "DiT": "dˈɪt", "FiLM": "fˈɪlm", "XGEN": "ˈɛks ʤˈɛn",
-    "Cinference": "sˈi ˈɪnfəɹəns", "PhD": "pˌiˌAʧdˈi", "SKILL.md": "skˈɪl dˈɑt ˌɛmdˈi", "Argmax": "ˈɑɹɡmˌæks", "argmax": "ˈɑɹɡmˌæks", "ZeRO": "zˈɪɹO",
-    "Limite": "lˈimitˌA", "Violetto": "vˌiOlˈɛtO", "Kev": "kˈɛv", "MoVA": "mˈOvə", "README": "ɹˈidmˌi",
-    "AuK": "ˈɔk", "Omni": "ˈɑmni", "Telecom": "tˈɛləkˌɑm", "Girard": "ʒəɹˈɑɹd", "Lucene": "lusˈin", "Elasticsearch": "əlˈæstɪksˌɜɹʧ",
-    "Walsh": "wˈɔlʃ", "Hadamard": "ˌhædəmˈɑɹ",
-    # hosts: every film's sign-off says the host's name
-    "Nacho": "nˈɑʧO", "Bramblewood": "bɹˈæmbᵊlwˌʊd", "Chive": "ʧˈIv", "Cosmo": "kˈɑzmO", "Donut": "dˈOnˌʌt",
-    "Jellybean": "ʤˈɛlibˌin", "Yoyo": "jˈOjO", "Ziggy": "zˈɪɡi",
-    "Fara": "fˈɑɹə", "Kalman": "kˈælmən", "Vicuna": "vɪkjˈunə", "Robomimic": "ɹˈObOmˌɪmɪk", "Extropic": "ɛkstɹˈɑpɪk", "Extropic's": "ɛkstɹˈɑpɪks",
-    "Microsoft": "mˈIkɹəsˌɔft", "Tanh": "tˈænʧ", "tanh": "tˈænʧ", "Livox": "lˈIvˌɑks",
-    "cuda": "kˈudə", "MNIST": "ˈɛmnˌɪst", "CIFAR": "sˈIfɑɹ", "Darwin": "dˈɑɹwᵊn", "Markov": "mˈɑɹkɔf", "DCFormer": "dˌisˈi fˈɔɹməɹ",
-    "Backprop": "bˈækpɹˌɑp", "backprop": "bˈækpɹˌɑp",
-    "Tencent": "tˈɛnsˈɛnt", "Hunyuan": "hwˈʊnjuˈɛn", "Alibaba": "ˌæləbˈɑbə", "Kaggle": "kˈæɡᵊl", "Gödel": "ɡˈɜdᵊl",
-    "Goodfire": "ɡˈʊdfˌIəɹ", "Weng": "wˈʌŋ", "Apodex": "ˈæpədˌɛks", "GDPval": "ʤˌidˌipˈi vˈæl", "Antidoom": "ˈæntidˌum",
-    "AIRA": "ˈIɹə", "ABot": "ˈAbˌɑt", "DFly": "dˈi flˈI",
-    "Colibri": "kˌOlibɹˈi", "Cornell": "kɔɹnˈɛl", "Elo": "ˈilO", "Unsloth": "ʌnslˈɔθ", "Readahead": "ɹˈidəhˌɛd",
-    "Jev": "ʤˈɛv", "Jev's": "ʤˈɛvz", "AgentJev": "ˈAʤənt ʤˈɛv", "Laya": "lˈɑjə", "Machina": "mˈækɪnə",
-    "Arcee": "ˈɑɹsi", "cua": "sˌijˌuˈA", "Musou": "mˈusO", "Spirula": "spˈɪɹjələ", "Tinfield": "tˈɪnfˌild",
-}
+# it knows it spells when people don't (CUDA, LiDAR). The table is data,
+# pronounce.json, so adding a name re-renders only the films that say it;
+# `python3 audio.py words` lists every narrated word the voice does not know.
+PRONOUNCE = {k: v for k, v in json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pronounce.json"), encoding="utf-8")).items() if not k.startswith("_")}
 _PRON = re.compile(r"(?<![\w.])(" + "|".join(re.escape(k) for k in sorted(PRONOUNCE, key=len, reverse=True)) + r")((?:'|’)s)?(?![\w])")
 def _say(m):
     w, poss = m.group(1), m.group(2)
