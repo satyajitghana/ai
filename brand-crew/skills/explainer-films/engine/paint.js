@@ -3,13 +3,14 @@
 // The base (brand-crew/skills/claude-animation-base) paints with p5.brush on
 // WebGL. On a machine with no GPU that runs in software, and a frame with a few
 // watercolour fills took 44-91 s here. This file keeps the base's API — paint(),
-// inkLine(), rectPts(), glow(), letter(), boilSeed(), push/translate/… — so its
-// character (clawd.js) and scene idioms run unchanged, but paints in Canvas2D:
+// inkLine(), rectPts(), glow(), boilSeed(), push/translate/… — but paints in
+// Canvas2D. (The watercolour style does use real p5.brush, through
+// brushbake.js, which paints each shape once and reuses the painting; these
+// washes are its fallback when there is no WebGL.)
 //
 //   wash       flat pigment, opaque
 //   fill       watercolour: the outline deformed a dozen times at low opacity
-//              and glazed with multiply, so layers pool darker at the edges and
-//              pigments mix like pigment (yellow over blue goes green)
+//              and glazed, so layers pool at the edges
 //   hatch      rough parallel strokes clipped to the shape
 //   ink        a tapered ribbon along the path with ragged edges and a
 //              pressure curve; 'dry' is five broken bristle lines instead
@@ -19,8 +20,12 @@
 // wash that doesn't move doesn't re-boil — which is also what keeps a painted
 // film small enough to ship.
 //
-// World coordinates are the base's 1920x1080; the canvas is 1280x720.
-const W = 1920, H = 1080, OUT_W = 1280, OUT_H = 720, SCALE = OUT_W / W;
+// World coordinates are the base's 1920x1080; the canvas is 1280x720. A style
+// (styles.js) owns what is under the world (paper, a chalkboard, a blueprint
+// grid) and what is over it (grain, dust), and may paint the whole frame at a
+// lower resolution and scale it up with hard edges (the pixel style).
+const W = 1920, H = 1080, OUT_W = 1280, OUT_H = 720;
+let SCALE = OUT_W / W;
 const PROJECT = window.PROJECT || { bpm: 120, offset: 0, duration: 30 };
 const BPM = PROJECT.bpm, BEAT = 60 / BPM, OFF = PROJECT.offset || 0, BOIL = 12;
 let DUR = PROJECT.duration;
@@ -40,7 +45,7 @@ const backOut = x => { x = clamp(x); if (x === 0 || x === 1) return x; const s =
 const hash = i => { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
 const bpOf = t => (t - OFF) / BEAT;
 const jit = a => (random() * 2 - 1) * a;
-let BOILN = 0, CLAWD_N = 0;
+let BOILN = 0;
 const boilSeed = key => { let h = 2166136261; for (const c of key + '|' + BOILN) h = Math.imul(h ^ c.charCodeAt(0), 16777619); randomSeed(h >>> 0); };
 const seg = (t, a, b) => clamp((t - a) / (b - a));
 const frac = x => x - Math.floor(x);
@@ -336,19 +341,6 @@ function paint(pts, o = {}) {
 }
 function inkLine(pts, sw = 1, col = PAL.ink, br = 'ink', curv = .5) { strokePath(pts, false, sw, col, br, curv); }
 
-// a brush.* shim for the one place clawd.js calls p5.brush directly
-const brush = (() => {
-  let st = { br: 'ink', col: PAL.ink, sw: 1 }, verts = [], curv = 0;
-  return {
-    noFill() {}, noWash() {}, noHatch() {}, noStroke() {},
-    set(br, col, sw) { st = { br, col, sw }; },
-    beginShape(c) { verts = []; curv = c || 0; },
-    vertex(x, y) { verts.push([x, y]); },
-    endShape(close) { strokePath(verts, !!close, st.sw, st.col, st.br, curv); verts = []; },
-    spline(pts, c) { strokePath(pts, false, st.sw, st.col, st.br, c); },
-  };
-})();
-
 // ---------- light and full-frame effects ----------
 function glow(x, y, r, col = '#FFC766', a = 1) {
   if (a <= 0 || r < 1) return;
@@ -396,44 +388,35 @@ function flushLetters() {
   G.save(); G.setTransform(SCALE, 0, 0, SCALE, 0, 0); drawLetters(G); G.restore(); LETTERS = [];
 }
 
-// ---------- paper and grain (the base's recipes, at output size) ----------
-function lcg(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
-function makePaper() {
-  const c0 = document.createElement('canvas'); c0.width = OUT_W; c0.height = OUT_H;
-  const c = c0.getContext('2d'), rnd = lcg(11); c.scale(SCALE, SCALE);
-  c.fillStyle = PAL.paper; c.fillRect(0, 0, W, H);
-  for (let i = 0; i < 70; i++) { const x = rnd() * W, y = rnd() * H, r = 120 + rnd() * 380, gr = c.createRadialGradient(x, y, 0, x, y, r), a = .045 * rnd(); gr.addColorStop(0, `rgba(160,125,80,${a})`); gr.addColorStop(1, 'rgba(160,125,80,0)'); c.fillStyle = gr; c.fillRect(x - r, y - r, 2 * r, 2 * r); }
-  c.lineWidth = 1;
-  for (let i = 0; i < 1400; i++) { const x = rnd() * W, y = rnd() * H, l = 6 + rnd() * 26, a = rnd() * TAU; c.strokeStyle = `rgba(110,88,60,${.035 + rnd() * .06})`; c.beginPath(); c.moveTo(x, y); c.quadraticCurveTo(x + Math.cos(a + .6) * l * .5, y + Math.sin(a + .6) * l * .5, x + Math.cos(a) * l, y + Math.sin(a) * l); c.stroke(); }
-  return c0;
-}
-function makeGrain() {
-  const cv = document.createElement('canvas'); cv.width = OUT_W; cv.height = OUT_H; const c = cv.getContext('2d'), rnd = lcg(5);
-  const id = c.createImageData(OUT_W, OUT_H), d = id.data;
-  for (let i = 0; i < d.length; i += 4) { const v = 255 - (rnd() < .55 ? rnd() * rnd() * 26 : 0); d[i] = v; d[i + 1] = v - 1; d[i + 2] = v - 3; d[i + 3] = 255; }
-  c.putImageData(id, 0, 0);
-  const g = c.createRadialGradient(OUT_W / 2, OUT_H / 2, OUT_H * .45, OUT_W / 2, OUT_H / 2, OUT_H * 1.05); g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(1, 'rgba(120,95,70,.3)');
-  c.fillStyle = g; c.fillRect(0, 0, OUT_W, OUT_H);
-  return cv;
-}
-
 // ---------- frame ----------
-let T = 0;
+let T = 0, MAIN = null, LO = null;
 function paintInit(canvas) {
   CV = canvas; CV.width = OUT_W; CV.height = OUT_H;
-  G = CV.getContext('2d');
-  paperC = makePaper(); grainC = makeGrain();
+  MAIN = G = CV.getContext('2d');
 }
-// draw(fn): paper, the world, the letters, the grain
-function paintFrame(t, world) {
+function lcg(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+// paintFrame(t, world, S): the style's ground, the world, the letters, the
+// style's overlay; at S.lowres, all of it on a small canvas scaled up hard-edged
+function paintFrame(t, world, S) {
   T = t; LETTERS = []; CAM = null;
-  G.setTransform(1, 0, 0, 1, 0, 0); G.globalCompositeOperation = 'source-over'; G.globalAlpha = 1;
-  G.drawImage(paperC, 0, 0);
-  G.setTransform(SCALE, 0, 0, SCALE, 0, 0);
-  BOILN = Math.floor(t * BOIL + 1e-6); CLAWD_N = 0; boilSeed('frame');
+  let w = OUT_W, h = OUT_H
+  if (S.lowres) {
+    if (!LO || LO.width !== S.lowres[0]) { LO = document.createElement('canvas'); LO.width = S.lowres[0]; LO.height = S.lowres[1] }
+    G = LO.getContext('2d'); w = LO.width; h = LO.height
+  } else G = MAIN
+  SCALE = w / W
+  G.setTransform(1, 0, 0, 1, 0, 0); G.globalCompositeOperation = 'source-over'; G.globalAlpha = 1; G.imageSmoothingEnabled = true
+  S.ground(G, w, h)
+  G.setTransform(SCALE, 0, 0, SCALE, 0, 0)
+  BOILN = Math.floor(t * BOIL + 1e-6); boilSeed('frame');
   world(t);
   flushLetters();
-  G.setTransform(1, 0, 0, 1, 0, 0);
-  G.globalCompositeOperation = 'multiply'; G.drawImage(grainC, 0, 0);
+  G.setTransform(1, 0, 0, 1, 0, 0); G.globalAlpha = 1
+  S.over(G, w, h)
   G.globalCompositeOperation = 'source-over';
+  if (S.lowres) {
+    if (S.quantize) S.quantize(G, w, h)
+    MAIN.setTransform(1, 0, 0, 1, 0, 0); MAIN.imageSmoothingEnabled = false
+    MAIN.drawImage(LO, 0, 0, OUT_W, OUT_H); G = MAIN; SCALE = OUT_W / W
+  }
 }

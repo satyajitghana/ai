@@ -14,6 +14,7 @@ import type { Publication } from "@/data/publications"
 import type { Article as ContentArticle, BlogPost, Project } from "@/lib/content"
 import { absoluteUrl, siteUrl } from "@/lib/site"
 import { getFilm, isoDuration } from "@/lib/films"
+import { isAbsolute } from "@/lib/media"
 
 // Centralized JSON-LD builders (schema-dts-typed). Injected via <JsonLd /> with
 // the `<` escape the Next.js json-ld guide requires.
@@ -163,7 +164,7 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
       const cites = citationsFromBody(article.body)
       return cites.length ? { citation: cites } : {}
     })(),
-    // The Receipts film, when the article has one: its transcript is the text
+    // The explainer film, when the article has one: its transcript is the text
     // of every frame, so an engine that can't watch it can still read it.
     ...(() => {
       const film = getFilm(article.slug)
@@ -172,10 +173,10 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
         video: {
           "@type": "VideoObject" as const,
           name: article.title,
-          description: `A ${Math.round(film.duration)}-second narrated summary of the article, painted in code.`,
+          description: `A ${Math.round(film.duration)}-second narrated explainer of the article, drawn in code.`,
           transcript: film.transcript,
-          thumbnailUrl: absoluteUrl(film.poster),
-          contentUrl: absoluteUrl(film.src),
+          thumbnailUrl: isAbsolute(film.poster) ? film.poster : absoluteUrl(film.poster),
+          contentUrl: isAbsolute(film.src) ? film.src : absoluteUrl(film.src),
           uploadDate: film.rendered,
           duration: isoDuration(film.duration),
           width: `${film.width}`,

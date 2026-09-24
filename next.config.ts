@@ -32,6 +32,7 @@ const nextConfig: NextConfig = {
       "./public/**/*.mov",
       "./public/**/*.pdf",
       "./public/**/*.bin",
+      "./public/**/*.vtt",
       // onnxruntime-web is ~140 MB of WASM and a browser runtime by definition:
       // it must never reach a server function. Without this the tracer can pull
       // it into every route reachable from a component that imports it, and

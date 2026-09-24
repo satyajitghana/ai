@@ -6,7 +6,7 @@ description: >-
   dances and props, painted with p5.brush watercolour and boiling ink, rendered
   frame by frame in headless Chrome. Use it to make a bespoke painted short, to
   learn the animation rules its guide teaches (reads, timing, anticipation,
-  transitions), or as the character library behind receipt-films. Read
+  transitions), or to see where explainer-films' painter comes from. Read
   ANIMATION_GUIDE.md before drawing anything.
 ---
 
@@ -23,7 +23,7 @@ Two ways it is used on this site:
    `npm install` here, then `node render.mjs --clip --out=out/video.mp4`. On a machine with no GPU, set
    `NO_GPU=1` and expect p5.brush watercolour fills to cost tens of seconds a frame in software WebGL;
    upstream's README says as much, and it is why the next use exists.
-2. **The character behind every Receipts film.** `brand-crew/skills/receipt-films/engine/paint.js`
-   re-implements this kit's drawing API (`paint`, `inkLine`, `rectPts`, `glow`, `letter`, `boilSeed`,
-   the p5 transform calls) in Canvas2D, and loads `src/clawd.js` from here unchanged. Frames paint in
-   about a tenth of a second on four CPU cores instead of a minute.
+2. **The painter behind explainer films.** `brand-crew/skills/explainer-films/engine/paint.js`
+   re-implements this kit's drawing API (`paint`, `inkLine`, `rectPts`, `glow`, `boilSeed`, the p5
+   transform calls) in Canvas2D, so a frame paints in about a tenth of a second on four CPU cores
+   instead of a minute. The films' hosts are that engine's own animals, not Clawd.

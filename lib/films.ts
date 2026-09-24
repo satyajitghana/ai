@@ -1,7 +1,9 @@
 import manifest from "@/data/.generated/films.json"
+import { mediaUrl } from "@/lib/media"
 
-// Receipts films: a painted, narrated summary of an article, rendered from a
-// storyboard (data/films/<slug>.json) by brand-crew/skills/receipt-films.
+// Explainer films: a drawn, narrated explanation of how an article's subject
+// works, rendered from a storyboard (data/films/<slug>.json) by
+// brand-crew/skills/explainer-films.
 //
 // Read from the committed manifest, never from public/ — the page must not
 // touch public/ with fs (it drags the whole directory into the function
@@ -20,23 +22,26 @@ export type Film = {
   rendered: string
   /** Every word the narrator says, in order. */
   transcript: string
+  /** Painted at 320x180 and shipped at 640x360: scale it up with hard edges. */
+  pixel: boolean
 }
 
-type Entry = { duration: number; rendered: string; transcript: string }
+type Entry = { duration: number; rendered: string; transcript: string; style?: string }
 const films = (manifest as { films: Record<string, Entry> }).films
 
 export function getFilm(slug: string): Film | null {
   const f = films[slug]
   if (!f) return null
   return {
-    src: `/films/${slug}.mp4`,
-    poster: `/films/${slug}-poster.webp`,
+    src: mediaUrl(`/films/${slug}.mp4`),
+    poster: mediaUrl(`/films/${slug}-poster.webp`),
     captions: `/films/${slug}.vtt`,
     duration: f.duration,
     width: 960,
     height: 540,
     rendered: f.rendered,
     transcript: f.transcript,
+    pixel: f.style === "pixel",
   }
 }
 
