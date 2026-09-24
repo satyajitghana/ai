@@ -10,13 +10,13 @@ import { fileURLToPath } from 'node:url'
 export const SKILL_DIR = dirname(fileURLToPath(import.meta.url))
 export const ROOT = join(SKILL_DIR, '..', '..', '..')
 
-// Everything that shapes a film: the painter and the scenes, the page they run
-// in, the renderer's encode settings, the sound (voice, effects, score, mix),
-// the fonts, and the character, which lives in the vendored base.
-// Not SKILL.md, not this file.
+// Everything that shapes a film: the painter, the styles, the hosts and the
+// scenes, the vendored p5.brush that paints the watercolour style, the page
+// they run in, the renderer's encode and GPU settings, the sound (voice,
+// effects, scores, mix) and the fonts. Not SKILL.md, not this file.
 function engineFiles() {
-  const out = ['studio-painted.html', 'render.mjs', 'audio.py', '../claude-animation-base/src/clawd.js']
-  for (const d of ['engine', 'fonts']) for (const f of readdirSync(join(SKILL_DIR, d)).sort()) if (/\.(js|woff2)$/.test(f)) out.push(`${d}/${f}`)
+  const out = ['studio.html', 'render.mjs', 'audio.py']
+  for (const d of ['engine', 'engine/vendor', 'fonts']) for (const f of readdirSync(join(SKILL_DIR, d)).sort()) if (/\.(js|woff2)$/.test(f)) out.push(`${d}/${f}`)
   return out.sort()
 }
 

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react"
 
 import type { Film } from "@/lib/films"
 
-// The article's Receipts film, at the top of the page.
+// The article's explainer film, at the top of the page.
 //
 // Two ways to watch it, because they want opposite things:
 //   ambient   muted and looping, playing only while it is on screen — the
@@ -85,7 +85,7 @@ export function ArticleFilm({ film, title }: { film: Film; title: string }) {
       <div className="relative">
         <video
           ref={ref}
-          className="aspect-video w-full rounded-md border bg-muted"
+          className={`aspect-video w-full rounded-md border bg-muted${film.pixel ? " [image-rendering:pixelated]" : ""}`}
           width={film.width}
           height={film.height}
           poster={film.poster}
@@ -129,7 +129,7 @@ export function ArticleFilm({ film, title }: { film: Film; title: string }) {
         ) : null}
       </div>
       <figcaption className="mt-2 font-mono text-xs text-muted-foreground">
-        A {secs}-second narrated summary, painted in code. Every figure in it is
+        A {secs}-second narrated explainer, drawn in code. Every figure in it is
         this article&apos;s own; the sources are below.
         <details className="mt-1">
           <summary className="cursor-pointer select-none">transcript</summary>

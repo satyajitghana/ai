@@ -9,6 +9,8 @@ import { RelatedArticles } from "@/components/site/related-articles"
 import { ShareButtons } from "@/components/site/share-buttons"
 import { getArticle, getArticles } from "@/lib/content"
 import { getFilm } from "@/lib/films"
+import { isAbsolute } from "@/lib/media"
+import { getThumb } from "@/lib/thumbs"
 import { articleJsonLd, breadcrumbJsonLd, JsonLd } from "@/lib/jsonld"
 import { absoluteUrl } from "@/lib/site"
 
@@ -51,7 +53,7 @@ export async function generateMetadata({
       tags: article.tags,
       // Discord, Slack and friends play an og:video inline when a link is shared.
       // Absolute: metadataBase resolves og:image URLs but not og:video ones.
-      ...(film ? { videos: [{ url: absoluteUrl(film.src), type: "video/mp4", width: film.width, height: film.height }] } : {}),
+      ...(film ? { videos: [{ url: isAbsolute(film.src) ? film.src : absoluteUrl(film.src), type: "video/mp4", width: film.width, height: film.height }] } : {}),
     },
   }
 }
@@ -67,6 +69,7 @@ export default async function Page({
 
   const { default: Article } = await import(`@/content/articles/${slug}.mdx`)
   const film = getFilm(slug)
+  const thumb = getThumb(slug)
 
   return (
     <PageShell>
@@ -79,7 +82,18 @@ export default async function Page({
         ])}
       />
       <article>
-        <header className="mb-10">
+        <header className="relative isolate mb-10">
+          {thumb ? (
+            // The article's thumbnail, faint behind the title and fading out
+            // below it. Decorative: the film and the prose carry its content.
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 -top-10 -z-10 h-80 overflow-hidden rounded-2xl opacity-30 [mask-image:linear-gradient(to_bottom,black_15%,transparent_95%)] dark:opacity-20"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={thumb.src} alt="" className="h-full w-full object-cover object-right" decoding="async" />
+            </div>
+          ) : null}
           <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between sm:gap-4">
             <h1 className="font-heading text-3xl font-bold tracking-tight text-balance">
               {article.title}

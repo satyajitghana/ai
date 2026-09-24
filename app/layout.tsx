@@ -1,5 +1,6 @@
 import type { Metadata } from "next"
 import { Hanken_Grotesk, IBM_Plex_Mono } from "next/font/google"
+import Script from "next/script"
 
 import "./globals.css"
 import "katex/dist/katex.min.css"
@@ -11,6 +12,10 @@ import { cn } from "@/lib/utils"
 import { JsonLd, personJsonLd, websiteJsonLd } from "@/lib/jsonld"
 import { WebMcp } from "@/components/site/webmcp"
 import { siteUrl } from "@/lib/site"
+
+// The Cloudflare Web Analytics site token (Cloudflare dashboard → Analytics &
+// Logs → Web Analytics → add site). Public by design: it only labels beacons.
+const CF_BEACON = process.env.NEXT_PUBLIC_CF_ANALYTICS_TOKEN
 
 // Grotesk for display + body (unified, minimal), IBM Plex Mono as the accent.
 const fontSans = Hanken_Grotesk({
@@ -112,6 +117,16 @@ export default function RootLayout({
           <SiteFooter />
           <TerminalOverlay />
         </ThemeProvider>
+        {/* Cloudflare Web Analytics: free, cookieless page views and Core Web
+            Vitals, no event cap. Works without proxying the site through
+            Cloudflare. Renders nothing until the site's beacon token is set. */}
+        {CF_BEACON ? (
+          <Script
+            src="https://static.cloudflareinsights.com/beacon.min.js"
+            strategy="afterInteractive"
+            data-cf-beacon={JSON.stringify({ token: CF_BEACON })}
+          />
+        ) : null}
       </body>
     </html>
   )
