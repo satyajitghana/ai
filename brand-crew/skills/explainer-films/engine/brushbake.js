@@ -156,12 +156,38 @@ const PB = (() => {
     G.restore()
   }
 
+  // How light a fill medium lands for a given colour. p5.brush paints a
+  // stroke darker than its colour, and a massed fill stacks strokes, so a
+  // near-white charcoal fill lands mid-grey; ruled hatching lets paper
+  // through and lands lighter. No one formula covers both, so each medium is
+  // measured once, on six grey swatches, in the middle of each where no edge
+  // bleed or overshoot reaches: `landed(o, l)` interpolates between them.
+  const curves = new Map(), LEVELS = [0, .25, .5, .7, .85, 1]
+  function curve(o) {
+    const s = SCALE, key = s.toFixed(3) + '|' + [o.medium, o.fillBrush, o.fillWeight, o.dist, o.angle, o.cross, o.rand, o.continuous, o.gradient, o.strength, o.precision, o.alpha, o.bleed, o.tex, o.border].join('|')
+    if (curves.has(key)) return curves.get(key)
+    const out = LEVELS.map(l => {
+      const v = Math.round(l * 255), hex = '#' + [v, v, v].map(x => x.toString(16).padStart(2, '0')).join('')
+      const e = paintOne([[0, 0], [260, 0], [260, 110], [0, 110]], { ...o, fill: hex, ink: null, cover: false, seed: fnv(key + hex) % 1000003 }, s, true)
+      const W = e.c.width, H = e.c.height, px = e.c.getContext('2d').getImageData(Math.round(W * .3), Math.round(H * .3), Math.round(W * .4), Math.round(H * .4)).data
+      let sum = 0; for (let i = 0; i < px.length; i += 4) sum += .299 * px[i] + .587 * px[i + 1] + .114 * px[i + 2]
+      return sum / (px.length / 4) / 255
+    })
+    curves.set(key, out)
+    return out
+  }
+  function landed(o, l) {
+    const c = curve(o)
+    for (let i = 1; i < LEVELS.length; i++) if (l <= LEVELS[i]) return lerp(c[i - 1], c[i], (l - LEVELS[i - 1]) / (LEVELS[i] - LEVELS[i - 1]))
+    return c[c.length - 1]
+  }
+
   // is this too small to be worth a painting? (progress ticks, packets, dots)
   const tiny = pts => { const b = bbox(pts); return Math.min(b.w, b.h) * SCALE < 14 || b.w * b.h * SCALE * SCALE < 900 }
 
   return {
     get ok() { return ready() },
-    tiny, stats, simplify,
+    tiny, stats, simplify, landed,
     // a new film starts with no paintings: another film's are never reused
     // (style textures are, and stay)
     clear() { cache.clear() },

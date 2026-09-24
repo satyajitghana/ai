@@ -124,7 +124,11 @@ unsure, leave it off.
   90 — three columns fit a row, four only with short labels. The host
   presents from the right; the checker keeps nodes clear of it and refuses
   overlaps. An L or U shape (across the top, down the side, back along the
-  bottom) fits more than a straight line.
+  bottom) fits more than a straight line. The checker sizes each node the
+  way the engine will, from the style's real glyph widths in `metrics.json`
+  (so a node that passes in one style can fail in pixel, whose type is
+  widest); after changing a style's fonts, `node render.mjs metrics` rewrites
+  that table.
 - `label` ≤ 5 words (≤ 3 reads best), `sub` ≤ 5 words.
 - `kind`: `box` (default, a component), `pill` (a value or output), `stack`
   (many of something: experts, heads, replicas), `db` (a store, cache, table),

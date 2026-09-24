@@ -30,7 +30,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
-import { articleDate, filmSha } from "../brand-crew/skills/explainer-films/hash.mjs"
+import { articleDate, filmSha, fontsSha } from "../brand-crew/skills/explainer-films/hash.mjs"
 
 const ROOT = process.cwd()
 const SB_DIR = join(ROOT, "data", "films")
@@ -217,13 +217,63 @@ function beatLines(sc: Sc): string[] {
 }
 const BUDGET = 280   // narration words: about 90 s of speech at Kokoro 1.1x, a film of ~105 s
 
-// ---- diagram geometry (mirrors engine/explainer.js layoutDiagram, approximately) ----
-function nodeBox(n: { label: string; sub?: string; kind?: string; at: [number, number] }) {
+// ---- diagram geometry (mirrors engine/explainer.js layoutDiagram) ----
+// Text is sized from each style's real glyph advances (metrics.json, written
+// by `node render.mjs metrics`), wrapped and fitted the way type.js does it,
+// so a node is as wide here as it will be on screen. Summing single-glyph
+// advances ignores kerning, which only ever narrows a word: the error is on
+// the safe side.
+const METRICS = join(ROOT, "brand-crew", "skills", "explainer-films", "metrics.json")
+type Role = { k: number; caps: boolean; adv: number[] }
+type Met = { fonts: string; styles: Record<string, { ls: number; minPx: number; roles: Record<string, Role> }> }
+const MET: Met | null = existsSync(METRICS) ? JSON.parse(readFileSync(METRICS, "utf8")) : null
+if (!MET) console.warn("! films: no metrics.json, so node sizes are guessed; run node brand-crew/skills/explainer-films/render.mjs metrics")
+else if (MET.fonts !== fontsSha()) console.warn("! films: metrics.json predates a font or style change; run node brand-crew/skills/explainer-films/render.mjs metrics")
+
+type Fit = { px: number; lines: number[] }
+function fitR(style: string, role: string, s: string, maxPx: number, minPx: number, maxW: number, maxLines: number): Fit {
+  const S = MET!.styles[style], R = S.roles[role] ?? S.roles.body
+  const txt = R.caps ? s.toUpperCase() : s
+  const avg = R.adv.slice(65, 91).reduce((a, b) => a + b, 0) / 26   // a glyph outside ASCII: an average lowercase one
+  const width = (w: string, size: number) => [...w].reduce((a, ch) => { const c = ch.charCodeAt(0); return a + (c >= 32 && c < 127 ? R.adv[c - 32] : avg) * size / 100 + S.ls }, 0)
+  const wrap = (size: number) => {
+    const sp = width(" ", size), lines: number[] = []
+    let cw = -1
+    for (const w of txt.split(/\s+/).filter(Boolean)) {
+      const ww = width(w, size)
+      if (cw >= 0 && cw + sp + ww > maxW) { lines.push(cw); cw = -1 }
+      cw = cw < 0 ? ww : cw + sp + ww
+    }
+    if (cw >= 0) lines.push(cw)
+    return lines
+  }
+  const sizeOf = (px: number) => Math.round(Math.max(px * R.k, S.minPx))   // the font size F() asks for
+  for (let px = maxPx; px >= minPx; px -= 2) {
+    const lines = wrap(sizeOf(px))
+    if (lines.length <= maxLines && lines.every((l) => l <= maxW)) return { px: Math.max(px * R.k, S.minPx), lines }
+  }
+  return { px: Math.max(minPx * R.k, S.minPx), lines: wrap(sizeOf(minPx)) }
+}
+
+function nodeBox(style: string, n: { label: string; sub?: string; kind?: string; at: [number, number] }) {
   const cx = 160 + (n.at[0] / 100) * 1100, cy = 300 + (n.at[1] / 100) * 590
+  if (!MET) return guessBox(n, cx, cy)
   // an operator circle grows to hold its word
+  if (n.kind === "op") { const lb = fitR(style, "head", n.label, 46, 26, 150, 1), r = Math.max(48, lb.lines[0] / 2 + 20); return { x0: cx - r, x1: cx + r, y0: cy - r, y1: cy + r } }
+  const lb = fitR(style, "body", n.label, 32, 24, 250, 2)
+  // a sub-label takes one line if it fits at any size, two only if it doesn't
+  let sb = n.sub ? fitR(style, "mono", n.sub, 25, 19, 300, 1) : null
+  if (sb && sb.lines.length > 1) sb = fitR(style, "mono", n.sub!, 25, 19, 300, 2)
+  let w = Math.max(150, Math.max(...lb.lines, ...(sb ? sb.lines : [0])) + 60) + (n.kind === "grid" ? 64 : 0)
+  let h = lb.lines.length * lb.px * 1.15 + 44 + (sb ? sb.px * (0.3 + sb.lines.length) : 0)
+  if (n.kind === "user") { w = Math.max(w - 40, 130); h += 70 }
+  if (n.kind === "db") h += 24
+  return { x0: cx - w / 2, x1: cx + w / 2, y0: cy - h / 2, y1: cy + h / 2 }
+}
+// without the table: a flat guess of 17px a letter, 14 for a sub-label
+function guessBox(n: { label: string; sub?: string; kind?: string }, cx: number, cy: number) {
   if (n.kind === "op") { const r = Math.max(48, Math.min(150, n.label.length * 25) / 2 + 20); return { x0: cx - r, x1: cx + r, y0: cy - r, y1: cy + r } }
   const chars = n.label.length, lines = Math.min(2, Math.ceil((chars * 17) / 250))
-  // a sub-label wraps to a second line past ~300px
   const subW = n.sub ? Math.min(300, n.sub.length * 14) : 0, subLines = n.sub ? Math.min(2, Math.ceil((n.sub.length * 14) / 300)) : 0
   let w = Math.max(150, Math.min(250, chars * 17 / lines) + 60, subW ? subW + 60 : 0) + (n.kind === "grid" ? 64 : 0)
   let h = lines * 37 + 44 + (n.sub ? 25 * (0.3 + subLines) : 0)
@@ -313,7 +363,7 @@ for (const slug of files) {
         for (const x of s.flow ?? []) if (!keys.has(x)) fail(slug, `${at}: flow "${x}" is not an edge (write from>to)`)
         for (const x of [...(s.highlight ?? []), ...(s.focus ?? [])]) if (!ids.has(x)) fail(slug, `${at}: "${x}" is not a node`)
       }
-      const boxes = sc.nodes.map((n) => ({ id: n.id, ...nodeBox(n) }))
+      const boxes = sc.nodes.map((n) => ({ id: n.id, ...nodeBox(sb.style, n) }))
       for (const b of boxes) {
         if (b.x0 < 100 || b.x1 > 1420 || b.y0 < 240 || b.y1 > 950) fail(slug, `${at}: node "${b.id}" runs off the diagram area (x 0-100 and y 0-100 are node centres; wide nodes need room, and the host stands right of x ~1420)`)
       }

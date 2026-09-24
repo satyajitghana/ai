@@ -637,14 +637,27 @@
     draw(t, lt, sc) {
       folio(lt)
       const caseMatters = /[a-z]/.test(sc.value)
-      const vb = fitR(caseMatters ? 'body' : 'head', sc.value, 290, 100, 1100, 1), vw = vb.lines[0].width, vy = 200 + vb.px * .82
+      // a display face's full stop is a speck tucked under the digit before it
+      // ("2.7" reads "27" in a marker face), so a decimal point is not typed:
+      // it keeps a space's room and is drawn there as a round dot
+      const role = caseMatters ? 'body' : 'head', parts = sc.value.split(/(?<=\d)\.(?=\d)/)
+      const vb = fitR(role, parts.join(' '), 290, 100, 1100, 1), vw = vb.lines[0].width, vy = 200 + vb.px * .82
       STYLE.shape(ellPts(M + vw / 2, vy - vb.px * .32, vw / 2 + 110, vb.px * .55, 30), { fill: P().a, op: .5 * easeOut(seg(lt, 0, .4)), ink: null })
       // the figure is written on left to right, never counted up: an odometer's
       // in-between frames are numbers nobody published
       const k = THUMB ? 1 : easeOut(seg(lt, .15, sc._t.land))
       push(); translate(M, vy); scale(1 + .06 * spring(lt, sc._t.land, 8, 26))
       G.save(); G.beginPath(); G.rect(-30, -vb.px * 1.3, (vw + 60) * k, vb.px * 1.8); G.clip()
-      write(caps(caseMatters ? 'body' : 'head', sc.value), 0, 0, vb.f, STYLE.ink, { alpha: easeOut(seg(lt, .1, .3)) })
+      const va = easeOut(seg(lt, .1, .3)), sp = measure(' ', vb.f)
+      let vx = 0
+      parts.forEach((p, i) => {
+        const s = caps(role, p); write(s, vx, 0, vb.f, STYLE.ink, { alpha: va }); vx += measure(s, vb.f)
+        if (i === parts.length - 1) return
+        const r = vb.px * .075
+        G.save(); G.globalAlpha *= va; G.fillStyle = STYLE.ink; G.beginPath()
+        if (STYLE.name === 'pixel') G.rect(vx + sp / 2 - r, -2 * r, 2 * r, 2 * r); else G.arc(vx + sp / 2, -r * 1.1, r, 0, Math.PI * 2)
+        G.fill(); G.restore(); vx += sp
+      })
       G.restore(); pop()
       const lb = fitR('body', sc.label, 56, 36, 1120, 2)
       wipeLines(THUMB ? 99 : lt, lb, M, vy + 70 + lb.px, lb.px * 1.18, .5, .14, STYLE.ink)
@@ -847,5 +860,10 @@
     try { paintFrame(s.start + s.dur - .05, tt => drawScene(s, tt), STYLE) } finally { THUMB = false }
     return { scene: s.sc.type, style: STYLE.name, mascot: MASCOT.name }
   }
-  window.FILM = { load, frame, lines, thumb, get duration() { return TL ? TL.duration : 0 }, STYLES: Object.keys(STYLES), MASCOT_OPTS, SCENE_TYPES: Object.keys(SCENES) }
+  // every diagram's node boxes as laid out, to hold the checker's copy of the layout to this one
+  function boxes(sb) {
+    load(sb, [])
+    return TL.scenes.filter(s => s.sc.type === 'diagram').map(s => ({ scene: s.sc._i, nodes: Object.values(layoutDiagram(s.sc).nodes).map(n => ({ id: n.id, x0: n.cx - n.w / 2, x1: n.cx + n.w / 2, y0: n.cy - n.h / 2, y1: n.cy + n.h / 2 })) }))
+  }
+  window.FILM = { load, frame, lines, thumb, boxes, get duration() { return TL ? TL.duration : 0 }, STYLES: Object.keys(STYLES), MASCOT_OPTS, SCENE_TYPES: Object.keys(SCENES) }
 })()

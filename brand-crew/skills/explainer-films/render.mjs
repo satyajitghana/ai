@@ -5,6 +5,7 @@
 //   node render.mjs film  <storyboard.json ...> --out=dir [--workers=2] [--poster=1.6] [--scale=960] [--crf264=32]
 //   node render.mjs thumb <storyboard.json ...> --out=dir [--w=1200] [--q=0.72]
 //   node render.mjs lines <storyboard.json ...>
+//   node render.mjs metrics                  (rewrites metrics.json, for the checker)
 //
 // thumb writes <slug>.jpg, 1200x630: the film's first mechanism scene, fully
 // built, with no text chrome, for the article's backdrop and its OG image.
@@ -19,6 +20,7 @@ import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
+import { fontsSha } from './hash.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FPS = 24
@@ -210,6 +212,27 @@ const main = async () => {
       const out = {}
       for (const f of files) { const sb = loadSb(f); out[sb.slug] = await page.evaluate(sb => FILM.lines(sb), sb) }
       console.log(JSON.stringify(out))
+    } else if (mode === 'metrics') {
+      // each style's real glyph advances, so the storyboard checker sizes a
+      // node the way the engine will instead of guessing a width per letter
+      const page = await openPage(browser)
+      const styles = await page.evaluate(() => {
+        G = document.createElement('canvas').getContext('2d')
+        const chars = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)), out = {}
+        for (const name of Object.keys(STYLES)) {
+          STYLE = STYLES[name]
+          const roles = {}
+          for (const r of ['head', 'body', 'mono']) {
+            const R = roleOf(r), f = fnt(R.fam, R.w, 100)
+            roles[r] = { k: R.k || 1, caps: !!R.caps, adv: chars.map(ch => +(measure(ch, f) - (STYLE.ls || 0)).toFixed(2)) }
+          }
+          out[name] = { ls: STYLE.ls || 0, minPx: STYLE.minPx || 0, roles }
+        }
+        return out
+      })
+      const file = join(HERE, 'metrics.json')
+      writeFileSync(file, JSON.stringify({ _note: 'written by `node render.mjs metrics`: advance of ASCII 32-126 at 100px per style and role, letter spacing excluded. Re-run after changing a style font.', fonts: fontsSha(), styles }) + '\n')
+      console.log(`${file}: ${Object.keys(styles).length} styles`)
     } else if (mode === 'thumb') {
       const out = opt.out || 'thumbs'; mkdirSync(out, { recursive: true })
       const w = +(opt.w || 1200), q = +(opt.q || .72), queue = [...files]
@@ -240,7 +263,7 @@ const main = async () => {
         const pages = await Promise.all(Array.from({ length: per }, () => openPage(browser)))
         while (queue.length) { const f = queue.shift(); await film(pages, loadSb(f), out) }
       }))
-    } else throw new Error('mode: sheet | strip | film')
+    } else throw new Error('mode: sheet | strip | film | thumb | lines | metrics')
   } finally { await browser.close() }
 }
 main().catch(e => { console.error(e); process.exit(1) })
