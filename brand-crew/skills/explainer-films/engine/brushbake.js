@@ -162,6 +162,9 @@ const PB = (() => {
   return {
     get ok() { return ready() },
     tiny, stats, simplify,
+    // a new film starts with no paintings: another film's are never reused
+    // (style textures are, and stay)
+    clear() { cache.clear() },
     // a filled shape with an optional outline; o = { fill, alpha, bleed, tex, border, ink, brush, weight }
     shape(pts, o, alpha = 1, clip = null) { lay(get('s', pts, o, true), alpha, clip) },
     // a stroke along a path

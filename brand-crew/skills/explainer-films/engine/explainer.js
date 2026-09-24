@@ -204,10 +204,12 @@
     const nodes = {}
     for (const n of sc.nodes) {
       const kind = n.kind || 'box', cx = AREA.x0 + n.at[0] / 100 * (AREA.x1 - AREA.x0), cy = AREA.y0 + n.at[1] / 100 * (AREA.y1 - AREA.y0)
-      if (kind === 'op') { const lb = fitR('head', n.label, 46, 28, 70, 1); nodes[n.id] = { ...n, kind, cx, cy, w: 96, h: 96, r: 48, lb }; continue }
-      const lb = fitR('body', n.label, 32, 24, 250, 2), sb = n.sub ? fitR('mono', n.sub, 25, 20, 260, 1) : null
-      let w = Math.max(150, Math.max(...lb.lines.map(l => l.width), sb ? sb.lines[0].width : 0) + 60) + (kind === 'grid' ? 64 : 0)
-      let h = lb.lines.length * lb.px * 1.15 + 44 + (sb ? sb.px * 1.3 : 0)
+      // an operator circle grows to hold its word
+      if (kind === 'op') { const lb = fitR('head', n.label, 46, 26, 150, 1), r = Math.max(48, lb.lines[0].width / 2 + 20); nodes[n.id] = { ...n, kind, cx, cy, w: r * 2, h: r * 2, r, lb }; continue }
+      // a sub-label may take two lines rather than being cut off
+      const lb = fitR('body', n.label, 32, 24, 250, 2), sb = n.sub ? fitR('mono', n.sub, 25, 19, 300, 2) : null
+      let w = Math.max(150, Math.max(...lb.lines.map(l => l.width), ...(sb ? sb.lines.map(l => l.width) : [0])) + 60) + (kind === 'grid' ? 64 : 0)
+      let h = lb.lines.length * lb.px * 1.15 + 44 + (sb ? sb.px * (.3 + sb.lines.length) : 0)
       if (kind === 'user') { w = Math.max(w - 40, 130); h += 70 }
       if (kind === 'db') h += 24
       nodes[n.id] = { ...n, kind, cx, cy, w, h, lb, sb }
@@ -265,7 +267,12 @@
     const K = n.kind
     if (K === 'op') STYLE.shape(ellPts(0, 0, n.r, n.r, 28), { fill: c, ...ink })
     else if (K === 'pill') STYLE.shape(rrPts(-w / 2, -h / 2, w, h, h / 2), { fill: c, ...ink })
-    else if (K === 'stack') { for (const o of [28, 14]) STYLE.shape(rrPts(-w / 2 + o, -h / 2 - o, w, h, 16), { fill: c, op: .5, ...ink }); STYLE.shape(rrPts(-w / 2, -h / 2, w, h, 16), { fill: c, ...ink }) }
+    else if (K === 'stack') {
+      for (const o of [28, 14]) STYLE.shape(rrPts(-w / 2 + o, -h / 2 - o, w, h, 16), { fill: c, op: .5, ...ink })
+      // the front card hides the cards behind it, even in a medium that glazes
+      STYLE.flat(rrPts(-w / 2, -h / 2, w, h, 16), bgCol(), 1)
+      STYLE.shape(rrPts(-w / 2, -h / 2, w, h, 16), { fill: c, ...ink })
+    }
     else if (K === 'db') {
       const ry = 18, body = [[-w / 2, -h / 2 + ry]].concat(ellPts(0, h / 2 - ry, w / 2, ry, 20).filter(p => p[1] >= h / 2 - ry - .1).sort((a, b) => b[0] - a[0])).concat([[w / 2, -h / 2 + ry]])
       STYLE.shape([[-w / 2, -h / 2 + ry], [w / 2, -h / 2 + ry], [w / 2, h / 2 - ry], ...ellPts(0, h / 2 - ry, w / 2, ry, 24).filter(p => p[1] > h / 2 - ry).sort((a, b) => b[0] - a[0]), [-w / 2, h / 2 - ry]], { fill: c, ...ink })
@@ -285,9 +292,9 @@
     const tc = textOn(c), lb = n.lb, off = K === 'grid' ? 32 : 0
     if (K === 'user') { lb.lines.forEach((l, i) => write(l.text, 0, h / 2 - 6 - (lb.lines.length - 1 - i) * lb.px * 1.12, lb.f, STYLE.ink, { align: 'center' })) }
     else {
-      const tot = lb.lines.length * lb.px * 1.15 + (n.sb ? n.sb.px * 1.3 : 0), y0 = -tot / 2 + lb.px * .85 + (K === 'db' ? 10 : 0)
+      const tot = lb.lines.length * lb.px * 1.15 + (n.sb ? n.sb.px * (.3 + n.sb.lines.length) : 0), y0 = -tot / 2 + lb.px * .85 + (K === 'db' ? 10 : 0)
       lb.lines.forEach((l, i) => write(l.text, off, y0 + i * lb.px * 1.15, lb.f, tc, { align: 'center' }))
-      if (n.sb) write(n.sb.lines[0].text, off, y0 + lb.lines.length * lb.px * 1.15 + n.sb.px * .2, n.sb.f, STYLE.name === 'pixel' ? tc : STYLE.dim, { align: 'center' })
+      if (n.sb) n.sb.lines.forEach((l, i) => write(l.text, off, y0 + lb.lines.length * lb.px * 1.15 + n.sb.px * (.2 + i * 1.05), n.sb.f, STYLE.name === 'pixel' ? tc : (STYLE.subInk || STYLE.dim), { align: 'center' }))
     }
     pop()
   }
@@ -773,6 +780,7 @@
   // ---------- the film ----------
   const TW = .7   // transition window, centred on the cut
   function setup(sb) {
+    if (SB && SB.slug !== sb.slug && typeof PB !== 'undefined') PB.clear()
     SB = sb; STYLE = STYLES[sb.style] || STYLES.watercolour
     const keys = Object.keys(STYLE.pals)
     STYLE.P = STYLE.pals[sb.palette] || STYLE.pals[keys[hashStr(sb.slug) % keys.length]]

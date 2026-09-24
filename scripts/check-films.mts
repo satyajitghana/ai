@@ -220,10 +220,13 @@ const BUDGET = 280   // narration words: about 90 s of speech at Kokoro 1.1x, a 
 // ---- diagram geometry (mirrors engine/explainer.js layoutDiagram, approximately) ----
 function nodeBox(n: { label: string; sub?: string; kind?: string; at: [number, number] }) {
   const cx = 160 + (n.at[0] / 100) * 1100, cy = 300 + (n.at[1] / 100) * 590
-  if (n.kind === "op") return { x0: cx - 48, x1: cx + 48, y0: cy - 48, y1: cy + 48 }
+  // an operator circle grows to hold its word
+  if (n.kind === "op") { const r = Math.max(48, Math.min(150, n.label.length * 25) / 2 + 20); return { x0: cx - r, x1: cx + r, y0: cy - r, y1: cy + r } }
   const chars = n.label.length, lines = Math.min(2, Math.ceil((chars * 17) / 250))
-  let w = Math.max(150, Math.min(250, chars * 17 / lines) + 60, n.sub ? n.sub.length * 14 + 60 : 0) + (n.kind === "grid" ? 64 : 0)
-  let h = lines * 37 + 44 + (n.sub ? 33 : 0)
+  // a sub-label wraps to a second line past ~300px
+  const subW = n.sub ? Math.min(300, n.sub.length * 14) : 0, subLines = n.sub ? Math.min(2, Math.ceil((n.sub.length * 14) / 300)) : 0
+  let w = Math.max(150, Math.min(250, chars * 17 / lines) + 60, subW ? subW + 60 : 0) + (n.kind === "grid" ? 64 : 0)
+  let h = lines * 37 + 44 + (n.sub ? 25 * (0.3 + subLines) : 0)
   if (n.kind === "user") { w = Math.max(w - 40, 130); h += 70 }
   if (n.kind === "db") h += 24
   return { x0: cx - w / 2, x1: cx + w / 2, y0: cy - h / 2, y1: cy + h / 2 }

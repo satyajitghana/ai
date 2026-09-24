@@ -329,7 +329,7 @@ const STYLES = (() => {
   const PICO = ['#000000', '#1D2B53', '#7E2553', '#008751', '#AB5236', '#5F574F', '#C2C3C7', '#FFF1E8', '#FF004D', '#FFA300', '#FFEC27', '#00E436', '#29ADFF', '#83769C', '#FF77A8', '#FFCCAA']
   const PICO_RGB = PICO.map(c => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)])
   const pixel = {
-    name: 'pixel', dark: true, lowres: [320, 180], minPx: 44, ink: '#FFF1E8', dim: '#C2C3C7', music: 'chip', bpm: 132, trans: 'dither',
+    name: 'pixel', dark: true, lowres: [320, 180], minPx: 44, ls: 6, ink: '#FFF1E8', dim: '#C2C3C7', music: 'chip', bpm: 132, trans: 'dither',
     font: { head: { fam: FAM.silk, caps: true, k: 1.1 }, body: { fam: FAM.vt, k: 1.55 }, mono: { fam: FAM.vt, k: 1.45 }, label: { fam: FAM.silk, caps: true, k: 1.05 } },
     pals: {
       pico: { bg: '#1D2B53', a: '#FF004D', b: '#29ADFF', hi: '#FFEC27', light: '#00E436', wash: '#1D2B53' },
@@ -388,7 +388,8 @@ const STYLES = (() => {
     for (let i = 0; i < n; i++) { const x = r() * w, y = r() * h, l = 4 + r() * 18, t = r() * TAU; c.strokeStyle = hexA(col, a * (.4 + r() * .6)); c.beginPath(); c.moveTo(x, y); c.lineTo(x + Math.cos(t) * l, y + Math.sin(t) * l); c.stroke() }
   }
   const media = spec => ({
-    dark: false, over() {}, ...spec,
+    // a node's sub-label is written in full ink: dim grey vanishes into hatching and spray
+    dark: false, over() {}, subInk: spec.ink, ...spec,
     line(pts, sw, col, o = {}) {
       col = col || this.ink
       const curv = o.curv ?? .4, P = curv > 0 && pts.length > 2 ? (o.closed ? throughClosed(pts, 5) : through(pts, 6)) : pts
@@ -400,8 +401,15 @@ const STYLES = (() => {
       const ink = o.ink === null ? null : (o.ink || this.ink), P = o.curv ? throughClosed(pts, 5) : pts, a = clamp((o.op ?? .75) / .75)
       // labels sit on fills in the style's ink, so a dense medium (wax, charcoal,
       // stipple) paints its colours part-way to the paper to keep them readable
+      // every medium keeps its fills readable under its own ink: on paper a
+      // fill is lifted until dark text reads on it, on a dark ground it is
+      // sunk until light text does; a dense medium (tint) starts further along
       let fill = o.fill
-      if (fill && this.tint) { const to = this.paper || P0().bg; let k = this.tint; while (lumOf(mixCol(fill, to, k)) < .68 && k < .85) k += .05; fill = mixCol(fill, to, k) }
+      if (fill && !this.keepFill) {
+        const to = this.paper || P0().bg, ok = c => this.dark ? lumOf(c) <= .6 : lumOf(c) >= .68
+        let k = this.tint || 0; while (!ok(mixCol(fill, to, k)) && k < .85) k += .05
+        fill = mixCol(fill, to, k)
+      }
       if (PB.ok && !PB.tiny(pts)) {
         if (fill) PB.shape(P, { ...this.fill, fill, cover: this.cover }, a)
         if (ink) PB.line(P, { ink, brush: this.pen.brush, weight: (o.sw ?? 1) * this.pen.weight, cover: this.cover }, true)
@@ -441,7 +449,7 @@ const STYLES = (() => {
 
   // pastel: soft chalk pastel that covers toned paper, a harp
   const pastel = media({
-    name: 'pastel', dark: true, cover: true, ink: '#FFF4E0', dim: '#E4DACB', music: 'harp', bpm: 84, trans: 'erase',
+    name: 'pastel', dark: true, cover: true, keepFill: true, ink: '#FFF4E0', dim: '#E4DACB', music: 'harp', bpm: 84, trans: 'erase',
     font: { head: { fam: FAM.amatic, w: 700, k: 1.42 }, body: { fam: FAM.patrick, k: 1.14 }, mono: { fam: FAM.plex, w: 600 }, label: { fam: FAM.amatic, w: 700, k: 1.4 } },
     pals: {
       slate: { bg: '#56677A', a: '#FFB4A2', b: '#A8E6CF', hi: '#FFE66D', light: '#FFD8BE', wash: '#6C7F93' },
