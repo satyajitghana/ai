@@ -17,11 +17,14 @@ export function renderOgImage({
   title,
   subtitle,
   footerLeft = profile.name,
+  background,
 }: {
   kicker: string
   title: string
   subtitle?: string
   footerLeft?: string
+  /** A data: URI for a faint picture behind everything (an article's thumbnail). */
+  background?: string
 }) {
   const titleSize = title.length > 54 ? 56 : title.length > 34 ? 68 : 80
 
@@ -42,6 +45,30 @@ export function renderOgImage({
           position: "relative",
         }}
       >
+        {background ? (
+          // the article's thumbnail, faint, and darkened most where the title sits
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={background}
+            alt=""
+            width={1200}
+            height={630}
+            style={{ position: "absolute", top: 0, left: 0, width: 1200, height: 630, objectFit: "cover", opacity: 0.34 }}
+          />
+        ) : null}
+        {background ? (
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: 1200,
+              height: 630,
+              background: "linear-gradient(90deg, rgba(10,10,11,0.9) 0%, rgba(10,10,11,0.72) 55%, rgba(10,10,11,0.25) 100%)",
+              display: "flex",
+            }}
+          />
+        ) : null}
         {/* soft top-left glow for depth */}
         <div
           style={{

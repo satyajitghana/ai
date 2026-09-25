@@ -13,6 +13,8 @@ import { profile } from "@/data/profile"
 import type { Publication } from "@/data/publications"
 import type { Article as ContentArticle, BlogPost, Project } from "@/lib/content"
 import { absoluteUrl, siteUrl } from "@/lib/site"
+import { getFilm, isoDuration } from "@/lib/films"
+import { isAbsolute } from "@/lib/media"
 
 // Centralized JSON-LD builders (schema-dts-typed). Injected via <JsonLd /> with
 // the `<` escape the Next.js json-ld guide requires.
@@ -161,6 +163,28 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
     ...(() => {
       const cites = citationsFromBody(article.body)
       return cites.length ? { citation: cites } : {}
+    })(),
+    // The explainer film, when the article has one: its transcript is the text
+    // of every frame, so an engine that can't watch it can still read it.
+    ...(() => {
+      const film = getFilm(article.slug)
+      if (!film) return {}
+      return {
+        video: {
+          "@type": "VideoObject" as const,
+          name: article.title,
+          description: `A ${Math.round(film.duration)}-second narrated explainer of the article, drawn in code.`,
+          transcript: film.transcript,
+          thumbnailUrl: isAbsolute(film.poster) ? film.poster : absoluteUrl(film.poster),
+          contentUrl: isAbsolute(film.src) ? film.src : absoluteUrl(film.src),
+          uploadDate: film.rendered,
+          duration: isoDuration(film.duration),
+          width: `${film.width}`,
+          height: `${film.height}`,
+          encodingFormat: "video/mp4",
+          inLanguage: "en",
+        },
+      }
     })(),
   }
 }
