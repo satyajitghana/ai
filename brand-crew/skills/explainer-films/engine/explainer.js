@@ -671,16 +671,34 @@
   const mediaKey = sc => sc.src + '|' + (sc.clip || []).join(',')
   async function media(key, kind, urls, fps = 24) {
     const imgs = await Promise.all(urls.map(u => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('media: ' + key)); im.src = u })))
-    MEDIA[key] = { kind, frames: imgs, fps, w: imgs[0].naturalWidth, h: imgs[0].naturalHeight }
+    MEDIA[key] = { kind, frames: imgs, fps, w: imgs[0].naturalWidth, h: imgs[0].naturalHeight, bg: edgeColour(imgs[imgs.length - 1]) }
     return { key, n: imgs.length, w: MEDIA[key].w, h: MEDIA[key].h }
   }
   // In the pixel style the frame is painted at 320x180 and snapped to its
   // palette, which would leave a paper's figure unreadable: there the picture
   // is laid on the full-size frame afterwards, where it was framed.
+  // the colour a picture sits on: the median of its outermost pixels, the
+  // ground a washed-back region should fade into (a terminal's black, a chart's white)
+  function edgeColour(img) {
+    const c = document.createElement('canvas'); c.width = 96; c.height = 96
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0, 96, 96)
+    const d = g.getImageData(0, 0, 96, 96).data, px = []
+    for (let i = 0; i < 96; i++) for (const [x, y] of [[i, 0], [i, 95], [0, i], [95, i]]) { const o = (y * 96 + x) * 4; px.push([d[o], d[o + 1], d[o + 2]]) }
+    const med = j => px.map(p => p[j]).sort((a, b) => a - b)[px.length >> 1]
+    return '#' + [0, 1, 2].map(j => med(j).toString(16).padStart(2, '0')).join('')
+  }
   const POST = []
-  function picture(img, sx, sy, sw, sh, x, y, w, h) {
-    if (!STYLE.lowres) { G.save(); G.beginPath(); G.rect(x, y, w, h); G.clip(); G.imageSmoothingEnabled = true; G.imageSmoothingQuality = 'high'; G.drawImage(img, sx, sy, sw, sh, x, y, w, h); G.restore(); return }
-    POST.push({ img, s: [sx, sy, sw, sh], d: [x, y, w, h], m: G.getTransform(), a: G.globalAlpha })
+  function picture(img, sx, sy, sw, sh, x, y, w, h, veil) {
+    if (!STYLE.lowres) { G.save(); G.beginPath(); G.rect(x, y, w, h); G.clip(); G.imageSmoothingEnabled = true; G.imageSmoothingQuality = 'high'; G.drawImage(img, sx, sy, sw, sh, x, y, w, h); if (veil) drawVeil(G, [x, y, w, h], veil, SCALE); G.restore(); return }
+    POST.push({ img, s: [sx, sy, sw, sh], d: [x, y, w, h], m: G.getTransform(), a: G.globalAlpha, veil })
+  }
+  // what a zoom takes in beyond the region the step asked for (the card's
+  // shape is fixed, so a tall region brings its neighbours along, cut at the
+  // card's edge) is washed back toward the mat: context, not a clipped word
+  function drawVeil(c, d, v, px) {
+    const [x, y, w, h] = d, [rx, ry, rw, rh] = v.r, e = 16
+    c.save(); c.beginPath(); c.rect(x - 40, y - 40, w + 80, h + 80); c.rect(rx - e / 2, ry - e / 2, rw + e, rh + e)
+    c.fillStyle = v.col; c.globalAlpha *= v.a; c.filter = `blur(${(e * .6 * px).toFixed(1)}px)`; c.fill('evenodd'); c.restore()
   }
   function flushPost() {
     if (!POST.length) return
@@ -688,7 +706,9 @@
     for (const p of POST.splice(0)) {
       MAIN.save(); MAIN.setTransform(p.m.a * f, p.m.b * f, p.m.c * f, p.m.d * f, p.m.e * f, p.m.f * f); MAIN.globalAlpha = p.a
       MAIN.imageSmoothingEnabled = true; MAIN.imageSmoothingQuality = 'high'
-      MAIN.drawImage(p.img, ...p.s, ...p.d); MAIN.restore()
+      MAIN.drawImage(p.img, ...p.s, ...p.d)
+      if (p.veil) { MAIN.beginPath(); MAIN.rect(...p.d); MAIN.clip(); drawVeil(MAIN, p.d, p.veil, Math.hypot(p.m.a, p.m.b) * f) }
+      MAIN.restore()
     }
   }
   const FIGURE = {
@@ -726,7 +746,9 @@
       const sx = clamp(mx - rw / 2, 0, m.w - rw), sy = clamp(my - rh / 2, 0, m.h - rh)
       // a clip plays once and holds its last frame: a loop restarts its counters
       const img = m.kind === 'video' ? m.frames[Math.min(m.frames.length - 1, Math.floor(Math.max(0, lt - .3) * m.fps))] : m.frames[0]
-      picture(img, sx, sy, rw, rh, -cw / 2, -ch / 2, cw, ch)
+      const wash = Math.min(1, (1 - f[2] * f[3] / 1e4) * 3) * .75, q = cw / rw
+      const veil = wash > .01 ? { a: wash, col: m.bg, r: [(f[0] / 100 * m.w - sx) * q - cw / 2, (f[1] / 100 * m.h - sy) * q - ch / 2, f[2] / 100 * m.w * q, f[3] / 100 * m.h * q] } : null
+      picture(img, sx, sy, rw, rh, -cw / 2, -ch / 2, cw, ch, veil)
       pop()
       write(caps('mono', 'Source: ' + sc.credit), cx - cw / 2 - pad, cy + ch / 2 + pad + 42, F('mono', 24), STYLE.dim, { alpha: k })
       host(t, { point: [cx + cw * .32, cy], mood: 'thinking', look: -.7, ...hop(lt, t0, 18) })
