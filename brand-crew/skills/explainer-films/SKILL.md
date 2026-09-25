@@ -87,12 +87,36 @@ because the captions show `say` as written.
 | `compare` | `title?`, `left` / `right` `{title ≤ 5 w, items[1-3] ≤ 10 w, say?}` | The usual way vs this one. The right side is the new idea. |
 | `grid` | `title`, `rows`, `cols` (2-16), `rowLabel?`, `colLabel?`, `steps[]` `{pattern, label?, note?, say}` | A matrix whose cells light by pattern: `dense`, `none`, `causal`, `diagonal`, `sliding:W`, `block:B`, `sparse:0.25`, `topk:K`, `pages:P` (KV-cache pages), `rows:1,3`, `cols:0,2`, `quant` (magnitudes with outliers). Attention masks, sparsity, cache layouts, routing. |
 | `equation` | `text` (≤ 48 chars, plain text, `x` not `×` unless the article uses it), `parts[]` (1-4, `{match, note ≤ 12 w, say?}`), `say?`, `title?` | A formula explained one term at a time; `match` is a substring of `text`. |
+| `figure` | `src`, `credit` (≤ 10 w), `title?`, `clip?` `[from, to]` s, `steps[]` (1-4, `{focus? [x, y, w, h], note?, say}`) | A picture or clip **the article itself shows**, on a card; each step frames a region of it. See below. At most two. |
 | `stat` | `value` (≤ 20 chars), `label` (≤ 14 w), `note?`, `stamp?` | One striking figure. |
 | `bars` | `title`, `items[]` (2-5, `{label ≤ 5 w, value, hl?}`), `unit?` (≤ 4 chars), `note?`, `stamp?` | A comparison; `hl` marks the one that matters. |
 | `tally` | `label`, `of` (≤ 300), `rows[]` (1-3, `{label, n}`) | n of N. |
 | `quote` | `quote` (≤ 30 w, verbatim), `source?`, `mark?`, `stamp?` | Someone's claim the article checks. At most one. |
 | `takeaway` | `text` (≤ 22 w), `mark?` | Exactly one: the thing to remember. Not a jab; the insight. |
 | `end` | `recap[]` (2-3, ≤ 10 w each), `say?` | The engine adds the sign-off. Give `say` a short recap; the default reads every item. |
+
+### Figures and clips
+
+A `figure` scene puts the article's own evidence on screen: the paper's
+architecture diagram, the tool's interface, a clip of the thing running. The
+checker refuses anything the article does not itself show: `src` is the same
+path as the article's `<Figure src>` or `<Video src>` (a video's may omit the
+extension, as the article's does), committed under `public/`.
+
+- **Pick what explains.** The method or architecture figure, the interface, a
+  clip of output. A results chart only when it *is* the point, and then say so.
+- **Steps frame regions.** `focus` is `[x, y, w, h]` in percent of the picture
+  (omit it for the whole picture); the camera eases to it on the step's line.
+  Look at the picture and measure: a region is right when its part fills the
+  card. Name in `say` what the viewer is looking at, in the article's words.
+- **`credit` says whose it is**, as the article's caption does: "paper,
+  Figure 2", "the project's README", "the project's own animation; its
+  claims". Numbers inside a picture are its source's, not ours; if the article
+  treats them as claims, the credit or the line says so.
+- **Clips** play muted and loop; `clip` picks the span in seconds (default the
+  first 12 s).
+- A figure scene is evidence, not a mechanism scene: a film still needs a
+  diagram, stack, steps, grid, equation or compare.
 
 `stamp`: `measured`, `reported`, `reasoned` (how the article labels a figure),
 or `holds` / `does not hold` / `half true` on a quote. Match the article; if
