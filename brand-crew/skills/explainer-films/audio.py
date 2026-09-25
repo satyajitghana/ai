@@ -168,6 +168,9 @@ def sfx(kind, rng, **kw):
         n = int(.5 * SR); y = bandnoise(rng, n, 2200, 6500)
         am = np.abs(np.sin(2 * math.pi * 11 * np.arange(n) / SR + rng.uniform(0, 3))) ** 2
         return .35 * y * am * np.sin(np.linspace(0, math.pi, n)) ** .5
+    if kind == "cut":        # a cut landing on the beat: a soft low hit
+        n = int(.3 * SR); t = t_(.3)
+        return .7 * np.sin(2 * math.pi * (85 - 110 * t) * t) * env(n, .001, .14, 5) + .12 * bandnoise(rng, n, 2500, 9000) * env(n, .001, .04, 7)
     if kind == "thunk":      # a rubber stamp
         n = int(.35 * SR); t = t_(.35)
         return .9 * np.sin(2 * math.pi * (95 - 40 * t) * t) * env(n, .002, .12, 5) + .5 * bandnoise(rng, n, 150, 2500) * env(n, .001, .03, 8)
@@ -261,7 +264,7 @@ def score_paper(dur, seed, punches, bpm=120):
     prog = [[0, 4, 7, 11], [9, 12, 16, 19], [5, 9, 12, 16], [7, 11, 14, 17]]   # Imaj7 vi IV V
     if seed % 2: prog = [prog[1], prog[2], prog[0], prog[3]]
     beat = 60 / bpm; bar = 4 * beat
-    start = max(punches) + .36 if punches else 0
+    start = _grid0(punches)
     def put(y, at, g):
         i = int(at * SR)
         if i >= n: return
@@ -295,6 +298,12 @@ def score_paper(dur, seed, punches, bpm=120):
     return mix * fade
 
 
+# Where the score's beat grid starts. The film says (its cuts are placed on
+# this grid); without it, just after the title's punches, as before.
+GRID0 = None
+def _grid0(punches):
+    return GRID0 if GRID0 is not None else (max(punches) + .36 if punches else 0)
+
 def _grid(dur, seed, punches, bpm):
     rng = np.random.default_rng(seed); n = int((dur + 1) * SR); mix = np.zeros(n)
     key = list(NOTES.values())[seed % len(NOTES)] + 48
@@ -306,7 +315,7 @@ def _grid(dur, seed, punches, bpm):
         i = int(at * SR)
         if 0 <= i < n: mix[i:i + len(y)] += g * y[:n - i]
     for hit in punches: put(sfx("thunk", rng) * .6, hit, .5)
-    start = max(punches) + .36 if punches else 0
+    start = _grid0(punches)
     return rng, n, mix, key, prog, beat, put, start
 def _finish(mix, dur):
     n = len(mix); fade = np.ones(n); f0 = int(max(0, dur - 1.2) * SR); fade[f0:] = np.linspace(1, 0, n - f0)
@@ -563,7 +572,11 @@ def mix(args):
     if worst[0] > SLIP and not args.allow_drift:
         sys.exit(f"{film['slug']}: line {worst[1]} would talk over the line before it by {worst[0]:.2f}s. "
                  "The film was not timed to this voice; render it through build.mjs, which voices the lines first.")
+    global GRID0
+    GRID0 = film.get("beat0")
     punches = [e["t"] for e in film["events"] if e["type"] == "punch"]
+    for t_cut in film.get("cuts", []):
+        y = sfx("cut", rng); at = int(t_cut * SR); fx[at:at + len(y)] += y[:max(0, n - at)] * .5
     for e in film["events"]:
         if e["type"] == "punch": continue     # the score plays the punches
         y = (chip_sfx if chip else sfx)(e["type"], rng, **{k: v for k, v in e.items() if k not in ("t", "type")})

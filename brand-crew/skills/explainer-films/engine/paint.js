@@ -41,6 +41,8 @@ const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
 const lerp = (a, b, x) => a + (b - a) * x;
 const ease = x => { x = clamp(x); return x * x * (3 - 2 * x); };
 const easeOut = x => 1 - Math.pow(1 - clamp(x), 3);
+// arrivals that decelerate hard and settle, as a motion designer's expo-out
+const expoOut = x => { x = clamp(x); return x >= 1 ? 1 : 1 - Math.pow(2, -10 * x); };
 const backOut = x => { x = clamp(x); if (x === 0 || x === 1) return x; const s = 1.9; return 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2); };
 const hash = i => { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
 const bpOf = t => (t - OFF) / BEAT;
@@ -395,9 +397,12 @@ function paintInit(canvas) {
   MAIN = G = CV.getContext('2d');
 }
 function lcg(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
-// paintFrame(t, world, S): the style's ground, the world, the letters, the
-// style's overlay; at S.lowres, all of it on a small canvas scaled up hard-edged
-function paintFrame(t, world, S) {
+// paintFrame(t, world, S, drawT): the style's ground, the world, the letters,
+// the style's overlay; at S.lowres, all of it on a small canvas scaled up
+// hard-edged. drawT is the drawing the linework boils to (t by default): the
+// sub-frames of one motion-blurred frame share it, so the blur smears motion
+// and never the boil
+function paintFrame(t, world, S, drawT = t) {
   T = t; LETTERS = []; CAM = null;
   let w = OUT_W, h = OUT_H
   if (S.lowres) {
@@ -408,7 +413,7 @@ function paintFrame(t, world, S) {
   G.setTransform(1, 0, 0, 1, 0, 0); G.globalCompositeOperation = 'source-over'; G.globalAlpha = 1; G.imageSmoothingEnabled = true
   S.ground(G, w, h)
   G.setTransform(SCALE, 0, 0, SCALE, 0, 0)
-  BOILN = Math.floor(t * BOIL + 1e-6); boilSeed('frame');
+  BOILN = Math.floor(drawT * BOIL + 1e-6); boilSeed('frame');
   world(t);
   flushLetters();
   G.setTransform(1, 0, 0, 1, 0, 0); G.globalAlpha = 1

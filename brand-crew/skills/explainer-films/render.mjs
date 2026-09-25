@@ -57,7 +57,7 @@ async function sheet(page, sb, times, cols, w, out, labels = true) {
     const src = document.getElementById('c')
     const ms = []
     times.forEach((t, i) => {
-      const a = performance.now(); FILM.frame(t); ms.push(performance.now() - a)
+      const a = performance.now(); FILM.frame(t, { blur: true }); ms.push(performance.now() - a)
       const x = (i % cols) * w, y = Math.floor(i / cols) * (h + (labels ? 22 : 0))
       g.drawImage(src, x, y, w, h)
       if (labels) { g.fillStyle = '#ddd'; g.font = '13px monospace'; g.fillText(t.toFixed(2) + 's', x + 6, y + h + 15) }
@@ -93,10 +93,13 @@ async function film(pages, sb, out) {
   const n = Math.round(info.duration * FPS)
   const enc = encoder(out, sb.slug, !!info.lowres)
   const t0 = Date.now()
-  // Animated on twos: one drawing per two frames, like hand-drawn animation.
-  // The duplicate frame is nearly free to encode, which halves the file.
-  const step = opt.ones ? 1 : 2
-  const at = []; for (let i = 0; i < n; i += step) at.push(i)
+  // Animated on twos: one drawing per two frames, like hand-drawn animation;
+  // the duplicate frame is nearly free to encode. Inside a motion window
+  // (a cut, parts arriving, packets running) every frame is painted, and
+  // smeared over the shutter where the window says so, so movement is
+  // smooth while the linework still boils on twos.
+  const mo = info.motion || [], moving = t => mo.some(w => t >= w[0] && t <= w[1])
+  const at = []; for (let i = 0; i < n; i++) if (opt.ones || i % 2 === 0 || (!opt.noblur && moving(i / FPS))) at.push(i)
   // With more than one page, the drawings are split into one contiguous run
   // per page and streamed to the encoder in order as they arrive. Frames are
   // pure functions of t and paintings are seeded by their key, so a page
@@ -107,13 +110,13 @@ async function film(pages, sb, out) {
   const flush = () => (flushing = flushing.then(async () => {
     while (shots.has(wrote)) {
       const buf = shots.get(wrote); shots.delete(wrote)
-      for (let r = 0; r < Math.min(step, n - at[wrote]); r++) await write(enc.ff.stdin, buf)
+      for (let r = 0; r < (at[wrote + 1] ?? n) - at[wrote]; r++) await write(enc.ff.stdin, buf)
       wrote++
     }
   }))
   await Promise.all(pages.map(async (p, w) => {
     for (let j = w * per; j < Math.min(at.length, (w + 1) * per); j++) {
-      const url = await p.evaluate(t => { FILM.frame(t); return document.getElementById('c').toDataURL('image/jpeg', .95) }, at[j] / FPS)
+      const url = await p.evaluate(({ t, blur }) => { FILM.frame(t, { blur }); return document.getElementById('c').toDataURL('image/jpeg', .95) }, { t: at[j] / FPS, blur: !opt.noblur })
       shots.set(j, Buffer.from(url.split(',')[1], 'base64'))
       if (j === wrote) await flush()
     }
@@ -136,7 +139,7 @@ async function film(pages, sb, out) {
   writeFileSync(poster, Buffer.from(purl.split(',')[1], 'base64'))
   await enc.done
   const size = f => statSync(f).size
-  const r = { slug: sb.slug, duration: +info.duration.toFixed(2), frames: n, paintMs: Math.round(paintMs), wallS: Math.round((Date.now() - t0) / 1000), mp4: size(enc.mp4), poster: size(poster), posterT: pt, scenes: info.scenes, beats: info.beats, events: info.events || [], lines: info.lines || [], style: info.style, music: info.music, bpm: info.bpm, mascot: info.mascot }
+  const r = { slug: sb.slug, duration: +info.duration.toFixed(2), frames: n, paintMs: Math.round(paintMs), wallS: Math.round((Date.now() - t0) / 1000), mp4: size(enc.mp4), poster: size(poster), posterT: pt, scenes: info.scenes, beats: info.beats, events: info.events || [], lines: info.lines || [], style: info.style, music: info.music, bpm: info.bpm, beat0: info.beat0, cuts: info.cuts || [], mascot: info.mascot }
   console.log(JSON.stringify(r))
   return r
 }

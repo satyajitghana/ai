@@ -199,6 +199,38 @@ sheet or film is slower than the other styles: minutes, not seconds.
 `flat` stays opaque Canvas2D in every style, since it has to cover what is
 under it (title cards, the plate behind an edge label), and `multiply` can't.
 
+## Motion
+
+The engine owns how a film moves; a storyboard never asks for it. All of it
+is off in the pixel style, whose hard edges are the point, and in thumbnails.
+
+- **On twos, except where things move.** A drawing is held for two frames and
+  the linework boils at 12 drawings a second, as hand animation does. Each
+  scene's `plan` declares *motion windows* (a cut, parts arriving on a beat,
+  packets running a flow step); inside one, every frame is painted.
+- **Motion blur.** In a window that asks for it, a frame is the average of
+  five to eight paints spread over a half-frame shutter (1/48 s): wipes sweep,
+  pops smear, the camera's punch softens. Every sub-frame boils to the frame's
+  own drawing, and the host keeps the frame's pose, so only motion smears: a
+  fast hop averaged over the shutter read as five ghosts, not as speed.
+- **Arrivals come into focus.** Nodes, layers, cards, stamps, headline words
+  and a stat's figure arrive blurred and sharpen as they land (`focus(k)`);
+  headings drop in word by word. Slides and rises use expo-out, decelerating
+  hard and settling.
+- **The camera steps on the beat.** Each beat punches in and settles into a
+  slightly closer framing that holds until the next; the folio stays put. It
+  does not drift between beats: a camera that never stops changes every pixel
+  of every drawing, and measured a third more file for a push-in nobody sees.
+- **Cuts land on the music.** Scene lengths are rounded up to the next beat of
+  the style's score; `audio.py` is handed the grid's start (`beat0`) and the
+  cut times, and puts a soft low hit on each cut.
+- **The recap replays the film.** The end card shows up to three of the
+  film's mechanism scenes rebuilding at twice speed above the recap lines,
+  sized to the room the lines leave.
+
+It costs 2-3x the paint time of the same film on twos and about an eighth
+more file.
+
 ## The host
 
 Every film has its own host — a **cat, dog, fox, bunny, capybara or fish** —
