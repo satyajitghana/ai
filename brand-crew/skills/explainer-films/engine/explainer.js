@@ -14,7 +14,7 @@
 //   draw(t, lt, sc)    the frame at scene time lt; a pure function of time
 (() => {
   const M = 110, READ = 3.6
-  let SB = null, TL = null, THUMB = false
+  let SB = null, TL = null, THUMB = false, MINI = false, POSE = null, CHROME = null
   const P = () => STYLE.P
   const readT = s => (s ? .4 + words(s) / READ : 0)
   const snap = x => Math.ceil(x * 12 - 1e-6) / 12
@@ -28,6 +28,14 @@
   const textOn = c => STYLE.name === 'pixel' ? (luma(c) > .5 ? '#000000' : '#FFF1E8')
     : STYLE.dark && STYLE.keepFill && luma(c) > .55 ? mixCol(P().bg, '#000000', .62)
     : STYLE.knockout && luma(c) < STYLE.knockout ? STYLE.paper : STYLE.ink
+
+  // A part arrives out of focus and sharpens as it lands, which is how a
+  // camera sees a thing move into its plane. Call inside push()/pop(); not in
+  // the pixel style, whose hard edges are the point, nor in a still.
+  function focus(k, px = 10) {
+    if (STYLE.lowres || THUMB || k >= 1) return
+    G.filter = `blur(${(Math.max(0, 1 - k) * px * SCALE).toFixed(2)}px)`
+  }
 
   // beats laid end to end: each lasts its spoken line plus a breath, or its reading minimum
   function beatTimes(v, mins, lead = .35, gap = .5) {
@@ -48,6 +56,11 @@
   // Scene content keeps left of x ~1400 to leave it room.
   const HOST = { x: 1660, u: 70 }
   function host(t, o = {}) {
+    if (MINI) return
+    // inside a smeared frame the host keeps the pose of the frame itself: a
+    // drawn character is not photographed, and a fast hop averaged over the
+    // shutter reads as five ghosts, not as speed
+    if (POSE) { if (POSE.rec) POSE.list.push([t, o]); else if (POSE.list[POSE.i]) [t, o] = POSE.list[POSE.i++] }
     if (THUMB) o = { ...o, talk: 0, wave: false }
     const u = o.u || HOST.u, x = o.x ?? HOST.x
     mascot(x, H + .9 * u + (o.rise || 0), u, { t, talk: talkAt(t), key: 'host', ...o })
@@ -56,21 +69,31 @@
 
   // ---------- chrome ----------
   function folio(lt) {
-    if (THUMB) return
+    if (THUMB || MINI) return
+    if (CHROME) { CHROME.push(lt); return }
     const a = easeOut(seg(lt, .05, .35))
     write(caps('label', SB.kicker), M, 78, F('mono', 26), STYLE.dim, { ls: 2, alpha: a })
     write('ai.thesatyajit.com', W - M, 78, F('mono', 24), STYLE.dim, { align: 'right', alpha: a })
   }
   // where a scene heading's last line ends: one line or two, by the style's font
   const headBottom = str => { if (!str) return 150; const b = fitR('head', str, 64, 40, 1250, 2); return 190 + (b.lines.length - 1) * b.px * 1.1 + b.px * .25 }
+  // A heading is set word by word: each drops in from above, decelerating
+  // hard, and comes into focus as it lands, a beat after the one before it.
   function heading(lt, str, t0 = .1, y = 190) {
     if (!str || THUMB) return null
     const b = fitR('head', str, 64, 40, 1250, 2)
-    wipeLines(lt, b, M, y, b.px * 1.1, t0, .12, STYLE.ink, { dur: .45 })
+    let i = 0
+    b.lines.forEach((line, li) => line.words.forEach(w => {
+      const k = seg(lt, t0 + i * .045, t0 + i * .045 + .42); i++
+      if (k <= 0) return
+      push(); translate(M + w.x, y + li * b.px * 1.1 - (1 - expoOut(k)) * 44); focus(k * 1.5, 10)
+      write(w.text, 0, 0, b.f, STYLE.ink, { ls: b.ls, alpha: clamp(k * 3) })
+      pop()
+    }))
     return b
   }
   function note(lt, str, t0) {
-    if (!str || THUMB) return
+    if (!str || THUMB || MINI) return
     const b = fitR('body', str, 36, 26, 1250, 2)
     wipeLines(lt, b, M, 990 - (b.lines.length - 1) * b.px * 1.15, b.px * 1.15, t0, .1, STYLE.dim)
   }
@@ -79,7 +102,7 @@
     if (!key || lt < t0) return
     const lab = caps('label', STAMPS[key] || key), f = F('label', 34), w = measure(lab, f) + 44, k = seg(lt, t0, t0 + .18), s = lerp(1.7, 1, easeIn(k))
     push(); translate(x, y); rotate(-.08); scale(s)
-    G.globalAlpha *= clamp(k * 3)
+    G.globalAlpha *= clamp(k * 3); focus(k, 8)
     STYLE.shape(rrPts(-w / 2, -30, w, 60, 12), { fill: P().hi, op: .5, ink: STYLE.dark ? P().hi : STYLE.ink, sw: 1.1 })
     write(lab, 0, 12, f, textOn(P().hi), { align: 'center' })
     pop()
@@ -97,6 +120,7 @@
       sc._ev = (sc.punch || []).map((_, i) => ({ t: i * .42, type: 'punch' })).concat([{ t: sc._t.h0, type: 'write' }, { t: sc._t.bun + .05, type: 'boing' }])
       const dur = snap(Math.max(4.2, bt.end + .3))
       sc._t.poster = Math.min(dur - .1, sc._t.subAt + 1.6)
+      sc._win = [[0, sc._t.subAt + 1.1, 5]]
       return dur
     },
     draw(t, lt, sc) {
@@ -119,7 +143,7 @@
         const k = THUMB ? 1 : seg(lt, T_.h0 + i * .09, T_.h0 + i * .09 + .28); i++
         if (k <= 0) return
         const s = lerp(1.45, 1, backOut(k))
-        push(); translate(M + w.x + w.w / 2, top + li * lh - hb.px * .35); scale(s)
+        push(); translate(M + w.x + w.w / 2, top + li * lh - hb.px * .35); scale(s); focus(k * 1.6, 14)
         write(w.text, -w.w / 2, hb.px * .35, hb.f, STYLE.ink, { alpha: k * 3 })
         pop()
       }))
@@ -129,7 +153,7 @@
       }
       const b0 = T_.bun, j = hop(lt, b0 + .1, 60)
       if (lt > b0 - .05 || THUMB) {
-        const rise = THUMB ? 0 : 520 * (1 - easeOut(seg(lt, b0 - .05, b0 + .3)))
+        const rise = THUMB ? 0 : 520 * (1 - expoOut(seg(lt, b0 - .05, b0 + .4)))
         host(t, { x: 1570, u: 94, mood: lt < b0 + 1.2 ? 'excited' : 'happy', wave: lt > b0 + .3, dy: j.dy, rise, sq: j.sq, earKick: j.earKick, look: -.4 })
       }
     },
@@ -268,7 +292,7 @@
   function drawNode(n, k, emph, lt) {
     if (k <= 0) return
     const s = lerp(.6, 1, backOut(k)), c = tone(n.tone || { box: 'light', pill: 'a', stack: 'b', db: 'hi', grid: 'b', doc: 'light', chip: 'a', user: 'hi', cloud: 'light' }[n.kind] || 'light')
-    push(); translate(n.cx, n.cy); scale(s); G.globalAlpha *= clamp(k * 2.5)
+    push(); translate(n.cx, n.cy); scale(s); G.globalAlpha *= clamp(k * 2.5); focus(k * 1.3, 12)
     const w = n.w, h = n.h, ink = { sw: emph ? 1.5 : 1 }
     boilSeed('node' + n.id)
     if (emph && !THUMB) { const pad = 16 + 4 * Math.sin(lt * 6); STYLE.line(rrPts(-w / 2 - pad, -h / 2 - pad, w + pad * 2, h + pad * 2, 26), 1.3, P().a, { closed: true, curv: 0 }); if (STYLE.dark) glow(0, 0, w * .7, P().a, .35) }
@@ -328,6 +352,9 @@
         if (s.flow) sc._ev.push({ t: t0 + .35, type: 'flow', span: (bt.at[i + 1] ?? bt.end) - t0 - .5 })
         if (s.highlight) sc._ev.push({ t: t0 + .1, type: 'ding' })
       })
+      // parts arrive (smeared); packets run the whole of a flow step (on ones, unsmeared)
+      sc._win = sc.steps.map((s, i) => [bt.at[i] - .04, bt.at[i] + Object.keys(L.nodes).filter(id => L.shown[id] === i).length * .16 + 1.1, 5])
+        .concat(sc.steps.flatMap((s, i) => s.flow ? [[bt.at[i] + .3, (bt.at[i + 1] ?? bt.end), 1]] : []))
       return snap(bt.end + .4)
     },
     draw(t, lt, sc, dur) {
@@ -435,7 +462,7 @@
         const k = THUMB ? 1 : (firstShow && sc.steps[bi].show != null ? seg(lt, (sc._b[bi] || 0) + i * .12, (sc._b[bi] || 0) + i * .12 + .35) : 1)
         if (k <= 0) continue
         const y = g.ys[i] - (1 - easeOut(k)) * 60, L = sc.layers[i], on = hl.has(i) || (THUMB && L.hl), col = on ? P().a : tone(L.tone || (i % 2 ? 'light' : 'b'))
-        G.save(); G.globalAlpha *= clamp(k * 2) * (hl.size && !on ? .45 : 1)
+        G.save(); G.globalAlpha *= clamp(k * 2) * (hl.size && !on ? .45 : 1); focus(k * 1.3, 10)
         const x0 = g.cx - g.wSlab / 2, x1 = g.cx + g.wSlab / 2
         boilSeed('slab' + i)
         STYLE.shape([[x0, y - g.th], [x1, y - g.th], [x1 + g.dx, y - g.th + g.dy], [x0 + g.dx, y - g.th + g.dy]], { fill: mixCol(col, '#FFFFFF', .35), sw: .9 })
@@ -523,7 +550,7 @@
       const card = (side, x, k, dimmed, col) => {
         if (k <= 0) return
         const y0 = sc.title ? 280 : 200, w = 590, h = 620
-        push(); translate(x + (1 - easeOut(k)) * (side.key === 'l' ? -80 : 80), 0); G.globalAlpha *= clamp(k * 2) * (dimmed ? .55 : 1)
+        push(); translate(x + (1 - expoOut(k)) * (side.key === 'l' ? -120 : 120), 0); G.globalAlpha *= clamp(k * 2) * (dimmed ? .55 : 1); focus(k * 1.2, 12)
         boilSeed('card' + side.key)
         STYLE.shape(rrPts(x0(), y0, w, h, 24), { fill: col, op: .45, sw: 1.1 })
         const tb = fitR('label', side.title, 40, 28, w - 80, 2)
@@ -641,6 +668,7 @@
     plan(sc, v) {
       const bt = beatTimes(v, [2.6 + readT(sc.label) + readT(sc.note) * .6], .3, .42)
       sc._b = bt.at; sc._t = { land: .85 }; sc._ev = [{ t: .2, type: 'count' }, { t: .85, type: 'boing' }].concat(sc.stamp ? [{ t: 1.2, type: 'thunk' }] : [])
+      sc._win = [[0, 1.9, 5]]
       return snap(bt.end + .3)
     },
     draw(t, lt, sc) {
@@ -655,7 +683,7 @@
       // the figure is written on left to right, never counted up: an odometer's
       // in-between frames are numbers nobody published
       const k = THUMB ? 1 : easeOut(seg(lt, .15, sc._t.land))
-      push(); translate(M, vy); scale(1 + .06 * spring(lt, sc._t.land, 8, 26))
+      push(); translate(M, vy); scale(1 + .06 * spring(lt, sc._t.land, 8, 26)); focus(k * 1.15, 16)
       G.save(); G.beginPath(); G.rect(-30, -vb.px * 1.3, (vw + 60) * k, vb.px * 1.8); G.clip()
       const va = easeOut(seg(lt, .1, .3)), sp = measure(' ', vb.f)
       let vx = 0
@@ -680,6 +708,7 @@
     plan(sc, v) {
       const n = sc.items.length, bt = beatTimes(v, [1.4 + n * .5 + readT(sc.title) + readT(sc.note) * .6], .3, .42)
       sc._b = bt.at; sc._ev = sc.items.map((_, i) => ({ t: .5 + i * .35, type: 'grow' })).concat(sc.stamp ? [{ t: .6 + n * .35, type: 'thunk' }] : [])
+      sc._win = [[0, 1.4 + n * .35, 5]]
       return snap(bt.end + .3)
     },
     draw(t, lt, sc) {
@@ -704,6 +733,7 @@
     plan(sc, v) {
       const bt = beatTimes(v, [1.2 + sc.rows.length * 1.1 + readT(sc.label) + readT(sc.note) * .6], .3, .42)
       sc._b = bt.at; sc._ev = sc.rows.map((r, i) => ({ t: .5 + i * .9, type: 'ticks', n: r.n, span: .6 }))
+      sc._win = [[0, 1.3 + sc.rows.length * .9, 3]]
       return snap(bt.end + .3)
     },
     draw(t, lt, sc) {
@@ -735,7 +765,7 @@
     draw(t, lt, sc) {
       folio(lt)
       const b = fitR('body', sc.quote, 58, 34, 1130, 6), lh = b.px * 1.22, w = 1230, h = b.lines.length * lh + 190, y0 = Math.max(170, 540 - h / 2), k = THUMB ? 1 : easeOut(seg(lt, 0, .4))
-      push(); translate(0, (1 - k) * 60); G.globalAlpha *= k
+      push(); translate(0, (1 - expoOut(seg(lt, 0, .5))) * 80); G.globalAlpha *= k; focus(k * 1.2, 10)
       boilSeed('quote'); STYLE.shape(rrPts(M, y0, w, h, 22), { fill: tone('light'), op: .55, sw: 1.1 })
       write(caps('label', sc.label || 'The claim'), M + 50, y0 + 64, F('label', 28), STYLE.dim, { ls: 2 })
       if (sc.source) write(caps('mono', sc.source), M + w - 50, y0 + 64, F('mono', 24), STYLE.dim, { align: 'right' })
@@ -770,20 +800,29 @@
     plan(sc, v) {
       const n = (sc.recap || []).length, bt = beatTimes(v, [1 + n * 1.2, 2.4], .4, .42)
       sc._b = bt.at; sc._ev = (sc.recap || []).map((_, i) => ({ t: .5 + i * .6, type: 'pop' })).concat([{ t: bt.at[1], type: 'boing' }])
+      // the replays are on screen from the start: smear their arrival, then
+      // paint them on ones while they play
+      sc._win = [[0, 1.2 + n * .6, 5], [1.2 + n * .6, bt.at[1] - .2, 1], [bt.at[1] - .2, bt.at[1] + .9, 5]]
       return snap(bt.end + .6)
     },
     draw(t, lt, sc) {
       folio(lt)
-      write(caps('head', 'Recap'), M, 250, F('head', 96), STYLE.ink, { alpha: easeOut(seg(lt, 0, .3)) })
-      let y = 360
+      write(caps('head', 'Recap'), M, 230, F('head', 84), STYLE.ink, { alpha: easeOut(seg(lt, 0, .3)) })
+      // the replays take what room the recap leaves above the sign-off (y 800)
+      const fits = (sc.recap || []).map(r => fitR('body', r, 40, 28, 1120, 2))
+      const listH = fits.reduce((a, b) => a + b.lines.length * b.px * 1.15 + 22, 0)
+      const rh = replays(lt, 800 - 290 - 70 - listH)
+      let y = rh ? 290 + rh + 70 : 360
       ;(sc.recap || []).forEach((r, i) => {
         const k = THUMB ? 1 : seg(lt, .5 + i * .6, .9 + i * .6); if (k <= 0) return
-        const b = fitR('body', r, 46, 30, 1040, 2)
+        const b = rh ? fits[i] : fitR('body', r, 46, 30, 1040, 2)
         push(); translate(M + 30, y); scale(lerp(.6, 1, backOut(k)))
         boilSeed('tick' + i); STYLE.line([[-18, -10], [-4, 6], [22, -26]], 1.6, P().a, { curv: 0 })
         pop()
+        push(); focus(k * 1.3, 8)
         b.lines.forEach((l, li) => write(l.text, M + 80, y + li * b.px * 1.15, b.f, STYLE.ink, { alpha: clamp(k * 2) }))
-        y += b.lines.length * b.px * 1.15 + 40
+        pop()
+        y += b.lines.length * b.px * 1.15 + (rh ? 22 : 40)
       })
       const k2 = THUMB ? 1 : easeOut(seg(lt, sc._b[1] - .2, sc._b[1] + .3))
       write('The full article, with every source:', M, 840, F('body', 38), STYLE.dim, { alpha: k2 })
@@ -792,6 +831,35 @@
       host(t, { x: 1610, u: 94, mood: 'happy', wave: lt > sc._b[1], look: -.3, ...j })
       if (k2 > 0) write(`— ${MASCOT.name}`, M, 1010, F('body', 34), STYLE.dim, { alpha: k2 })
     },
+  }
+
+  // The film's own mechanism scenes, replaying small above the recap: each
+  // builds again from its first beat at twice speed and holds when built, so
+  // the recap is shown, not only read. The host, the folio and the notes stay
+  // out of them; every painting in them is the full-size one, laid smaller.
+  function replays(lt, maxH) {
+    if (THUMB || !TL || maxH < 150) return 0
+    const mech = TL.scenes.filter(s => MECH.includes(s.sc.type)).slice(0, 3)
+    if (!mech.length) return 0
+    // each replay frames the scene's content, not the whole frame: the host
+    // and the folio are not drawn in it, so their room is cropped away
+    const CX = 90, CY = 140, CW = 1330, CH = 850
+    const n = mech.length, gap = 34, w = Math.min(460, (1260 - gap * (n - 1)) / n, maxH * CW / CH), h = w * CH / CW, y0 = 290
+    mech.forEach((s, i) => {
+      const k = expoOut(seg(lt, .15 + i * .12, .75 + i * .12)); if (k <= 0) return
+      const x = M + i * (w + gap)
+      push(); translate(x, y0 + (1 - k) * 60); G.globalAlpha *= clamp(k * 2); focus(k * 1.2, 10)
+      STYLE.flat(rrPts(0, 0, w, h, 14), bgCol(), 1)
+      G.save(); G.beginPath(); G.rect(0, 0, w, h); G.clip()
+      scale(w / CW); translate(-CX, -CY)
+      const first = s.sc._b[0] || 0, tt = s.start + Math.min(s.dur - .05, first + Math.max(0, lt - .3) * 2)
+      MINI = true
+      try { drawScene(s, tt) } finally { MINI = false }
+      G.restore()
+      boilSeed('replay' + i); STYLE.line(rrPts(0, 0, w, h, 14), 1, STYLE.dim, { closed: true, curv: 0 })
+      pop()
+    })
+    return h
   }
 
   const SCENES = { title: TITLE, idea: IDEA, diagram: DIAGRAM, stack: STACK, steps: STEPS, compare: COMPARE, grid: GRID, equation: EQUATION, stat: STAT, bars: BARS, tally: TALLY, quote: QUOTE, takeaway: TAKEAWAY, end: END }
@@ -810,10 +878,17 @@
   function load(sb, voice) {
     setup(sb)
     voice = voice || sb._voice || []
-    let t = 0, k = 0
+    // Every cut lands on a beat of the style's score. The score's grid starts
+    // just after the title's punches (audio.py is handed beat0 and uses it), and
+    // a scene is lengthened to the next beat: half a beat on average.
+    const BEAT = 60 / (STYLE.bpm || 120)
+    let t = 0, k = 0, beat0 = 0
     const scenes = sb.scenes.map((sc, i) => {
       const s = { ...sc, _i: i }, nb = SCENES[s.type].beats(s).length, v = voice.slice(k, k + nb)
-      const dur = SCENES[s.type].plan(s, v)
+      let dur = SCENES[s.type].plan(s, v)
+      if (i === 0) { const p = (s._ev || []).filter(e => e.type === 'punch').map(e => e.t); beat0 = p.length ? Math.max(...p) + .36 : 0 }
+      const end = t + dur
+      if (end > beat0) dur = Math.round((beat0 + Math.ceil((end - beat0) / BEAT - 1e-6) * BEAT) * 24) / 24 - t
       const out = { sc: s, start: t, dur, trans: i === 0 ? 'none' : STYLE.trans, v, k0: k }
       t += dur; k += nb; return out
     })
@@ -823,10 +898,23 @@
       if (s.trans !== 'none') events.push({ t: +(s.start - .3).toFixed(3), type: 'whoosh' })
       for (const e of s.sc._ev || []) events.push({ ...e, t: +(s.start + e.t).toFixed(3) })
     }
-    TL = { scenes, duration: t, beats }
+    // Motion windows, [from, to, samples]: where parts arrive or move fast
+    // enough to smear (samples > 1: that many paints averaged over the
+    // shutter), or move steadily enough to want every frame (1: painted on
+    // ones, unsmeared). Everywhere else a drawing is held for two frames.
+    const win = []
+    for (const s of scenes) {
+      if (s.trans !== 'none') win.push([s.start - TW / 2 - .05, s.start + TW / 2 + .05, s.trans === 'slide' ? 8 : 6])
+      win.push([s.start - .02, s.start + 1.0, 5])
+      for (const b of s.sc._b) win.push([s.start + b - .04, s.start + b + .9, 5])
+      for (const [a, b, n] of s.sc._win || []) win.push([s.start + a, s.start + b, n])
+    }
+    win.sort((a, b) => a[0] - b[0])
+    TL = { scenes, duration: t, beats, motion: win, beat0, cuts: scenes.slice(1).map(s => +s.start.toFixed(3)) }
     DUR = t
     return {
       duration: +t.toFixed(3), posterT: scenes[0].start + (scenes[0].sc._t?.poster || 2), style: STYLE.name, music: STYLE.music, bpm: STYLE.bpm, mascot: MASCOT,
+      beat0: +beat0.toFixed(3), cuts: TL.cuts, motion: STYLE.lowres ? [] : win.map(w => [+w[0].toFixed(3), +w[1].toFixed(3), w[2]]),
       lowres: STYLE.lowres || null,
       scenes: scenes.map(s => ({ type: s.sc.type, start: +s.start.toFixed(3), dur: +s.dur.toFixed(3), trans: s.trans })),
       beats, events: events.sort((a, b) => a.t - b.t), lines: sb.scenes.flatMap(sc => SCENES[sc.type].beats(sc)),
@@ -843,22 +931,74 @@
     })
   }
   function drawScene(s, tt) { SCENES[s.sc.type].draw(tt, clamp(tt - s.start, 0, s.dur - 1e-4), s.sc, s.dur); flushLetters() }
-  function frame(t) {
+  // The camera. Every scene but the title (which has its own choreography)
+  // moves in on each beat: a quick punch that settles into a slightly closer,
+  // slightly shifted framing, and holds there until the next beat. It moves
+  // one way on one scene and the other on the next, centres on the content,
+  // left of the host, and the folio stays put while the picture moves.
+  // Held, not drifting: a camera that never stops changes every pixel of
+  // every drawing, which cost a third more file for a push-in nobody sees.
+  function sceneCam(s, tt) {
+    if (THUMB || s.sc.type === 'title') return null
+    const lt = tt - s.start, dir = s.sc._i % 2 ? 1 : -1
+    let step = 0, kick = 0
+    for (const b of s.sc._b || []) {
+      const d = lt - b; if (d <= 0) continue
+      step += expoOut(seg(d, 0, .4))
+      if (d < .9) kick += (d / .08) * Math.exp(1 - d / .08)
+    }
+    step = Math.min(step, 4)   // a long diagram stops closing in before its edges crowd the frame
+    return { z: 1 + .012 * step + .01 * kick, x: dir * 7 * step, y: -4 * step }
+  }
+  function underCam(s, tt, draw) {
+    const c = sceneCam(s, tt)
+    if (!c) return draw()
+    const cx = 760, cy = 560
+    push(); translate(cx + c.x, cy + c.y); scale(c.z); translate(-cx, -cy)
+    draw()
+    pop()
+  }
+
+  // How many paints this frame is averaged from: 0 outside every motion window
+  const samplesAt = t => { let n = 0; for (const w of TL.motion) { if (w[0] > t) break; if (t <= w[1]) n = Math.max(n, w[2]) } return n }
+  // A frame inside a smearing window is the average of several paints spread
+  // over a half-frame shutter (1/48 s), the way a camera sees movement. Every
+  // sub-frame boils to the frame's own drawing, so only motion smears.
+  const SHUTTER = 1 / 48
+  let ACC = null
+  function frame(t, o = {}) {
     t = Math.max(0, Math.min(t, TL.duration - 1e-4))
+    const n = o.blur && !STYLE.lowres ? samplesAt(t) : 0
+    if (n < 2) return paintAt(t, t)
+    if (!ACC) { ACC = document.createElement('canvas'); ACC.width = OUT_W; ACC.height = OUT_H }
+    const a = ACC.getContext('2d')
+    a.globalCompositeOperation = 'source-over'; a.globalAlpha = 1; a.fillStyle = '#000'; a.fillRect(0, 0, OUT_W, OUT_H)
+    a.globalCompositeOperation = 'lighter'; a.globalAlpha = 1 / n
+    POSE = { rec: true, list: [], i: 0 }
+    try {
+      for (let i = 0; i < n; i++) { POSE.rec = i === 0; POSE.i = 0; paintAt(Math.max(0, t - SHUTTER * i / (n - 1)), t); a.drawImage(CV, 0, 0) }
+    } finally { POSE = null }
+    MAIN.setTransform(1, 0, 0, 1, 0, 0); MAIN.globalCompositeOperation = 'source-over'; MAIN.globalAlpha = 1; MAIN.filter = 'none'
+    MAIN.drawImage(ACC, 0, 0)
+  }
+  function paintAt(t, drawT) {
     paintFrame(t, tt => {
       let i = TL.scenes.length - 1; while (i > 0 && tt < TL.scenes[i].start) i--
       const s = TL.scenes[i], next = TL.scenes[i + 1], lt = tt - s.start
       const inSlide = STYLE.trans === 'slide'
-      if (inSlide && next && lt > s.dur - TW / 2) { const e = ease((lt - (s.dur - TW / 2)) / TW); push(); translate(-W * e, 0); drawScene(s, tt); pop(); push(); translate(W * (1 - e), 0); drawScene(next, next.start); pop() }
-      else if (inSlide && s.trans === 'slide' && lt < TW / 2) { const prev = TL.scenes[i - 1], e = ease(.5 + lt / TW); push(); translate(-W * e, 0); drawScene(prev, s.start - 1e-3); pop(); push(); translate(W * (1 - e), 0); drawScene(s, tt); pop() }
-      else drawScene(s, tt)
+      if (inSlide && next && lt > s.dur - TW / 2) { const e = ease((lt - (s.dur - TW / 2)) / TW); push(); translate(-W * e, 0); underCam(s, tt, () => drawScene(s, tt)); pop(); push(); translate(W * (1 - e), 0); underCam(next, next.start, () => drawScene(next, next.start)); pop() }
+      else if (inSlide && s.trans === 'slide' && lt < TW / 2) { const prev = TL.scenes[i - 1], e = ease(.5 + lt / TW); push(); translate(-W * e, 0); underCam(prev, s.start - 1e-3, () => drawScene(prev, s.start - 1e-3)); pop(); push(); translate(W * (1 - e), 0); underCam(s, tt, () => drawScene(s, tt)); pop() }
+      else {
+        CHROME = []
+        try { underCam(s, tt, () => drawScene(s, tt)) } finally { const f = CHROME; CHROME = null; for (const l of f) folio(l) }
+      }
       const tr = TRANS[STYLE.trans]
       if (!inSlide) {
         if (next && lt > s.dur - TW / 2) tr((lt - (s.dur - TW / 2)) / TW)
         if (s.trans !== 'none' && lt < TW / 2) tr(.5 + lt / TW)
       }
       progress(tt)
-    }, STYLE)
+    }, STYLE, drawT)
   }
   // a still for the article's thumbnail: the first mechanism scene, fully built
   function thumb(sb) {

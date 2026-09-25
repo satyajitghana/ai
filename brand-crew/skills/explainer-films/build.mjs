@@ -7,6 +7,9 @@
 //                                                                   thumbnails only (every storyboard when no slug is given)
 //   node brand-crew/skills/explainer-films/build.mjs <slug> --social --out=drafts/films
 //                                                                   a 1280x720 cut for posting; not committed, no manifest
+//   node brand-crew/skills/explainer-films/build.mjs <slug> --preview --out=/tmp/preview
+//                                                                   the film as it would render now, into a scratch
+//                                                                   directory; not committed, no manifest
 //   node brand-crew/skills/explainer-films/build.mjs <slug> --style=crayon --out=/tmp/preview
 //                                                                   the film in another style, voiced and timed like the
 //                                                                   real one; not committed, no manifest. Always preview
@@ -39,8 +42,8 @@ const args = process.argv.slice(2)
 const opt = Object.fromEntries(args.filter(a => a.startsWith('--')).map(a => { const [k, ...v] = a.slice(2).split('='); return [k, v.join('=') || true] }))
 const SB = join(ROOT, 'data', 'films')
 const MAN = join(ROOT, 'data', '.generated', 'films.json'), TMAN = join(ROOT, 'data', '.generated', 'thumbs.json')
-const social = !!opt.social, preview = !!opt.style, keep = !social && !preview
-if (preview && !opt.out) throw new Error('--style renders a preview: give it --out=<dir> outside public/')
+const social = !!opt.social, preview = !!opt.style || !!opt.preview, keep = !social && !preview
+if (preview && !opt.out) throw new Error('a preview (--preview, --style) needs --out=<dir> outside public/')
 const OUT = opt.out ? (opt.out.startsWith('/') ? opt.out : join(ROOT, opt.out)) : join(ROOT, 'public', 'films')
 const CACHE = process.env.EXPLAINER_CACHE || join(homedir(), '.cache', 'explainer-films')
 export const VOICE = 'af_heart'
@@ -64,7 +67,7 @@ if (!slugs.length) { if (keep) save(); console.log('nothing to render'); process
 const tmp = join(tmpdir(), `explainer-${process.pid}`), frames = join(tmp, 'video')
 mkdirSync(frames, { recursive: true }); mkdirSync(OUT, { recursive: true }); mkdirSync(CACHE, { recursive: true })
 const sbPath = slug => join(tmp, `${slug}.json`)
-for (const slug of slugs) writeFileSync(sbPath(slug), JSON.stringify({ ...load(slug), date: articleDate(slug), ...(preview ? { style: opt.style, palette: undefined } : {}) }))
+for (const slug of slugs) writeFileSync(sbPath(slug), JSON.stringify({ ...load(slug), date: articleDate(slug), ...(opt.style ? { style: opt.style, palette: undefined } : {}) }))
 
 const run = (cmd, a) => { const r = spawnSync(cmd, a, { encoding: 'utf8', maxBuffer: 1 << 26 }); if (r.status !== 0) throw new Error(`${cmd} ${a.slice(0, 3).join(' ')}: ${r.stderr}`); return r.stdout }
 
