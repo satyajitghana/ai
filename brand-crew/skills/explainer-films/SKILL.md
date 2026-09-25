@@ -113,8 +113,10 @@ extension, as the article's does), committed under `public/`.
   Figure 2", "the project's README", "the project's own animation; its
   claims". Numbers inside a picture are its source's, not ours; if the article
   treats them as claims, the credit or the line says so.
-- **Clips** play muted and loop; `clip` picks the span in seconds (default the
-  first 12 s).
+- **Clips** play muted, once, from when the card lands, and then hold their
+  last frame; `clip` picks the span in seconds (default the first 12 s). A
+  loop would restart every counter in the clip and show its in-between
+  values, so end the span on the frame the narration names.
 - A figure scene is evidence, not a mechanism scene: a film still needs a
   diagram, stack, steps, grid, equation or compare.
 
@@ -252,7 +254,7 @@ is off in the pixel style, whose hard edges are the point, and in thumbnails.
   film's mechanism scenes rebuilding at twice speed above the recap lines,
   sized to the room the lines leave.
 
-It costs 2-3x the paint time of the same film on twos and about an eighth
+It costs 2-3x the paint time of the same film on twos and about a seventh
 more file.
 
 ## The host

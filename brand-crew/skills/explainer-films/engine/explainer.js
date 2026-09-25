@@ -698,7 +698,7 @@
       sc._b = bt.at
       sc._ev = [{ t: .05, type: 'slide' }].concat(sc.steps.slice(1).map((_, i) => ({ t: bt.at[i + 1] + .05, type: 'whoosh' })))
       const m = MEDIA[mediaKey(sc)]
-      sc._win = [[0, .9, 5]].concat(m && m.kind === 'video' ? [[.9, bt.end + .4, 1]] : [])
+      sc._win = [[0, .9, 5]].concat(m && m.kind === 'video' ? [[.9, Math.min(bt.end + .4, .4 + m.frames.length / m.fps), 1]] : [])
       return snap(bt.end + .4)
     },
     draw(t, lt, sc) {
@@ -724,7 +724,8 @@
       if (rw / rh < A) rw = rh * A; else rh = rw / A
       if (rw > m.w) { rw = m.w; rh = rw / A } if (rh > m.h) { rh = m.h; rw = rh * A }
       const sx = clamp(mx - rw / 2, 0, m.w - rw), sy = clamp(my - rh / 2, 0, m.h - rh)
-      const img = m.kind === 'video' ? m.frames[Math.floor(Math.max(0, lt - .3) * m.fps) % m.frames.length] : m.frames[0]
+      // a clip plays once and holds its last frame: a loop restarts its counters
+      const img = m.kind === 'video' ? m.frames[Math.min(m.frames.length - 1, Math.floor(Math.max(0, lt - .3) * m.fps))] : m.frames[0]
       picture(img, sx, sy, rw, rh, -cw / 2, -ch / 2, cw, ch)
       pop()
       write(caps('mono', 'Source: ' + sc.credit), cx - cw / 2 - pad, cy + ch / 2 + pad + 42, F('mono', 24), STYLE.dim, { alpha: k })
