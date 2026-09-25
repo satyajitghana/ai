@@ -392,6 +392,10 @@ function flushLetters() {
 
 // ---------- frame ----------
 let T = 0, MAIN = null, LO = null;
+// regions the style's overlay leaves alone: a photograph or a screenshot laid
+// on the frame is a print pinned to the ground, not ink the grain sits in
+let KEEP = [];
+function keepClear(x, y, w, h, r = 0) { KEEP.push([G.getTransform(), x, y, w, h, r]); }
 function paintInit(canvas) {
   CV = canvas; CV.width = OUT_W; CV.height = OUT_H;
   MAIN = G = CV.getContext('2d');
@@ -403,7 +407,7 @@ function lcg(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) /
 // sub-frames of one motion-blurred frame share it, so the blur smears motion
 // and never the boil
 function paintFrame(t, world, S, drawT = t) {
-  T = t; LETTERS = []; CAM = null;
+  T = t; LETTERS = []; KEEP = []; CAM = null;
   let w = OUT_W, h = OUT_H
   if (S.lowres) {
     if (!LO || LO.width !== S.lowres[0]) { LO = document.createElement('canvas'); LO.width = S.lowres[0]; LO.height = S.lowres[1] }
@@ -417,7 +421,11 @@ function paintFrame(t, world, S, drawT = t) {
   world(t);
   flushLetters();
   G.setTransform(1, 0, 0, 1, 0, 0); G.globalAlpha = 1
-  S.over(G, w, h)
+  if (KEEP.length) {
+    G.save(); G.beginPath(); G.rect(0, 0, w, h)
+    for (const [m, x, y, rw, rh, r] of KEEP) { G.setTransform(m); G.roundRect(x, y, rw, rh, r); }
+    G.setTransform(1, 0, 0, 1, 0, 0); G.clip('evenodd'); S.over(G, w, h); G.restore()
+  } else S.over(G, w, h)
   G.globalCompositeOperation = 'source-over';
   if (S.lowres) {
     if (S.quantize) S.quantize(G, w, h)
