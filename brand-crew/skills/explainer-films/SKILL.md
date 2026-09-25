@@ -1,7 +1,7 @@
 ---
 name: explainer-films
 description: >-
-  Write and render an explainer film for an article: a 60-110 second animated,
+  Write and render an explainer film for an article: a 90-125 second animated,
   narrated explanation of how the thing the article is about works — its
   architecture, its technique, what is new about it — presented by a mascot
   (cat, dog, fox, bunny, capybara or fish) who is different in every film, in
