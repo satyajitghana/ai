@@ -677,15 +677,20 @@
   // In the pixel style the frame is painted at 320x180 and snapped to its
   // palette, which would leave a paper's figure unreadable: there the picture
   // is laid on the full-size frame afterwards, where it was framed.
-  // the colour a picture sits on: the median of its outermost pixels, the
-  // ground a washed-back region should fade into (a terminal's black, a chart's white)
+  // the colour a picture sits on: the commonest colour of its outermost
+  // pixels, the ground a washed-back region should fade into (a terminal's
+  // black, a chart's white). Commonest, not a per-channel median: a border
+  // half white and half red has a median of pink, which is neither
   function edgeColour(img) {
     const c = document.createElement('canvas'); c.width = 96; c.height = 96
     const g = c.getContext('2d'); g.drawImage(img, 0, 0, 96, 96)
-    const d = g.getImageData(0, 0, 96, 96).data, px = []
-    for (let i = 0; i < 96; i++) for (const [x, y] of [[i, 0], [i, 95], [0, i], [95, i]]) { const o = (y * 96 + x) * 4; px.push([d[o], d[o + 1], d[o + 2]]) }
-    const med = j => px.map(p => p[j]).sort((a, b) => a - b)[px.length >> 1]
-    return '#' + [0, 1, 2].map(j => med(j).toString(16).padStart(2, '0')).join('')
+    const d = g.getImageData(0, 0, 96, 96).data, bins = new Map()
+    for (let i = 0; i < 96; i++) for (const [x, y] of [[i, 0], [i, 95], [0, i], [95, i]]) {
+      const o = (y * 96 + x) * 4, k = (d[o] >> 4) << 8 | (d[o + 1] >> 4) << 4 | d[o + 2] >> 4
+      const b = bins.get(k) || [0, 0, 0, 0]; b[0]++; b[1] += d[o]; b[2] += d[o + 1]; b[3] += d[o + 2]; bins.set(k, b)
+    }
+    const top = [...bins.values()].sort((a, b) => b[0] - a[0])[0]
+    return '#' + [1, 2, 3].map(j => Math.round(top[j] / top[0]).toString(16).padStart(2, '0')).join('')
   }
   const POST = []
   function picture(img, sx, sy, sw, sh, x, y, w, h, veil) {
