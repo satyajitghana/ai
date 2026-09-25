@@ -117,6 +117,12 @@ const Scene = z.discriminatedUnion("type", [
     steps: z.array(z.object({ pattern: z.string().regex(PATTERN, "a grid pattern (see SKILL.md)"), label: str(10).optional(), note, say: sayReq }).strict()).min(1).max(5),
   }).strict(),
   z.object({ type: z.literal("equation"), title: str(8).optional(), text: z.string().min(3).max(48), say, parts: z.array(z.object({ match: z.string().min(1), note: str(12), say }).strict()).min(1).max(4) }).strict(),
+  z.object({
+    type: z.literal("figure"), title: str(8).optional(),
+    src: z.string().regex(/^\/articles\/[^\s"]+$/, "a path under /articles/ that the article itself shows"),
+    credit: str(10), clip: z.tuple([z.number().min(0), z.number().min(0)]).optional(),
+    steps: z.array(z.object({ focus: z.tuple([pct, pct, pct, pct]).optional(), note, say: sayReq }).strict()).min(1).max(4),
+  }).strict(),
   z.object({ type: z.literal("stat"), value: z.string().min(1).max(20), label: str(14), note, stamp, say }).strict(),
   z.object({ type: z.literal("bars"), title: str(10), unit: z.string().max(4).optional(), items: z.array(z.object({ label: str(5), value: numeric, hl: z.boolean().optional() }).strict()).min(2).max(5), note, stamp, say }).strict(),
   z.object({ type: z.literal("tally"), label: str(10), of: z.number().int().min(2).max(300), rows: z.array(z.object({ label: str(6), n: z.number().int().min(0) }).strict()).min(1).max(3), note, say }).strict(),
@@ -161,9 +167,9 @@ const prose = (s: string) =>
 
 // Only what a viewer sees or hears is a fact. Layout (`at`, `bend`, layer
 // indices, grid sizes, patterns), ids and the mascot are not.
-const TEXT_KEYS = new Set(["kicker", "headline", "sub", "say", "text", "label", "note", "quote", "source", "mark", "title", "value", "unit", "input", "output", "match", "colLabel", "rowLabel", "of", "n"])
+const TEXT_KEYS = new Set(["kicker", "headline", "sub", "say", "text", "label", "note", "quote", "source", "mark", "title", "value", "unit", "input", "output", "match", "colLabel", "rowLabel", "of", "n", "credit"])
 const TEXT_ARRAYS = new Set(["punch", "recap", "items"])
-const SKIP = new Set(["mascot", "style", "palette", "type", "kind", "tone", "pattern", "at", "bend", "from", "to", "show", "flow", "focus", "highlight", "hl", "dashed", "id", "thumb", "rows", "cols", "side", "repeat", "slug", "nodes"])
+const SKIP = new Set(["mascot", "style", "palette", "type", "kind", "tone", "pattern", "at", "bend", "from", "to", "show", "flow", "focus", "highlight", "hl", "dashed", "id", "thumb", "rows", "cols", "side", "repeat", "slug", "nodes", "src", "clip"])
 function strings(v: unknown, key = "", out: string[] = []): string[] {
   if (v == null) return out
   if (typeof v === "string" || typeof v === "number") { if (TEXT_KEYS.has(key)) out.push(String(v)); return out }
@@ -203,7 +209,7 @@ function nearLabel(norm: string, n: string, ws: string[]): boolean {
 function beatLines(sc: Sc): string[] {
   switch (sc.type) {
     case "title": return [sc.say ?? `Hi, I'm Name! ${sc.headline}. ${sc.sub ?? ""}`]
-    case "diagram": case "stack": case "grid": return sc.steps.map((s) => s.say)
+    case "diagram": case "stack": case "grid": case "figure": return sc.steps.map((s) => s.say)
     case "steps": return (sc.say ? [sc.say] : []).concat(sc.items.map((i) => i.say ?? i.text))
     case "compare": return [sc.left.say ?? sc.left.title, sc.right.say ?? sc.right.title]
     case "equation": return [sc.say ?? "Here is the formula."].concat(sc.parts.map((p) => p.say ?? p.note))
@@ -319,6 +325,7 @@ for (const slug of files) {
   if (types.filter((t) => t === "takeaway").length !== 1) fail(slug, "exactly one takeaway")
   if (types.filter((t) => t === "quote").length > 1) fail(slug, "at most one quote")
   if (types.filter((t) => NUMERIC.has(t)).length > 3) fail(slug, "more than three number scenes: explain, don't tabulate")
+  if (types.filter((t) => t === "figure").length > 2) fail(slug, "at most two figure scenes")
   if (sb.thumb && sb.thumb.scene >= sb.scenes.length) fail(slug, `thumb.scene ${sb.thumb.scene} is past the last scene`)
   const narration = sb.scenes.flatMap(beatLines).reduce((a, l) => a + words(l), 0)
   if (narration > BUDGET) fail(slug, `narration is ${narration} words; the budget is ${BUDGET} (about 105 s of film). Cut words, not scenes`)
@@ -345,6 +352,19 @@ for (const slug of files) {
     }
     if (sc.type === "idea" || sc.type === "takeaway") inside(sc.mark, sc.text, sc.type)
     if (sc.type === "equation") for (const p of sc.parts) if (!sc.text.includes(p.match)) fail(slug, `${at}: part "${p.match}" is not in the formula`)
+    if (sc.type === "figure") {
+      // the article's own picture or clip: committed, and shown by the article itself
+      const video = !/\.(png|jpe?g|webp|gif|avif)$/i.test(sc.src), base = sc.src.replace(/\.(mp4|webm|mov)$/i, "")
+      const file = join(ROOT, "public", sc.src), exists = video && base === sc.src ? [".mp4", ".webm"].some((e) => existsSync(file + e)) : existsSync(file)
+      if (!exists) fail(slug, `${at}: ${sc.src} is not a committed file under public/`)
+      const shows = [sc.src, base].some((p) => src.includes(`"${p}"`))
+      if (!shows) fail(slug, `${at}: the article does not show ${sc.src}; a film uses only the article's own figures and clips`)
+      if (sc.clip && (!video || sc.clip[1] <= sc.clip[0])) fail(slug, `${at}: clip is [from, to] seconds of a video`)
+      for (const st of sc.steps) if (st.focus) {
+        const [x, y, w, h] = st.focus
+        if (w < 8 || h < 8 || x + w > 100.01 || y + h > 100.01) fail(slug, `${at}: focus [${st.focus}] must lie inside the picture (x+w, y+h ≤ 100) and be at least 8 wide and tall`)
+      }
+    }
     if (sc.type === "stack") {
       const n = sc.layers.length
       if (sc.repeat && (sc.repeat.from >= n || sc.repeat.to >= n || sc.repeat.from > sc.repeat.to)) fail(slug, `${at}: repeat must span layers 0..${n - 1}, from ≤ to`)

@@ -15,8 +15,9 @@
 // frames, ms per frame, bytes. Frames are pure functions of t, so a film
 // re-renders identically. Use build.mjs rather than this for site films: it
 // fills in the article date and keeps the manifest.
-import { spawn } from 'node:child_process'
-import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { readFileSync, writeFileSync, mkdirSync, statSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
@@ -48,7 +49,37 @@ async function openPage(browser) {
 }
 const loadSb = f => JSON.parse(readFileSync(f, 'utf8'))
 
+// The article's own figures and clips, handed to a page before a film loads.
+// An image goes as it is; a clip goes as frames ffmpeg pulls at 24 fps, muted,
+// only over the span the scene plays, so a clip frame is a pure function of
+// time like every other. Pulled once per clip per run.
+const PUBLIC = join(HERE, '..', '..', '..', 'public')
+const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', avif: 'image/avif' }
+const clips = new Map()
+function mediaOf(sc) {
+  const key = sc.src + '|' + (sc.clip || []).join(',')
+  if (clips.has(key)) return clips.get(key)
+  const ext = (sc.src.match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase()
+  let r
+  if (MIME[ext]) r = { key, kind: 'image', urls: [`data:${MIME[ext]};base64,${readFileSync(join(PUBLIC, sc.src)).toString('base64')}`] }
+  else {
+    const file = ext ? join(PUBLIC, sc.src) : ['.mp4', '.webm'].map(e => join(PUBLIC, sc.src + e)).find(existsSync)
+    if (!file || !existsSync(file)) throw new Error(`figure: no file for ${sc.src}`)
+    const [a, b] = sc.clip || [0, 12], dir = mkdtempSync(join(tmpdir(), 'clip-'))
+    const ff = spawnSync('ffmpeg', ['-v', 'error', '-ss', String(a), '-t', String(b - a), '-i', file, '-an', '-vf', 'fps=24,scale=1280:-2', '-q:v', '4', join(dir, 'f%04d.jpg')])
+    if (ff.status !== 0) throw new Error(`figure: ffmpeg on ${sc.src}: ${ff.stderr}`)
+    r = { key, kind: 'video', urls: readdirSync(dir).sort().map(f => 'data:image/jpeg;base64,' + readFileSync(join(dir, f)).toString('base64')) }
+    rmSync(dir, { recursive: true, force: true })
+  }
+  clips.set(key, r)
+  return r
+}
+async function prepMedia(page, sb) {
+  for (const sc of sb.scenes || []) if (sc.type === 'figure') { const m = mediaOf(sc); await page.evaluate(m => FILM.media(m.key, m.kind, m.urls, 24), m) }
+}
+
 async function sheet(page, sb, times, cols, w, out, labels = true) {
+  await prepMedia(page, sb)
   const info = await page.evaluate(sb => FILM.load(sb), sb)
   const data = await page.evaluate(({ times, cols, w, labels }) => {
     const h = Math.round(w * 720 / 1280), rows = Math.ceil(times.length / cols)
@@ -89,6 +120,7 @@ const write = (stream, buf) => new Promise(res => (stream.write(buf) ? res() : s
 async function film(pages, sb, out) {
   const page = pages[0]
   if (opt.opts) for (const p of pages) await p.evaluate(o => Object.assign(RF.OPT, o), JSON.parse(opt.opts))
+  await Promise.all(pages.map(p => prepMedia(p, sb)))
   const info = (await Promise.all(pages.map(p => p.evaluate(sb => FILM.load(sb), sb))))[0]
   const n = Math.round(info.duration * FPS)
   const enc = encoder(out, sb.slug, !!info.lowres)
@@ -205,6 +237,7 @@ const main = async () => {
         const a = +opt.from, b = +opt.to; times = []
         for (let t = a; t <= b + 1e-6; t += 1 / FPS) times.push(+t.toFixed(4))
       } else if (opt.every) {
+        await prepMedia(page, sb)
         const info = await page.evaluate(sb => FILM.load(sb), sb)
         times = []; for (let t = +opt.start || 0; t < info.duration; t += +opt.every) times.push(+t.toFixed(3))
       } else times = String(opt.at).split(',').map(Number)
@@ -243,6 +276,7 @@ const main = async () => {
       const page = await openPage(browser)
       while (queue.length) {
         const sb = loadSb(queue.shift())
+        await prepMedia(page, sb)
         const r = await page.evaluate(({ sb, w, q }) => {
           const info = FILM.thumb(sb), src = document.getElementById('c'), h = Math.round(w * 630 / 1200)
           const c = document.createElement('canvas'); c.width = w; c.height = h
