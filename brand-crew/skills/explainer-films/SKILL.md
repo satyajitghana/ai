@@ -108,7 +108,12 @@ extension, as the article's does), committed under `public/`.
 - **Steps frame regions.** `focus` is `[x, y, w, h]` in percent of the picture
   (omit it for the whole picture); the camera eases to it on the step's line.
   Look at the picture and measure: a region is right when its part fills the
-  card. Name in `say` what the viewer is looking at, in the article's words.
+  card. The card keeps the picture's shape, so a region of another shape is
+  widened to it, and what the widening takes in is washed back toward the
+  picture's own ground (a chart's white, a terminal's black): context, not a
+  word cut at the edge. Still, start and end a region between words, not
+  through one. Name in `say` what the viewer is looking at, in the article's
+  words.
 - **`credit` says whose it is**, as the article's caption does: "paper,
   Figure 2", "the project's README", "the project's own animation; its
   claims". Numbers inside a picture are its source's, not ours; if the article
