@@ -662,6 +662,76 @@
   }
 
   // ======================================================================
+  // FIGURE: an image or a clip the article itself shows, on a card. Each beat
+  // moves the framing to the part of it the line is about, and the credit
+  // stays on screen. A clip plays muted, on ones, looping if the scene is
+  // longer. The picture is handed in by render.mjs (media() below), decoded
+  // once; a clip arrives as frames ffmpeg pulled at 24 fps.
+  const MEDIA = {}
+  const mediaKey = sc => sc.src + '|' + (sc.clip || []).join(',')
+  async function media(key, kind, urls, fps = 24) {
+    const imgs = await Promise.all(urls.map(u => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('media: ' + key)); im.src = u })))
+    MEDIA[key] = { kind, frames: imgs, fps, w: imgs[0].naturalWidth, h: imgs[0].naturalHeight }
+    return { key, n: imgs.length, w: MEDIA[key].w, h: MEDIA[key].h }
+  }
+  // In the pixel style the frame is painted at 320x180 and snapped to its
+  // palette, which would leave a paper's figure unreadable: there the picture
+  // is laid on the full-size frame afterwards, where it was framed.
+  const POST = []
+  function picture(img, sx, sy, sw, sh, x, y, w, h) {
+    if (!STYLE.lowres) { G.save(); G.beginPath(); G.rect(x, y, w, h); G.clip(); G.imageSmoothingEnabled = true; G.imageSmoothingQuality = 'high'; G.drawImage(img, sx, sy, sw, sh, x, y, w, h); G.restore(); return }
+    POST.push({ img, s: [sx, sy, sw, sh], d: [x, y, w, h], m: G.getTransform(), a: G.globalAlpha })
+  }
+  function flushPost() {
+    if (!POST.length) return
+    const f = OUT_W / STYLE.lowres[0]
+    for (const p of POST.splice(0)) {
+      MAIN.save(); MAIN.setTransform(p.m.a * f, p.m.b * f, p.m.c * f, p.m.d * f, p.m.e * f, p.m.f * f); MAIN.globalAlpha = p.a
+      MAIN.imageSmoothingEnabled = true; MAIN.imageSmoothingQuality = 'high'
+      MAIN.drawImage(p.img, ...p.s, ...p.d); MAIN.restore()
+    }
+  }
+  const FIGURE = {
+    beats: sc => sc.steps.map(s => s.say),
+    plan(sc, v) {
+      const bt = beatTimes(v, sc.steps.map(s => 2.4 + readT(s.note) * .7), .55, .42)
+      sc._b = bt.at
+      sc._ev = [{ t: .05, type: 'slide' }].concat(sc.steps.slice(1).map((_, i) => ({ t: bt.at[i + 1] + .05, type: 'whoosh' })))
+      const m = MEDIA[mediaKey(sc)]
+      sc._win = [[0, .9, 5]].concat(m && m.kind === 'video' ? [[.9, bt.end + .4, 1]] : [])
+      return snap(bt.end + .4)
+    },
+    draw(t, lt, sc) {
+      heading(lt, sc.title); folio(lt)
+      const m = MEDIA[mediaKey(sc)]
+      const bi = THUMB ? sc.steps.length - 1 : beatOf(sc, lt), t0 = sc._b[bi] || 0
+      note(lt, sc.steps[bi]?.note, t0 + .3)
+      if (!m) { host(t, { mood: 'thinking', look: -.7 }); return }
+      // the card: the picture fitted left of the host, under the heading, on a white mat
+      const top = sc.title ? headBottom(sc.title) + 56 : 190, aw = 1150, ah = 900 - top
+      const s0 = Math.min(aw / m.w, ah / m.h), cw = m.w * s0, ch = m.h * s0, cx = 150 + aw / 2, cy = top + ah / 2
+      const k = THUMB ? 1 : expoOut(seg(lt, 0, .7)), pad = 14
+      push(); translate(cx, cy + (1 - k) * 80); rotate(-.008); G.globalAlpha *= clamp(k * 2); focus(k * 1.2, 12)
+      STYLE.flat(rrPts(-cw / 2 - pad + 10, -ch / 2 - pad + 14, cw + pad * 2, ch + pad * 2, 10), '#000000', .16)
+      STYLE.flat(rrPts(-cw / 2 - pad, -ch / 2 - pad, cw + pad * 2, ch + pad * 2, 10), '#FFFFFF', 1)
+      // the framing: the step's region (percent of the picture), eased from the
+      // last one, widened to the card's shape about its centre, kept inside the picture
+      const full = [0, 0, 100, 100], R = i => (i >= 0 && sc.steps[i] && sc.steps[i].focus) || full
+      const e = THUMB ? 1 : ease(seg(lt, t0, t0 + .9)), f = R(bi - 1).map((a, j) => lerp(a, R(bi)[j], e))
+      let rw = f[2] / 100 * m.w, rh = f[3] / 100 * m.h
+      const A = cw / ch, mx = (f[0] + f[2] / 2) / 100 * m.w, my = (f[1] + f[3] / 2) / 100 * m.h
+      if (rw / rh < A) rw = rh * A; else rh = rw / A
+      if (rw > m.w) { rw = m.w; rh = rw / A } if (rh > m.h) { rh = m.h; rw = rh * A }
+      const sx = clamp(mx - rw / 2, 0, m.w - rw), sy = clamp(my - rh / 2, 0, m.h - rh)
+      const img = m.kind === 'video' ? m.frames[Math.floor(Math.max(0, lt - .3) * m.fps) % m.frames.length] : m.frames[0]
+      picture(img, sx, sy, rw, rh, -cw / 2, -ch / 2, cw, ch)
+      pop()
+      write(caps('mono', 'Source: ' + sc.credit), cx - cw / 2 - pad, cy + ch / 2 + pad + 42, F('mono', 24), STYLE.dim, { alpha: k })
+      host(t, { point: [cx + cw * .32, cy], mood: 'thinking', look: -.7, ...hop(lt, t0, 18) })
+    },
+  }
+
+  // ======================================================================
   // numbers: STAT, BARS, TALLY
   const STAT = {
     beats: sc => [sc.say || (/^[a-z]/.test(sc.label) ? sent(`${sc.value} ${sc.label}`) : sent(`${sc.label.replace(/[:.]\s*$/, '')}: ${sc.value}`))],
@@ -862,7 +932,7 @@
     return h
   }
 
-  const SCENES = { title: TITLE, idea: IDEA, diagram: DIAGRAM, stack: STACK, steps: STEPS, compare: COMPARE, grid: GRID, equation: EQUATION, stat: STAT, bars: BARS, tally: TALLY, quote: QUOTE, takeaway: TAKEAWAY, end: END }
+  const SCENES = { title: TITLE, idea: IDEA, diagram: DIAGRAM, stack: STACK, steps: STEPS, compare: COMPARE, grid: GRID, equation: EQUATION, figure: FIGURE, stat: STAT, bars: BARS, tally: TALLY, quote: QUOTE, takeaway: TAKEAWAY, end: END }
   const MECH = ['diagram', 'stack', 'steps', 'grid', 'equation', 'compare']
 
   // ---------- the film ----------
@@ -999,6 +1069,7 @@
       }
       progress(tt)
     }, STYLE, drawT)
+    if (STYLE.lowres) flushPost()
   }
   // a still for the article's thumbnail: the first mechanism scene, fully built
   function thumb(sb) {
@@ -1006,7 +1077,7 @@
     const pick = sb.thumb?.scene ?? TL.scenes.findIndex(s => MECH.includes(s.sc.type))
     const s = TL.scenes[pick >= 0 ? pick : 0]
     THUMB = true
-    try { paintFrame(s.start + s.dur - .05, tt => drawScene(s, tt), STYLE) } finally { THUMB = false }
+    try { paintFrame(s.start + s.dur - .05, tt => drawScene(s, tt), STYLE); if (STYLE.lowres) flushPost() } finally { THUMB = false }
     return { scene: s.sc.type, style: STYLE.name, mascot: MASCOT.name }
   }
   // every diagram's node boxes as laid out, to hold the checker's copy of the layout to this one
@@ -1014,5 +1085,5 @@
     load(sb, [])
     return TL.scenes.filter(s => s.sc.type === 'diagram').map(s => ({ scene: s.sc._i, nodes: Object.values(layoutDiagram(s.sc).nodes).map(n => ({ id: n.id, x0: n.cx - n.w / 2, x1: n.cx + n.w / 2, y0: n.cy - n.h / 2, y1: n.cy + n.h / 2 })) }))
   }
-  window.FILM = { load, frame, lines, thumb, boxes, get duration() { return TL ? TL.duration : 0 }, STYLES: Object.keys(STYLES), MASCOT_OPTS, SCENE_TYPES: Object.keys(SCENES) }
+  window.FILM = { load, frame, lines, thumb, boxes, media, get duration() { return TL ? TL.duration : 0 }, STYLES: Object.keys(STYLES), MASCOT_OPTS, SCENE_TYPES: Object.keys(SCENES) }
 })()
