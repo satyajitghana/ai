@@ -714,6 +714,7 @@
       push(); translate(cx, cy + (1 - k) * 80); rotate(-.008); G.globalAlpha *= clamp(k * 2); focus(k * 1.2, 12)
       STYLE.flat(rrPts(-cw / 2 - pad + 10, -ch / 2 - pad + 14, cw + pad * 2, ch + pad * 2, 10), '#000000', .16)
       STYLE.flat(rrPts(-cw / 2 - pad, -ch / 2 - pad, cw + pad * 2, ch + pad * 2, 10), '#FFFFFF', 1)
+      keepClear(-cw / 2 - pad, -ch / 2 - pad, cw + pad * 2, ch + pad * 2, 10)
       // the framing: the step's region (percent of the picture), eased from the
       // last one, widened to the card's shape about its centre, kept inside the picture
       const full = [0, 0, 100, 100], R = i => (i >= 0 && sc.steps[i] && sc.steps[i].focus) || full
