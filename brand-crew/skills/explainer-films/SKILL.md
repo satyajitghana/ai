@@ -188,7 +188,7 @@ own ground, line, type, transition and score.
 | `neon` | glowing tubes on a synthwave floor | agents, realtime, audio, security | `club` `ocean` `sunset` |
 | `notebook` | ruled paper, ballpoint, highlighter, ukulele | tools, evals, datasets, tutorials | `yellow` `pink` `green` |
 | `riso` | two-ink print, flat fills, misregistration, marimba | image, video, 3D, design, vision | `pink-blue` `orange-teal` `yellow-violet` `green-red` |
-| `pixel` | 320x180, 16 colours, chiptune | games, voxels, retro, playful subjects | `pico` `night` `wine` |
+| `pixel` | 640x360, 16 colours, chiptune | games, voxels, retro, playful subjects | `pico` `night` `wine` |
 | `crayon` | waxy massed crayon on cartridge paper, a music box | beginner-friendly explainers, education, anything playful | `primary` `garden` `berry` |
 | `pastel` | soft chalk pastel covering toned paper, a harp | vision, generative art, calm long reads | `slate` `umber` `moss` |
 | `ballpoint` | four-colour pen, cross-hatched, dot-grid sketchbook, pizzicato | how-tos, debugging stories, systems sketches | `bic` `sketch` |
