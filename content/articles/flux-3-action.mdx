@@ -1,0 +1,436 @@
+---
+title: "FLUX 3 Action: 2,720 tokens of imagined video for every 32 robot actions"
+description: "Black Forest Labs open-weighted FLUX 3 Action, a world action model that denoises a robot's next 32 joint targets in the same sequence as 2,720 tokens of the video they would cause. I counted the safetensors (a 6.99B DiT, 12.6B once you add the Qwen3-VL-4B text encoder and video VAE it cannot run without), read the flux-action code to see how the actions come out, and checked the RoboLab claim. First place holds and the organizers verified it, but 42.92% is the best of six seeds whose mean is 41.60%. The lead over second place is inside one run's error bar. And the predicted camera frames the model card offers are not in the inference API."
+date: 2026-09-26
+interest: 4
+helpful: 4
+tags:
+  - robotics
+  - world-models
+  - black-forest-labs
+  - open-weights
+  - flow-matching
+  - diffusion
+  - explainer
+draft: false
+---
+
+import { TokenLedger } from "@/components/articles/flux-3-action/token-ledger"
+import { ReplanClock } from "@/components/articles/flux-3-action/replan-clock"
+
+Two months ago this site covered [FLUX 3](/articles/flux-3), Black Forest Labs' move from image
+model to "world model". One row of that article's release table read *FLUX 3 Action: rolling out*.
+On 2026-09-23 it rolled out, as open weights, in three Hugging Face repositories:
+[`flux-3-action-base`](https://huggingface.co/black-forest-labs/flux-3-action-base),
+[`flux-3-action-so101`](https://huggingface.co/black-forest-labs/flux-3-action-so101) and
+[`flux-3-action-droid`](https://huggingface.co/black-forest-labs/flux-3-action-droid). There is also a
+training and inference codebase, [`flux-action`](https://github.com/black-forest-labs/flux-action),
+and a long [technical write-up on BFL's blog](https://bfl.ai/blog/flux-3-action) that stands in for a
+paper. There is no arXiv report.
+
+The card makes two headline claims: "an open weights 7B world action model", and first place on the
+RoboLab-120 simulation benchmark at 42.92% task success. I summed the tensor shapes in every
+safetensors header, read by HTTP range request. I read the `flux-action` source to see how an action
+leaves the network. And I checked the benchmark claim against the live leaderboard and BFL's own seed
+table. The mechanism comes first, because it explains the costs.
+
+## What a world action model is
+
+A robot **policy** maps what the robot sees and feels to what it does next. Modern policies emit an
+**action chunk**: a short trajectory of future commands, say 32 joint targets, executed open-loop
+before the policy looks again. Chunking amortizes one expensive network call over many control ticks.
+
+There are two families of learned policy, and the DROID model card defines both under its results
+table:
+
+- A **VLA** (vision-language-action model) is "a vision-language model that outputs actions
+  directly". π0.5 is the reference open one: 3.3B parameters, 15 actions per call, and 28.0% task
+  success on the RoboLab benchmark below.
+- A **WAM** (world action model) "predicts future frames and actions together". The network
+  generates the next second or two of video *and* the commands that would produce it, in one pass.
+  The name comes from [DreamZero](https://arxiv.org/abs/2602.15922). NVIDIA's policy variants of
+  [Cosmos 3](/articles/cosmos-world-model) are WAMs, and so is [Flex-π](/articles/flex-pi).
+
+The argument for a WAM is data. Robot demonstrations are scarce and expensive. Video of the world
+moving is not. If the same weights must predict what the scene will look like after the gripper
+closes, a video model's knowledge of how objects move transfers to the action it pairs with the
+frames. The argument against is cost. Video is thousands of tokens, actions are a few dozen, and a
+WAM pays for the whole sequence on every denoising step. BFL frames its release as making that cost
+tolerable: "When you choose a WAM you pay in latency and hardware costs; when you choose a VLA you
+give up on almost a quarter of successful rollouts."
+
+## How it works: five streams on one clock
+
+### What goes in, and what comes out
+
+Take the DROID policy, the one with the benchmark number. Per call it takes a text instruction, three
+RGB cameras at 360×640 and an 8-value state: seven joint angles in radians plus a gripper closed
+fraction. It returns a `(1, 32, 8)` array of 32 absolute joint targets plus gripper, at 15 Hz. That is
+2.13 s of motion.
+
+Inside, everything becomes tokens in five **streams**, and each stream has its own embedding layer:
+
+- **Task text.** The instruction goes through Qwen3-VL-4B-Instruct, and the hidden states of eight of
+  its 36 layers (4, 8, 12 … 32) are stacked side by side. That makes each text token 8 × 2,560 =
+  20,480 values wide, which is exactly the input width of the DiT's `txt_in` projection. The code
+  pads captions to a multiple of 80 tokens.
+- **Camera history.** The three views are tiled onto one 544×736 canvas: wrist on top, the two
+  exterior cameras at half size below. A 1.25B transformer video VAE turns that into latents. The
+  VAE has 96 channels, compresses 32× in space and 4× in time, and gives 17 × 20 = 340 tokens for the
+  current frame.
+- **State.** One token carrying the 8 measured values.
+- **Future video.** 8 latent frames × 340 = 2,720 tokens. Each latent frame spans four 15 Hz control
+  ticks, so eight of them cover the same 2.13 s as the actions.
+- **Action chunk.** 32 tokens, one per control tick, each a raw 8-value vector.
+
+The first three streams are clean inputs: the model sees them at noise level zero. The last two start
+as Gaussian noise and are denoised together. Switch to SO-101 below and the shapes change: five
+joints plus a gripper at 30 Hz, a 42-action chunk, two camera snapshots and eight ticks of history.
+
+<TokenLedger />
+
+In one DROID forward pass the sequence is 3,173 tokens (with
+the shortest caption), and **85.7% of it is imagined future video**. The actions the robot will
+actually execute are 32 tokens, **1.0%** of the sequence. The released base checkpoint runs 4 sampler
+steps with classifier-free guidance, which means two passes per step, so one plan pushes about 25,000
+token-passes through the network to produce 32 vectors of 8 numbers.
+
+### One backbone, private blocks first
+
+The DiT is a FLUX-lineage transformer: hidden size 3,072, 24 heads of 128, a SwiGLU MLP of 9,216,
+and RMS-normed queries and keys. What is unusual is the order of its blocks, and the checkpoint
+spells it out:
+
+| Block group | What it does | Parameters (base, measured) |
+|---|---|---:|
+| 5 **mode blocks** per stream, × 5 streams | each stream attends only to itself, with its own weights | 3,067,091,200 |
+| 28 **shared blocks** | all streams concatenated, one joint attention over everything | 3,435,142,144 |
+| per-stream modulation (early + shared) | each stream's scale, shift and gate from its own timestep | 283,115,520 |
+| input embedders (`txt_in`, `time_in`, `vector_in`) | project text, timestep and a pooled vector to 3,072 | 84,934,656 |
+| per-stream input and output heads (video, `ee50`, `gaming`, each with a `_cond` twin) | tokens in, predictions out | 115,826,688 |
+| **total DiT** | 457 tensors, all BF16 | **6,986,110,208** |
+
+Each stream gets five private transformer blocks. The text is processed as text and the camera history
+as video, with no cross-talk. Then all five streams are concatenated and 28 shared blocks attend
+across the whole sequence. This is where an action token can read the video tokens of the frame it
+will cause. Two details make the shared blocks work for tokens at different noise levels:
+
+- **Per-token timesteps.** Each stream carries its own diffusion time. The clean conditioning streams
+  sit at zero, the future video and actions at the current sampling step. Each stream's modulation
+  layer turns its time into a scale, shift and gate, so one weight matrix serves a clean camera frame
+  and a half-denoised action in the same attention call.
+- **One clock for position.** Rotary embeddings run on four axes of 32 dimensions: time, height,
+  width, and a fourth axis that text uses for token order. Time is a shared 10 ms grid. Counting
+  from zero, action $k$ sits at $(k+1)/15$ s and latent frame $i$ at $4i/15$ s, where frame 0 is the
+  current observation. So the fourth action and the first predicted frame share a time position, and
+  so do the 32nd action and the last frame.
+
+The text path has a practical consequence. The five text mode blocks never see the video, and their
+timestep is pinned at zero, so their output depends only on the prompt. BFL caches it once per
+instruction, which its latency table relies on. BFL's own diagram draws the same structure without
+the numbers:
+
+<Figure
+  src="/articles/flux-3-action/fig1.png"
+  alt="Block diagram titled FLUX 3 Action. An instruction, three camera images and a robot-state waveform pass through a text encoder, a video encoder and a state encoder into task, history and state tokens. These feed a box labelled FLUX 3 backbone whose layers 1 to N each hold task, history, state, future and action features. From the last layer, future tokens go through a video decoder to predicted frames, and action tokens go through an action decoder to robot actions."
+  caption="Text, camera history and robot state enter as tokens; the backbone carries task, history, state, future and action features through every layer; future tokens decode to frames and action tokens to robot actions (BFL, FLUX 3 Action report, Figure 3)."
+/>
+
+### How an action comes out
+
+The "action decoder" in that figure is one linear layer, 3,072 → 8, behind an adaptive layer norm.
+There is no action vocabulary, no binning, no autoregressive decoding over tokens. The action stream
+is continuous and generated by **flow matching**, the same objective as the image and video models.
+Training mixes clean data $x_0$ with noise $\varepsilon$ as $z_t = (1-t)\,x_0 + t\,\varepsilon$ and
+learns the velocity that carries $z_t$ back toward $x_0$. At inference the DROID sampler runs:
+
+1. Start the future-video stream and the 32-token action stream from Gaussian noise.
+2. Take 4 steps of the UniPC solver (order 2, time shift 5). Video and actions share each step's time.
+3. At every step run the DiT twice, once with the instruction and once with an empty caption, and
+   combine the two predictions **per stream**: guidance 4 on video, 1 on actions. A scale of 1 means
+   the action stream simply takes the conditional prediction; only the video is pushed toward the
+   instruction. BFL's grid search over the two scales peaked at exactly that pair, 42.00% success.
+4. Divide the action stream by the **action scale** of 2, undo the gripper inversion, and return 32
+   absolute joint targets.
+
+The action scale is the least obvious knob. Multiplying the actions by $s$ before noising means more
+noise is needed to destroy them, so the action stream resolves earlier in sampling than the video.
+BFL's reading is that with $s \gg 1$ the joint model approximates choosing the motion first and then
+imagining what it looks like, and with $s \ll 1$ the reverse. BFL says plainly that its sweep showed
+no clear trend. But $s = 2$ with a timestep distribution shifted by $\alpha = 42$ kept scoring well,
+and it had the best median, 36.72% on the simple task suite. The settings sit in the released
+configs: `action_scale: 2.0`, `train_timestep_shift: 42.0`, `train_timestep_width: 0.75`.
+
+Step 4 is the one to notice. `_sample` returns `out[ak]`, the action stream. The 2,720 future-video
+tokens are denoised on every call and then dropped. They are never decoded to pixels. BFL's
+inference docs say it plainly: the API "neither decodes those latents into RGB frames nor exposes a
+video output flag." 
+
+## Where the weights came from
+
+The base checkpoint's metadata says:
+
+> FLUX Action DiT base for embodiment finetuning: video + text + shared action streams, ee50 and
+> gaming action heads. Removed: image and audio streams, joint14 heads, repa projectors. BF16.
+
+It also records `"step": "724000"` and `"ema": "classic, decay 0.999"`. Together these tie the release
+to the FLUX 3 backbone. This is the multimodal model, pretrained on image, video and audio with
+"video accounting for over 95% of the training tokens", with its image and audio streams cut away.
+`repa` is the usual name for representation-alignment heads, auxiliary projectors that only matter
+during training; BFL credits its multimodal [Self-Flow](https://arxiv.org/abs/2603.06507) pretraining
+for the backbone's representations. Step 724,000 is the "724K action-midtraining checkpoint" the
+report fine-tunes DROID from. BFL gave no parameter count for FLUX 3 at launch, so this is the first
+FLUX 3 checkpoint anyone outside BFL can count. Whether FLUX 3 Video is the same size is not stated.
+
+Midtraining is where actions enter. BFL continued training on 36.95% pretraining video with audio
+and 63.05% video that comes with aligned actions: 19.55% game recordings, 13.54% egocentric video
+with hand-pose labels, 14.03% handheld grippers and 15.93% teleoperation across 14 embodiments. Two
+action vocabularies exist at this stage, and both survive in the base as heads you can measure:
+
+- **EE50** (`emb_in.action_prediction_ee50`, 50 wide): two end effectors × 25 values. Each gets 3
+  for translation, 6 for rotation, and 16 for hand-joint angles or gripper state.
+- **Gaming** (64 wide): mouse x and y, two mouse buttons, and 60 keyboard keys.
+
+The report's ablation is the argument for the whole design. With random initialization, 10,000 steps
+of fine-tuning on DROID reach 0.75% on RoboLab. From pretraining checkpoints the same recipe reaches
+11.6 to 12.4%, and from the 724K midtraining checkpoint 18.63%. The native EE50 head, with no DROID
+fine-tuning at all, gets 17.29%.
+
+<Figure
+  src="/articles/flux-3-action/fig2.png"
+  alt="Bar chart of RoboLab success rate by initialization. Random initialization is under 1 percent. Pretraining checkpoints at 400K, 500K and 636K steps score about 11.6 to 12.4 percent. Action-midtraining checkpoints at 647.5K, 682K and 724K steps are shown twice: hatched bars for the EE50 head used directly, rising from about 7 to about 17 percent, and solid bars for joint fine-tuning for 10K steps, rising from about 14 to about 18.6 percent."
+  caption="Video pretraining is the difference between under 1% and double digits; action midtraining adds the rest. Preliminary settings, small batch, so the absolute numbers are low (BFL, FLUX 3 Action report, Figure 4)."
+/>
+
+### Three repositories, and what is in each
+
+| Repository | DiT parameters (measured) | Action head | Chunk and rate | Sampler |
+|---|---:|---|---|---|
+| `flux-3-action-base` | 6,986,110,208 | EE50 (50) + gaming (64) | n/a, adaptation base | n/a |
+| `flux-3-action-so101` | 6,947,071,232 | 5 joints + gripper: joint deltas, absolute gripper | predict 42, execute 32, at 30 Hz | 4 Euler steps, shift 6.93, guidance 3 |
+| `flux-3-action-droid` | 6,947,058,944 | 7 joints + gripper, absolute | predict 32, execute 32, at 15 Hz | 4 UniPC steps, shift 5, guidance 4 / 1 |
+
+The base also holds the two frozen encoders every policy loads from it: the video VAE, with
+1,254,034,544 parameters, and an unmodified Qwen3-VL-4B-Instruct under Apache-2.0, with 4,437,815,808.
+The policies pin both to a fixed base revision and ship none of their own.
+
+The DROID repository carries five more packages under `variants/`, for six in all. There are three
+recipes: the root (4 steps with guidance), `gd` (guidance-distilled: 4 steps, one pass each) and `sd`
+(step-distilled: one step). Each recipe comes in BF16 at 13.9 GB and as an FP8 twin at 7.1 GB
+(`fp8r`, `gd-fp8r`, `sd-fp8r`). The FP8 file stores 6,795,952,128 weights as E4M3 with one FP32 scale
+per row. It keeps 151,106,816 in BF16: the action streams' input and output heads and modulation
+layers, which the README says are left unquantized on purpose.
+
+The card's "new embodiments require their own action heads" makes a fine-tune sound like bolting on
+a head. It is not. I range-fetched the same three weight matrices from all three checkpoints: the
+query projection of a shared block, a text mode block and a video mode block. In each, the DROID and
+SO-101 policies sit 22–30% of the base weight's norm away from the base, and further still from each
+other: two full fine-tunes from one start. That matches the report's recipe, which freezes the trunk
+for the first 1,000 steps, then warms it up to a learning rate of 2e-4 over the next 2,000. Each
+embodiment is a complete 6.95B checkpoint. The lighter route BFL documents is a rank-32 LoRA for task
+adaptation on SO-101.
+
+## Checking the claims
+
+### "7B"
+
+The DiT is 6.99B in the base and 6.95B in each policy, so "7B" is honest rounding. It is also the
+number that leaves out 5.69B of weights you cannot run without:
+
+| What loads for one DROID policy | Parameters (measured) | BF16 on disk |
+|---|---:|---:|
+| DiT | 6,947,058,944 | 13.9 GB |
+| Qwen3-VL-4B-Instruct text encoder | 4,437,815,808 | 8.9 GB |
+| video VAE | 1,254,034,544 | 2.5 GB |
+| **total** | **12,638,909,296** | **25.3 GB** |
+
+BFL's blog says the model beats the previous best open model "at less than half the parameters". That
+is Cosmos3-Nano-Policy, listed at 16B. I counted its [DROID checkpoint](https://huggingface.co/nvidia/Cosmos3-Nano-Policy-DROID)
+the same way: a 15.17B transformer, a 0.70B VAE and a 0.58B vision encoder, 16.45B in all. Backbone
+against backbone, 6.95B is 46% of 15.17B, and the claim holds. Everything-loaded against
+everything-loaded, 12.64B is 77% of 16.45B. Cosmos 3's transformer contains its own language tower,
+while FLUX 3 Action outsources text to an encoder whose output it caches per prompt, so per denoising
+step the backbone is the fair comparison. Fair, then, and incomplete.
+
+Memory comes in three numbers. The card says "about 32 GB of GPU memory in bfloat16 on an NVIDIA H200",
+and under 24 GB with FP8 and the text encoder offloaded. The RoboLab leaderboard lists 69 GB for the
+same policy. The weights alone are 25.3 GB.
+
+### "First place on RoboLab"
+
+[RoboLab-120](https://arxiv.org/abs/2604.09860) is 120 tabletop tasks in Isaac Sim on a DROID-style
+Franka arm, 10 trials each, so 1,200 episodes. A trial counts only if the task is done as instructed.
+Here is the top of the [live leaderboard](https://research.nvidia.com/labs/srl/projects/robolab/leaderboard.html),
+read on 2026-09-26. The 95% intervals are exact Clopper–Pearson bounds on each success count, as the
+leaderboard computes them:
+
+| # | Policy | Type | Successes | Success rate | 95% interval | Weights | Sim data in fine-tuning |
+|---:|---|---|---:|---:|---|---|---|
+| 1 | FLUX 3 Action | WAM | 515 / 1,200 | 42.9% | 40.1–45.8% | open, 7B | no |
+| 2 | HiDream-O1-Embodied | VLA | 479 / 1,200 | 39.9% | 37.1–42.8% | closed, 6B | yes |
+| 3 | Atomic-WAM | VLM+WAM | 475 / 1,200 | 39.6% | 36.8–42.4% | open, 16.2B | yes |
+| 4 | OASIS WAM | VLM+WAM | 468 / 1,200 | 39.0% | 36.2–41.8% | closed | no |
+| 5 | Cosmos3-Nano-Policy | WAM | 441 / 1,200 | 36.8% | 34.0–39.5% | open, 16B | no |
+| 9 | π0.5 | VLA | 336 / 1,200 | 28.0% | 25.5–30.6% | open, 3.3B | no |
+
+The first place is real, and it is better than it looks in one respect. The leaderboard marks FLUX 3
+Action as verified: organizers "were able to independently run this policy and/or cross-check its
+reported results". The board records no RoboLab, Isaac Sim or other simulator data in its training.
+The entries in second and third place both fine-tuned on RoboLab or Isaac data, so their evaluation
+scenes are in distribution. FLUX 3 Action's are not.
+
+It is weaker than it looks in three respects:
+
+- **42.92% is one seed of six.** BFL's report lists six RoboLab runs of the root BF16 checkpoint:
+  42.67, 40.25, 40.42, 42.92, 41.42 and 41.92%. The mean is 41.60% ± 0.46 (SEM). I checked that these
+  are whole counts out of 1,200 and that the mean and SEM reproduce. 515 / 1,200 is the best of the
+  six. Even the worst, 40.25%, still clears HiDream-O1-Embodied's 39.9%. But that 39.9% is itself one
+  run, and the lead over second place lies inside a single run's 95% interval. The lead over the
+  previous open WAM, Cosmos3-Nano at 36.8%, does not.
+- **The card's comparison table skips the neighbours.** It shows Cosmos3-Nano-Policy and π0.5. It
+  leaves out the three policies between 36.8% and 42.9%. Two of them are flagged as new entries on
+  the board and are absent from BFL's own Table 1 as well.
+- **First overall is not first everywhere.** By difficulty tier, FLUX 3 Action leads on simple tasks
+  (314 / 640, 49.1%). It trails Atomic-WAM on moderate ones (153 / 390 against 158 / 390). On complex
+  tasks it trails both HiDream-O1-Embodied (48 / 170, 28.2%, against 56 / 170, 32.9%) and OASIS WAM
+  (55 / 170).
+
+On real hardware, BFL commissioned Positronic Robotics to run ten DROID tasks, three attempts each, on
+a Franka arm. The operator was blind to which model was driving. The score was 28 of 30 for FLUX 3
+Action, 27 for Cosmos 3 Nano, 20 for DreamZero and 13 for π0.5. That is one attempt ahead of Cosmos
+on a sample of 30: a result that says both work, not that one is better.
+
+### "Up to 3.95× faster"
+
+Success of all six DROID packages, means over seeds from the report's Table 5:
+
+| DROID package | Passes per plan | BF16 success | FP8 success |
+|---|---:|---:|---:|
+| base (root, `variants/fp8r`) | 8 | 41.60% | 41.16% |
+| guidance-distilled (`gd`, `gd-fp8r`) | 4 | 42.19% | 42.24% |
+| step-distilled (`sd`, `sd-fp8r`) | 1 | 38.68% | 37.92% |
+
+Guidance distillation trains a student to reproduce the guided prediction in one pass: half the
+passes, and 0.6 to 1.08 points better. Step distillation then collapses four steps into one, at a cost
+of 3.5 to 4.3 points, still above Cosmos3-Nano's 36.8%. Both keep the joint video-and-action
+prediction intact rather than cutting the video stream. BFL's latencies per predicted chunk, with the
+prompt cached and cameras re-encoded on every call:
+
+| GPU | F3A base BF16 / FP8 (ms) | F3A `gd` BF16 / FP8 (ms) | F3A `sd` BF16 / FP8 (ms) | Cosmos 3 Nano BF16 / FP8 (ms) | π0.5 BF16 (ms) |
+|---|---|---|---|---|---:|
+| B200 | 246.42 / 182.00 | 136.25 / 101.71 | 41.06 / 32.29 | 387.71 / 320.40 | 31.99 |
+| H200 | 397.74 / 291.67 | 216.91 / 145.64 | 60.51 / 43.81 | 713.76 / 575.75 | 46.96 |
+| RTX 6000 Pro | 772.60 / 553.10 | 426.00 / 309.30 | 118.80 / 91.50 | 1278.30 / 840.80 | 57.70 |
+| RTX 5090 | 1458.62 / 697.79 | 720.71 / 344.51 | 179.80 / 85.43 | 1980.22 / 1129.34 | 34.92 |
+
+"Up to 3.95×" is the guidance-distilled FP8 package against Cosmos 3 Nano in FP8 on an H200: 575.75
+÷ 145.64. The bottom of BFL's "1.52× through 3.95×" range is the base FP8 package on an RTX 6000 Pro.
+Both reproduce from the table.
+
+Against π0.5, BFL itself notes the advantage is "in real-time factor, not latency per call". The **real-time factor** (RTF) is compute time divided by the seconds of
+motion that compute buys:
+
+$$
+\text{RTF} = \frac{t_{\text{compute}}}{n / f}
+$$
+
+Here $n$ is the number of actions executed per plan and $f$ is the control rate. Per call, the
+step-distilled FP8 model and π0.5 cost the same on a B200: 32.29 ms against 31.99 ms. FLUX 3 Action
+wins on RTF because its call buys 2.13 s of motion (32 actions at 15 Hz) and π0.5's buys 1.00 s. That
+holds only while you execute the whole chunk blind. BFL's game example executes 8 actions and its
+shooter experiment 2. On a B200 the break-even is about 15 executed actions: replan any sooner and the
+1-step model spends more compute per second of motion than π0.5 running its full chunk.
+
+<Figure
+  src="/articles/flux-3-action/fig3.png"
+  alt="Scatter plot of RoboLab success rate against real-time factor on a B200 in FP8. F3A Guidance Distilled sits at about 42 percent and 0.048, F3A at about 41 percent and 0.085, and F3A Step Distilled at about 38 percent and 0.015, joined by a dashed new Pareto front. Cosmos 3 Nano sits at 36.8 percent and 0.150 and π0.5 at 28 percent and 0.032, joined by a dotted previous Pareto front."
+  caption="BFL's speed–success plot on a B200 in FP8 (π0.5 was evaluated only in BF16, so its point is its BF16 result): all three FLUX 3 Action packages sit above and left of the Cosmos 3 Nano to π0.5 front. The x-axis assumes the whole chunk is executed (BFL, FLUX 3 Action report, Figure 1)."
+/>
+
+Move the slider to execute fewer actions per plan and watch the real-time factor respond:
+
+<ReplanClock />
+
+The shipped DROID profile sets `n_action_steps: 32`, BFL's assumption. The docs are frank that
+`select_action` "does not provide an asynchronous controller or real-time chunking", and that fresh
+observations "do not replace queued commands". A cube that slips at action 3 is noticed at action 33.
+That is standard for chunked policies, and it is why the headline RTF is a best case.
+
+## Limits
+
+- **The licence is not open source.** The weights are under the FLUX Kommunity License v1.0. It grants
+  use for non-commercial purposes, "including non-commercial Robotics Uses", and it defines Robotics
+  Uses as production robots and control signals for physical equipment. A "Qualifying User", one with
+  under US\$5,000,000 in annual revenue, may use Outputs commercially, and Outputs explicitly include
+  "action-prediction outputs". The licence is revocable on notice. It forbids using the model or its
+  outputs to improve any other model with a similar function. The text encoder is Apache-2.0, and so
+  is the `flux-action` code. If you plan to put this on a paid robot, read the licence with a lawyer,
+  not with this paragraph.
+- **The model has no safety envelope.** In the card's words: "Nothing in the model bounds joint
+  velocity, force or workspace". The application must enforce those limits and keep a hardware stop
+  within reach.
+- **The video is not a product.** The card says the model outputs "on request, predicted camera
+  frames". The inference docs and the code say it does not. For now a user gets actions only.
+- **Access is looser than the docs imply.** The docs say to log in "with an account that has access
+  to the weights", and the variant READMEs say access restrictions apply. On 2026-09-26 the Hub API
+  reported all three repositories as ungated, and every header in this article was read without a token.
+- **Only two embodiments ship.** DROID is fine-tuned on the DROID dataset. SO-101 is trained on the
+  SO-101 episodes of `lerobot/community_dataset_v3`. The game and drone demos in BFL's docs are
+  recipes, not checkpoints.
+
+## The take
+
+FLUX 3 Action is a video model with a small continuous action stream threaded through it. The design
+is readable straight off the tensors: five private streams, 28 shared blocks, a joint flow-matching
+sampler, and a linear action head. It also makes the WAM bargain concrete. For every 32 actions the
+DROID policy imagines 2,720 tokens of future video, and it throws them away. BFL's contribution is
+making that bargain cheaper without breaking it: guidance and step distillation that keep the video
+in the loop, and FP8 packages that, with the text encoder offloaded, fit a 24 GB card.
+
+The claims mostly survive. "7B" is the DiT, and 12.64B is what loads. First place on RoboLab is real,
+organizer-verified and achieved without simulator data. But the number on the card is the best of six
+seeds, and second place is within noise. "Up to 3.95×" reproduces from BFL's own table. The π0.5 speed
+win is a statement about chunk length, not model speed. For anyone building on it, the useful facts
+are the ones the card is quietest about. Each embodiment is a full re-train of the trunk. The imagined
+frames are not exposed. And the licence puts a production robot outside the free grant for any company
+above US\$5,000,000 in revenue, and leaves it unclear for those below.
+
+<ChangeMyMind>
+
+<Falsifier claim="The FLUX 3 Action DiT is 6.99B parameters in the base and 6.95B in each policy; a DROID policy loads 12.64B in all.">
+Summed from the safetensors headers of `flux-3-action-base.safetensors`, both policies' `model.safetensors`, `video_vae.safetensors` and both text-encoder shards, counting every BF16 tensor. If the loader instantiates modules that are not in these files, such as the removed image and audio streams as randomly initialized dummies, the in-memory count is higher. `sum(p.numel() for p in policy.parameters())` after `from_pretrained` settles it.
+</Falsifier>
+
+<Falsifier claim="The leaderboard's 515 / 1,200 is the best of six seeds whose mean is 41.60%.">
+The six values in BFL's Table 5 for base BF16 are all whole counts out of 1,200, and 515 is the only one that matches 42.92%. If the leaderboard entry was a separate, seventh evaluation, or used a checkpoint other than the released root, then the seed table and the leaderboard are measuring different things and "best of six" is wrong. The organizers' run logs would show which.
+</Falsifier>
+
+<Falsifier claim="The inference API discards the jointly denoised future video.">
+Read from `policy.py` at commit `e2dd1d8` (`_sample` returns only the action stream) and from BFL's inference docs. If a later `flux-action` release adds a video output path, the card's "on request, predicted camera frames" becomes true and this becomes history.
+</Falsifier>
+
+<Falsifier claim="The DROID and SO-101 policies are full fine-tunes of the trunk, not heads on a frozen base.">
+Based on three sampled 3,072 × 3,072 matrices (one shared block, one text mode block, one video mode block), each 22–30% of the base weight's norm away from the base. A full-model diff could show that some block groups were frozen after all. Three matrices say "moved", not "all moved".
+</Falsifier>
+
+<Falsifier claim="Against π0.5, FLUX 3 Action's speed advantage is chunk length, not per-call latency.">
+From BFL's Table 4: 32.29 ms against 31.99 ms per call on a B200 for the step-distilled FP8 package. On an H200 FLUX 3 Action is slightly faster per call (43.81 against 46.96 ms). On the RTX cards it is slower. An independent latency measurement on matched hardware, with the prompt cache and compilation settings stated, would move these numbers but not the logic.
+</Falsifier>
+
+</ChangeMyMind>
+
+---
+
+*Measured: parameter counts, tensor shapes, dtypes and checkpoint metadata, from the safetensors headers
+of all three FLUX 3 Action repositories and of Cosmos3-Nano-Policy-DROID, read by HTTP range request on
+2026-09-26, plus the relative weight distances between checkpoints from three range-fetched matrices.
+Read from source: the stream layout, token counts, sampler, guidance split and the discarded video
+stream, from [`flux-action`](https://github.com/black-forest-labs/flux-action) at `e2dd1d8` and the
+released `config.json` files. No code from the repository was run and no model was served. Reported:
+everything from BFL's [FLUX 3 Action report](https://bfl.ai/blog/flux-3-action) and
+[documentation](https://docs.bfl.ai/flux_3/flux3_action_overview), including all success rates,
+latencies and the real-robot results, and the [RoboLab leaderboard](https://research.nvidia.com/labs/srl/projects/robolab/leaderboard.html)
+as read on 2026-09-26. The three figures are BFL's, captured from the report's page. The token ledger,
+the replanning clock and the tables are mine. Previously: [FLUX 3](/articles/flux-3) on the backbone,
+[Cosmos 3](/articles/cosmos-world-model) on the rival WAM, and [Flex-π](/articles/flex-pi) on another
+world-action policy.*
