@@ -88,6 +88,18 @@ const RELEASES: Release[] = [
     calib: "not reported, by its own Limitations section",
   },
   {
+    name: "Kev-0.8B on Core ML",
+    who: "FluidInference",
+    families: ["pointer"],
+    released:
+      "fp16 Core ML packages of Kev-0.8B: the LoRA folded into Qwen3.5-0.8B-Base plus Kev's pointer head; 3.55 GB repo, 1.51 GB on the fused path",
+    decides: "Kev's pointer head, unchanged, on the Apple GPU",
+    cap: "80 in the 1,024-token row package",
+    jev: "none: the baseline is Kev's own PyTorch path on MPS",
+    open: "conversion reports; Guess Who agreement as counts, no per-item answers",
+    calib: "decision-v7 dev ECE 0.0326 vs fp32's 0.0329",
+  },
+  {
     name: "Lumma-fev 0.1B / 0.6B",
     who: "FrontiersMind",
     families: ["pointer"],
@@ -104,7 +116,7 @@ const RELEASES: Release[] = [
     who: "Doccy",
     families: ["letter"],
     released:
-      "LoRA r=64 on layers 32–63 (217,579,520), A–J heads (409,680) and an evidence MLP (7,865,345) for Qwen3.8-27B",
+      "LoRA r=64 on layers 32–63 (217,579,520 params), ten-slot letter heads and an evidence MLP for Qwen3.8-27B",
     decides:
       "trained A–J heads initialised from the LM head's letter rows; adapter off for the document, on for the questions",
     cap: "10",
@@ -145,7 +157,7 @@ const RELEASES: Release[] = [
     decides: "the model writes probabilities into strict JSON at temperature 0",
     cap: "none stated; options are listed in the prompt in caller order",
     jev: "none: “this is not a Jev-vs-model benchmark”",
-    open: "1,200-request bake-off with results.jsonl",
+    open: "1,200-request bake-off with per-row results",
     calib: "ECE 0.032–0.544; BoolQ answers come back as 0 or 1",
   },
   {
