@@ -176,6 +176,7 @@ Intelligence, price, speed, latency and context re-read from AA for all of these
 - K2 Horizon 375B A23B — https://artificialanalysis.ai/models/k2-horizon-375b-a23b (K2 Horizon 375B A23B); null: price (AA lists none), speed/latency (AA has no measurement)
 - K2 Horizon 7B — https://artificialanalysis.ai/models/k2-horizon-7b (K2 Horizon 7B); null: price (AA lists none), speed/latency (AA has no measurement)
 - K2 Horizon MoVA 36B A4B — https://artificialanalysis.ai/models/k2-horizon-mova-36b-a4b (K2 Horizon MoVA 36B A4B); https://huggingface.co/IFM/K2-Horizon-MoVA-36B-A4B; article /articles/k2-horizon-mova; null: price (AA lists none), speed/latency (AA has no measurement)
+- K2 Horizon origin (all five rows: provider "MBZUAI IFM", origin UAE) — the Institute of Foundation Models is MBZUAI's: https://mbzuai.ac.ae/research/our-institutes-centers/institute-foundation-models ; launch: https://mbzuai.ac.ae/news/mbzuais-institute-of-foundation-models-launches-k2-horizon-the-worlds-largest-fully-open-ai-models-in-history/
 - LFM2.5-2.6B — https://artificialanalysis.ai/models/lfm2-5-2-6b (LFM2.5-2.6B, estimated); https://llm-stats.com/models/lfm-2.5-2.6b; null: speed/latency (AA has no measurement)
 - Ling 3.0 Flash — https://artificialanalysis.ai/models/ling-3-0-flash (Ling 3.0 Flash, estimated); https://llm-stats.com/models/ling-3.0-flash; article /articles/ling-3-0-flash
 - Ling 3.0 Flash Fin — https://artificialanalysis.ai/models/ling-3-0-flash-fin (Ling-3.0-flash-Fin); https://llm-stats.com/models/ling-3.0-flash-fin; article /articles/ling-3-0-flash-fin
