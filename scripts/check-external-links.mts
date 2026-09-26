@@ -265,6 +265,7 @@ function matchesDynamic(path: string, pattern: string): boolean {
 /** `content/<dir>` backing each URL prefix that renders a content file. */
 const CONTENT_ROUTES: Record<string, string> = {
   articles: "articles",
+  architectures: "architectures",
   blog: "blog",
   notes: "notes",
   projects: "projects",
@@ -281,6 +282,7 @@ type Problem = Ref & { why: string }
 const MD_TWIN_PREFIXES = [
   "blog",
   "articles",
+  "architectures",
   "logs",
   "projects",
   "arxiv",

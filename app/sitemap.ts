@@ -1,6 +1,7 @@
 import type { MetadataRoute } from "next"
 
 import {
+  getArchitectureDocs,
   getArticles,
   getArxivDigests,
   getBlogPosts,
@@ -59,6 +60,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
       lastModified: a.lastUpdated,
       changeFrequency: "monthly" as const,
       priority: a.featured ? 0.8 : 0.7,
+    })),
+    ...getArchitectureDocs().map((d) => ({
+      url: absoluteUrl(`/architectures/${d.slug}`),
+      lastModified: d.lastUpdated,
+      changeFrequency: "monthly" as const,
+      priority: 0.7,
     })),
     ...getLogs().map((l) => ({
       url: absoluteUrl(`/logs/${l.slug}`),

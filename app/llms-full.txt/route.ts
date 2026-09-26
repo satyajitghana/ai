@@ -1,5 +1,6 @@
 import { profile } from "@/data/profile"
 import {
+  getArchitectureDocs,
   getArticles,
   getArxivDigests,
   getBlogPosts,
@@ -32,6 +33,7 @@ export async function GET() {
     ["projects", getProjects()],
     ["blog", getBlogPosts()],
     ["articles", getArticles()],
+    ["architectures", getArchitectureDocs()],
     ["logs", getLogs()],
     ["arxiv", getArxivDigests()],
     ["snippets", getSnippets()],

@@ -1,5 +1,6 @@
 import { profile } from "@/data/profile"
 import {
+  getArchitectureDocs,
   getArticles,
   getArxivDigests,
   getBlogPosts,
@@ -16,6 +17,7 @@ export const dynamic = "force-static"
 export function GET() {
   const posts = getBlogPosts()
   const articles = getArticles()
+  const archDocs = getArchitectureDocs()
   const logs = getLogs().slice(0, 14)
   const projects = getProjects()
   const digests = getArxivDigests().slice(0, 14)
@@ -98,6 +100,19 @@ export function GET() {
         `- [${a.title}](${absoluteUrl(`/articles/${a.slug}.md`)}): ${a.description} (${a.date})`
     ),
     "",
+    ...(archDocs.length
+      ? [
+          "## Architectures",
+          "",
+          `Explainers for the model architectures in the gallery at ${absoluteUrl("/architectures")} (roster as JSON: ${absoluteUrl("/api/architectures")}).`,
+          "",
+          ...archDocs.map(
+            (d) =>
+              `- [${d.title}](${absoluteUrl(`/architectures/${d.slug}.md`)}): ${d.description} (${d.date})`
+          ),
+          "",
+        ]
+      : []),
     "## Daily logs (latest)",
     "",
     ...logs.map(
