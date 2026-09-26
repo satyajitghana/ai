@@ -22,7 +22,7 @@ export type Film = {
   rendered: string
   /** Every word the narrator says, in order. */
   transcript: string
-  /** Painted at 320x180 and shipped at 640x360: scale it up with hard edges. */
+  /** Painted at 640x360 and shipped at that size: scale it up with hard edges. */
   pixel: boolean
 }
 

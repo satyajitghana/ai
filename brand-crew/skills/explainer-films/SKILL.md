@@ -8,8 +8,8 @@ description: >-
   one of eighteen drawn styles (watercolour, crayon, pastel, ballpoint,
   pencil, marker, charcoal, sumi, engraving, stipple, calligraphy, spray,
   chalkboard, blueprint, neon, notebook, riso, pixel). Every article also gets a
-  thumbnail painted from the same storyboard, used as its page backdrop and its
-  OG image background. Use when an article needs its film or thumbnail, when an
+  thumbnail painted from the same storyboard, used as the cover of an article
+  with no film and as the card in its OG image. Use when an article needs its film or thumbnail, when an
   article's facts change, or when asked for a video explanation of a piece. The
   storyboard is data/films/<slug>.json; every number and quote in it must appear
   in the article, and pnpm validate fails if one does not.
@@ -188,7 +188,7 @@ own ground, line, type, transition and score.
 | `neon` | glowing tubes on a synthwave floor | agents, realtime, audio, security | `club` `ocean` `sunset` |
 | `notebook` | ruled paper, ballpoint, highlighter, ukulele | tools, evals, datasets, tutorials | `yellow` `pink` `green` |
 | `riso` | two-ink print, flat fills, misregistration, marimba | image, video, 3D, design, vision | `pink-blue` `orange-teal` `yellow-violet` `green-red` |
-| `pixel` | 320x180, 16 colours, chiptune | games, voxels, retro, playful subjects | `pico` `night` `wine` |
+| `pixel` | 640x360, 16 colours, chiptune | games, voxels, retro, playful subjects | `pico` `night` `wine` |
 | `crayon` | waxy massed crayon on cartridge paper, a music box | beginner-friendly explainers, education, anything playful | `primary` `garden` `berry` |
 | `pastel` | soft chalk pastel covering toned paper, a harp | vision, generative art, calm long reads | `slate` `umber` `moss` |
 | `ballpoint` | four-colour pen, cross-hatched, dot-grid sketchbook, pizzicato | how-tos, debugging stories, systems sketches | `bic` `sketch` |

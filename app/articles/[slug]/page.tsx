@@ -82,18 +82,7 @@ export default async function Page({
         ])}
       />
       <article>
-        <header className="relative isolate mb-10">
-          {thumb ? (
-            // The article's thumbnail, faint behind the title and fading out
-            // below it. Decorative: the film and the prose carry its content.
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-x-0 -top-10 -z-10 h-80 overflow-hidden rounded-2xl opacity-30 [mask-image:linear-gradient(to_bottom,black_15%,transparent_95%)] dark:opacity-20"
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={thumb.src} alt="" className="h-full w-full object-cover object-right" decoding="async" />
-            </div>
-          ) : null}
+        <header className="mb-10">
           <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between sm:gap-4">
             <h1 className="font-heading text-3xl font-bold tracking-tight text-balance">
               {article.title}
@@ -104,7 +93,24 @@ export default async function Page({
             {article.date} · {article.readingTimeMins} min
             {article.tags.length ? ` · ${article.tags.join(" · ")}` : ""}
           </p>
-          {film ? <ArticleFilm film={film} title={article.title} /> : null}
+          {film ? (
+            <ArticleFilm film={film} title={article.title} />
+          ) : thumb ? (
+            // No film: the thumbnail painted from the article's storyboard is
+            // its cover. Decorative — the prose below carries its content.
+            <div className="mt-8 overflow-hidden rounded-xl border bg-muted shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={thumb.src}
+                alt=""
+                width={thumb.width}
+                height={thumb.height}
+                className="block h-auto w-full"
+                decoding="async"
+                fetchPriority="high"
+              />
+            </div>
+          ) : null}
         </header>
         <Article />
       </article>
