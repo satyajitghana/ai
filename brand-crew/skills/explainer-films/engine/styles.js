@@ -335,7 +335,9 @@ const STYLES = (() => {
   const PICO = ['#000000', '#1D2B53', '#7E2553', '#008751', '#AB5236', '#5F574F', '#C2C3C7', '#FFF1E8', '#FF004D', '#FFA300', '#FFEC27', '#00E436', '#29ADFF', '#83769C', '#FF77A8', '#FFCCAA']
   const PICO_RGB = PICO.map(c => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)])
   const pixel = {
-    name: 'pixel', dark: true, lowres: [320, 180], minPx: 44, ls: 6, ink: '#FFF1E8', dim: '#C2C3C7', music: 'chip', bpm: 132, trans: 'dither',
+    // painted at 640x360, not 320x180: at 320 a label had seven pixels of
+    // height, and anything smaller than a heading broke up into noise
+    name: 'pixel', dark: true, lowres: [640, 360], minPx: 44, ls: 6, ink: '#FFF1E8', dim: '#C2C3C7', music: 'chip', bpm: 132, trans: 'dither',
     font: { head: { fam: FAM.silk, caps: true, k: 1.1 }, body: { fam: FAM.vt, k: 1.55 }, mono: { fam: FAM.vt, k: 1.45 }, label: { fam: FAM.silk, caps: true, k: 1.05 } },
     pals: {
       pico: { bg: '#1D2B53', a: '#FF004D', b: '#29ADFF', hi: '#FFEC27', light: '#00E436', wash: '#1D2B53' },
@@ -346,7 +348,9 @@ const STYLES = (() => {
       const p = P()
       g.drawImage(cached('px-' + p.bg, w, h, (c, w, h) => {
         c.fillStyle = p.bg; c.fillRect(0, 0, w, h)
-        const r = lcg(31); for (let i = 0; i < 60; i++) { c.fillStyle = r() < .7 ? '#5F574F' : '#C2C3C7'; c.fillRect(Math.floor(r() * w), Math.floor(r() * h * .7), 1, 1) }
+        // a star is one pixel of the original 320x180 grid, whatever the canvas
+        const s = Math.max(1, Math.round(w / 320)), r = lcg(31)
+        for (let i = 0; i < 60; i++) { c.fillStyle = r() < .7 ? '#5F574F' : '#C2C3C7'; c.fillRect(Math.floor(r() * w / s) * s, Math.floor(r() * h * .7 / s) * s, s, s) }
       }), 0, 0)
     },
     over() {},
@@ -448,7 +452,7 @@ const STYLES = (() => {
 
   // crayon: waxy massed strokes on cream cartridge paper, a music box
   const crayon = media({
-    name: 'crayon', tint: .5, ink: '#2B2530', dim: '#6E6670', paper: '#FBF6EA', music: 'musicbox', bpm: 100, trans: 'scribble',
+    name: 'crayon', tint: .6, ink: '#2B2530', dim: '#6E6670', paper: '#FBF6EA', music: 'musicbox', bpm: 100, trans: 'scribble',
     font: { head: { fam: FAM.gaegu, w: 700, k: 1.28 }, body: { fam: FAM.gaegu, w: 700, k: 1.16 }, mono: { fam: FAM.plex, w: 600 }, label: { fam: FAM.gaegu, w: 700, k: 1.14 } },
     pals: {
       primary: { a: '#E63946', b: '#1D6FD8', hi: '#FFC300', light: '#FFD6A5', wash: '#CFE8FF' },
@@ -461,6 +465,32 @@ const STYLES = (() => {
     mark: { medium: 'mass', fillBrush: 'crayon', strength: .45, precision: .6 },
     hostPen: { brush: 'crayon', weight: 1.7 },
     hostTex: (tw, th) => { brush.mass('crayon', '#BDB6AC', { strength: .55, precision: .3 }); brush.polygon([[0, 0], [tw, 0], [tw, th], [0, th]]); brush.noMass() },
+    // wax streaks run through letters written over them, so under each line
+    // the crayon is smoothed first: what is already there (a fill, a
+    // highlight, bare paper) is blurred until the streaks go, and laid back
+    // through a soft mask the shape of the words, so the letters sit on the
+    // same colour without its grain. A paper-coloured halo erased highlights
+    // and glowed on the paper; paler fills went grey and stayed busy
+    write(str, x, y, f, col, o = {}) {
+      const px = +(/(\d+(?:\.\d+)?)px/.exec(f) || [0, 40])[1], cv = G.canvas, T = G.getTransform(), k = Math.hypot(T.a, T.b)
+      const setup = c => { c.font = f; c.letterSpacing = (o.ls || 0) + 'px'; c.textAlign = o.align || 'left'; c.textBaseline = o.base || 'alphabetic' }
+      G.save(); setup(G); const m = G.measureText(str); G.restore()
+      const pad = px * .6, corners = [[x - m.actualBoundingBoxLeft - pad, y - m.actualBoundingBoxAscent - pad], [x + m.actualBoundingBoxRight + pad, y + m.actualBoundingBoxDescent + pad]]
+      const q = [[corners[0][0], corners[0][1]], [corners[1][0], corners[0][1]], [corners[1][0], corners[1][1]], [corners[0][0], corners[1][1]]].map(([a, b]) => T.transformPoint(new DOMPoint(a, b)))
+      const bx = Math.max(0, Math.floor(Math.min(...q.map(p => p.x)))), by = Math.max(0, Math.floor(Math.min(...q.map(p => p.y))))
+      const bw = Math.min(cv.width, Math.ceil(Math.max(...q.map(p => p.x)))) - bx, bh = Math.min(cv.height, Math.ceil(Math.max(...q.map(p => p.y)))) - by
+      if (bw > 2 && bh > 2) {
+        const sheet = (key) => { const c = this[key] || (this[key] = document.createElement('canvas')); if (c.width < bw || c.height < bh) { c.width = Math.max(c.width, bw); c.height = Math.max(c.height, bh) } const g = c.getContext('2d'); g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'source-over'; g.filter = 'none'; g.clearRect(0, 0, bw, bh); return [c, g] }
+        const [calm, a] = sheet('_calm'), [mask, mk] = sheet('_mask')
+        a.filter = `blur(${(px * .3 * k).toFixed(2)}px)`; a.drawImage(cv, bx, by, bw, bh, 0, 0, bw, bh); a.filter = 'none'
+        mk.setTransform(T.a, T.b, T.c, T.d, T.e - bx, T.f - by); setup(mk); mk.lineJoin = 'round'; mk.lineWidth = px * .7
+        mk.filter = `blur(${(px * .12 * k).toFixed(2)}px)`; mk.strokeText(str, x, y); mk.fillText(str, x, y)
+        a.globalCompositeOperation = 'destination-in'; a.drawImage(mask, 0, 0, bw, bh, 0, 0, bw, bh)
+        G.save(); G.setTransform(1, 0, 0, 1, 0, 0); G.filter = 'none'; if (o.alpha != null) G.globalAlpha *= clamp(o.alpha)
+        G.drawImage(calm, 0, 0, bw, bh, bx, by, bw, bh); G.restore()
+      }
+      text(str, x, y, f, col, o)
+    },
   })
 
   // pastel: soft chalk pastel that covers toned paper, a harp
@@ -598,7 +628,9 @@ const STYLES = (() => {
     pen: { brush: 'rotring', weight: .95, fallback: 'rotring' },
     mark: { medium: 'hatch', fillBrush: 'stipple', fillWeight: 1.1, dist: 3, angle: 0, rand: .4 },
     hostPen: { brush: 'rotring', weight: 2.1 },
-    hostTex: (tw, th) => { brush.hatch(5, 0, { rand: .5 }); brush.hatchStyle('stipple', '#A5A29A', 1); brush.polygon(sheet(tw, th)); brush.noHatch() },
+    // no texture sheet on the host: p5.brush's stipple is soft blobs, and laid
+    // over a whole figure at any density it read as camouflage or TV static.
+    // The host is flat colour inked with the rotring, like a stipple plate's key drawing
   })
 
   // calligraphy: a broad nib in iron-gall ink, watercolour tints, laid paper

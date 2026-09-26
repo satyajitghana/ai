@@ -20,12 +20,39 @@ function engineFiles() {
   return out.sort()
 }
 
-let cached = null
-export function engineSha() {
-  if (cached) return cached
+// styles.js holds all eighteen styles. A film depends on the code they share
+// and on its own style, not on the other seventeen, so tuning one medium does
+// not make every film stale. Each style is a block that opens with
+// `  const <name> = {` or `  const <name> = media({` and closes at the next
+// line that is `  }` or `  })`; the style names come from the file's own
+// `return { ... }`.
+export function stylesSource(style) {
+  const src = readFileSync(join(SKILL_DIR, 'engine', 'styles.js'), 'utf8')
+  const names = new Set((src.match(/^  return \{ ([\w, ]+) \}$/m)?.[1] || '').split(/,\s*/))
+  if (!names.has(style)) return src
+  const keep = []
+  let inside = null
+  for (const line of src.split('\n')) {
+    const open = line.match(/^  const (\w+) = (?:media\()?\{$/)
+    if (!inside && open && names.has(open[1])) inside = open[1]
+    if (!inside || inside === style) keep.push(line)
+    if (inside && /^  \}\)?$/.test(line)) inside = null
+  }
+  return keep.join('\n')
+}
+
+const cached = new Map()
+export function engineSha(style) {
+  if (cached.has(style)) return cached.get(style)
   const h = createHash('sha256')
-  for (const f of engineFiles()) { h.update(f + '\0'); h.update(readFileSync(join(SKILL_DIR, f))); h.update('\0') }
-  return (cached = h.digest('hex'))
+  for (const f of engineFiles()) {
+    h.update(f + '\0')
+    h.update(f === 'engine/styles.js' ? stylesSource(style) : readFileSync(join(SKILL_DIR, f)))
+    h.update('\0')
+  }
+  const sha = h.digest('hex')
+  cached.set(style, sha)
+  return sha
 }
 
 export function articleDate(slug) {
@@ -54,7 +81,7 @@ function lexiconFor(sb) {
 }
 
 export function filmSha(sb, date) {
-  return createHash('sha256').update(engineSha() + '\n' + date + '\n' + canon(sb) + '\n' + JSON.stringify(lexiconFor(sb))).digest('hex').slice(0, 16)
+  return createHash('sha256').update(engineSha(sb.style) + '\n' + date + '\n' + canon(sb) + '\n' + JSON.stringify(lexiconFor(sb))).digest('hex').slice(0, 16)
 }
 
 // what metrics.json was measured from: the type code, the fonts, and the

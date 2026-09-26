@@ -17,16 +17,21 @@ export function renderOgImage({
   title,
   subtitle,
   footerLeft = profile.name,
-  background,
+  picture,
 }: {
   kicker: string
   title: string
   subtitle?: string
   footerLeft?: string
-  /** A data: URI for a faint picture behind everything (an article's thumbnail). */
-  background?: string
+  /** A data: URI for a picture shown as a card beside the title (an article's thumbnail). */
+  picture?: string
 }) {
-  const titleSize = title.length > 54 ? 56 : title.length > 34 ? 68 : 80
+  // With a picture the title has the left half, so it sets smaller and the
+  // subtitle is cut sooner.
+  const titleSize = picture
+    ? title.length > 60 ? 46 : title.length > 36 ? 54 : 64
+    : title.length > 54 ? 56 : title.length > 34 ? 68 : 80
+  const subMax = picture ? 96 : 120
 
   return new ImageResponse(
     (
@@ -45,29 +50,27 @@ export function renderOgImage({
           position: "relative",
         }}
       >
-        {background ? (
-          // the article's thumbnail, faint, and darkened most where the title sits
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={background}
-            alt=""
-            width={1200}
-            height={630}
-            style={{ position: "absolute", top: 0, left: 0, width: 1200, height: 630, objectFit: "cover", opacity: 0.34 }}
-          />
-        ) : null}
-        {background ? (
+        {picture ? (
+          // the article's thumbnail, whole and crisp, as a card on the right:
+          // a picture under the title only muddied both
           <div
             style={{
               position: "absolute",
-              top: 0,
-              left: 0,
-              width: 1200,
-              height: 630,
-              background: "linear-gradient(90deg, rgba(10,10,11,0.9) 0%, rgba(10,10,11,0.72) 55%, rgba(10,10,11,0.25) 100%)",
+              top: 172,
+              right: 56,
+              width: 500,
+              height: 263,
               display: "flex",
+              borderRadius: 18,
+              overflow: "hidden",
+              border: "1px solid rgba(255,255,255,0.14)",
+              boxShadow: "0 24px 60px rgba(0,0,0,0.55)",
+              transform: "rotate(2deg)",
             }}
-          />
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={picture} alt="" width={500} height={263} style={{ width: 500, height: 263, objectFit: "cover" }} />
+          </div>
         ) : null}
         {/* soft top-left glow for depth */}
         <div
@@ -141,7 +144,7 @@ export function renderOgImage({
               fontWeight: 700,
               lineHeight: 1.05,
               letterSpacing: -1.5,
-              maxWidth: 1000,
+              maxWidth: picture ? 560 : 1000,
             }}
           >
             {title}
@@ -152,11 +155,11 @@ export function renderOgImage({
                 display: "flex",
                 fontSize: 28,
                 color: MUTED,
-                maxWidth: 940,
+                maxWidth: picture ? 560 : 940,
                 lineHeight: 1.3,
               }}
             >
-              {subtitle.length > 120 ? subtitle.slice(0, 117) + "…" : subtitle}
+              {subtitle.length > subMax ? subtitle.slice(0, subMax - 3).trimEnd() + "…" : subtitle}
             </div>
           ) : null}
         </div>

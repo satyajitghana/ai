@@ -23,19 +23,19 @@ export default async function Image({
   const article = getArticle(slug)
   // These images are prerendered at build (dynamicParams = false), so this read
   // happens there; *.jpg is excluded from every function's trace in
-  // next.config.ts, and a missing file only means no background.
-  let background: string | undefined
+  // next.config.ts, and a missing file only means no picture.
+  let picture: string | undefined
   const thumb = getThumb(slug)
   if (thumb) {
     try {
       const jpg = await readFile(join(process.cwd(), "public", "thumbs", `${slug}.jpg`))
-      background = `data:image/jpeg;base64,${jpg.toString("base64")}`
+      picture = `data:image/jpeg;base64,${jpg.toString("base64")}`
     } catch {}
   }
   return renderOgImage({
     kicker: "cat articles/" + slug + ".md",
     title: article?.title ?? "Article",
     subtitle: article?.description,
-    background,
+    picture,
   })
 }
