@@ -9,7 +9,8 @@
 //            budget that keeps it under two minutes
 //   explain  it has a mechanism scene (diagram, stack, steps, grid, equation or
 //            compare) — a film that only quotes numbers is not an explainer —
-//            and exactly one takeaway; diagrams have no overlapping nodes and
+//            and exactly one takeaway; diagrams have no overlapping nodes, no
+//            arrow drawn backwards between two boxes set too close, and
 //            keep clear of the side the host presents from
 //   facts    every digit string a viewer sees or hears appears in the article's
 //            MDX (thousands separators and number words both count), a key
@@ -401,6 +402,27 @@ for (const slug of files) {
       for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
         const a = boxes[i], b = boxes[j]
         if (a.x0 < b.x1 + 24 && b.x0 < a.x1 + 24 && a.y0 < b.y1 + 24 && b.y0 < a.y1 + 24) fail(slug, `${at}: nodes "${a.id}" and "${b.id}" overlap; move them apart`)
+      }
+      // An edge runs from 12px outside its source box to 12px outside its target
+      // (engine/explainer.js edgePath). Two boxes close together along the edge
+      // put those two points past each other, and the line then runs backwards:
+      // the arrowhead lands on the source, pointing the wrong way.
+      const byId = new Map(sc.nodes.map((n, i) => [n.id, { ...boxes[i], op: n.kind === "op" }]))
+      for (const e of sc.edges ?? []) {
+        const A = byId.get(e.from), B = byId.get(e.to)
+        if (!A || !B) continue
+        const ax = (A.x0 + A.x1) / 2, ay = (A.y0 + A.y1) / 2, bx = (B.x0 + B.x1) / 2, by = (B.y0 + B.y1) / 2
+        const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1, bend = (e.bend ?? 0) * L * 0.35
+        const Cx = (ax + bx) / 2 - (dy / L) * bend, Cy = (ay + by) / 2 + (dx / L) * bend
+        const end = (N: typeof A, x: number, y: number) => {
+          const tx = Cx - x, ty = Cy - y, d = Math.hypot(tx, ty) || 1, ux = tx / d, uy = ty / d
+          const t = N.op ? (N.x1 - N.x0) / 2 + 10 : Math.min(Math.abs(ux) > 1e-6 ? ((N.x1 - N.x0) / 2 + 12) / Math.abs(ux) : 1e9, Math.abs(uy) > 1e-6 ? ((N.y1 - N.y0) / 2 + 12) / Math.abs(uy) : 1e9)
+          return [x + ux * t, y + uy * t]
+        }
+        const [p0x, p0y] = end(A, ax, ay), [p2x, p2y] = end(B, bx, by)
+        const run = ((p2x - p0x) * dx + (p2y - p0y) * dy) / L
+        // A short run still reads (the head sits in the gap); a negative one never does.
+        if (run < 0) fail(slug, `${at}: edge ${e.from}>${e.to} runs ${Math.round(run)}px, so its arrow is drawn backwards; move the two nodes further apart along it, or bend it`)
       }
     }
   })

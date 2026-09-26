@@ -26,6 +26,9 @@ function header(title: string, canonical: string, meta: string[] = []): string {
     `> ${profile.name} — ${profile.title} @ ${profile.company.name}`,
     `> canonical: ${absoluteUrl(canonical)}`,
     ...meta.map((m) => `> ${m}`),
+    // A blank line ends the blockquote. Without it, a body that starts on the
+    // next line (a tagline, a paragraph) is a lazy continuation of the quote.
+    "",
     "",
   ].join("\n")
 }

@@ -197,6 +197,11 @@ unsure, leave it off.
   `light` overrides the colour.
 - `edges` appear once both ends are shown. `label` ≤ 3 words; `dashed` for
   optional or feedback paths; `bend` (-1..1) curves one that would cross.
+  An edge is drawn from just outside one box to just outside the other, so
+  two connected nodes set too close (wide boxes a column apart, say) put
+  those points past each other and the arrow points back at its source. The
+  checker refuses it; give the pair more room along the edge, or drop a
+  sub-label to narrow the boxes.
 - `groups` draw a dashed frame with a label around nodes ("GPU 0", "Prefill").
 - Steps build it: `show` names what appears, `flow` sends packets along edges
   in order (`"a>b"`), `highlight` rings nodes and dims the rest, `focus` zooms
