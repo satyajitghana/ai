@@ -7,6 +7,7 @@ import type { ZodType } from "zod"
 
 import { absoluteUrl } from "@/lib/site"
 import {
+  architectureDocFrontmatter,
   articleFrontmatter,
   blogFrontmatter,
   logFrontmatter,
@@ -14,6 +15,7 @@ import {
   papersDigestFrontmatter,
   projectFrontmatter,
   snippetFrontmatter,
+  type ArchitectureDoc,
   type Article,
   type BlogPost,
   type ContentItem,
@@ -27,6 +29,8 @@ import {
 
 // Re-export the content types so consumers can `import type { Note } from "@/lib/content"`.
 export type {
+  ArchitectureDoc,
+  ArchitectureDocFrontmatter,
   Article,
   ArticleFrontmatter,
   ArticleSignal,
@@ -196,11 +200,22 @@ export function getNote(slug: string): Note | undefined {
   return getNotes().find((n) => n.slug === slug)
 }
 
+// Architecture explainers, one per /architectures gallery entry that has one.
+// Their slugs are data/architectures.ts slugs (validate-content enforces it).
+export function getArchitectureDocs(): ArchitectureDoc[] {
+  return load("architectures", architectureDocFrontmatter)
+}
+
+export function getArchitectureDoc(slug: string): ArchitectureDoc | undefined {
+  return getArchitectureDocs().find((d) => d.slug === slug)
+}
+
 // Flat corpus for /llms-full.txt, search index, and the RAG chat.
 export function getAllContent(): Array<ContentItem<Record<string, unknown>>> {
   return [
     ...getBlogPosts(),
     ...getArticles(),
+    ...getArchitectureDocs(),
     ...getLogs(),
     ...getProjects(),
     ...getArxivDigests(),

@@ -3,6 +3,9 @@ import type { Metadata } from "next"
 import { ARCH_DIAGRAM_SLUGS } from "@/components/architectures/registry"
 import { PageShell } from "@/components/site/page-shell"
 import { architectures, architectureSignal } from "@/data/architectures"
+import { getArchitectureDocs } from "@/lib/content"
+import { archFilmKey, getFilm } from "@/lib/films"
+import { getThumb } from "@/lib/thumbs"
 
 import { ArchitecturesList } from "./architectures-list"
 
@@ -17,7 +20,11 @@ export default function Page() {
   // Slim, serializable projection handed to the client gallery. The signal is
   // derived from each entry's own interest + uniqueness (data/architectures.ts).
   // Only architectures that have a vetted diagram are shown — the gallery is a
-  // set of unique model architectures, each with its own figure.
+  // set of unique model architectures, each with its own figure. One with a
+  // full explainer (content/architectures/<slug>.mdx) links to its page and
+  // shows the thumbnail painted from its storyboard; both come from the
+  // content layer and the committed thumbnail manifest, not from public/.
+  const docs = new Set(getArchitectureDocs().map((d) => d.slug))
   const items = architectures
     .filter((a) => ARCH_DIAGRAM_SLUGS.has(a.slug))
     .map((a) => {
@@ -37,6 +44,9 @@ export default function Page() {
         signalLabel: s.label,
         score: s.score,
         hasDiagram: true,
+        doc: docs.has(a.slug),
+        thumb: docs.has(a.slug) ? (getThumb(archFilmKey(a.slug))?.src ?? null) : null,
+        film: docs.has(a.slug) && getFilm(archFilmKey(a.slug)) !== null,
       }
     })
 

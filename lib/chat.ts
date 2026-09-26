@@ -223,7 +223,7 @@ export function agentTools() {
 
     get_content: tool({
       description:
-        "Fetch the full markdown of one page. `kind` is a content kind (articles, blog, logs, projects, arxiv, snippets, notes) plus its `slug`, OR a data page (about, resume, health, now, uses, reading) — for data pages the slug is ignored. Read the actual page with this before you rely on its details; don't answer from the snippet alone.",
+        "Fetch the full markdown of one page. `kind` is a content kind (articles, architectures, blog, logs, projects, arxiv, snippets, notes) plus its `slug`, OR a data page (about, resume, health, now, uses, reading) — for data pages the slug is ignored. Read the actual page with this before you rely on its details; don't answer from the snippet alone.",
       inputSchema: z.object({
         kind: z.string().describe("content kind or data-page name"),
         slug: z.string().optional().describe("page slug; omit for data pages"),

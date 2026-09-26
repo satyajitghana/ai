@@ -82,6 +82,7 @@ const nextConfig: NextConfig = {
       { source: "/api/v1/:path*", destination: "/api/:path*" },
       { source: "/blog/:slug.md", destination: "/md/blog/:slug" },
       { source: "/articles/:slug.md", destination: "/md/articles/:slug" },
+      { source: "/architectures/:slug.md", destination: "/md/architectures/:slug" },
       { source: "/logs/:slug.md", destination: "/md/logs/:slug" },
       { source: "/projects/:slug.md", destination: "/md/projects/:slug" },
       { source: "/arxiv/:slug.md", destination: "/md/arxiv/:slug" },
