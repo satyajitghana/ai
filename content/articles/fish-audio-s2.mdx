@@ -1,0 +1,239 @@
+---
+title: "Fish Audio S2: a Qwen3-4B on the time axis, four layers on the codebook axis, and tags that are only text"
+description: "Fish Audio's Drama 3 is a gated API preview with nothing to read, so this reads its open predecessor. From the S2 report, the fish-speech code and the fishaudio/s2-pro file headers read by range request: the slow AR is Qwen3-4B's layer stack plus 3,840 embedding rows, the 'lightweight' fast AR is four full-width layers that run ten times a frame and read as many weights per frame as the 4B model, inline tags and speaker tags are plain BPE text, and every benchmark is self-reported, the headline 81.88% win rate measured on texts Gemini 3 Pro rewrote first. It ends with what Drama 3 claims and what would have to be published to check it."
+date: 2026-09-26
+interest: 4
+helpful: 4
+tags:
+  - tts
+  - audio
+  - speech
+  - open-weights
+  - inference
+  - evaluation
+---
+
+import { DualArStepper } from "@/components/articles/fish-audio-s2/dual-ar-stepper"
+import { ParamLedger } from "@/components/articles/fish-audio-s2/param-ledger"
+
+Fish Audio announced Drama 3 on 23 September 2026. It is a preview behind an API access request: a `model` header value, a demo video and a thread of claims. There is no report, no weights, no licence and no price. There is nothing to read.
+
+Its predecessor is the opposite. Fish Audio S2 shipped in March with a fourteen-author [technical report](https://arxiv.org/abs/2603.08823), open weights at [`fishaudio/s2-pro`](https://huggingface.co/fishaudio/s2-pro) and code at [`fishaudio/fish-speech`](https://github.com/fishaudio/fish-speech). This site never covered it, so this is a read of S2: the report, the code at commit `214da3c`, and the safetensors headers, fetched by HTTP range request without downloading a single weight. A short, labelled section on Drama 3 comes last.
+
+<Callout type="note">
+Numbers below carry one of three labels. **Measured**: I read it from a file. **Reported**: Fish Audio, or someone serving its model, says so. **Reasoned**: my arithmetic on the first two.
+</Callout>
+
+| | | |
+|---|---|---|
+| Checkpoint | `fishaudio/s2-pro` at `1de9996`: **4,561,852,416** parameters, all BF16, 9.12 GB in two shards | measured |
+| Slow AR | Qwen3-4B's layer stack: 36 layers, 2560 wide, 32 query and 8 KV heads, FFN 9728; vocabulary 155,776 | measured |
+| Fast AR | 4 layers at the **same** 2560 width, its own 4,096-row embedding and head: 424.7 M | measured |
+| Codebook fusion | one 40,960 × 2560 table, 104.9 M, summed into every slow-AR input | measured |
+| Codec | DAC-derived, causal, 44.1 kHz in; hop 2048, so **21.53 frames per second**; 1 × 4,096 semantic + 9 × 1,024 acoustic codebooks; 391.4 M parameters in `codec.pth` | measured |
+| Token rate | 215 codec tokens per second of audio, about 2.20 kbit/s | reasoned |
+| Serving | RTF 0.195, time to first audio "as low as 100 ms", one H200 (Fish); RTF 0.34 at batch 1, TTFA ~140 ms (SGLang-Omni) | reported |
+| Licence | Fish Audio Research License on code and weights: research and non-commercial use only | measured |
+
+<ModelCard repo="fishaudio/s2-pro" />
+
+<RepoCard repo="fishaudio/fish-speech" />
+
+## Two autoregressions, because ten codebooks is ten times the sequence
+
+S2's codec emits 21.53 frames per second, each ten codebooks deep. Flattened into one stream, that is 215 tokens per second of speech for a language model to produce. The report's second pre-training stage uses a 16,384-token context. Flattened, that holds 76 seconds of audio. At one position per frame it holds 12.7 minutes (reasoned).
+
+The Dual-AR design is the fix, and the report's Figure 2 draws it.
+
+<Figure
+  src="/articles/fish-audio-s2/fig2.png"
+  alt="The S2 architecture. Along the bottom, a row of input tokens: pink text tokens for the instruction 'convert the provided text to speech', the reference text and the target text, and orange multi-codebook fused embeddings for the reference audio, all under a bracket labelled System Prompt. They feed a wide box labelled Fish Audio S2 Slow AR. Above it, for each time step, a grey Slow AR hidden state and a purple semantic token numbered 0 enter a box labelled Fish Audio S2 Fast AR, which emits a stack of lighter acoustic tokens numbered 1, 2 up to 9, linked by arrows. The stacks feed an Audio Tokenizer Decoder that outputs a waveform. At the bottom right, generated audio tokens pass through a Multi-Codebook Fusion box back into the slow AR's input."
+  caption="The Dual-AR layout: the slow AR runs over time and emits the semantic token 0; the fast AR runs up each column and emits acoustic tokens 1 to 9; multi-codebook fusion feeds each finished column back in. (Fish Audio S2 report, Figure 2)."
+/>
+
+The **slow AR** runs along time, one position per frame. At each step it samples only the semantic token $q^{(0)}_t$, the first codebook. `generate()` in `fish_speech/models/text2semantic/inference.py` enforces that with a logit bias that is `-inf` everywhere except the 4,096 semantic ids and `<|im_end|>`, so the 4B model cannot emit ordinary text once it starts talking.
+
+The **fast AR** runs along depth. Its sequence is the codebook stack of one frame. `decode_one_token_ar` shows the order:
+
+```python
+# fish_speech/models/text2semantic/inference.py, decode_one_token_ar (trimmed)
+biased_logits = logits + semantic_logit_bias
+main_token_normal = sample(biased_logits, ...)[0]          # q0, from the slow AR
+
+model.forward_generate_fast(hidden_states, input_pos=0)    # slow hidden state at position 0
+a = codebooks[0] - model.config.semantic_begin_id
+hidden_states = model.fast_embeddings(a)                   # q0 embedded at position 1
+for codebook_idx in range(1, model.config.num_codebooks):
+    logits = model.forward_generate_fast(hidden_states, input_pos=codebook_idx)
+    a = sample(logits, ...)[0]                             # q1 .. q9
+    hidden_states = model.fast_embeddings(a)
+```
+
+Ten codebooks cost one slow pass and **ten** fast passes per frame: one to put the slow hidden state into the fast AR's cache, nine to produce $q^{(1)}$ through $q^{(9)}$. The fast AR's KV cache is `num_codebooks` long and is overwritten every frame.
+
+Then **multi-codebook fusion** closes the loop. The ten tokens are embedded and summed into one vector, the slow AR's next input. The report's Equation 1 is
+
+$$
+\mathbf{x}_{t+1} = \mathbf{e}^{\text{LM}}_{t} + \sum_{k=0}^{N-1} \mathbf{E}^{(k)}\bigl[q^{(k)}_{t}\bigr], \qquad N = 10
+$$
+
+where $\mathbf{e}^{\text{LM}}_t$ is the semantic token's row in the language model's own embedding table and $\mathbf{E}^{(k)}$ is codebook $k$'s table. The semantic token is counted twice, through two independently trained tables. The code adds one step the report leaves out: for `fish_qwen3_omni` checkpoints `scale_codebook_embeddings` is on, and `forward_generate` divides the sum by $\sqrt{N+1} = \sqrt{11}$ so eleven summed embeddings keep the scale of one.
+
+The sampler has a loop breaker the report does not describe. Each slow step also draws a second sample at temperature 1.0 and top-p 0.9, and uses it whenever the normal sample repeats a semantic token from the last 10 frames (`RAS_WIN_SIZE = 10`). `generate_long` accepts a `repetition_penalty` of 1.1 and never passes it on.
+
+Step through it:
+
+<DualArStepper />
+
+The timing is an estimate: one seconds-per-weight constant, fitted to SGLang-Omni's 63.3 frames per second at batch 1 on an H200 and scaled by the weights each frame reads. The shipped configuration lands on RTF 0.34 by construction. Flattened over all ten codebooks, the same slow model comes out at about 1.68, slower than real time (reasoned). At 86.13 Hz, a plain DAC encoder's rate without S2's extra 4×, even the Dual-AR version falls behind. The frame rate and the split are one design decision.
+
+## The codec: 44.1 kHz in, 21.53 frames out
+
+The tokenizer is Descript's DAC, rebuilt for streaming. `fish_speech/configs/modded_dac_vq.yaml` has the whole shape:
+
+- **Downsampling.** `encoder_rates: [2, 4, 8, 8]` is DAC's own 512×. The quantizer adds `downsample_factor: [2, 2]`, another 4×, and `modded_dac.py` sets `self.frame_length = self.hop_length * 4`. So 44,100 / 2,048 = 21.53 frames per second, and one frame is 46.4 ms of audio (reasoned from measured config).
+- **Quantization.** `DownsampleResidualVectorQuantize` has a `semantic_quantizer` of one codebook with 4,096 entries and a residual quantizer of nine codebooks with 1,024 entries each, all 8-dimensional; the checkpoint's codebook tensors agree. That is 12 + 9 × 10 = 102 bits per frame, about 2.20 kbit/s (reasoned).
+- **Semantic distillation.** In training, a head regresses codebook 0 onto layer 16 of w2v-BERT 2.0, so the first codebook carries content the slow AR can plan like text. The head is not shipped.
+- **Causality.** Convolutions are `CausalConvNet`s, and the transformers either side of the quantizer are causal `WindowLimitedTransformer`s with `window_size: 128`, commented `# empirically this does not seem to matter`. A causal codec is what lets audio leave before the utterance ends.
+
+`codec.pth` is a 1.87 GB torch zip. I read its central directory and `data.pkl` by range request and walked the pickle with a stub unpickler that imports nothing. The float tensors sum to **391,430,530** parameters, stored in fp32 (measured). The report says the tokenizer totals 446M. The released file does not; the training-only distillation head may be the difference, but the report does not say. 302 MB of the file, 16% of the download, is boolean causal masks saved as buffers, the largest 16,384 × 16,384.
+
+One boundary is papered over. The fast AR's single `[4096, 2560]` output head serves all nine acoustic codebooks, which have 1,024 entries each. `decode_one_token_ar` samples them unmasked (`# no constrain for fast codebooks`), and the codec's `decode()` clamps every residual index to 1,023. Harmless if training did its job. It also leaves rows 1,024 to 4,095 of codebooks 1 to 9 in the fusion table unreachable by any real code: 9 × 3,072 × 2560 = 70.8 M parameters (reasoned from measured shapes).
+
+## The slow AR is Qwen3-4B. The fast AR is not small
+
+The `text_config` in `config.json` (36 layers, `dim` 2560, 32 heads over 8 KV heads, `head_dim` 128, `intermediate_size` 9728, `rope_base` 1000000, qk-norm, tied embeddings) is [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B)'s, field for field. The tensors agree. `text_model.*` sums to **4,032,298,496**; Qwen3-4B is 4,022,468,096; the difference is exactly 3,840 × 2560, the extra embedding rows (measured).
+
+The vocabulary explains the rows. Qwen's 151,643 BPE ids, 35 added tokens (26 of Qwen's own, 9 of Fish's: `<|pad|>`, `<|voice|>`, `<|audio_start|>` and so on), 4,096 `<|semantic:i|>` tokens at ids 151,678 to 155,773, and 2 rows of padding make 155,776.
+
+The fast AR is the surprise. The report calls it "a lightweight Fast AR network—consisting of 4 Transformer layers". Its `audio_decoder_config` gives those four layers `dim` 2560, 32 heads over 8 KV heads and `intermediate_size` 9728: the slow AR's layer, minus qk-norm. It is light in depth, not in width.
+
+<ParamLedger />
+
+Width matters because the fast AR runs ten times a frame. At batch size 1, decoding is bound by reading weights, so count them. One slow step reads 36 layers plus the tied 155,776-row head, since the reference code computes logits over the whole vocabulary before masking all but 4,097 of them: 4.03 B weights. One fast pass reads four layers plus the 4,096-row head, 414.2 M; ten passes read 4.14 B (reasoned from measured shapes). **The "400M" half of the model reads slightly more weights per frame than the "4B" half.** That is why SGLang-Omni captures the fast loop in CUDA graphs alongside the slow one, and lists "Batched Fast AR head processing" as its next optimisation.
+
+The README's model table says "4B parameters". The language model is 4.56 B and the release, codec included, is 4.95 B (measured).
+
+## Tags are text
+
+The feature S2 is known for is inline control: `[whispers sweetly]`, `[laughing]`, `[pitch up]` placed mid-sentence and performed at that point. The mechanism is the absence of one. The report says the model "internalizes the mapping between these textual cues and localized acoustic variations without requiring dedicated control tokens", and the files confirm it:
+
+- `tokenizer.json` has 4,131 added tokens. None contains a square bracket. None is a speaker tag either: `<|speaker:1|>` is not a token, it is a string that Qwen's BPE splits into pieces like any other (measured).
+- Nothing on the inference path rewrites the text first. `clean_text` is only called from the training data code.
+
+So `[whispers sweetly]` reaches the model as the same subwords it would be in a novel. The meaning comes from the data. The rich-transcription ASR, a fine-tune of Qwen3-Omni-30B-A3B, writes transcripts with tags like `[prolonged laugh]`, `[inhale]` and `[in a hurry]` at the positions they happen, plus `<|speaker:N|>` turns. Training on transcripts like that, over a pre-training set of more than 10 million hours, teaches the model that a bracketed phrase is something to perform and not to read aloud. The README's "15,000+ unique tags supported" is most plausibly the number of distinct strings that captioner wrote (reasoned; the README does not define it). A tag it never wrote has only the base model's English to go on.
+
+<Figure
+  src="/articles/fish-audio-s2/fig4.png"
+  alt="Two speech bubbles with waveforms. A pink bubble reads '<speaker:0> Fish Audio is amazing. <speaker:1> Yes, you can clone any voice. <speaker:2> It even understands emotions!'. A purple bubble shows six lines with speaker tags and bracketed instructions such as [excited], [emphasis], [whisper in small voice], [professional], [slow], [professional boardcast tone], [super happy] and [pitch up] placed inside sentences. Handwritten annotations point to them: multi-speaker and multi-tag support, any natural language control, fine-grained control."
+  caption="The input format: speaker turns and free-form bracketed instructions inside the text. The figure writes <speaker:0>; the code's tag is <|speaker:0|>. (Fish Audio S2 report, Figure 4)."
+/>
+
+Put together from `generate_long` and `Conversation._build_content_sequence`, one request with a cloned voice is this token sequence:
+
+```text
+<|im_start|>system
+convert the provided text to speech reference to the following:
+
+Text:
+<|speaker:0|>transcript of the reference clip
+
+Speech:
+<|semantic:…|> × one per reference frame<|im_end|>
+<|im_start|>user
+<|speaker:0|>I told you [whispers sweetly] it was a secret.<|im_end|>
+<|im_start|>assistant
+<|voice|><|semantic:…|> … generated, one per frame … <|im_end|>
+```
+
+The reference audio sits in the system prompt, which S1 did not do. That placement is what lets a serving engine cache it: two requests with the same voice share a prefix.
+
+## Speakers and turns
+
+Multi-speaker generation is the same trick with a different string. `split_text_by_speaker` splits the input on `<|speaker:\d+|>`, and `group_turns_into_batches` packs them into batches of at most five turns or `chunk_length` bytes. Each batch becomes a user message. The codes generated for it are appended to the conversation as an assistant message before the next batch, so later turns hear earlier ones. Multi-turn here is chat history.
+
+Voices bind to speaker ids by order and nothing else. Given several reference clips, `generate_long` tags each untagged transcript `<|speaker:i|>`, then concatenates all the reference codes into **one** audio part after all the transcripts. There is no speaker embedding anywhere in the checkpoint. The model has to line up transcript order with audio order on its own, and the RL reward pushes it there with "substantially stronger penalties to incorrect speaker ID tags".
+
+Text with no speaker tag is not split at all: `split_text_by_speaker` returns an empty list and `batches = [text]`, so `chunk_length` is ignored and the whole input is one generation. The reference server's `streaming` mode yields one audio segment per batch, decoded after the batch finishes. For a single-speaker paragraph without tags, the first audio in the fish-speech server arrives when the last does (reasoned from the code path). Each batch also stops at `max_new_tokens`, 1,024 frames by default in `ServeTTSRequest`, which is 47.6 seconds of audio; an untagged paragraph longer than that is cut off (reasoned).
+
+## Streaming: whose numbers
+
+The latency figures come from other code: the report's engine is built on SGLang, and the README points to [SGLang-Omni](https://github.com/sgl-project/sglang-omni) and vLLM-Omni for serving. Two sets of numbers, both on one H200:
+
+| Source | RTF | Time to first audio | Conditions stated |
+|---|---|---|---|
+| S2 report, section 5 | 0.195 | "as low as 100 ms" | "production serving environment", RadixCache hits; batch size not stated |
+| SGLang-Omni README | 0.34 | ~140 ms (TTFT ~18 ms) | "single batch size" |
+
+SGLang-Omni's 0.34 comes with "63.3 tok/s", and 21.53 / 63.3 = 0.340, so its "token" is a frame. The report's 0.195 implies 110 frames per second (reasoned). Neither document gives text length or cache state. The report's "3000+ acoustic tokens per second" under load is 139 seconds of audio per second if a token is a frame, or 14 if it is a codebook entry; the report does not say which.
+
+What the architecture buys is real: a causal codec, and a reference voice that is a cacheable prefix, with an 86.4% average prefix-cache hit rate reported when voices are reused. At 63.3 frames per second, one frame costs 15.8 ms of decode and carries 46.4 ms of audio. The rest of a 100 to 140 ms first-audio time is prefill, the codec decode and serving overhead, which neither source breaks down.
+
+One note from SGLang-Omni's appendix: S2 was trained with bf16 RoPE tables, and computing them in fp32 "caused logit divergence producing garbled audio". fish-speech's `precompute_freqs_cis` ends in `.to(dtype=torch.bfloat16)`. The less precise table is the correct one.
+
+## Training: the filter is the reward
+
+The data pipeline has three stages: vocal separation and VAD, a speech-quality model that filters, and the rich-transcription ASR that captions. The report's central claim is that reusing those two models as RL rewards "eliminates distribution shift between pre-training and post-training by construction". Pre-training runs in two stages, 8,192 then 16,384 tokens of context, over more than 10 million hours in about 80 languages; SFT follows.
+
+RL is a GRPO variant without per-group standard-deviation normalisation (after Dr.GRPO), applied to both ARs with a shared advantage. The reward is a weighted sum of the ASR's per-token confidence (with extra penalties for wrong speaker tags and missed vocal instructions), the quality model's score and cosine similarity from an external voiceprint model. The weights are not published. Updates are rank-stabilised LoRA (`r=16, α=64`) on MLP layers only.
+
+<Figure
+  src="/articles/fish-audio-s2/fig5.png"
+  alt="A line chart of mean reward against training step, from 0 to about 300 steps. A noisy light-blue per-step curve and a dark-blue exponential moving average with alpha 0.05. The average rises from about 2.15 to about 2.4 by step 150 and then stays flat with small dips, ending at an annotated 2.418."
+  caption="The only quantitative figure in the report: about 300 RL steps, ending at a mean reward of 2.418. The reward's weights are unpublished, so the scale has no unit. (Fish Audio S2 report, Figure 5)."
+/>
+
+Reusing the filter as the reward has an obvious benefit and an obvious cost. The benefit is the one claimed. The cost is that one captioner decides what the data says, how the policy is scored, and, as the next section shows, where the benchmark's tags go. [Nar TTS](/articles/nar-tts) built emotion rewards and set them to weight zero for exactly this reason: a model rewarded by its judge learns to please the judge. S2 made the other choice.
+
+## What the benchmarks measure, and who ran them
+
+Every S2 number in the report is Fish Audio's own run. The report does not say whether the comparison rows were re-run or copied from each system's publication.
+
+| Benchmark | Measures | Scored by | S2 | Compared with |
+|---|---|---|---|---|
+| Seed-TTS-Eval | intelligibility of cloned speech | WER from Whisper-large-v3 (en), Paraformer-zh (zh) | 0.99% en, 0.54% zh, 5.99% zh-hard | 7 systems; CosyVoice 3 is better on zh-hard at 5.83% |
+| MiniMax multilingual, 24 languages | WER and speaker similarity | ASR; speaker embeddings | lowest WER in 11, highest SIM in 17 | MiniMax, ElevenLabs, S1 |
+| Long-TTS-Eval, modified | long-form WER and timbre drift | chunked ASR; WavLM-large SIM | 4.38% en WER, SIM 0.523 | Qwen3-TTS, VibeVoice, S1 |
+| EmergentTTS-Eval | pairwise preference on hard prompts | Gemini 2.5 Pro against gpt-4o-mini-tts | 81.88% win rate | 24 other rows |
+| Fish Audio Instruction Benchmark | inline-tag following | Gemini 3 Pro | TAR 0.881 en, 0.984 zh | S1 only |
+
+**Word error rate and speaker similarity** are the solid part: automatic, reproducible, with named ASR models. On long-form audio S2 has the lowest WER, but its timbre is less stable than two rivals' (SIM-Std 0.0761 against Qwen3-TTS's 0.0737 and VibeVoice's 0.0572), and VibeVoice's mean similarity is higher. The report's long-audio section says the model was pre-trained to "a maximum of 8,192 context length"; section 4.2 says the second stage extended it to 16,384.
+
+**EmergentTTS-Eval's 81.88%** is the headline. An audio model judges two clips of the same text: here Gemini 2.5 Pro, against a fixed gpt-4o-mini-tts opponent that scores 50% by construction. S2's row is starred for "strong prompting", which for S2 means: "we first use Gemini 3 Pro to rewrite all benchmark texts and then synthesize speech from the rewritten prompts." The benchmark's own strong prompting adds a category instruction, such as "be emotionally expressive", through a style field or the user message. S1's row is unstarred, at 36.88%. So the 45-point jump from S1 to S2 mixes a new model with an LLM rewriting its input. S2's overall WER, 8.15%, is not the lowest (Gemini 2.5 Flash Preview TTS, starred, has 6.35%), and S2 is not first on Emotions (86.61 against 97.32) or Foreign Words (63.39 against 73.39). The [benchmark paper](https://arxiv.org/abs/2505.23009) (v1) reports win rates from 8.90% to 65.17% and has no Gemini 2.5 Flash TTS or Kokoro rows, so the comparison rows come from a later source the report does not name. Kokoro-82M, which narrates this site's films, sits at 25.46%.
+
+**Tag Activation Rate** is the number most coverage leads with: 0.881 in English against S1's 0.626, and 0.984 against 0.942 in Chinese. It is the share of inline tags that Gemini 3 Pro judges were performed at the right position. The benchmark is Fish Audio's own: about 500 utterances per language, English from MELD (clips from *Friends*), Chinese from game-character voice lines. Its tags were first placed by "the data pipeline described in Section 3", then checked by human experts. Gemini 3 Pro agrees with human annotators on event detection 76.2% of the time, Cohen's κ 0.47, which the report calls moderate. Only S1 is compared. The headline "93.3%" is the unweighted mean of the two languages, (0.984 + 0.881) / 2, and its "4.51 / 5.0" is the mean of four naturalness and expressiveness scores (reasoned). I would read TAR as a regression test between two Fish models, graded by a moderately reliable judge on tags placed by the pipeline that made their training data. It does not place S2 against anything else.
+
+**The Audio Turing Test** result, 0.515 with instruction rewriting, gets the same treatment: Gemini 3 Pro expanded all 499 texts first. The report says it "surpasses the previous SOTA by 30%"; its own table gives 0.515 against Seed-TTS's 0.417, which is 23.5% (reasoned). The README says 24%.
+
+The one number here that Fish Audio did not produce is an arena Elo. The twelve-model chart of the Artificial Analysis arena in the [Breeze TTS 2](/articles/breeze-tts-2) piece puts S2 Pro at 1,125, below four closed models and Breeze TTS 2, and above every other open-weight entry on it.
+
+## Licence
+
+`LICENSE` in fish-speech and `LICENSE.md` on the Hub are identical apart from whitespace (measured): the Fish Audio Research License, last updated 7 March 2026, copyright 39 AI, Inc. Research and non-commercial use is free. Commercial use, defined to include "Your business's or organization's internal operations" and "a hosted service or application programming interface", needs a separate written licence. Outputs may not be used "to create or improve any foundational generative AI model". Redistribution needs a Notice file and a visible "Built with Fish Audio". The Hub repo is not gated.
+
+The report calls S2 "open-sourced". It is open weights under a non-commercial licence. And Fish Audio's hosted API defaults to a model called `s2.1-pro`, which has no report or weights on the Hub, so an S2 result from the API is not necessarily these weights.
+
+## The ledger
+
+**What is genuinely good.** The Dual-AR split keeps the sequence at one position per frame without giving up codebook depth. Reference audio in the system prompt turns voice reuse into prefix caching, which serving engines already do well. Control as text removes a design surface: no tag vocabulary to maintain, and speakers, emotions and events share one mechanism. And the release is complete: report, weights, training code and a readable codec.
+
+**What the report overstates.** The "lightweight" fast AR reads as many weights per frame as the backbone. The released codec has 391.4 M parameters, not 446 M. The ATT margin is 23.5%, not 30%. The EmergentTTS-Eval headline was measured on rewritten input.
+
+**What I would watch.** How the fast loop is served. It is half the weight traffic of a frame and runs sequentially per request, so batching it across requests is where the next throughput gain has to come from.
+
+## Drama 3 (preview): what is announced
+
+*This section reports claims. None of them can be checked yet.*
+
+**What exists.** An announcement on X on 23 September 2026. Fish Audio's TTS API documentation lists `drama-3-preview` as a value of the `model` header, with the note "`drama-3-preview` is a preview model; its behavior and availability may change." It takes the same `<|speaker:N|>` tags as S2 and a `reference_id` array, one voice per speaker. Access is by request. I searched again today for a report or a model card. There is no arXiv paper, and the `fishaudio` organisation's newest model on the Hub is still `s2-pro`, last modified 11 March 2026 (measured). The coverage restates the announcement.
+
+**What is claimed.** Voice direction in natural language, without tags. Switching voice and speaking style in the middle of a sentence. Several characters in one pass. Regenerating a single word instead of the whole segment.
+
+**What S2 says about each (reasoned).**
+
+- *Direction without tags.* The documented request has no instruction or style field. Direction has to travel inside `text`, or in `features`, which the docs describe only as "request-scoped TTS feature flags forwarded verbatim to the inference backend". Inside `text` is the channel S2's tags already use. A captioner writing prose descriptions instead of bracketed ones would give tag-free direction with no architectural change. It could also be something else.
+- *Several characters in one pass.* S2 does this today, with the same speaker tags.
+- *Mid-sentence switching.* S2's format already accepts a speaker or style tag mid-sentence, but the report evaluates inline style tags only, never a speaker change inside a sentence. The claim is about doing it well, and there is nothing to measure it with.
+- *Single-word regeneration.* No documented field edits a span of existing audio. A left-to-right decoder like S2's cannot condition on the audio after a gap, so this needs infilling, which is what speech-editing models such as [AuK](/articles/auk-speech-editing) are built for, or a regenerate-and-splice at the codec level.
+
+**What would have to be published to evaluate it.** Weights, or a model card with the parameter count and architecture. The request format for direction and for regeneration. An evaluation with every row produced under one protocol, a named judge and public baselines, plus a human listening test for tag-free direction, the claim an LLM judge is least able to settle. Latency with batch size, text length and cache state. A licence and a price. Until then, Drama 3 is a model header and a video, and S2 is the most recent thing Fish Audio has let anyone read.
