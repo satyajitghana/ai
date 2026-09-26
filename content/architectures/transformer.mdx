@@ -1,0 +1,118 @@
+---
+title: "The Transformer, from first principles"
+description: "How a decoder-only Transformer turns token ids into a next-token distribution: embeddings, scaled dot-product attention and why it divides by √d_k, multi-head attention, the causal mask, the residual stream and pre-norm, the 4× MLP with GELU or SwiGLU, stacking, where the parameters and FLOPs go in Llama 2 7B, counted to the last weight, and the KV cache at inference."
+date: 2026-09-26
+tags:
+  - transformers
+  - attention
+  - explainer
+---
+
+In 2017 Vaswani et al. published [Attention Is All You Need](https://arxiv.org/abs/1706.03762), a translation model with no recurrence and no convolution: attention and small per-position networks, stacked. Nearly every large language model since descends from its decoder half. This page builds that block from first principles, one part at a time, and then counts where a real model's 6,738,415,616 parameters sit.
+
+The worked numbers use two configurations: the paper's base model (width 512, 8 heads, 6 layers) and [Llama 2](https://arxiv.org/abs/2307.09288) 7B (width 4,096, 32 heads, 32 layers), whose shape is the modern default.
+
+## Tokens become vectors
+
+A model reads numbers, not text. A tokenizer, usually byte-pair encoding ([BPE from first principles](/articles/tokenizers-v1-combinatorial-bpe)), cuts text into pieces from a fixed vocabulary and replaces each piece with its integer id. Llama 2's vocabulary has 32,000 entries.
+
+The embedding is a table with one row per vocabulary entry and $d$ columns: 32,000 × 4,096 in Llama 2 7B. Token id $i$ selects row $i$. There is no arithmetic here, only a lookup; the numbers in the table are learned like any other weight. A sequence of $T$ tokens becomes a $T \times d$ matrix $X$, one $d$-dimensional vector per position.
+
+That vector starts the token's **residual stream**: the one vector per position that every later layer reads from and adds to.
+
+Attention, below, has no notion of order: shuffle its input rows and its output rows shuffle the same way, so position has to be put in explicitly. The original paper added fixed sinusoids of different frequencies to the embeddings; GPT-2 learned a second table with one row per position; Llama 2 uses rotary embeddings ([RoPE](https://arxiv.org/abs/2104.09864)), which rotate each query and key by an angle proportional to its position, so that their dot product depends only on how far apart they are. The [GRAPE article](/articles/grape-position-encoding) shows RoPE and its relatives are one construction.
+
+## Scaled dot-product attention
+
+Three learned matrices project the residual stream into queries $Q = X W_Q$, keys $K = X W_K$ and values $V = X W_V$. Position $i$ scores position $j$ with the dot product of its query and $j$'s key, the scores become weights, and the weights average the values:
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{Q K^{\top}}{\sqrt{d_k}}\right) V
+$$
+
+$Q K^{\top}$ is a $T \times T$ matrix, one score for every ordered pair of positions. Softmax runs along each row, so row $i$ becomes non-negative weights that sum to one. Multiplying by $V$ gives each position a weighted average of the values it attends to. [How self-attention works](/articles/how-transformers-attention-works) walks through it on a three-token example.
+
+**Why divide by $\sqrt{d_k}$.** The paper gives the reason in a footnote. Suppose the components of a query $q$ and a key $k$ are independent, with mean 0 and variance 1. Each product $q_i k_i$ then has mean 0 and variance 1, and the dot product, a sum of $d_k$ such products, has mean 0 and variance $d_k$: its standard deviation is $\sqrt{d_k}$. With $d_k = 64$, as in the paper, typical scores spread 8 times wider than they would with a single dimension. Softmax exponentiates, so two scores two standard deviations apart, 16 points, get weights in the ratio $e^{16}$, about 8.9 million to one. The softmax goes nearly one-hot, and its Jacobian, $a_i(\delta_{ij} - a_j)$ for weights $a$, is close to zero in every entry: almost no gradient gets through. Dividing by $\sqrt{d_k} = 8$ brings the scores back to unit variance, whatever the head width.
+
+## Many heads
+
+One attention computes one weighted average per position, so it can look for one kind of thing at a time. **Multi-head attention** runs $h$ smaller attentions side by side. The stream is projected into $h$ sets of queries, keys and values, each of width $d_k = d / h$; each head attends on its own; the $h$ outputs are concatenated back to width $d$ and mixed by a fourth $d \times d$ matrix, $W_O$.
+
+The paper's base model uses 8 heads of width 64 for its width of 512; Llama 2 7B uses 32 heads of 128 for 4,096. The split costs nothing extra: $W_Q$, $W_K$ and $W_V$ are still $d \times d$ in total, cut into $h$ slices, so a block's attention holds $4d^2$ weights however many heads it has. What the split buys is $h$ independent attention patterns, one per head.
+
+## The causal mask
+
+A language model is trained to predict token $t+1$ from tokens 1 to $t$. If position $t$ could attend to position $t+1$, it would read the answer. So before the softmax, every score whose key comes after its query is set to $-\infty$; $e^{-\infty} = 0$, and those pairs get zero weight. Position $i$ sees positions 1 to $i$. Of the $T^2$ pairs, $T(T+1)/2$ remain: the lower triangle.
+
+The mask is also what makes training efficient. Because no position can see its future, one forward pass over a $T$-token sequence yields $T$ next-token predictions at once, each conditioned only on its own past, and all $T$ losses train the model together. The paper's decoder is masked the same way; an encoder such as BERT leaves the mask off, so every position sees the whole sequence.
+
+## The residual stream and pre-norm
+
+A block never replaces its input. It computes an update and adds it:
+
+$$
+\begin{aligned}
+x &\leftarrow x + \text{Attn}(\text{Norm}(x)) \\
+x &\leftarrow x + \text{MLP}(\text{Norm}(x))
+\end{aligned}
+$$
+
+So the stream is a running sum: the embedding, plus what the first attention wrote, plus what the first MLP wrote, and so on up the stack. Every sublayer reads the sum of everything before it, and a sublayer with nothing to add can output nearly zero and leave the stream as it was. The gradient has the same shortcut on the way down: the identity path carries it from the loss to the embedding without passing through any sublayer.
+
+**Norm first.** The paper normalised after the add, $\text{LayerNorm}(x + \text{Sublayer}(x))$, called post-norm, and trained with a learning-rate warm-up of 4,000 steps. Most models since normalise the input of each sublayer instead, called pre-norm, which leaves the identity path untouched; [Xiong et al. (2020)](https://arxiv.org/abs/2002.04745) showed that pre-norm Transformers train well without the warm-up. The stream itself is then never normalised inside the stack, so one final norm sits before the output. LayerNorm subtracts each vector's mean, divides by its standard deviation, and applies a learned scale and shift. Llama 2 uses [RMSNorm](https://arxiv.org/abs/1910.07467), which skips the mean and the shift and divides by the root mean square: $d$ learned weights per norm.
+
+## The MLP
+
+Attention moves information between positions. The MLP, the paper's "position-wise feed-forward network", then works on each position alone, with the same weights at every position: widen, apply a nonlinearity, narrow.
+
+$$
+\text{MLP}(x) = W_2 \, \phi(W_1 x)
+$$
+
+In the paper, $W_1$ maps 512 dimensions to 2,048, four times wider, and $\phi$ is ReLU. GPT-2 kept the 4× width and used [GELU](https://arxiv.org/abs/1606.08415), a smooth ReLU. Two matrices of $d \times 4d$ hold $8d^2$ weights, twice the attention's $4d^2$.
+
+Llama 2 uses [SwiGLU](https://arxiv.org/abs/2002.05202), a gated variant with three matrices:
+
+$$
+\text{MLP}(x) = W_2 \big(\text{SiLU}(W_1 x) \odot W_3 x\big)
+$$
+
+One widened copy, passed through SiLU, gates the other element by element. A third matrix would cost half as many weights again at the same width, so the hidden width is cut to two thirds of $4d$ to keep the count near $8d^2$: two thirds of 4 × 4,096 is 10,922.7, which Llama 2 rounds up to a multiple of 256, 11,008.
+
+## Stacking
+
+A block is attention and an MLP, each wrapped in a norm and a residual add. The model is that block repeated $N$ times, each copy with its own weights: 6 in the paper's encoder and 6 in its decoder, 32 in Llama 2 7B. After the last block come the final norm and the **unembedding**, a $d \times V$ matrix that turns each position's stream into one score, a logit, per vocabulary entry. Softmax turns the logits into the next-token distribution. GPT-2 reuses its embedding table as the unembedding; Llama 2 learns a separate one.
+
+## Where the parameters go
+
+Here is Llama 2 7B, counted weight by weight. It has no biases, and RoPE has no parameters.
+
+| Part | Shape | Parameters |
+|---|---|---:|
+| Embedding | 32,000 × 4,096 | 131,072,000 |
+| Attention, per block | 4 matrices of 4,096 × 4,096 | 67,108,864 |
+| MLP, per block | 3 matrices of 4,096 × 11,008 | 135,266,304 |
+| Two RMSNorms, per block | 2 × 4,096 | 8,192 |
+| **One block** | | **202,383,360** |
+| **32 blocks** | | **6,476,267,520** |
+| Final RMSNorm | 4,096 | 4,096 |
+| Unembedding | 4,096 × 32,000 | 131,072,000 |
+| **Total** | | **6,738,415,616** |
+
+Inside each block the MLP holds two thirds of the weights, 135.3 million, and attention one third, 67.1 million. The 32 blocks are 96% of the model; the embedding and unembedding together are 3.9%.
+
+**FLOPs.** Every weight in a matrix is used in one multiply-add per token, 2 floating-point operations, so the forward pass costs about 2 FLOPs per weight per token. The embedding is a lookup rather than a product, which leaves 6,607,077,376 weights that multiply: about 13.2 GFLOPs per token. Training costs about three times the forward pass, because the backward pass computes two gradients per weight, hence the rule of thumb of 6 FLOPs per parameter per token ([Kaplan et al., 2020](https://arxiv.org/abs/2001.08361)).
+
+Attention's own arithmetic uses no weights at all. Scoring one query against $t$ keys is $t \cdot d$ multiply-adds, summed over the heads, and averaging $t$ values is as many again, so a token at position $t$ costs $4td$ FLOPs per layer on top of its weights. For the 4,096th token of Llama 2 7B that is 4 × 4,096 × 4,096 × 32 = 2,147,483,648, about 2.1 GFLOPs, or 16% more than its weights cost. Summed over a whole sequence it grows with $T^2$, which is why long contexts cost more than linearly.
+
+## Inference and the KV cache
+
+Generation runs the model once per new token. At step $t$, the new token's query has to meet the keys and values of all $t$ positions, at every layer, and recomputing them would repeat the whole sequence's work at every step. But under the causal mask a position's stream depends only on the tokens up to it, so the keys and values of earlier positions never change once computed. They are computed once and kept: the **KV cache**. Each decode step runs only the new token through the stack, appends its key and value at every layer, and attends over the cache. Filling the cache from the prompt is prefill; the token-by-token loop after it is decode ([how LLM inference works](/articles/how-llm-inference-works)).
+
+The cache holds a key and a value of width 4,096 for every token at every layer: 2 × 32 × 4,096 = 262,144 numbers per token in Llama 2 7B. At 2 bytes each in 16-bit, that is 524,288 bytes, 512 KiB of cache per token, and a full 4,096-token context holds 2 GiB per sequence. The weights in 16-bit are 13,476,831,232 bytes, 12.55 GiB, so the caches of six full-length sequences, 12 GiB, weigh about as much as the model. Every decode step reads all the weights and every cache in the batch to produce one token per sequence, which is why decode is limited by memory bandwidth rather than by arithmetic.
+
+Shrinking that cache is what most attention variants since are about. Multi-query attention shares one key and value head across all the query heads, grouped-query attention shares a few, and multi-head latent attention caches one compressed latent per token. The [field guide to attention mechanisms](/articles/attention-mechanisms) maps them.
+
+## What changed since 2017
+
+The block at the top of this page is the paper's with four substitutions: rotary positions for sinusoids, pre-norm RMSNorm for post-norm LayerNorm, SwiGLU for ReLU, and a decoder-only stack instead of an encoder and a decoder. Attention scaled by $\sqrt{d_k}$, multiple heads, the causal mask, the residual stream and the position-wise MLP are the 2017 design. The rest of the [architectures gallery](/architectures) varies this block: [mixture-of-experts](/articles/mixture-of-experts-from-scratch) replaces the one MLP with many and a router, state-space models replace attention with a recurrence, and masked-diffusion language models drop the causal mask and generate by unmasking.
