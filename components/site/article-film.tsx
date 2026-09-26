@@ -62,7 +62,9 @@ const useReducedMotion = () =>
     () => false
   )
 
-export function ArticleFilm({ film, title }: { film: Film; title: string }) {
+// `source` names the page the film belongs to in its caption: an article's by
+// default, or an architecture doc's.
+export function ArticleFilm({ film, title, source = "article" }: { film: Film; title: string; source?: string }) {
   const wrap = useRef<HTMLDivElement>(null)
   const ref = useRef<HTMLVideoElement>(null)
   const held = useRef(false) // the reader paused it: don't restart on scroll
@@ -431,7 +433,7 @@ export function ArticleFilm({ film, title }: { film: Film; title: string }) {
       <figcaption className="mt-3 text-sm text-muted-foreground">
         <p>
           A {clock(dur)} narrated explainer, drawn in code. Every number and picture in it is
-          this article&apos;s own; the sources are below.
+          this {source}&apos;s own; the sources are below.
         </p>
         <details className="group/tx mt-1.5">
           <summary className="inline-flex cursor-pointer list-none items-center gap-1 font-mono text-xs select-none hover:text-foreground [&::-webkit-details-marker]:hidden">
