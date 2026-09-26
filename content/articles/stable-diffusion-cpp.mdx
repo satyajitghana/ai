@@ -1,0 +1,368 @@
+---
+title: "stable-diffusion.cpp: 52 model versions in one binary, and a quantiser that never touches a convolution"
+description: "A repo spotlight sold leejet's stable-diffusion.cpp as one executable, no Python, carried by one person. I read the code at 2f88688 and the tensor tables of the checkpoints it loads. The model family is picked from tensor names alone, into one of 52 versions; the sampler loop is plain host C++ and a ggml graph runs only inside each denoiser call; and the quantiser converts matrices but never convolutions, so 68.5% of an SD 1.5 UNet stays in f16 whatever --type says, and q4_K comes out larger than q4_0. The FLUX memory table in the docs reproduces to the hundredth of a MiB as pure weight bytes, and the flash-attention saving the docs quote for FLUX is one attention score matrix, exactly. leejet wrote 197 of the 383 commits in the last six months: a lead maintainer, not a solo act."
+date: 2026-09-26
+tags:
+  - image-generation
+  - diffusion
+  - quantization
+  - gguf
+  - llama-cpp
+  - inference-optimization
+  - open-source
+  - on-device
+  - systems
+  - explainer
+draft: false
+---
+
+import { MemoryPlanner } from "@/components/articles/stable-diffusion-cpp/memory-planner"
+
+A repo spotlight by [@Ryrenz](https://x.com/Ryrenz/status/2103273595728216490) went round
+on 25 September. Its pitch for [`leejet/stable-diffusion.cpp`](https://github.com/leejet/stable-diffusion.cpp):
+image generation squeezed into one executable, no Python, the same approach as llama.cpp,
+running on CPU (AVX), CUDA, Vulkan, Metal, OpenCL and SYCL. About 7,161 stars, eight-hundred-odd
+forks, no company behind it, "basically leejet carrying it alone". And the pace: five builds,
+`master-904` to `master-908`, on 23 September alone.
+
+I cloned it at `2f88688` (26 September) with its `ggml` submodule and read the code instead of
+the README. I also read the tensor tables of the checkpoints it loads, over HTTP range requests,
+because that is where the memory numbers actually come from. I did not build or run it.
+[The Qwen-Image-2.1 piece](/articles/qwen-image-2-1#running-it-on-four-cpu-cores-with-no-gpu-at-all)
+did, on four CPU cores at an earlier commit, and I use its measurements where they apply.
+
+The post mostly holds. **Measured**, from the GitHub API on 26 September: 7,403 stars and 827
+forks, MIT, created August 2023. "One executable, no Python" holds more literally than I
+expected: the tokenizers are compiled in as 145.8 MB of C arrays under `src/tokenizers/vocab/`
+(CLIP, T5, umT5, Qwen, Mistral and Gemma merges and vocabularies), and `.ckpt` pickles are
+parsed by its own `src/model_io/pickle_io.cpp`. The repository's eight Python files are offline
+conversion helpers under `scripts/`. Two models are exceptions: Lens and PiD refuse to start
+without an external `tokenizer.json`.
+
+"One person" does not hold. Over the six months to 26 September the repository has 383
+commits from 54 authors, and leejet wrote 197 of them, 51%. The five builds are real CI tags,
+one per merged commit, all committed between 16:03 and 17:45 UTC on 23 September. Two of the
+five are leejet's; the other three are by two other contributors. It is a lead maintainer who
+writes about half the commits, with 53 other people writing the rest.
+
+<RepoCard repo="leejet/stable-diffusion.cpp" note="Read at 2f88688 with the leejet/ggml submodule at 4bf5f60. 89,744 lines of C/C++ under src/, not counting the generated tokenizer tables; 30 denoiser files under src/model/diffusion/ totalling 21,196 lines." />
+
+<Figure
+  src="/articles/stable-diffusion-cpp/fig1.png"
+  alt="A grid of eight generated images, most of them a cat holding a cardboard sign. The signs read 'Stable diffusion 3.5 Large', 'flux.cpp', 'chroma.cpp', 'flux2-dev.cpp', 'krea2.cpp', 'ideogram4.cpp' and 'longcat.cpp'; the Qwen-Image panel is a woman in a QWEN t-shirt writing Chinese text on a glass whiteboard. Each is labelled with the model and the weight type it was run at."
+  caption="Eight architectures, one runtime: each model's own example output from its page in the project's docs, labelled with the weight type the documented command used. The FLUX.2-dev panel is an edit of an input image, with Mistral-Small-3.2-24B as its text encoder (stable-diffusion.cpp README, per-model docs under docs/)."
+/>
+
+## How a pipeline becomes ggml graphs
+
+The code has three layers.
+
+**Blocks.** `GGMLBlock` in `src/model/common/ggml_block.hpp` is a PyTorch module in C++: a
+map of named child blocks and a map of named parameter tensors. `init()` walks the tree and
+creates a ggml tensor for every parameter, named exactly like the checkpoint key, in a
+`no_alloc` context, so nothing is allocated until the loader knows where each weight will
+live. `Linear`, `Conv2d`, `LayerNorm`, `GroupNorm`, `RMSNorm` and `Embedding` are the leaves.
+A block's `forward()` computes nothing. It appends ggml ops to a graph.
+
+**Runners.** `GGMLRunner` in `src/core/ggml_runner.h` owns the parameters and a workspace.
+`compute()` builds the graph, allocates, runs it on a backend and reads the result back as an
+`sd::Tensor<float>`. The conditioner, the diffusion model and the VAE are one runner each.
+
+**The pipeline.** `src/pipeline/diffusion_engine.cpp` is ordinary host C++ that calls the
+runners in order: encode the prompt, loop the denoiser, decode the latent.
+
+Which runners get built is decided without a config file. `ModelLoader::get_sd_version()` in
+`src/model_loader.cpp` fingerprints the checkpoint by its tensor names and a few shapes. A
+`model.diffusion_model.joint_blocks.` prefix means SD3. `double_blocks.` means the FLUX family,
+and the width of `img_in` then separates the variants: 384 input channels is FLUX Fill, 128 is
+FLUX Controls, 196 is Flex.2. A `txt_in` 3,584 wide is LongCat. A `single_blocks.47` means
+FLUX.2-dev rather than klein. Wan 2.2's image-to-video and TI2V models are told apart by the
+product of input and output channels in `patch_embedding` (184,320 against 147,456). The `SDVersion` enum in
+`src/model.h` has 52 entries, one of them the ESRGAN upscaler.
+
+The architecture is read the same way. `FluxConfig::detect_from_weights` in
+`src/model/diffusion/flux.hpp` takes the depth from the highest `double_blocks.N` and
+`single_blocks.N` index it sees, the width from `txt_in.weight`, the head count from the
+length of a key-norm scale, and switches Chroma on when `distilled_guidance_layer` exists.
+That is why a fine-tune with a different depth needs no new flag.
+
+`build_core_runners` in `src/pipeline/model_builders.cpp` then pairs a conditioner with a
+denoiser. The conditioners say a lot about where the field went in three years:
+
+| Text encoder | Class in the code | Used by |
+|---|---|---|
+| CLIP-L, plus CLIP-G for XL | `FrozenCLIPEmbedderWithCustomWords` | SD 1.x, 2.x, SDXL |
+| CLIP-L + CLIP-G + T5-XXL | `SD3CLIPEmbedder` | SD3, SD3.5 |
+| CLIP-L + T5-XXL | `FluxCLIPEmbedder` | FLUX.1, Kontext |
+| T5-XXL or umT5-XXL | `T5CLIPEmbedder` | Chroma, Wan, PixArt |
+| Qwen2.5-VL | `LLMEmbedder` | Qwen-Image 1.x and Edit, LongCat, HunyuanVideo |
+| Qwen3-VL | `LLMEmbedder` | Qwen-Image-2.1, Krea2, Ideogram4, MiniMax-H3, LingBot-Video, Boogu, SeFi, Mage-Flow |
+| Qwen3 | `LLMEmbedder` | Z-Image, Ovis-Image, FLUX.2-klein |
+| Mistral Small 3.2 / Ministral 3B | `LLMEmbedder` | FLUX.2-dev / ERNIE-Image |
+| GPT-OSS-20B, Gemma 2 2B | `LLMEmbedder` | Lens, PiD |
+| Gemma 3 or Gemma 4 12B | `LTXAVEmbedder` | LTX-2.3, LTX-2.5 |
+
+Anima, HiDream-O1, MiniT2I and SenseNova U1.5 bring conditioners of their own. Ten LLM
+architectures live in `src/model/te/llm.hpp`, 2,975 lines. Most text encoders added since 2025
+are full language models, run once per prompt with the `lm_head` never declared, so never
+loaded.
+
+The denoiser is a UNet for SD 1.x, 2.x and XL and a DiT for everything since SD3. The VAEs
+are fewer than the models: `sd_version_uses_flux_vae` covers FLUX.1, Z-Image, Boogu and
+LongCat, `sd_version_uses_wan_vae` covers Wan, LingBot-Video, Qwen-Image, Krea2 and Anima, and
+the video models with sound add an audio VAE. SD 1.x and SDXL load from one checkpoint with
+`-m`; most newer models take separate `--diffusion-model`, `--llm` or `--t5xxl`, and `--vae`
+files.
+
+## The sampling loop runs on the host
+
+This is the part that surprised me. The samplers in `src/runtime/denoiser.hpp` are not ggml
+graphs. They take a `denoise` callback and a vector of noise levels and do their arithmetic on
+`sd::Tensor<float>`, a `std::vector`-backed host tensor from `src/core/tensor.hpp`. Euler shows
+the whole idea:
+
+```cpp
+// src/runtime/denoiser.hpp, sample_euler (error check dropped)
+for (int i = 0; i < steps; i++) {
+    float sigma       = sigmas[i];
+    auto denoised_opt = model(x, sigma, i + 1);     // the only ggml graph run
+    sd::Tensor<float> denoised = std::move(denoised_opt.pred);
+    sd::Tensor<float> d        = (x - denoised) / sigma;
+    x += d * (sigmas[i + 1] - sigma);
+}
+```
+
+The graph lives inside `model`, which is the lambda at `diffusion_engine.cpp:2375`. It runs the
+denoiser once for the prompt and once for the negative prompt, then mixes the two with the
+guidance scale. One line decides whether the second run happens at all: when the guidance
+scale is within `1e-5` of 1.0, `skip_uncond` is set and the unconditional pass is skipped.
+That is why every FLUX example in the docs passes `--cfg-scale 1.0`. FLUX.1-dev takes its
+guidance strength as an input, through the `guidance_in` embedder, so at 1.0 each step costs one
+denoiser call instead of two.
+
+The README lists nine sampling methods. The `sample_method_t` enum in
+`include/stable-diffusion.h` has 21, including DPM++ 2M SDE, TCD, LMS, iPNDM and two CFG++
+variants, and `scheduler_t` has 17 schedules, from Karras and AYS to per-model ones for FLUX,
+FLUX.2 and LTX-2. The README is the conservative document here, not the inflated one.
+
+Because every step pushes the whole latent through the whole network, a diffusion step behaves
+like the prefill half of [LLM inference](/articles/how-llm-inference-works), not the decode
+half: the weights are read once per graph run and there is no cache that grows. One recent
+exception is Qwen-Image-2.1. A prefix KV cache for it landed on 23 September in
+[#2035](https://github.com/leejet/stable-diffusion.cpp/pull/2035), switched on by default, a day after the `2bb7294` commit that
+[the pocket-rewriter piece](/articles/qwen-image-2-1-pocket-rewriter) read. That piece's
+statement that sd.cpp recomputes the prompt prefix on every step was true of that commit and
+is no longer true of `master`.
+
+## Quantisation: the matrices convert, the convolutions do not
+
+`--type q4_K` quantises at load time, and `-M convert` does the same once and writes a GGUF.
+Both go through one filter, `ModelLoader::tensor_should_be_converted` in
+`src/model_loader.cpp`. A tensor is converted only if its row length is a multiple of the
+target type's block size and its name is not a bias, a `.scale`, an embedding, a
+`scale_shift_table`, or one of FLUX's `img_in`, `txt_in`, `time_in`, `vector_in`,
+`guidance_in` and `final_layer`, or the UNet's `time_embed`. Then the blocks apply their own
+rules. `Linear` takes whatever type the loader settled on and always keeps its bias in f32.
+Norms are f32. And `Conv2d::init_params` hard-codes its weight to `GGML_TYPE_F16`, whatever
+the file or the flag says. A 3 x 3 kernel has a row length of 3 anyway, which no block size
+divides.
+
+Block sizes come from `ggml/src/ggml-common.h`:
+
+| Type | Weights per block | Bytes per block | Bits per weight |
+|---|---:|---:|---:|
+| `q8_0` | 32 | 34 | 8.5 |
+| `q5_0` | 32 | 22 | 5.5 |
+| `q4_0` | 32 | 18 | 4.5 |
+| `q6_K` | 256 | 210 | 6.5625 |
+| `q4_K` | 256 | 144 | 4.5 |
+| `q3_K` | 256 | 110 | 3.4375 |
+| `q2_K` | 256 | 84 | 2.625 |
+
+`q4_0` and `q4_K` cost exactly the same bytes. They differ in how the 4.5 bits are spent:
+`q4_K` spends them on a scale and a minimum per 32-weight sub-block, `q4_0` on one scale per
+block. Those rules have three consequences worth the arithmetic.
+
+**FLUX: the docs' memory table is pure weight bytes.** FLUX.1-dev is 11,901,408,320 parameters
+(**Measured**, from the tensor table in the header of
+[`leejet/FLUX.1-dev-gguf`](https://huggingface.co/leejet/FLUX.1-dev-gguf)'s q4_0 file).
+11,834,228,736 of them sit in the 304 tensors that get quantised; the other 476 tensors,
+67,179,584 parameters of biases, norms and the embedder and output matrices, are stored in f32.
+`docs/flux.md` prints a "Memory" row for five types, and I can reproduce every entry to the
+hundredth of a MiB (**Reasoned**) by assuming every 2-D matrix is quantised, every bias and
+norm is f32, and `img_in` stays f32 under the K-quants because its 64-long rows do not divide
+256: 12,068.09, 6,394.53, 6,395.17, 4,888.16 and 3,735.73 MiB. The table is the diffusion
+model's weights and nothing else. No text encoder, no VAE, no workspace.
+
+Today's rules, and leejet's files, keep the ten embedder and output matrices in f32 rather
+than quantising them, which adds 180 to 224 MiB per rung. From the q4_0 file's tensor table,
+sd.cpp's rules predict the tensor bytes of leejet's four other FLUX files exactly; each file is
+that plus the same 54,176-byte header.
+
+<Figure
+  src="/articles/stable-diffusion-cpp/fig2.png"
+  alt="Five images of the same orange cat holding a sign reading flux.cpp, labelled q8_0 12068.09 MB, q4_0 6394.53 MB, q4_k 6395.17 MB, q3_k 4888.16 MB and q2_k 3735.73 MB. The first four are nearly identical apart from the lettering; at q2_k the cat has turned pale cream and the sign reads 'fl1x..cpp'."
+  caption="FLUX.1-dev at five weight types, same prompt and seed, with the Memory row the docs print beneath each. Those figures are the diffusion model's weight bytes only; q2_k is where the picture itself changes and the lettering breaks (stable-diffusion.cpp README, docs/flux.md quantisation table)."
+/>
+
+**SD 1.5: most of the UNet never quantises.** From the header of the
+[`v1-5-pruned-emaonly.safetensors`](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5)
+file the README tells you to download, the UNet is 859,520,964 parameters, and 589,027,840 of
+them (68.5%) are convolution weights (**Measured**). They stay f16 at every `--type`. The VAE is
+nothing but convolutions and norms. So the whole pipeline goes from 2.06 GiB at f16 to 1.59 GiB
+at `q4_0` (**Reasoned**), 23% off, and the docs' own SD 1.x table shows the same flatness: about
+2.3 G at f16, about 2.0 G at every 4- and 5-bit type (**Reported**).
+
+The K-quants make it worse. SD 1.5's first two UNet levels are 320 and 640 channels wide, so
+35,840,000 of the linear-layer parameters sit in rows that divide by 32 but not by 256. Under a
+K-quant they are left in the file's own type, which for this file is f32. The UNet comes out at
+1,461,973,776 bytes at `q4_K` against 1,338,773,776 at `q4_0` and 1,472,774,416 at `q8_0`
+(**Reasoned**). On this model, choosing the "better" 4-bit format buys you an 8-bit footprint.
+The same effect makes the `q3_K` and `q2_K` pipelines larger than the `q4_0` one.
+
+**Mixed recipes are allowed.** `--tensor-type-rules` takes regex-to-type pairs; the Ideogram4
+docs use it to quantise only the attention, feed-forward and modulation weights. leejet's own
+[Z-Image-Turbo GGUFs](https://huggingface.co/leejet/Z-Image-Turbo-GGUF) do the same quietly:
+the Q4_K file keeps 22 tensors of the context and noise refiners at `q8_0` and its embedders
+in f32, which makes it 5.02 bits per parameter on disk rather than 4.5 (**Measured**, from the
+file's header). The patched ggml adds FP8 weights and ComfyUI's INT8 "convrot" format, and
+`--imat-out` trains an importance matrix while you generate, the llama.cpp trick for spending
+the bits where the activations say they matter.
+
+<Figure
+  src="/articles/stable-diffusion-cpp/fig3.png"
+  alt="Eight tall images of a hooded figure walking down a rain-slicked neon street under the quote 'The city is a circuit board, and I am a broken transistor.', labelled bf16, q8_0, q6_K, q5_0, q4_K, q4_0, q3_K and q2_K. The first seven keep the same composition and lettering; at q2_K the street, the lights and the text layout all change."
+  caption="Z-Image-Turbo from bf16 down to q2_K, one prompt and seed. Down to q3_K the model holds its composition and its lettering; q2_K draws a different street (stable-diffusion.cpp README, docs/z_image.md quantisation comparison)."
+/>
+
+On a CPU the quantised weights never get expanded back to floats. The CPU backend quantises
+the activations on the fly, to `q8_0` for the legacy types and `q8_K` for the K-quants, and runs
+integer dot products. The AVX2 path of
+`ggml_vec_dot_q4_0_q8_0` in `ggml/src/ggml-cpu/arch/x86/quants.c` unpacks 32 nibbles to bytes,
+subtracts 8, multiplies them against 32 int8 activations, and scales the sum by the product of
+the two blocks' f16 scales. That is the same kernel llama.cpp uses, and the reason
+[reading bits out of a GGUF header](/articles/penjing-27b) tells you most of what a quant costs.
+
+## Backends
+
+The CMake options are `SD_CUDA`, `SD_HIPBLAS` (ROCm), `SD_METAL`, `SD_VULKAN`, `SD_OPENCL`,
+`SD_SYCL` and `SD_MUSA`, plus an RPC backend for offloading to another machine. The CPU backend
+is built with `GGML_NATIVE` for the build machine by default, with explicit switches for AVX,
+AVX2, AVX-512 and its VNNI and BF16 extensions, and AMX. `ggml/src/ggml-cpu/arch/` carries
+kernels for x86, ARM, LoongArch, PowerPC, RISC-V, s390 and WebAssembly. That is the list the
+post gave, plus ROCm and Moore Threads.
+
+Two things go beyond "it builds on everything". Placement is per module:
+`--backend te=cpu,vae=cuda0,diffusion=vulkan0` puts each runner on its own device, and
+`diffusion=cuda0&cuda1` splits one model's blocks across two GPUs. And the default build uses
+leejet's patched fork, [`leejet/ggml`](https://github.com/leejet/ggml) at `4bf5f60`, which adds
+CUDA SageAttention kernels, FP8 matrix multiplies and the INT8 convrot path;
+`SD_USE_UPSTREAM_GGML=ON` trades those for stock ggml. Where a backend lacks an operator, the
+code asks `ggml_backend_supports_op` and falls back, flash attention to the explicit softmax
+path, INT8 convrot on Vulkan to the CPU.
+
+## Three memory tricks, each one a piece of arithmetic
+
+**Flash attention removes one matrix.** Without it, `ggml_ext_attention_ext` in
+`src/core/ggml_extend.cpp` materialises the score matrix `kq` in f32: heads x L x L x 4 bytes,
+where L is the number of tokens. FLUX at 768 x 768 has 2,304 image tokens plus the 256 T5
+tokens `FluxCLIPEmbedder` pads the prompt to, so 24 x 2,560 x 2,560 x 4 = 629,145,600 bytes,
+exactly 600 MiB (**Reasoned**). `docs/performance.md` says flash attention saves "~600mb" on
+FLUX at 768 x 768 (**Reported**). For SD2 at 768 x 768 the same formula gives 5 heads over 9,216
+tokens, 1,620 MiB, against the reported "~1400mb". At 1024 x 1024, FLUX's matrix is 1,734 MiB.
+The docs add that flash attention slows most backends down and speeds CUDA up, and is only
+wired up for some backends, the CPU, CUDA and ROCm and Metal among them.
+
+**VAE tiling bounds the biggest buffer in the pipeline.** The VAE decoder is the one component
+that works at full pixel resolution, and ggml runs a 3 x 3 convolution as an `im2col` followed
+by a matrix multiply. The SD and FLUX decoders enter full resolution with 256 channels. At the
+first residual block there, the block's f32 input (kept for the skip connection), its normalised
+f32 copy and the 256 x 9 f16 `im2col` of that copy are alive at once: 1,024 + 1,024 + 4,608 =
+6,656 bytes per output pixel, or 1,664 MiB at 512 x 512 and 6.5 GiB at 1024 x 1024
+(**Reasoned**, from the graph shapes, before the allocator finds any reuse). The CPU run in the Qwen-Image-2.1 piece
+measured that lopsidedness directly, on a different VAE: at 512 x 512, sd.cpp's compute buffers
+were 7.18 MB for the text encoder, 234.03 MB for the denoiser and 2,450.50 MB for the VAE
+(**Measured**, on this site).
+
+`--vae-tiling` decodes 256 x 256-pixel tiles with 50% overlap and blends them. At 512 x 512
+that is 3 x 3 tiles, as the docs say; at 1024 x 1024 the tiling arithmetic in
+`src/runtime/tiling.cpp` gives 7 x 7 = 49 tiles, each around 416 MiB by the same estimate, and
+about 3.06 times the decode work because of the overlap (**Reasoned**). The main decode path also
+retries an allocation failure with smaller tiles even when you did not ask for tiling, so running
+out of memory at the decode that ends a long job costs time rather than the job.
+
+**Offloading keeps the weights in RAM and stages them in.** `--offload-to-cpu` is shorthand for
+`--params-backend *=cpu`: parameters live in system RAM, and each runner gets GPU copies on
+demand, which stay resident while there is room. When a graph's weights plus workspace do not
+fit, the runner cuts the graph into segments and runs them in order, prefetching the next
+segment's weights, while keeping a 512 MiB scratch reserve free on the device. `--max-vram`
+sets the budget; `--params-backend diffusion=disk` rereads weights from the file instead of
+holding them in RAM at all. The docs say offloading saves VRAM "without reducing generation
+speed" (**Reported**). That can only hold while the copies stay resident. Once every step has to
+re-upload the model, it costs time, and the project's own LLaDA-Image notes say so: at 512 x 512,
+`--max-vram 3` produces byte-identical output "at roughly 2.5x the time" (**Reported**).
+
+## What fits in 8 GB and 16 GB
+
+Here are the weight bytes sd.cpp would allocate for six pipelines at one `--type` for every
+part, from each checkpoint's tensor table priced with the rules above (**Reasoned**, GiB). The
+last column is the largest single part at `q4_K`, which is the floor for anything that has to
+sit on the GPU at once.
+
+| Pipeline | f16 | q8_0 | q4_K | Largest part at q4_K |
+|---|---:|---:|---:|---|
+| SD 1.5 | 2.06 | 1.75 | 1.70 | UNet, 1.36 |
+| SDXL | 6.47 | 3.90 | 2.61 | UNet, 1.89 |
+| Z-Image Turbo | 19.12 | 10.23 | 5.49 | DiT, 3.23 |
+| Wan2.2 TI2V 5B | 21.21 | 11.92 | 6.96 | umT5 encoder, 2.98 |
+| FLUX.1-dev | 31.55 | 16.99 | 9.22 | DiT, 6.45 |
+| Qwen-Image | 52.73 | 28.27 | 15.22 | DiT, 10.74 |
+
+Parameter counts behind those rows, all from the files' own headers: SD 1.5's UNet 859,520,964;
+SDXL's 2,567,463,684; Z-Image Turbo's DiT 6,154,908,736 and its Qwen3-4B encoder 4,022,468,096;
+FLUX.1-dev's T5-XXL encoder 4,762,310,656 once its duplicate embedding is dropped; Qwen-Image's
+DiT 20,430,401,088, the same count the Qwen-Image-2.1 piece read, and its Qwen2.5-VL encoder
+7,747,169,280 without the `lm_head`. Wan 2.2's 5B row has the oddity: its umT5-XXL text encoder,
+5,680,910,336 parameters, is bigger than the 4,999,787,712-parameter video model, and its
+704,688,668-parameter VAE is almost entirely convolution, so it is 1.31 GiB at every `--type`.
+
+Read against an 8 GiB card: SD 1.5, SDXL and Z-Image Turbo at 4 bits fit whole, with room for
+their workspace. FLUX.1-dev at `q4_K` is 9.22 GiB, so it fits only with the text encoders on
+the CPU, which is what `--clip-on-cpu` in every FLUX example does: DiT plus VAE is 6.61 GiB.
+Qwen-Image at `q2_K` is 9.11 GiB; with its encoder on the CPU, DiT and VAE come to 6.52 GiB and
+leave under a gigabyte for the reserve and the workspace. At 4 bits its DiT alone is 10.74 GiB,
+so on 8 GiB it is an offloading job. On 16 GiB, FLUX fits whole at `q6_K`, 13.22 GiB. Qwen-Image's
+15.22 GiB at 4 bits leaves 0.78 GiB for the reserve and the workspaces, so it wants the encoder
+on the CPU or offloading.
+
+That settles one claim in the docs. `docs/flux.md` opens with "You can run Flux using
+stable-diffusion.cpp with a GPU that has 6GB or even 4GB of VRAM, without needing to offload to
+RAM." Against today's files, the `q2_K` DiT is 3,959.5 MiB and the VAE 160.0 MiB: 4,119.5 MiB of
+weights, over a 4 GiB card's 4,096 before a byte of workspace. Against the table the sentence
+was written with, it was 3,895.7 MiB, which leaves 200 MiB for everything else. Six is tight
+too: at `q3_K` the weights are 5,265.7 MiB, which leaves 878 MiB for the workspace and the
+512 MiB reserve together. Read both numbers as offloading jobs now; with segmented execution
+that is what they are.
+
+Pick a model, a type for each part and the flags, and see where the bytes land:
+
+<MemoryPlanner />
+
+Its weight rows are exact for the files named in its caption. The two workspace rows are the
+largest single tensors I can derive, so treat them as floors, and segmented execution can go
+below its offloading estimate at the cost of a weight upload per step.
+
+## The take
+
+stable-diffusion.cpp is llama.cpp's method applied to a harder shape of problem. A language
+model is one network; a 2026 diffusion pipeline is three or four, and the text encoder can be
+the biggest of them. What makes 52 versions tractable is that the model is identified from its tensor
+names and sized from its tensor shapes, and that everything a user can tune, from placement and
+offload to quantisation and tiling, is applied to runners rather than to models.
+
+The quantisation rules are the part to internalise before you pick a file. Weight types apply
+to matrices, not to models. A UNet that is mostly convolutions barely shrinks, a K-quant on
+misaligned rows can grow, and a VAE is the same size at `q2_K` as at f16. For a transformer
+denoiser the arithmetic is simple: parameters times bits over eight, plus a few hundred MiB of
+f32 around the edges. That, a GGUF header and the planner above are enough to know what a card
+will hold before you download 12 GB to find out.
