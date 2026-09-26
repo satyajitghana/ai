@@ -1,0 +1,353 @@
+---
+title: "Contrastive Language Model (CLM): the action never sees the state, and 81.6% is a pick from four"
+description: "CLM is a System One decision model built like a retriever: a frozen Qwen3-8B, two MLP heads with 18,887,680 trained parameters between them (I counted them in the checkpoint), and a softmax over 100 × cosine. Because an action is embedded without ever seeing the state, its vector can be cached, which is where the speed comes from; the same-GPU comparison against constrained decoding is the release's cleanest number. The Jev comparisons are softer. The 9× is one game whose harness collects answers once per 60 FPS frame, against a hosted API. The DeepSWE 81.6% is a best-of-4 pick over Opus 5 rollouts on 38 tasks: 21 of them pass whatever you pick, 4 fail whatever you pick, and the head gets 10 of the other 13 where a random pick expects 7. The earlier cross-validated heads, whose step scores ship in the public data, pick 89 of 113 against a random 82.5."
+date: 2026-09-26
+tags:
+  - explainer
+  - llm
+  - agents
+  - benchmarks
+  - evaluation
+  - architecture
+draft: false
+---
+
+import { TwoTowerScorer } from "@/components/articles/contrastive-language-model/two-tower-scorer"
+import { DecidableTasks } from "@/components/articles/contrastive-language-model/decidable-tasks"
+import { WindowSweep } from "@/components/articles/contrastive-language-model/window-sweep"
+
+On September 23, Jacky Kwok and colleagues at Stanford and NVIDIA Research
+posted [Contrastive Language Models](https://contrastive-lm.notion.site) as a
+new kind of **System One model**: a model that takes a state and a closed set of
+options and returns a probability for each option, which is the category
+[Jev](/articles/jev-system-one-models) opened a week earlier. The release makes
+three claims. CLM-8B is "on par with Jev" on computer-use, gaming and
+tool-calling tasks with "up to 9× lower latency". Fine-tuned as a verifier, it
+sets "a new SOTA" on DeepSWE (81.6%) and Terminal-Bench 2.1 (87.6%), where Jev
+"fails". And splitting states from actions makes training and serving cheap.
+
+I read the [repository](https://github.com/Contrastive-LM/CLM), the Notion post
+(including its collapsed toggles), both
+[model](https://huggingface.co/Contrastive-LM/CLM-v0.1-8B)
+[repositories](https://huggingface.co/Contrastive-LM/deepswe-clm-heads-8k) and
+every dataset they point to. I downloaded the two 75.6 MB head checkpoints,
+checked that their pickles reference nothing but tensor-rebuild globals, and
+loaded them with PyTorch's weights-only loader. The evaluation data is 681 MB, so
+I read only its metadata columns, 313 KB of it, by HTTP range request. I ran no
+code from the release and I have no GPU, so nothing here is a rerun of the model.
+
+<ModelCard repo="Contrastive-LM/CLM-v0.1-8B" claimed="20M-parameter heads on a frozen Qwen3-8B" note="The repository ships a .pt, not safetensors. Counted from the checkpoint: state head 9,443,840 + action head 9,443,840 = 18,887,680 trained parameters in FP32, plus one logit-scale scalar." />
+
+<RepoCard repo="Contrastive-LM/CLM" />
+
+<Callout type="note">
+**Measured** means I computed it from a released file. **Reported** means it is
+the release's number and I could not recompute it. **Reasoned** is my
+inference. Ratios such as 9.1× that appear in no source are my arithmetic on
+the release's own figures.
+</Callout>
+
+## What is in the checkpoint
+
+`CLM_v0.1-8B.pt` is 75,557,149 bytes, uploaded on September 21 and unchanged
+since (the LFS hash at the first commit matches today's). It holds two heads,
+a scalar and a config. There is no language model in it.
+
+| | value | source |
+|---|---|---|
+| encoder | `Qwen/Qwen3-8B`, frozen, last-token pooling, 4,096-d | `config.json`, `heads.py` |
+| state head | 4096 → 1536 → 1536 → 512, GELU, LayerNorm on the hidden layer | checkpoint `cfg`, measured |
+| state head parameters | 9,443,840 | measured |
+| action head | same shape, separate weights, 9,443,840 | measured |
+| `logit_scale` | 4.6132, so $s = e^{4.6132} \approx 100.8$, clamped to 100 at inference | measured; clamp in `heads.py` |
+| licence | Apache-2.0 for code and these weights; MIT for the DeepSWE heads | `LICENSE`, model cards |
+
+"CLM-8B" means 8B of borrowed encoder and 18.9M of CLM. The "20M-parameter
+projection head" in the post is the two heads together, rounded.
+
+## A retriever, used as a decider
+
+<Figure
+  src="/articles/contrastive-language-model/fig1.png"
+  alt="Three panels. Panel 1, contrastive state-action pre-training: stacks of actions such as 'right jump' go through an action encoder and stacks of Super Mario frames go through a state encoder, producing an N by N grid of dot products S_i·A_j whose diagonal is highlighted. Panel 2, create action candidates: the words left, jump and right run are filled into a template 'Mario should {action}.' and passed through the action encoder. Panel 3, zero-shot action classification: a new frame goes through the state encoder, is dotted against the three cached action vectors, and a softmax gives left 5%, jump 80%, right run 15%, so Mario jumps."
+  caption="The whole method on one page: train two encoders so matching state-action pairs line up on the diagonal, embed the candidate actions, and at run time score one new state against them with a softmax. The frames are illustrative; the released model reads text only (CLM blog post, overview figure)."
+/>
+
+A CLM is two encoders that never talk to each other. The state text goes through
+Qwen3-8B; the hidden state of its last token is L2-normalised and pushed through
+the state head. Each candidate action goes through the same frozen Qwen3-8B,
+separately, and through the action head. Both outputs are normalised again, and
+the logit for a pair is
+
+$$
+\ell(s, a) = \mathrm{min}(e^{\theta}, 100)\cdot \cos\big(f_s(E(s)),\, f_a(E(a))\big)
+$$
+
+where $E$ is the frozen encoder, $f_s$ and $f_a$ the two heads and $\theta$ the
+learned `logit_scale`. A softmax over the candidates you supplied is the answer.
+Training is the symmetric InfoNCE loss over a batch of $B$ matched pairs,
+each state pulled toward its own action and pushed from the other $B-1$, and the
+same the other way round:
+
+$$
+L = -\frac{1}{2B}\sum_i \left[\log\frac{e^{\ell(s_i,a_i)}}{\sum_j e^{\ell(s_i,a_j)}} + \log\frac{e^{\ell(s_i,a_i)}}{\sum_j e^{\ell(s_j,a_i)}}\right]
+$$
+
+That is [CLIP's](https://arxiv.org/abs/2103.00020) loss down to its constants:
+`train/finetune.py` initialises the scale at $\log(1/0.07)$ and clamps it at
+100, as CLIP did. The released head's scale has drifted past the clamp, so the
+temperature in use is exactly 0.01. A side effect I can see in the files: a
+clamped value gets no gradient, and the DeepSWE head's `logit_scale` after
+fine-tuning is bit-identical to the base's, 4.613248825073242.
+
+<TwoTowerScorer />
+
+The widget draws the readout in two dimensions instead of 512. The four action
+vectors are fixed; move the state and only the state is re-encoded. At the
+released scale of 100, a cosine gap of 0.05 becomes a logit gap of 5, about
+148 to 1 in probability, so answers are sharp by construction. Drop the scale
+to 1 and the same geometry gives a nearly flat distribution.
+
+### What that buys, and what it costs
+
+| | generative LLM | option readout ([Jev-style](/articles/parallel-constrained-decoding)) | CLM |
+|---|---|---|---|
+| work per decision | prefill, then a decode step per output token | one pass over state plus options | one pass over the state, then a 512-d dot product per option |
+| does an option see the state? | yes | yes | **no** |
+| do options see each other? | yes | no ([evidence](/articles/jev-scores-zero)) | no |
+| reusable across states | no | no | **every action vector** |
+
+The bold cells are the same fact. An action is embedded without the state, so
+its vector depends on nothing else and can be computed once. `clm-serve`
+reserves a slab of device memory for these vectors, and for recently seen
+states, at start-up, the way vLLM reserves a KV cache. That is the "disaggregation" in the announcement, and it is real
+engineering.
+
+The price is that the only place the state and an action meet is one dot product
+between two 512-d vectors. A readout that reads the option in the state's
+context can ask whether *this* action makes sense *here*. A two-tower model can
+only ask whether two points are near each other. This site's
+[relational-choice result](/articles/jev-scores-zero) was about options that
+cannot see each other. CLM's options also cannot see the state they are
+answering. I would expect it to do no better on that benchmark, and possibly
+worse; nobody has run it (Reasoned).
+
+The typed API sits on top of this. A `choice` embeds each option's description.
+A `score` takes the probability-weighted mean of the level indices. A `noul`, the
+yes/no type, is a softmax over two canned sentences, `true: Yes. This is true:`
+and `false: No. This is false:`, each followed by your question. The wire format
+is TypeSafe's `/v1/systemone`, so one client can call either model.
+
+## The training recipe, and how much of it shipped
+
+| stage | data | released? |
+|---|---|---|
+| pre-training | ~60M Nemotron DQA question-answer pairs | yes, as embeddings: 62,451,070 FP16 question vectors plus their answers, 625 chunks, 1,023.5 GB (measured from the `.npy` headers) |
+| mid-training | ~30M hard negatives written by Gemini 2.5 Flash-Lite | no |
+| post-training | ~1M agent trajectories from ADP, plus Endless-Terminals and LiteCoder-Terminal-SFT traces, 40% Nemotron replay | no |
+
+Only the heads train, so every run reads precomputed encoder vectors; a full
+pre-training run is "about an hour on a single RTX 4090 GPU" (reported). The
+recipe results are reported and plausible. Top-1 against 10 hard negatives is
+52.1% after pre-training alone and 69.2% after a short mid-training stage.
+Training on hard negatives from the start peaks at 62.4%. Replay holds the
+hard-negative score at 68.5% where agentic-only post-training drops it to 56.2%.
+
+The scaling-law fits in the post are power laws in compute, data, head size and
+encoder size, with exponents of −0.144, −0.117, −0.061 and −0.172 read off the
+figure. The encoder-size fit, the one the post calls the strongest, has three
+points: Qwen3-1.7B, 4B and 8B.
+
+## Receipt one: "up to 9× faster than Jev"
+
+<Figure
+  src="/articles/contrastive-language-model/fig2.png"
+  alt="Two grouped bar charts, CLM-8B in dark red and Jev (TypeSafe) in grey. Left, latency in milliseconds: T-Rex game 16.5 versus 149.8, tool calling (BFCL V4) 76.8 versus 125.5, WikiRacing 79.8 versus 225, Super Mario 33.5 versus 132.6. Right, success rate: T-Rex 5/5 and 5/5, BFCL V4 95.2% and 99.2%, WikiRacing 26/30 and 30/30, Super Mario 5/5 and 5/5."
+  caption="The zero-shot comparison. Only the T-Rex column ships with code and logs (Contrastive-LM/CLM README, assets/zero-shot.png)."
+/>
+
+| task | CLM ms | Jev ms | ratio | CLM success | Jev success |
+|---|---:|---:|---:|---:|---:|
+| T-Rex | 16.5 | 149.8 | 9.1× | 5/5 | 5/5 |
+| BFCL V4 | 76.8 | 125.5 | 1.6× | 95.2% | 99.2% |
+| WikiRacing | 79.8 | 225 | 2.8× | 26/30 | 30/30 |
+| Super Mario | 33.5 | 132.6 | 4.0× | 5/5 | 5/5 |
+
+"Up to 9×" is the largest of four ratios. "On par" is two ties and two losses.
+For BFCL, WikiRacing and Mario there is no code, no log and no statement of
+where either model ran, so those rows are reported and nothing more.
+
+T-Rex ships everything: `examples/t_rex/`, a harness taken from
+[laya-vs-jev](/articles/laya-vs-jev), and per-seed JSON for both models. Five
+seeded 60-second runs each:
+
+| from `results/*_realtime.json` | CLM | Jev |
+|---|---:|---:|
+| runs survived | 5/5 | 5/5 |
+| answer latency, median of per-seed p50 | 16.5 ms | 149.8 ms |
+| HTTP call, client-side p50 | 2.6 ms | 131.9 ms |
+| decisions per run, mean | 3,341.8 | 1,119.0 |
+| picked the planner's `Best.` option | 65.8% | 98.7% |
+| proposed an option labelled `Unsafe. … Collision.` | 364 | 0 |
+| actions changed by the shield, all kinds | 4,883 | 28 |
+
+Three things fall out of that table.
+
+**16.5 ms is about one frame.** The game ticks at 60 FPS and `Arena.tick` collects
+answers once per tick. CLM's call returns in 2.6 ms and then waits for the next
+frame, 16.7 ms away. The headline ratio is floored by the harness's clock, not
+set by the model. The cache is visible in the same logs: CLM's encoder tokens per
+run fall from 47,528 on the first seed to 4,515 on the fifth as the server warms,
+while Jev's billed input tokens stay between 605,117 and 637,935.
+
+**The model-call ratio compares a local call with an internet one.**
+CLM ran on a local `clm-serve` with a Qwen3-8B encoder on one RTX 4090; Jev is
+TypeSafe's hosted API. The 131.9 ms includes a round trip across the internet.
+Neither 9× nor the 50× in the raw call times isolates the model.
+
+**Survival measures the shield as much as the model.** The README says so itself: "the survival
+number measures the combined system and the agreement and intervention rows
+measure the model." CLM proposed an option whose own text said `Unsafe. …
+Collision.` 364 times; Jev never did. As the [laya-vs-jev
+piece](/articles/laya-vs-jev) showed, this harness builds each player's prompt
+from its own latency, and a faster player sees more options marked safe. That
+makes 65.8% against 98.7% partly two different exams. It does not explain the
+364: a faster player has fewer unsafe options to pick.
+
+The release does contain a like-for-like speed comparison, in a collapsed toggle
+on the Notion page (reported): a 200-token state on one RTX 4090, five trials.
+With 1 to 1,024 candidates of 15 tokens, CLM goes from 36 to 44 ms. Qwen3-8B
+constrained decoding on the same GPU reaches 4,285 ms at 1,024, about 97×
+slower. Jev goes from 131 to 579 ms. At five candidates of up to 2,048 tokens,
+CLM stays near 36 ms, constrained decoding reaches 3,402 ms and Jev 333 ms. That same-backbone,
+same-GPU row is the real size of the architectural win, and it is large. It is
+also a warm-cache number: the post says the candidate embeddings are cached, so
+the first time an action is seen is not in the curve. That is fair for a game's
+fixed action set. It is irrelevant for a verifier, whose candidates are new
+every time.
+
+## Receipt two: 81.6% on DeepSWE, 87.6% on Terminal-Bench 2.1
+
+<Figure
+  src="/articles/contrastive-language-model/fig3.png"
+  alt="Four bar charts. DeepSWE success rate: CLM (Ours) 81.6%, Jev 71.1%, dashed pass@1 line at 73.7%, labelled Bo4. DeepSWE latency: CLM 79 ms, Jev 449 ms, 5.7× faster. Terminal-Bench 2.1 success rate: CLM 87.6%, Jev 83.1%, pass@1 84.0%, labelled Bo5. Terminal-Bench latency: CLM 32 ms, Jev 131 ms, 4.1× faster. The legend reads CLM (Qwen3-8B, Finetuned), Jev (TypeSafe), Pass@1."
+  caption="The verifier result. The dashed line is a random pick; the ceiling, any passing candidate, is not drawn (Contrastive-LM/CLM README, assets/agentic.png)."
+/>
+
+Neither number is an agent's score. Each is a **selection**: sample several
+solutions per task, let a verifier choose one, report how often the chosen one
+passes. From the files:
+
+- **Candidates.** mini-swe-agent driving Claude Opus 5, config
+  `mini_swe_agent_claude_opus_5_max`: 449 rollouts over DeepSWE's 113 tasks,
+  four per task with three missing (measured, dataset metadata).
+- **Held out.** 38 tasks, 151 rollouts, best of four (measured).
+- **Trajectory score.** Each step's `(state, action)` cosine; the mean of the
+  last 12; highest wins, ties split evenly (`evaluation/bon_eval.py`). States
+  are embedded at 8,192 tokens, keeping the last 8,191.
+- **"Lightweight fine-tuning."** The head starts from `CLM_v0.1-8B.pt` and
+  trains on 22,576 pairs. That count is exactly the steps of the *passing* Opus 5
+  rollouts on the other 66 tasks that have any: 20,117 training plus 2,459
+  validation, and the checkpoint's own `n_val` is 2,459 (measured). The best
+  epoch is 15, 1.1 minutes into training by the checkpoint's clock.
+
+So the verifier is trained on the same agent, the same model and the same
+benchmark, on other tasks, on successes only. My reading is that it learns what
+a passing Opus 5 step looks like, and a trajectory whose last 12 steps look like
+that wins (Reasoned). Step by step it is a weak retriever: the checkpoint's
+validation metrics put the true next action first within its task 4.5% of the
+time, at a mean normalised rank of 0.251 where 0.5 is chance.
+
+<DecidableTasks />
+
+That is where 81.6% comes from. The random pick is 28/38 = 73.7%, the dashed
+line, and the ceiling is 34/38 = 89.5% (both measured). 21 tasks pass on every
+rollout and 4 fail on every rollout, so a verifier decides 13. The fine-tuned
+head gets 10 of them, Jev gets 6, and a random pick expects 7.0. Over the exact
+pass fractions of those 13 tasks, a random picker does at least as well as the
+head 6.2% of the time and no better than Jev 37.9% of the time. "Jev fails as a verifier"
+means Jev is indistinguishable from a coin here. "CLM sets SOTA" means three
+more tasks than a coin, on a sample where a coin does that well about one time in
+sixteen.
+
+There is a second, better-powered test, and it is sitting in the public data.
+The DeepSWE heads repository began on September 22 as a "Duplicate from
+Contrastive-LM/deepswe-prm-heads-8k", holding three checkpoints whose file
+hashes match the three task-disjoint fold heads now at
+[`tarsur385/deepswe-prm-heads-8k`](https://huggingface.co/tarsur385/deepswe-prm-heads-8k),
+and the seed-42 head replaced them on September 23. The fold heads start from a
+mid-trained head rather than the released one and train on the public pool of
+4,701 passing trajectories from 23 other models on the same 113 tasks. The
+evaluation file carries every step's score from the fold head that never saw its
+task. Applying the release's own rule to all 113 tasks gives **89/113 =
+78.8%**, against 82.5 for a random pick and 100 for the ceiling (measured). A
+random picker gets that far only 1.6% of the time. On the 38 held-out tasks the same
+heads get 30.
+
+<WindowSweep />
+
+The signal is real on 113 tasks. It is also narrow: averaging the last 8 to 16
+steps beats random by 5.5 to 7.5 tasks; the last 1 to 7 are within 2.5 of
+random; averaging every step does worse than random. The released head's
+`--window 12` is fixed by the evaluation script and the fine-tuning guide
+forbids changing it. Neither says how 12 was chosen.
+
+**The SOTA word.** DeepSWE's own leaderboard reports the share of passing
+rollouts across all 113 tasks, per [this site's reading of it](/articles/tinfield-1).
+On that measure the candidates here score 327 of 449 = 72.8%. 81.6% is a
+different quantity, a pick on a 38-task subset whose ceiling is 89.5%.
+
+**Terminal-Bench 2.1** ships nothing: no task list, no rollouts, no head, no
+code. The chart says 30 held-out tasks, Fable 5 candidates, best of five,
+random 84.0%, CLM 87.6%, Jev 83.1%. As fractions of 30 those are 25.2, 26.28 and
+24.93 tasks, so each is an average over something the release does not
+specify. The CLM-over-random gap is about one task. This site's reproduction of
+[Alibaba's Qwen3.8-Max table](/articles/qwen3-8-max) lists GPT-5.6 Sol (max) at
+88.8 on Terminal Bench 2.1 as a single model, a provider-reported number from a
+different harness. "SOTA" needs a comparison class, and the release gives none.
+
+**The latency panel**, 79 against 449 ms and 32 against 131 ms on an H100, does
+not say what one sample covers: a step, a trajectory or a task. It cannot be a
+whole best-of-4 pick including the encoder. The last 12 states of a long rollout
+sit near the 8,191-token cap, and one such prefill on an 8B model is over 100
+TFLOP, more than 100 ms even at the H100's peak dense BF16 rate (Reasoned). How
+Jev was asked to verify a trajectory, with what question and what truncation, is
+not published at all.
+
+## What is missing
+
+- **The reproduce command does not run as written.** The README points at
+  `Contrastive-LM/deepswe-clm-embeddings-8k`, which returns 401 and is absent
+  from the organisation's dataset listing. The same rollouts are public as
+  [`tarsur385/deepswe-prm-embeddings-8k`](https://huggingface.co/datasets/tarsur385/deepswe-prm-embeddings-8k).
+- **No code or logs** for BFCL V4, WikiRacing, Super Mario, Terminal-Bench 2.1,
+  or for Jev as a verifier.
+- **The research repository**, which the README says holds the scaling
+  experiments, data pipelines and figures, is not public. Neither are the
+  mid-training negatives or the post-training embeddings.
+- **No calibration measurement** for a model whose entire output is a
+  probability, with its temperature pinned at 0.01.
+- **Encoder lock and truncation.** Every head needs Qwen3-8B last-token vectors.
+  `clm-serve` embeds 2,048 tokens by default; the DeepSWE head was trained on
+  8,192. Serving it at the default would feed it vectors it never trained on
+  (Reasoned); the README says to raise both limits.
+
+The model card promises a multimodal CLM-35B in early October.
+
+## What I would take away
+
+The architecture is not new, and the release does not need it to be. It is a
+two-tower retriever, CLIP's loss on frozen LLM vectors, and that is what makes
+it fast. One encoder pass per state, cached vectors per action, and a dot
+product each is structurally cheaper than any readout that re-reads the
+options, and the same-GPU comparison against Qwen3-8B constrained decoding (4,285
+against 44 ms at 1,024 candidates) is the number to quote.
+
+The comparisons with Jev are weaker than the headlines. The 9× is a frame clock
+against a hosted API. "On par" is two ties and two losses, and in the one game
+with logs the shield carried CLM through 364 proposals its own prompt called a
+collision. The verifier result is a genuine, small, window-sensitive lift from
+a head trained in about a minute on the same agent's successes. It is honest
+enough to ship with its split, its hashes and its oracle in a JSON file. It is
+three tasks out of 38, and the file that would let anyone rerun it is at the
+wrong address.
