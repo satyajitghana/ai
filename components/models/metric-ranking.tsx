@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
-import { blendedPrice, type ModelRecord, type Origin } from "@/data/models"
+import { blendedPrice, contextLabel, type ModelRecord, type Origin } from "@/data/models"
 
 // Ranked bars for a single metric — output speed, blended price (cheapest first),
 // context window, or the Intelligence Index. Colored by origin so the US/China
@@ -33,7 +33,7 @@ const METRICS: Metric[] = [
   { key: "speed", label: "output speed (tok/s)", asc: false, get: (m) => m.speedTps, fmt: (v) => `${Math.round(v)}` },
   { key: "price", label: "blended price ($/M) — cheapest", asc: true, get: blendedPrice, fmt: (v) => `$${v < 1 ? v.toFixed(2) : v.toFixed(1)}` },
   { key: "intelligence", label: "Intelligence Index", asc: false, get: (m) => m.intelligence, fmt: (v) => `${v}` },
-  { key: "context", label: "context (K tokens)", asc: false, get: (m) => m.contextK, fmt: (v) => (v >= 1000 ? `${v / 1000}M` : `${v}K`) },
+  { key: "context", label: "context (K tokens)", asc: false, get: (m) => m.contextK, fmt: contextLabel },
 ]
 
 const TOP = 16
