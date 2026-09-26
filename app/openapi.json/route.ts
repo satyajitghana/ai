@@ -215,12 +215,12 @@ const S = {
         items: {
           type: "object",
           properties: {
-            kind: { type: "string", enum: ["article", "blog", "log", "project", "arxiv", "snippet", "note"] },
+            kind: { type: "string", enum: ["blog", "articles", "architectures", "logs", "projects", "arxiv", "snippets", "notes"] },
             slug: { type: "string" },
             title: { type: "string" },
             url: { type: "string", format: "uri" },
             score: { type: "number" },
-            heading: { type: "string" },
+            field: { type: "string", description: "The heading of the section that matched, or \"body\" for text before the first heading." },
             snippet: { type: "string" },
           },
         },
@@ -445,7 +445,7 @@ export function GET() {
       "/api/search": get({
         id: "searchContent",
         summary: "Full-text search across all content",
-        description: "BM25 search over contextualized chunks of every article, post, log, project, digest, snippet and note. Returns ranked matches with the matching heading and a snippet. This is the fastest way to find the right page before fetching it.",
+        description: "BM25 search over contextualized chunks of every article, architecture explainer, post, log, project, digest, snippet and note. Returns ranked matches with the matching heading and a snippet. This is the fastest way to find the right page before fetching it.",
         schema: ref("SearchResult"),
         tags: ["search"],
         extraErrors: ["400"],
