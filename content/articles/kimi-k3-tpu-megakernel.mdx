@@ -1,0 +1,378 @@
+---
+title: "Kimi K3's TPU megakernel: 92 layers in one Pallas call, and what 709 tokens a second measures"
+description: "Inferact open-sourced a Pallas megakernel that runs Kimi K3's decoder as one TPU program, staging the next layer's weights into VMEM while the current one still computes. The design holds up in the code. The headline is narrower than it reads: 709 tok/s is one user at an acceptance length forced to six by a benchmark flag, 8.46 ms per verify step on 16 TPU v7 chips against 13.27 ms on 16 GB200s. Without speculation the lead is 1.96x at batch 1 and 1.36x at batch 8, and by bytes per token the GB200 has the higher roofline, so this is a software result, not a chip result."
+date: 2026-09-26
+tags:
+  - tpu
+  - jax
+  - kernels
+  - inference-optimization
+  - speculative-decoding
+  - kimi
+  - benchmarks
+  - explainer
+draft: false
+---
+
+import { StepTimeline } from "@/components/articles/kimi-k3-tpu-megakernel/step-timeline"
+import { DecodeRoofline } from "@/components/articles/kimi-k3-tpu-megakernel/decode-roofline"
+
+On 23 September [Inferact](https://inferact.ai) posted: *"Our first TPU megakernel for Kimi K3
+reaches 709 tokens/s on low-concurrency decode, against 450 tokens/s for our GB200 baseline, both
+with DSpark speculative decoding."* The whole model, the post says, runs in a single Pallas kernel,
+and the code is open.
+
+Unlike most launch posts, this one has everything behind it. There is an engineering write-up,
+[700 TPS on Kimi K3: A Case for TPU Megakernels](https://inferact.ai/blog/tpu-megakernels) by
+George Novack, Xuting Liu, Jeff Ma and Woosuk Kwon. There is a repository,
+[`Inferact/tpu-megakernels`](https://github.com/Inferact/tpu-megakernels) (Apache-2.0), with the
+kernel, the loader, the benchmark scripts and the evaluation scripts. So the question is not
+whether 709 is real. It is what 709 is a measurement of.
+
+Short answer: **a careful kernel, measured for one user at an acceptance length set by a
+command-line flag, against a GPU baseline that sits further below its own bandwidth ceiling than
+the TPU does.** The design is the part worth learning from.
+
+<Callout type="note">
+Nothing here ran on a TPU or a GB200. I read the kernel source at commit `4048f08` (24 September),
+the benchmark scripts, the speculator's config on the Hub and vLLM's published recipe and posts.
+Every throughput figure is **Reported**, by Inferact unless I say otherwise. Byte counts are
+**Measured** from the repository's per-rank weight shapes and the Hub's parameter counts. Rooflines,
+ratios and step times are **Reasoned** from those, and labelled as they come up.
+</Callout>
+
+## What a megakernel is, and what it fixes on a TPU
+
+The usual one-liner is that a megakernel runs a whole forward step as one persistent kernel, so
+there are no per-op launches and no host round trips. On a GPU that is most of the story. A decode
+step is hundreds of kernels, and at batch 1 each is a few microseconds of work between a launch, a
+ramp and a drain. [Hazy Research's Llama-1B megakernel](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles)
+put the forward pass in one kernel and reported 78% of an H100's memory bandwidth, against at most
+50% for vLLM and SGLang on the same workload.
+
+On a TPU the launch half matters less. XLA already compiles a step into one device program; no host
+launches each fusion. What survives is the shape of each op inside that program. Inferact's
+diagnosis:
+
+> Most kernels have the same rough outline: load weights and activations from HBM, perform some
+> computation, then store the result back. Only the load phase pulls a large amount of data from
+> HBM, leaving bandwidth underutilized during the other phases.
+
+Every op boundary is a ramp, with nothing loading yet, and a drain, with the last load issued and
+compute finishing. A router's top-k, an RMSNorm, a collective: each leaves HBM idle unless something
+else is loading. GPUs chip at this with CUDA Graphs, streams and programmatic dependent launch. A
+megakernel removes the boundary: *"a weight load is no longer tied to the kernel that uses it — it
+can be issued as early as on-chip storage allows."*
+
+<StepTimeline />
+
+The toy schedule shows why the gain survives when launches are free. Drag the gap to zero and the
+per-op row still leaves HBM idle through the router's compute, the collective and every drain,
+because a load cannot start before the kernel that owns it. The megakernel row starts the next layer's attention weights during
+the current layer's routed experts. That is the whole design; the rest of the kernel exists to make
+it safe.
+
+## Why one user at a time is a bandwidth problem
+
+At batch 1 a decode step multiplies one row by every weight it touches. That is about one FLOP per
+byte, and the matrix units idle. The kernel says so in its own helper: the MXU's native row tile is
+16, so `_dot` broadcasts a single row to 16 before multiplying, because the other 15 cost nothing.
+The time is in the bytes ([decode is memory-bound](/articles/how-llm-inference-works#decode-memory-bound)
+covers the general case).
+
+For Kimi K3 the bytes are large. From [the architecture](/articles/kimi-k3) and
+[the C port's accounting](/articles/kimi-k3-in-c): 93 layers, 69 of them KDA and 24 MLA; 92 are
+mixture-of-experts layers routing each token to 16 of 896 experts; a bf16 dense trunk of 108.81 GB
+that every token reads in full; and experts shipped in MXFP4 at 17,547,264 bytes each. One token
+touches 1,472 experts, 25.83 GB of them.
+
+<ModelCard repo="moonshotai/Kimi-K3" note="The target model. The U8 row is the packed MXFP4 experts; the BF16 row is everything else, the dense trunk included." />
+
+Two properties make this model friendlier to a decode kernel than its size suggests. KDA's recurrent
+state does not grow with context, and MLA caches one 576-wide latent per position. The benchmark
+also keeps context short, so a step here is almost pure weight streaming.
+
+## How it maps onto a TPU v7
+
+<Figure
+  src="/articles/kimi-k3-tpu-megakernel/fig1.png"
+  alt="Two memory hierarchies side by side. Left, an NVIDIA GB200 GPU: 186 GB of HBM feeding a hardware-managed L2 cache, then 152 streaming multiprocessors each with 228 KB of shared memory and 256 KB of tensor memory, about 111 MiB of SRAM split 152 ways. Right, a TPU v7: 206 GB of HBM feeding, by program-issued DMA, one 64 MiB VMEM pool per TensorCore that the program manages, then the MXU, VPU and XLU; 128 MiB per chip, addressed as two pools."
+  caption="Where the weights wait. The GPU's fast memory is split across 152 SMs; each TPU v7 TensorCore has one 64 MiB pool that the program fills and empties itself, which is what lets a megakernel stage a layer's weights before they are needed (Inferact blog, Figure 2)."
+/>
+
+A TPU v7 (Ironwood) chip is two chiplets. Google's [TPU7x documentation](https://docs.cloud.google.com/tpu/docs/tpu7x)
+gives each chiplet one TensorCore, two SparseCores and its own 96 GB of HBM, and JAX exposes each as a
+separate device. So 16 chips are 32 devices. Per chip: 7,380 GB/s of HBM bandwidth, 2,307 BF16
+TFLOPs, 4,614 FP8 TFLOPs, 1,200 GB/s of ICI.
+
+The [Pallas TPU guide](https://docs.jax.dev/en/latest/pallas/tpu/details.html) describes TPUs as
+*"sequential machines with a very wide vector register (kind of like a CPU!)"*, where HBM transfers,
+matrix multiplies and transposes run asynchronously to the main instruction stream. The kernel
+gives each unit one job:
+
+- **The scalar core** runs control flow out of SMEM. The `pallas_call` puts the decode positions and
+  the KDA state row there with `PrefetchScalarGridSpec(num_scalar_prefetch=2)`. The layer loop is
+  `pl.loop(1, layers)`. Each layer picks MLA or KDA with a scalar branch on `index % 4 == 3` (plus the last
+  layer). The expert IDs the router picks become scalars that index DMA source addresses.
+- **The DMA engines** move every weight from HBM to VMEM, started with `make_async_copy(...).start()`
+  and joined with `.wait()`; 68 lines of the kernel file call it. Every weight enters as a raw HBM
+  reference, so no weight is staged by the compiler.
+- **The vector unit** does the non-matrix work: RMSNorm, attention-residual mixing, the KDA
+  recurrence, and the router's top-16, which is sixteen sequential argmax passes.
+- **The MXU** does the matmuls, accumulating in FP32.
+- **VMEM**, capped at `vmem_limit_bytes=64 * 1024**2`, is scratch the program owns outright: *"when we
+  move some data to VMEM, it stays there until we explicitly overwrite it."* `run_scoped` gives
+  short-lived buffers, like MLA cache tiles, a lexical lifetime. A four-slot pool holds routed-expert
+  weights in flight.
+
+<Figure
+  src="/articles/kimi-k3-tpu-megakernel/fig2.png"
+  alt="A timeline of one decoder layer. The compute row runs communications, attention, router, shared expert, routed experts and communications. Below it, HBM to VMEM transfers: layer N's attention weights, then shared experts, then routed experts, and then layer N plus 1's attention weights, which start while layer N's routed experts are computing and finish before layer N plus 1 needs them."
+  caption="The cross-layer prefetch. Layer N+1's attention projections are issued during layer N's routed experts and are resident before they are needed, so HBM keeps moving through the collective at the end of the layer. Time axis not to scale (Inferact blog, Figure 4)."
+/>
+
+Two details from the source make this concrete. After the routed experts are issued,
+`after_experts` starts the next layer's copies, which is the lowest blue bar in the figure:
+
+```python
+# kimi/decode_megakernel.py, inside the per-layer body
+@pl.when(layer_index + 1 < layers)
+def prefetch_next_layer():
+    prefetch_norms(layer_index + 1)
+    prefetch_attention(layer_index + 1)
+    prefetch_auxiliary(layer_index + 1)
+    prefetch_metadata(layer_index + 1)
+    prefetch_router(layer_index + 1)
+```
+
+And routed experts start moving before routing finishes. The top-16 loop calls back on every
+selection. When the winner lives on this rank and a pool slot is free, its DMA starts at once, while
+the remaining selections are still being computed.
+
+**The collectives live in the kernel too.** Sixteen chips are a 2x2x4 slice across four hosts.
+Attention heads are split 32 ways. Routed experts are TP4 x EP8: each expert is sliced across four
+TensorCores, and each group of four holds 112 experts. Paired TensorCores split the router,
+computing 512 and 384 of the 896 scores and swapping halves over a remote DMA. The reduction after
+the output and down projections is hand-written in `collectives32.py`, eight ranks per host and then
+four hosts, with `make_async_remote_copy` and DMA semaphores. The MoE's latent-to-hidden projection
+is replicated across hosts, *"trading additional weight reads for cheaper collective
+communications."* At batch 8, the norm and residual arithmetic became a bottleneck, so it is split across
+chips too, by sequence parallelism on the residual stream.
+
+**One precision choice costs bytes.** K3's experts ship in MXFP4, and Google lists BF16 and FP8 rates
+for TPU v7 but no FP4. The loader re-encodes each expert's gate/up projection into FP8 E4M3 with a
+BF16 scale per 256 rows, checks bit for bit that it decodes to the same values, and raises if not. The
+down projection stays packed MXFP4. It is lossless, and it costs 28,041,216 bytes per expert instead
+of 17,547,264: **41.28 GB of expert weights per token instead of 25.83 GB** (Measured, from the
+shapes in `kimi/load.py`). The kernel carries that handicap into every number below.
+
+One side effect the authors did not plan for: the whole kernel compiles from scratch in *"less than
+90 seconds"*, where a large XLA model *"can regularly take 30+ minutes"*.
+
+## What DSpark changes per step
+
+[DSpark](/articles/deepseek-dspark) is a block drafter. A small model fills a block of future tokens
+in one parallel pass off the target's hidden states, then a low-rank Markov head corrects it left to
+right; the target verifies the block in one step. [DFlash 2](/articles/dflash2) and
+[EAGLE-3](/articles/eagle-3-speculative-decoding) cover the family. The drafter here is
+[`RedHatAI/Kimi-K3-speculator.dspark`](https://huggingface.co/RedHatAI/Kimi-K3-speculator.dspark):
+4,744,900,481 bf16 parameters in five layers, reading K3's hidden states from layers 24, 48, 72, 88
+and 92, with a block size of 8.
+
+On the TPU a step is two Pallas programs. `dspark_fused_draft` proposes seven tokens. The megakernel
+then verifies an anchor plus those seven as eight rows of one sequence, and the accepted prefix plus
+one bonus token is emitted. In the benchmark, 24 steps run inside one jitted `fori_loop` per device
+call, so the host is involved once every 24 steps. "The whole model" is precisely the 93-layer
+decoder stack: the embedding gather and the LM head are XLA ops around it, and the drafter is a
+separate program. Three things change:
+
+1. **The verify reads more experts.** Eight rows route independently, so a layer touches up to 128
+   experts instead of 16; with independent routing the expected union is about 120 (Reasoned). The
+   trunk is still read once. This is the point [LFM2.5-DSpark](/articles/lfm25-dspark) made:
+   verifying a block gives a sparse model's advantage back.
+2. **The step roughly doubles.** 8.46 ms at acceptance length 6 against 4.02 ms for a plain batch-1
+   step, 2.11x. On the GB200 baseline it is 13.27 against 7.87 ms, 1.69x (Reasoned, from the
+   published rates).
+3. **Tokens per second becomes acceptance length over step time.** So speculation pays on this
+   kernel only above about 2.11 accepted tokens a step, and on the baseline above about 1.69.
+
+A smaller difference: the TPU draft kernel runs the Markov correction over the top 16 candidates of
+each vocabulary shard (`markov_top_m = 16`), not the full vocabulary. That can change acceptance. It
+cannot change what the target accepts.
+
+## Checking the claim
+
+### Which hardware, which stack
+
+The TPU side is unambiguous: 16 TPU v7 chips in a 2x2x4 topology, four hosts, 32 TensorCores. The
+launcher pins it with `TPU_PROCESS_BOUNDS=1,1,4` and `TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1`.
+
+The GPU side is *"vLLM's published Kimi K3 recipe on 16 GB200 GPUs"*, and that is all. The post does
+not give the vLLM version, the parallel layout, the MoE backend, or whether the 16 GPUs were an NVL72
+rack or four NVL4 nodes (the spec table cites NVL72; [the recipe](https://recipes.vllm.ai/moonshotai/Kimi-K3)
+lists GB200 NVL4). The version matters: [vLLM's own K3 tuning post](https://vllm.ai/blog/2026-09-13-kimi-k3-performance-optimization)
+reports 2.2x more throughput at concurrency 1 between v0.27.1 and its 13 September main, on B300
+with DSpark.
+
+The baseline is not a straw man, though. [vLLM's launch post](https://vllm.ai/blog/2026-07-27-k3)
+measured 118 tok/s per user at batch 1 on 16 GB300 GPUs, TP16. Inferact's GB200 figure is 127. That
+is vLLM as vLLM reports itself.
+
+Two disclosures: Inferact builds on vLLM, so the baseline is its own team's engine, and on 14
+September it announced an engineering partnership with Google to make TPU a first-class target for
+vLLM. And the post says 450 where the blog and repository say 452.
+
+### Per user or aggregate
+
+Both, on different charts. The speculative numbers are **per user**: `benchmark_kimi_dspark.sh` runs
+`--max-concurrency 1` and divides generated tokens, minus the first, by decode time. 709 is one
+stream.
+
+The non-speculative chart is **aggregate**. The README's alt text says so: *"Aggregate decode
+throughput at batch sizes 1, 2, 4 and 8."* At batch 8, 865 against 636 is 108 against 79.5 tok/s per
+user.
+
+<Figure
+  src="/articles/kimi-k3-tpu-megakernel/fig3.png"
+  alt="Grouped bar chart of aggregate decode throughput without speculative decoding at batch sizes 1, 2, 4 and 8. Kimi K3 megakernel on 16 TPU v7 chips: 249, 392, 515 and 865 tokens per second. vLLM baseline on 16 GB200 GPUs: 127, 227, 373 and 636."
+  caption="Without speculation, the lead is widest where the step is pure weight streaming: 1.96x at batch 1, then 1.73x, 1.38x and 1.36x at batch 8. These are aggregate rates; divide by the batch for one user's (Inferact blog, Figure 6)."
+/>
+
+### Acceptance length and batch size
+
+The speculative runs are batch 1, with each step verifying eight rows. The acceptance length is not
+measured. It is set. The script passes `--fixed-acceptance-length`, whose help text reads *"Force
+tokens emitted per speculative step (benchmarking only; default: use actual acceptance)"*. The
+workload is one random input token, 1,000 output tokens with `--ignore-eos`, a 1,152-token context,
+four timed requests after one warm-up. The MLA cache never holds more than about a thousand positions.
+
+<Figure
+  src="/articles/kimi-k3-tpu-megakernel/fig4.png"
+  alt="Horizontal bar chart of accepted output tokens per second with DSpark speculative decoding using the RedHatAI Kimi-K3 speculator. At acceptance length 3, the TPU megakernel reaches 350 and the GB200 baseline 229, 1.53 times faster. At acceptance length 6, 709 against 452, 1.57 times faster."
+  caption="The headline chart. Both acceptance lengths are fixed by the benchmark, not produced by a workload, so each pair of bars is really one step time times two chosen multipliers (Inferact blog, Figure 5)."
+/>
+
+The blog says the drafter *"typically yields between 3 and 6 accepted tokens per step."* vLLM's
+[DSpark training post](https://vllm.ai/blog/2026-09-15-kimi-k3-dspark) measured this same drafter at
+a macro-average of 4.11 across nine domains: 6.42 on math reasoning, 4.96 on HumanEval, 4.65 on
+translation. So 6 is close to the best domain, not the typical one. At 4.11, the published step times
+give about 482 against 312 tok/s (Reasoned: step time interpolated between the two published points).
+
+### Is it like for like?
+
+- **Drafter**: the same weights, `RedHatAI/Kimi-K3-speculator.dspark`, on both sides as far as the
+  post says. The recipe sets `num_speculative_tokens` to 8 with probabilistic drafting; the TPU
+  verifies 8 rows, an anchor plus 7. If the baseline followed the recipe, it verified 9.
+- **Acceptance**: vLLM has its own forcing mode, `"rejection_sample_method": "synthetic"`, which the
+  recipe page warns *"skips real verification: never use it to serve users or to evaluate accuracy."*
+  The post does not say how the GB200 points were fixed. Both are consistent with a fixed length: the
+  implied step barely moves between 3 and 6 (13.10 to 13.27 ms).
+- **Precision**: both start from the same MXFP4 weights. The TPU computes with a bf16 trunk and
+  activations and FP8-stored gate/up weights. The recipe's default variant is *"MXFP4 weights with
+  MXFP8 activations"* with an FP8 KV cache on Blackwell. Not the same arithmetic, and the post does not
+  say which variant ran.
+- **Output**: with the acceptance length forced, neither side emits Kimi K3's actual continuation.
+  Accuracy was checked separately, on the real verification path with thinking at max: 0.944 on
+  GPQA-Diamond and 0.972 on GSM8K with greedy decoding. Moonshot's card reports 93.5 on GPQA Diamond
+  at temperature 1.0, so there is no sign of a numerical problem, but no token-for-token comparison
+  with the GPU path is published.
+
+The same repository reports 1,515 against 695 tok/s for Qwen 3.8 27B with DFlash2 on four chips a
+side, under the same forced acceptance length of 6. I have not checked that path.
+
+## The bandwidth arithmetic
+
+A single-stream roofline is one division: bytes per token over aggregate HBM bandwidth. For the TPU
+kernel's layout:
+
+$$
+t_{\text{floor}} = \frac{108.81\ \text{GB} + 1{,}472 \times 28{,}041{,}216\ \text{B}}{16 \times 7{,}380\ \text{GB/s}}
+= \frac{150.09\ \text{GB}}{118{,}080\ \text{GB/s}} = 1.27\ \text{ms}
+$$
+
+| One token, no speculation | 16x TPU v7, this kernel | 16x GB200, MXFP4 |
+|---|---|---|
+| dense trunk, bf16 | 108.81 GB | 108.81 GB |
+| 1,472 routed experts | 41.28 GB (FP8 gate/up) | 25.83 GB (MXFP4) |
+| bytes per token | 150.09 GB | 134.64 GB |
+| aggregate HBM bandwidth | 118,080 GB/s | 128,000 GB/s |
+| floor per token | 1.27 ms | 1.05 ms |
+| ceiling | 787 tok/s | 951 tok/s |
+| published, batch 1 | 249 tok/s | 127 tok/s |
+| share of ceiling | 32% | 13% |
+
+The GB200 column assumes the baseline read its experts in MXFP4, the recipe's default. Both columns
+assume perfect sharding, and the TPU layout is not perfectly sharded on purpose. Per TensorCore it
+reads about 5.66 GB of dense weights, including the replicated MLA down-projections and roughly half
+the router, plus expert slices: 1.29 GB if the 16 experts spread evenly over the eight groups, about
+2.69 GB if every layer waits on its busiest group under uniform routing. At half a chip's bandwidth,
+3,690 GB/s, that is 1.88 to 2.26 ms. The kernel's 4.02 ms is about twice that, so it runs at roughly
+half of its own layout's floor (Reasoned; the per-rank shapes are Measured). The remainder has to
+cover 92 layers of two-stage collectives, the sixteen serial argmax passes of routing, the
+KDA recurrence and the embedding and LM head outside the kernel.
+
+<DecodeRoofline />
+
+Speculation moves both floors. An eight-row verify with about 120 distinct experts a layer reads
+roughly 419 GB on the TPU layout and 303 GB in MXFP4, so 3.55 against 2.37 ms, against published steps
+of 8.46 and 13.27 ms (Reasoned, and an upper end: consecutive tokens share experts more than
+independent routing assumes).
+
+Read the table the other way round and the headline changes meaning. **The GB200 has the higher
+ceiling**: more bandwidth per chip, and native FP4 so its experts are 1.6x smaller. The TPU wins
+because its kernel reaches 32% of its ceiling while vLLM's general-purpose path reaches 13%. That is
+a software result, and a good one. It is not evidence that TPU v7 decodes faster than GB200. The
+obvious counter-experiment is a GPU megakernel for the same model, and the 78% Hazy Research reached
+on an H100 says there is room for one.
+
+## What I'd take from it
+
+- **The design is the transferable part.** Give every buffer a lifetime, issue each weight load as
+  early as VMEM allows, across layers if need be, and start expert DMAs from inside the top-k loop.
+- **Report the step, then the acceptance length.** "8.46 ms per eight-row verify on 16 TPU v7" is a
+  kernel measurement. "709 tok/s" multiplies it by a number the workload did not choose.
+- **The actionable number is the baseline's 13%.** At one user, vLLM on 16 GB200s runs at about an
+  eighth of what its memory bus allows.
+- **It is narrow on purpose.** One topology (2x2x4), batch 8 at most, and benchmarked at about a
+  thousand tokens of context. The authors say higher concurrency *"moves the bottleneck"*, and the collectives would
+  need rewriting for another slice shape.
+
+<ChangeMyMind>
+
+<Falsifier claim="The 709 and 452 tok/s were measured at an acceptance length fixed by the benchmark, not produced by a workload.">
+`scripts/benchmark_kimi_dspark.sh` passes `--fixed-acceptance-length`, which `demo_kimi_dspark.py` documents as benchmarking only. A run on real prompts with measured acceptance near 6 and a rate near 709 would make the headline a workload number. If the GB200 points used natural acceptance instead of a forced one, the comparison is asymmetric in a way I have not accounted for.
+</Falsifier>
+
+<Falsifier claim="The TPU kernel reads 1.6x the routed-expert bytes of the MXFP4 checkpoint.">
+`kimi/load.py` stores gate/up as `float8_e4m3fn` with BF16 scales per 256 rows and keeps down as packed MXFP4; 1,472 experts at 28,041,216 bytes is 41.28 GB. If a later commit keeps gate/up in FP4, the TPU ceiling rises to about 877 tok/s, still under the GB200's.
+</Falsifier>
+
+<Falsifier claim="On bytes per token, the GB200 baseline has the higher single-stream ceiling, 951 against 787 tok/s.">
+It is the trunk plus 1,472 experts over 16 chips at 7,380 or 8,000 GB/s. If the baseline dequantised experts to a wider format in HBM, or its GPUs delivered far less than 8,000 GB/s on this access pattern, the comparison could flip. A profile of the baseline would show it.
+</Falsifier>
+
+<Falsifier claim="The GB200 baseline is representative of vLLM.">
+vLLM's own launch post reports 118 tok/s per user at batch 1 on 16 GB300s, next to Inferact's 127. If a current vLLM main measures well above 127 on the same GB200s, the non-speculative lead shrinks, and the post names no version.
+</Falsifier>
+
+<Falsifier claim="The megakernel's accuracy matches Kimi K3's.">
+0.944 on GPQA-Diamond with greedy decoding sits near Moonshot's 93.5 at temperature 1.0, which is consistency, not equivalence. Greedy outputs from the TPU path and from vLLM on the same prompts, compared token by token, would settle it.
+</Falsifier>
+
+</ChangeMyMind>
+
+---
+
+*Throughput figures are Reported from Inferact's [blog post](https://inferact.ai/blog/tpu-megakernels)
+(23 September 2026) and the [`Inferact/tpu-megakernels`](https://github.com/Inferact/tpu-megakernels)
+README, read on 26 September; the code was read at commit `4048f0820aa4`. The four figures are the
+blog's own diagrams, captured from the page and served from this site, numbered in the order they
+appear there. Hardware figures are from Google's [TPU7x documentation](https://docs.cloud.google.com/tpu/docs/tpu7x);
+the drafter's size and config from the Hugging Face API. vLLM figures are from its
+[launch post](https://vllm.ai/blog/2026-07-27-k3),
+[tuning post](https://vllm.ai/blog/2026-09-13-kimi-k3-performance-optimization),
+[DSpark training post](https://vllm.ai/blog/2026-09-15-kimi-k3-dspark) and
+[recipe](https://recipes.vllm.ai/moonshotai/Kimi-K3). The trunk size is from
+[kimi-k3-in-c](/articles/kimi-k3-in-c). For another hand-written Pallas decoder, audited the same way,
+see [a 320B MoE on a free Kaggle TPU](/articles/kaggle-tpu-320b); for a megakernel that measured no
+faster and said so, see [Husky](/articles/husky-msi).*
