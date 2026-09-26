@@ -9,6 +9,8 @@ import { mediaUrl } from "@/lib/media"
 //
 // Read from the committed manifest, never by listing public/: an entry here
 // means `pnpm validate:films` has checked the file exists and is current.
+// Keyed like films (lib/films.ts): an article's bare slug, or
+// `architectures/<slug>` (archFilmKey) for public/thumbs/architectures/<slug>.jpg.
 const thumbs = (manifest as { thumbs: Record<string, { style: string; mascot?: string }> }).thumbs
 
 export function getThumb(slug: string): { src: string; style: string; width: number; height: number } | null {
