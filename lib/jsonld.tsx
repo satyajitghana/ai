@@ -9,11 +9,12 @@ import type {
   WithContext,
 } from "schema-dts"
 
+import type { Architecture } from "@/data/architectures"
 import { profile } from "@/data/profile"
 import type { Publication } from "@/data/publications"
-import type { Article as ContentArticle, BlogPost, Project } from "@/lib/content"
+import type { ArchitectureDoc, Article as ContentArticle, BlogPost, Project } from "@/lib/content"
 import { absoluteUrl, siteUrl } from "@/lib/site"
-import { getFilm, isoDuration } from "@/lib/films"
+import { archFilmKey, type Film, getFilm, isoDuration } from "@/lib/films"
 import { isAbsolute } from "@/lib/media"
 
 // Centralized JSON-LD builders (schema-dts-typed). Injected via <JsonLd /> with
@@ -164,28 +165,65 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
       const cites = citationsFromBody(article.body)
       return cites.length ? { citation: cites } : {}
     })(),
-    // The explainer film, when the article has one: its transcript is the text
-    // of every frame, so an engine that can't watch it can still read it.
+    // The explainer film, when the article has one.
     ...(() => {
       const film = getFilm(article.slug)
-      if (!film) return {}
-      return {
-        video: {
-          "@type": "VideoObject" as const,
-          name: article.title,
-          description: `A ${Math.round(film.duration)}-second narrated explainer of the article, drawn in code.`,
-          transcript: film.transcript,
-          thumbnailUrl: isAbsolute(film.poster) ? film.poster : absoluteUrl(film.poster),
-          contentUrl: isAbsolute(film.src) ? film.src : absoluteUrl(film.src),
-          uploadDate: film.rendered,
-          duration: isoDuration(film.duration),
-          width: `${film.width}`,
-          height: `${film.height}`,
-          encodingFormat: "video/mp4",
-          inLanguage: "en",
-        },
-      }
+      return film ? { video: filmVideo(film, article.title, "the article") } : {}
     })(),
+  }
+}
+
+// An explainer film as a VideoObject: its transcript is the text of every
+// frame, so an engine that can't watch it can still read it.
+function filmVideo(film: Film, name: string, of: string) {
+  return {
+    "@type": "VideoObject" as const,
+    name,
+    description: `A ${Math.round(film.duration)}-second narrated explainer of ${of}, drawn in code.`,
+    transcript: film.transcript,
+    thumbnailUrl: isAbsolute(film.poster) ? film.poster : absoluteUrl(film.poster),
+    contentUrl: isAbsolute(film.src) ? film.src : absoluteUrl(film.src),
+    uploadDate: film.rendered,
+    duration: isoDuration(film.duration),
+    width: `${film.width}`,
+    height: `${film.height}`,
+    encodingFormat: "video/mp4",
+    inLanguage: "en",
+  }
+}
+
+// An architecture explainer (content/architectures/<slug>.mdx) is a
+// TechArticle about the architecture in data/architectures.ts: the same
+// citation graph an article emits, with the architecture's own paper first.
+export function architectureJsonLd(
+  doc: ArchitectureDoc,
+  arch: Architecture
+): WithContext<Article> {
+  const url = absoluteUrl(`/architectures/${doc.slug}`)
+  const ogImage = absoluteUrl(`/architectures/${doc.slug}/opengraph-image`)
+  const cites = [...new Set([...(arch.paper ? [arch.paper] : []), ...citationsFromBody(doc.body)])].slice(0, 20)
+  const film = getFilm(archFilmKey(doc.slug))
+  return {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    headline: doc.title,
+    description: doc.description,
+    image: [ogImage],
+    datePublished: doc.date,
+    dateModified: doc.lastUpdated,
+    url,
+    mainEntityOfPage: { "@type": "WebPage", "@id": url },
+    about: { "@type": "Thing", name: arch.name },
+    keywords: [...new Set([...arch.tags, ...doc.tags])].join(", "),
+    articleSection: "Architectures",
+    wordCount: doc.body.split(/\s+/).filter(Boolean).length,
+    timeRequired: `PT${doc.readingTimeMins}M`,
+    inLanguage: "en",
+    isAccessibleForFree: true,
+    author: { "@id": `${siteUrl}/#person` },
+    publisher: { "@id": `${siteUrl}/#person` },
+    ...(cites.length ? { citation: cites } : {}),
+    ...(film ? { video: filmVideo(film, doc.title, "the architecture") } : {}),
   }
 }
 

@@ -5,6 +5,11 @@ import { mediaUrl } from "@/lib/media"
 // works, rendered from a storyboard (data/films/<slug>.json) by
 // brand-crew/skills/explainer-films.
 //
+// Keyed like the storyboards: an article by its bare slug, any other kind by
+// `<kind>/<slug>` (data/films/architectures/<slug>.json →
+// public/films/architectures/<slug>.mp4). The key is the path under /films/,
+// so one lookup serves both; use archFilmKey() for an architecture doc.
+//
 // Read from the committed manifest, never from public/ — the page must not
 // touch public/ with fs (it drags the whole directory into the function
 // trace), and the manifest already carries everything the page needs.
@@ -28,6 +33,9 @@ export type Film = {
 
 type Entry = { duration: number; rendered: string; transcript: string; style?: string }
 const films = (manifest as { films: Record<string, Entry> }).films
+
+/** The film and thumbnail key of an architecture doc (content/architectures/<slug>.mdx). */
+export const archFilmKey = (slug: string) => `architectures/${slug}`
 
 export function getFilm(slug: string): Film | null {
   const f = films[slug]
