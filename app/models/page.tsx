@@ -6,7 +6,7 @@ import { MetricRanking } from "@/components/models/metric-ranking"
 import { FrontierTimeline } from "@/components/models/frontier-timeline"
 import { StylometryHeatmap } from "@/components/models/stylometry-heatmap"
 import { ModelTable } from "@/components/models/model-table"
-import { models, MODELS_SNAPSHOT_DATE } from "@/data/models"
+import { models, MODELS_INDEX_VERSION, MODELS_SNAPSHOT_DATE } from "@/data/models"
 
 export const metadata: Metadata = {
   title: "Models",
@@ -24,8 +24,9 @@ export default function ModelsPage() {
     >
       <p className="mb-6 font-mono text-xs text-muted-foreground">
         snapshot {MODELS_SNAPSHOT_DATE} · {models.length} models · figures from Artificial
-        Analysis, provider docs, and Epoch (ECI). Leaderboards churn — treat this as a dated
-        picture, not live data.
+        Analysis (Intelligence Index {MODELS_INDEX_VERSION}; each model at its highest reasoning
+        effort), llm-stats, provider docs, and Epoch (ECI). Leaderboards churn — treat this as a
+        dated picture, not live data.
       </p>
 
       <IntelligenceScatter models={models} />

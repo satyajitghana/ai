@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
-import { blendedPrice, type ModelRecord, type Origin } from "@/data/models"
+import { blendedPrice, contextLabel, type ModelRecord, type Origin } from "@/data/models"
 import { mlog } from "@/lib/dmath"
 
 // The flagship comparison: Intelligence Index (y) against a chosen x-axis —
@@ -36,7 +36,7 @@ const AXES: Axis[] = [
   { key: "price", label: "blended price ($/M)", log: true, get: blendedPrice, fmt: (v) => `$${v < 1 ? v.toFixed(2) : v.toFixed(1)}` },
   { key: "speed", label: "output speed (tok/s)", log: false, get: (m) => m.speedTps, fmt: (v) => `${Math.round(v)}` },
   { key: "latency", label: "latency TTFT (s)", log: false, get: (m) => m.latencyS, fmt: (v) => `${v.toFixed(2)}s` },
-  { key: "context", label: "context (K tokens)", log: true, get: (m) => m.contextK, fmt: (v) => (v >= 1000 ? `${v / 1000}M` : `${v}K`) },
+  { key: "context", label: "context (K tokens)", log: true, get: (m) => m.contextK, fmt: contextLabel },
 ]
 
 const W = 640
@@ -95,6 +95,10 @@ export function IntelligenceScatter({ models }: { models: ModelRecord[] }) {
     )
 
   const hp = hover != null ? pts.find((p) => p.i === hover) : null
+  // Size the hover label to its text (monospace: ~0.6em per glyph) so long
+  // names such as "Llama-3.3-Nemotron-Super-49B v1.5" stay inside the box.
+  const hpSub = hp ? `${hp.m.provider} · AAI ${hp.y} · ${axis.fmt(hp.x)}` : ""
+  const hpW = hp ? Math.max(146, Math.ceil(14 + Math.max(hp.m.name.length * 5.7, hpSub.length * 5.1))) : 0
 
   return (
     <figure className="my-6 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
@@ -153,10 +157,10 @@ export function IntelligenceScatter({ models }: { models: ModelRecord[] }) {
 
             {/* hover label */}
             {hp ? (
-              <g transform={`translate(${Math.min(sx(hp.x) + 8, W - 150)}, ${Math.max(sy(hp.y) - 30, padT)})`}>
-                <rect width="146" height="26" rx="5" fill="var(--background)" stroke="var(--border)" />
+              <g transform={`translate(${Math.min(sx(hp.x) + 8, W - hpW - 4)}, ${Math.max(sy(hp.y) - 30, padT)})`}>
+                <rect width={hpW} height="26" rx="5" fill="var(--background)" stroke="var(--border)" />
                 <text x="7" y="11" className="fill-foreground font-mono" fontSize="9.5">{hp.m.name}</text>
-                <text x="7" y="21" className="fill-muted-foreground font-mono" fontSize="8.5">{hp.m.provider} · AAI {hp.y} · {axis.fmt(hp.x)}</text>
+                <text x="7" y="21" className="fill-muted-foreground font-mono" fontSize="8.5">{hpSub}</text>
               </g>
             ) : null}
           </svg>
