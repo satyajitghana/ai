@@ -1,0 +1,271 @@
+---
+title: "Hunyuan-A13B: an 80B MoE that reads 13B per token, and a switch for thinking"
+description: "Tencent's Hunyuan-A13B is a fine-grained Mixture-of-Experts model with 64 routed experts and 1 shared expert per layer. I count its 80.39B parameters from the safetensors headers, derive the 12.75B it reads per token, trace how /think and /no_think pick the reasoning mode, and check the self-reported benchmarks, the 256K window, the quantised variants and the territory-limited licence. The arXiv report of September 2026 is a re-post of a PDF dated June 2025."
+date: 2026-09-26
+interest: 3
+helpful: 4
+tags:
+  - explainer
+  - llm
+  - mixture-of-experts
+  - open-weights
+  - reasoning
+  - long-context
+  - quantization
+  - licensing
+draft: false
+---
+
+import { A13bParams } from "@/components/articles/hunyuan-a13b/a13b-params"
+import { A13bModes } from "@/components/articles/hunyuan-a13b/a13b-modes"
+
+**Hunyuan-A13B** is Tencent Hunyuan's open-weights Mixture-of-Experts model: **80 billion parameters stored, 13 billion used per token**. Each of its 32 layers holds 64 small routed experts and 1 shared expert. A router picks 8 of the 64 for each token. On top of that sits a **dual-mode chain of thought**: the same weights either think step by step (the default) or answer straight away when the prompt carries `/no_think`.
+
+The [technical report](https://arxiv.org/abs/2609.27284) went up on arXiv on 23 September 2026, but it is not new. The weights were committed to Hugging Face on 25 June 2025, and the same report has sat in the [GitHub repository](https://github.com/Tencent-Hunyuan/Hunyuan-A13B) ever since as a PDF stamped `2025-06-26`. I diffed the two texts: every number is identical, and the arXiv copy only fixes hyphenation, shifts a few verbs to the present tense and adds a typo. So this is a **June 2025 model with a June 2025 evaluation**. One baseline was stale even then: the tables use `DeepSeek-R1-0120`, though [`DeepSeek-R1-0528`](https://huggingface.co/deepseek-ai/DeepSeek-R1-0528) was out a month before the PDF.
+
+I read both versions of the report, the five `tencent/Hunyuan-A13B-*` model cards, `config.json`, the chat template at two revisions, the reference modelling code and the licence. I did not run the model or download weights.
+
+<Callout type="note">
+Every number is labelled. **Measured**: computed from files Tencent published (safetensors headers, `config.json`, the chat template, commit dates). **Reported**: Tencent's claim, from the report or a model card, not reproduced here. **Reasoned**: derived from the other two, with the working shown.
+</Callout>
+
+<ModelCard repo="tencent/Hunyuan-A13B-Instruct" />
+
+## Where the 80 billion parameters live
+
+The shipped `config.json` agrees with the report's Table 1 and adds the details that decide the count (measured):
+
+| Field | Value |
+|---|---|
+| Layers | 32 |
+| Hidden size | 4096 |
+| Attention | 32 query heads, 8 key-value heads, head dim 128 |
+| Experts per layer | 64 routed + 1 shared, all SwiGLU with FFN width 3072 |
+| Routed experts per token | 8 (`moe_topk`) |
+| Vocabulary | 128,167 (`vocab_size`); the report says 128K |
+| Output head | tied to the embedding (`tie_word_embeddings: true`) |
+| QK-norm | on (`use_qk_norm: true`) |
+
+To check the headline, I read the header of each of the 33 safetensors shards with an HTTP range request: an 8-byte length, then a JSON table of every tensor's name, shape and dtype. Summing the shapes gives **80,393,183,232 parameters in 6,530 tensors**, matching Hugging Face's own total to the digit. There is no `lm_head` tensor: the output head reuses the embedding.
+
+<Receipts src="/articles/hunyuan-a13b/data/params.json" />
+
+The layer arithmetic is simple enough to do by hand. One SwiGLU expert has three matrices of 4096 × 3072:
+
+$$
+P_\text{expert} = 3 \times 4096 \times 3072 = 37{,}748{,}736
+$$
+
+Attention per layer is $Q$ and $O$ at 4096 × 4096, plus $K$ and $V$ at 1024 × 4096 (8 heads of 128), which is 41,943,040. The router is a 64 × 4096 matrix. So a layer stores 65 experts, attention, a router and four small norm vectors:
+
+$$
+P_\text{layer} = 65 \cdot P_\text{expert} + 41{,}943{,}040 + 262{,}144 + 8{,}448 = 2{,}495{,}881{,}472
+$$
+
+Thirty-two layers, plus the 524,972,032-parameter embedding and a final norm, give the 80,393,183,232. The routed experts alone are 77.31B, or **96%** of the model.
+
+### What a token actually reads
+
+"13B active" needs a convention, because the report does not state one. Here is mine (reasoned):
+
+- Per layer, a token touches attention, the router, the shared expert and 8 routed experts: $41{,}943{,}040 + 262{,}144 + 8{,}448 + 9 \cdot P_\text{expert}$.
+- The embedding lookup reads one row. The **output head**, tied to that same matrix, multiplies the full 128,167 × 4096 for every generated token, so I count the matrix once.
+
+That gives **12,747,448,320 parameters read per token, 12.75B**, or 16% of what is stored. Drop the output head and it is 12.22B. Count embedding and head as two matrices, as untied accounting would, and it is 13.27B. All three round to Tencent's "13B", so the headline holds under any of the usual conventions.
+
+That ratio is the economic argument. A dense model of the same stored size reads 6.3× more weights per token (reasoned: 80.39 / 12.75). Batch-1 decoding is bound by memory bandwidth, and each token reads **25.5 GB** of weights in BF16, 12.7 GB in FP8 and 6.4 GB in 4-bit (reasoned). Move the knobs and watch which number responds:
+
+<A13bParams />
+
+The KV cache stays at **128 KiB per token** in 16-bit however many experts you add: $2 \times 8 \times 128 \times 32 \times 2$ bytes, K and V for 8 heads of 128 over 32 layers (reasoned). If routing is new to you, I built one in [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch).
+
+### How the router picks
+
+The report says only "1 shared expert and 64 fine-grained non-shared experts", with 8 active. The reference code that `trust_remote_code` loads, `modeling_hunyuan.py`, fills in the rest (read, not run):
+
+1. The router is a bias-free linear layer kept in **float32**. That is why Hugging Face lists 8,388,608 F32 parameters for this repo: 32 × 64 × 4096.
+2. Softmax over all 64 logits, then top-8, then the 8 winning probabilities are **renormalised to sum to 1**.
+3. The shared expert runs on every token and its output is **added with no gate**.
+
+One detail matters if you run the Transformers code rather than vLLM or SGLang. `topkgating()` caps each expert at `max(topk, topk * tokens // num_experts)` assignments, a capacity factor of exactly 1. Decoding one token is unaffected. In a long prefill, any expert loaded above the mean drops the excess, although `config.json` says `moe_drop_tokens: false`; the function never reads that flag. I have not measured how often it bites.
+
+Why one shared expert? The report says models without one underperformed in its scaling experiments, and more than one gave "diminishing returns, with only marginal improvements (or even fluctuations)". It prints no numbers.
+
+## Attention and the 256K window
+
+Attention is grouped-query: 32 query heads share 8 KV heads, head dim 128, with RMSNorm on queries and keys. `config.json` also carries `cla_share_factor: 2`, a cross-layer attention setting, but `use_cla` is `false`, so no cache is shared across layers.
+
+At 262,144 tokens the cache is **32 GiB** in BF16; full multi-head attention would need 128 GiB (reasoned). Tencent's later [Hunyuan Hy3](/articles/hunyuan-hy3) keeps the same 8 KV heads over 80 layers, 320 KiB per token.
+
+The context was grown in stages (reported):
+
+- **Foundation:** 20T tokens at a 4,096-token window.
+- **Fast annealing:** 300B tokens at 8,192.
+- **Long context:** two phases, 32K and then 256K, with NTK-aware RoPE scaling at alpha 50 and 1000.
+
+The shipped config carries alpha 1000 and `rope_theta` 10000, and the reference code turns that into a new rotary base:
+
+$$
+\theta' = \theta \cdot \alpha^{d/(d-2)} = 10^4 \cdot 1000^{128/126} \approx 1.12 \times 10^7
+$$
+
+with $d = 128$ the head dim: a fixed stretch of every wavelength, not a length-dependent schedule.
+
+The same file has a trap. `max_position_embeddings` is **32,768**. The model card says the cap is deliberate, to avoid running out of memory, and that you should set 262,144 or pass `--max-model-len 262144` to vLLM. Its recommended 256K setup is 4 NVIDIA H20 GPUs, all BF16.
+
+The evidence for the window is thinner than the window. The report's long-context tables (reported):
+
+| | Gemini 2.5 Pro | DeepSeek R1 | Qwen3-A22B | Hunyuan-A13B |
+|---|---|---|---|---|
+| PenguinScrolls | 88.3 | 87.5 | 87.1 | 87.7 |
+| LongBench-v2 | 60.9 | 53.8 | 48.4 | 55.0 |
+| FRAMES | 80.1 | 85.7 | 84.0 | 81.1 |
+| RULER QA, 0-8K | 83.2 | 75.4 | 76.6 | 78.7 |
+| RULER QA, 64K-128K | 80.2 | 65.6 | 66.6 | 73.9 |
+| RULER QA, average | 81.7 | 72.0 | 73.0 | 76.7 |
+
+The RULER slope is the useful number: Hunyuan-A13B loses 4.8 points from the shortest bucket to the longest, against about 10 for DeepSeek R1 and Qwen3-A22B. But the longest bucket stops at **128K**; nothing tests the half of the window above it. PenguinScrolls is Tencent's own benchmark.
+
+## Dual-mode chain of thought
+
+The mechanism is a response format, not an architecture. Every training example has a thinking block and then an answer. For slow thinking the block holds the reasoning; for fast thinking it is empty. A tag in the prompt picks the mode (reported):
+
+- `/think` gives slow thinking, with reflection and backtracking, and more tokens.
+- `/no_think` gives fast thinking, an empty block and a direct answer.
+- **No tag means slow thinking.** The default is the expensive mode.
+
+The report prints the empty block as `<think>\n\n<think>`. The chat template shows the closing tag is meant: `<think>\n\n</think>`. It is the same soft switch [Qwen3](https://huggingface.co/Qwen/Qwen3-235B-A22B) shipped with in April 2025, down to the tag spelling.
+
+There are two documented ways to flip it, and one has quietly stopped working. The model card says to pass `enable_thinking=False` to `apply_chat_template`. The template the repo carried until August 2025 did exactly that: it appended an empty thinking block after the prompt, so generation started past the reasoning (measured, at revision `f21d329` of July 2025):
+
+```jinja
+{%- if enable_thinking is defined and enable_thinking is false %}
+    {{- '<think>\n\n</think>\n' }}
+{%- endif %}
+```
+
+On 21 August 2025 Tencent replaced the tokenizer files, and the template on `main` since then (revision `290ddb9`) has **no `enable_thinking` branch**, and no tool-calling branch either. Jinja ignores unknown keyword arguments, so `enable_thinking=False` now does nothing, silently. The model card still documents it. What the card says still works is the tag, which reaches the model as plain prompt text:
+
+```python
+messages = [{"role": "user", "content": "/no_think Summarise this paragraph in one line: ..."}]
+# slow mode is the default; put /think at the front to force it
+```
+
+On training, the report says both modes share "a unified training structure", and that for agent data it trained "a special model to generate thinking processes" to balance fast and slow examples. It gives no fast-to-slow ratio, no mode-specific reward and no length penalty.
+
+### What each mode costs and buys
+
+The report measures **accuracy per mode, not tokens per mode**. With no token counts or latencies, the saving from `/no_think` is measured nowhere. The only hint is Table 7, which benchmarks outputs of 14,336 and 22,528 tokens: lengths only a long reasoning trace needs (reasoned). I cannot fill that gap without running the model, so I do not guess.
+
+What the report does allow is a like-for-like accuracy comparison. Table 3 is slow mode, Table 4 fast mode; they share 20 benchmarks and one baseline, Qwen3-A22B (values reported, gaps reasoned):
+
+<A13bModes />
+
+Read it from the top:
+
+- **Thinking is worth 36.5 to 57.6 points** on AIME 2024, AIME 2025, ZebraLogic and LiveCodeBench. On AIME 2025, slow thinking scores 76.8 and fast thinking 19.2.
+- **The median gap is 9.15 points**, against 7.30 for Qwen3-A22B.
+- **Instruction following barely moves.** IF-Eval is 84.7 slow and 84.4 fast.
+- **On two agent benchmarks, fast beats slow.** ComplexFuncBench is 74.0 fast against 61.2 slow, and C3-Bench 65.4 against 63.5. The report does not comment. One reading is that a long reasoning trace gets in the way of multi-step function calling, but nothing in the report tests it.
+
+The report also says that "especially in the fast-thinking scenario, Hunyuan-A13B consistently exhibits excellent performance, often clearly outperforming larger models". Against the older baselines in Table 4 that holds: fast Hunyuan-A13B beats Qwen2.5-72B-Instruct on 20 of 21 rows and Hunyuan-Large on 18. Against the newest baseline it does not: Qwen3-A22B in its fast mode wins 14 of 21.
+
+## Training: 20T tokens and four post-training stages
+
+**Pretraining** (reported). The data pipeline is Hunyuan-TurboS's, with better STEM acquisition and cleaning that yielded **250B tokens** of STEM text. The foundation stage runs 20T tokens. The learning rate warms up to $3 \times 10^{-4}$, then cosine-decays to $3 \times 10^{-5}$ over 13.5T tokens and holds there. Annealing then decays it to $8 \times 10^{-6}$ over 300B tokens. The tokenizer is Hunyuan-Large's.
+
+**Post-training** is four stages in a line:
+
+<Figure
+  src="/articles/hunyuan-a13b/fig1.png"
+  alt="A left-to-right flow of five boxes: Pretrain Model, then Stage1 Reasoning-oriented SFT, Stage2 Reasoning-oriented RL, Stage3 All-Scenarios SFT, and Stage4 All-Scenarios RL, joined by arrows."
+  caption="The post-training pipeline: reasoning-oriented SFT and RL, then all-scenarios SFT and RL (Hunyuan-A13B report, Figure 1)."
+/>
+
+1. **Reasoning SFT.** Maths, code, logic and science, each with its own filter: solution verifiers for maths, sandbox runs and critic models for code, ZebraLogic-style synthesis for puzzles, an LLM verifier and rejection sampling for science.
+2. **Reasoning RL.** GRPO with two rewards: a small model that outputs 1 when the final answer matches the reference and 0 otherwise, and a sandbox for 36 programming languages that runs over 1,000 jobs at once. The prompts are **150K** cases where the SFT model was unstable, mixed 2:2:1:1 across maths, code, logic and science, 10% of them seen in SFT. Multiple-choice, true/false and proof questions are excluded so that guessing earns nothing. Rollouts run at 24K context, then 32K, on-policy, with **no KL penalty** and temperature 0.6-0.8.
+3. **All-scenarios SFT.** Reasoning data mixed with writing, translation, role-play, dialogue, knowledge QA and agent data. The agent data comes from a five-role simulator (user, planner, tool, agent, checker), with tool responses from sandboxes, MCP servers and synthetic tools, over 30 kinds of agent system prompt, and 20,000 format combinations.
+4. **All-scenarios RL.** A generative reward model compares each answer with a reference, alongside "16 sub-topics and over 30 scoring services". The agent reward is a 0/1 format check plus a match of tool, parameters and values against the reference.
+
+Most of the reasoning RL is borrowed, and the report says from where. GRPO comes from [DeepSeekMath](https://arxiv.org/abs/2402.03300). Dropping the KL term comes from [DAPO](https://arxiv.org/abs/2503.14476). Growing the rollout context in phases comes from DeepScaleR. What is Tencent's own is the specifics: the 150K prompts picked where SFT was unstable, and the rule that nothing guessable earns a reward.
+
+What is **not** in the report: training compute, GPU hours, the pretraining data mix, the number of RL steps or tokens, and any ablation for the four-stage order or the shared-expert claim.
+
+## The evidence, and who measured it
+
+Every benchmark number is **reported by Tencent**, and the report does not say whether baseline scores were re-run or copied from their vendors. The post-trained tables give no evaluation code, sampling settings, sample counts or seeds; the model card says only that the base-model table was "evaluated by TRT-LLM-backend". Six of the 21 rows in the slow-thinking table are Tencent's own: ArtifactsBench (introduced in the report), four internal sets (LengthCtrl, InsCtrl, ComplexNLU, Word-Task), and C3-Bench, [published by the Tencent Hunyuan team](https://arxiv.org/abs/2505.18746) with Peijie Yu, this report's arXiv submitter, as first author.
+
+**Base model** (Table 2, reported), against Hunyuan-Large (389B total, 52B active), Qwen2.5-72B and Qwen3-A22B base: MMLU 88.17, MATH 72.35, GPQA 49.12, EvalPlus 78.64. The text claims wins over Hunyuan-Large on "12 of 14" benchmarks; the table shows **11 of 14**, losing MMLU (88.17 vs 88.40), CMATH (91.17 vs 91.30) and GSM8K (91.83 vs 92.80). Against Qwen3-A22B, "7 of 12" is correct.
+
+**Post-trained, slow mode** (Table 3, reported). Hunyuan-A13B tops 6 of 21 rows: AIME 2024 (87.3), BBH (89.1), ZebraLogic (84.7) and three of the four agent benchmarks. Against Qwen3-A22B in thinking mode it wins 16 of 21, losing AIME 2025 (76.8 vs 81.5), OlympiadBench, LiveCodeBench (63.9 vs 70.7), ArtifactsBench and InsCtrl. For 13B active against 22B, that is strong, if you take the numbers as given.
+
+**Agents** are where the report pushes hardest (reported):
+
+<BenchBars
+  title="τ-Bench, slow-thinking mode (Table 3) — reported"
+  unit=""
+  bars={[
+    { label: "Hunyuan-A13B", value: 54.7, highlight: true },
+    { label: "OpenAI o1-1217", value: 60.4 },
+    { label: "Qwen3-A22B", value: 44.6 },
+    { label: "DeepSeek-R1-0120", value: 43.8 },
+  ]}
+/>
+
+BFCL v3 is 78.3, ComplexFuncBench 61.2 and C3-Bench 63.5, all the top scores in Table 3. The text goes one row further: "Hunyuan-A13B demonstrated a leading performance on BFCL-v3, τ-Bench, ComplexFuncbench and C3-Bench". On τ-Bench its own table has o1 ahead, 60.4 to 54.7. Among the open models, the claim holds.
+
+**Throughput** (Table 7, reported): 190.84 tokens/s at batch 1, 1,246.54 at batch 16 and 1,981.99 at batch 32, for 2,048 input and 14,336 output tokens; 1,725.95 at batch 32 with 22,528 output tokens. The table names no GPU, GPU count or framework, but it can be bounded (reasoned). At batch 1 each decode step reads all 25.5 GB of active BF16 weights, so 190.84 tokens/s needs at least **4.87 TB/s**: more than a single H100 (3.35 TB/s) or H20 (4.0 TB/s) is rated for. This is a tensor-parallel, multi-GPU number; the README's launch commands use 2 to 4 GPUs.
+
+One inconsistency to flag. The copy of Table 3 on the model card and in the GitHub README gives DeepSeek R1 an IF-Eval of **88.3**. Both PDFs say **83.3**.
+
+## Release: weights, quantisations, licence
+
+The weights predate the arXiv report by 15 months (measured from commit history):
+
+| Date | Event |
+|---|---|
+| 2025-06-25 | `Hunyuan-A13B-Instruct` repo created; first weights committed (PyTorch `.bin`) |
+| 2025-06-26 | FP8 and GPTQ-Int4 repos; report PDF stamped with this date |
+| 2025-06-27 | `Hunyuan-A13B-Pretrain` weights; GitHub repo created; licence "Release Date: June 27, 2025" |
+| 2025-07-01 | Instruct weights converted to safetensors; vLLM support merged (per the card) |
+| 2025-07-10 | Official GGUF repo |
+| 2025-08-21 | Tokenizer and chat template replaced on `main` |
+| 2026-09-23 | Report submitted to arXiv as 2609.27284 |
+
+The repositories may have been private for their first day or two; Tencent's public date is 27 June 2025.
+
+The variants, with sizes summed from each repo's file list (measured):
+
+| Repo | Format | Size |
+|---|---|---|
+| `Hunyuan-A13B-Instruct` / `-Pretrain` | BF16 (router F32) | 160.8 GB |
+| `Hunyuan-A13B-Instruct-FP8` | FP8 E4M3, static activation scales | 80.9 GB |
+| `Hunyuan-A13B-Instruct-GPTQ-Int4` | 4-bit weights, group 128, symmetric | 42.7 GB |
+| `Hunyuan-A13B-Instruct-GGUF` | `Q4_0` / `Q4_K_M` / `Q8_0` | 45.4 / 48.8 / 85.4 GB |
+
+The FP8 checkpoint quantises attention and every expert (79,859,548,160 parameters in `F8_E4M3`) and keeps the embedding, router and norms in BF16 (533,635,072), per the Hugging Face metadata. The GitHub README reports the quality cost, one run each, no error bars: FP8 moves AIME 2024 from 87.3 to 86.7; Int4 moves BBH from 89.1 to 87.91 and OlympiadBench from 82.7 *up* to 84.0, which is more likely noise than a free lunch. Those tables give the BF16 model a GSM8K of 94.39, a number absent from the report's post-trained tables but equal, to the digit, to Qwen3-A22B's base-model GSM8K in Table 2. Coincidence or copy slip; I cannot tell.
+
+At 42.7 GB, the Int4 checkpoint leaves about 5 GB of a 48 GB card for activations, runtime and a cache that costs 128 MiB per 1K tokens (reasoned): one card, short contexts.
+
+**The licence** is the Tencent Hunyuan Community License Agreement, not an OSI licence. What it says, in its own terms:
+
+- **Territory.** "THIS LICENSE AGREEMENT DOES NOT APPLY IN THE EUROPEAN UNION, UNITED KINGDOM AND SOUTH KOREA". Territory is defined as worldwide excluding those three. Use, reproduction, modification, distribution or display of the model, **or its outputs**, outside the Territory is "unlicensed and unauthorized".
+- **Scale.** If your products had more than **100 million monthly active users** in the calendar month before the release date, you must request a licence, which Tencent may grant "in its sole discretion".
+- **No training other models.** "You must not use the Tencent Hunyuan Works or any Output or results of the Tencent Hunyuan Works to improve any other AI model". Model Derivatives explicitly include distillation. Fine-tuning Hunyuan itself is allowed.
+- **Distribution.** Pass on the agreement, mark modified files, ship a `Notice` file, and bind downstream users to the use restrictions.
+- **Acceptable use** (Exhibit A, 20 items). Among them: no "military purposes", no "high-stakes automated decisions" in areas such as law enforcement, migration, medicine, credit, employment, housing, education or insurance, and nothing placed in a public context without "expressly and conspicuously identifying that the information and/or content is machine generated".
+- **Law.** Hong Kong law, Hong Kong courts. The licence ends if you sue Tencent claiming the model or its output infringes your IP.
+
+For a team inside the Territory with fewer than 100M users that wants to run and fine-tune the model, it is workable. For distilling it into a different model, or for serving users in the EU, the UK or South Korea, the licence does not give you the rights.
+
+## The take
+
+The architecture survives a header count. 64 routed experts plus 1 shared, top-8, and GQA with 8 KV heads over 32 layers come to exactly 80,393,183,232 parameters, of which 12.75B are read per token. That is a sensible mid-2025 design point: one large GPU in 4-bit with short contexts, and a 128 KiB-per-token cache that makes 256K a 32 GiB problem instead of a 128 GiB one.
+
+The thinking switch is the part to use with care. Slow is the default, the documented `enable_thinking=False` path does nothing on `main` today, and the report never measures what fast mode saves. Its own tables do say where thinking pays: 36 to 58 points on competition maths, contest code and logic puzzles, and minus 12.8 on ComplexFuncBench tool calling.
+
+The rest is self-reported, fifteen months old, partly scored on Tencent's own benchmarks, and contradicted by its own tables in at least two places. Hunyuan-A13B was a good open MoE in June 2025. The arXiv upload changes its citation, not its evidence.
+
+---
+
+*Sources: the [Hunyuan-A13B Technical Report](https://arxiv.org/abs/2609.27284) (arXiv v1, 23 September 2026) and its June 2025 PDF in [`Tencent-Hunyuan/Hunyuan-A13B`](https://github.com/Tencent-Hunyuan/Hunyuan-A13B) (commit `2798f3c`, 8 July 2025); the model cards, `config.json`, chat templates and file lists of [`tencent/Hunyuan-A13B-Instruct`](https://huggingface.co/tencent/Hunyuan-A13B-Instruct), [`-Pretrain`](https://huggingface.co/tencent/Hunyuan-A13B-Pretrain), [`-FP8`](https://huggingface.co/tencent/Hunyuan-A13B-Instruct-FP8), [`-GPTQ-Int4`](https://huggingface.co/tencent/Hunyuan-A13B-Instruct-GPTQ-Int4) and [`-GGUF`](https://huggingface.co/tencent/Hunyuan-A13B-Instruct-GGUF), read on 26 September 2026. Figure 1 is reproduced from the report for commentary. The interactives use the published config and the report's tables; no number here comes from running the model.*
