@@ -1,0 +1,238 @@
+---
+title: "Flash-dLLM: a KV cache for keys that never sit still, and a model that checks its own drafts"
+description: "A masked diffusion LLM attends in both directions, so every denoising step can move every key and value, and every cache for it is an approximation. Flash-dLLM makes the approximation cheap: a Triton kernel projects, rotates and writes K/V straight into one flat preallocated cache, refreshing only the masked window plus the most-attended decoded tokens each step, and Flash-Verify lets the model check its own low-confidence drafts in one small extra pass, with no draft model. On LLaDA-1.5 on one A100 it reports 148.0 to 210.6 tokens/s and 5.1x and 11.0x the throughput of Elastic-Cache on GSM8K and HumanEval. The code matches the paper, with two differences worth knowing before you tune it: only one 16-token block per step is a decoding candidate, and gamma thresholds a running product of verify probabilities, which is stricter than the paper's per-token rule."
+date: 2026-09-26
+interest: 4
+helpful: 4
+tags:
+  - diffusion
+  - llm
+  - language-models
+  - kv-cache
+  - inference-optimization
+  - speculative-decoding
+  - explainer
+draft: false
+---
+
+import { RefreshGrid } from "@/components/articles/flash-dllm/refresh-grid"
+import { VerifyStep } from "@/components/articles/flash-dllm/verify-step"
+
+An autoregressive model can cache keys and values because the past never changes. Once token 41 is written, its key in layer 12 is the same at step 500 as it was at step 42. A masked diffusion LLM breaks that. [LLaDA](/articles/illada-diffusion-language-model) and Dream attend in both directions, so when a denoising step commits one token, the hidden state of every other position can move, and with it every key and value in every layer above the first. There is no exact cache for that model. There are approximations, and a bill for keeping them fresh.
+
+[Flash-dLLM](https://arxiv.org/abs/2609.26796) comes from Quan Nguyen-Tri, Mukul Ranjan and Zhiqiang Shen at MBZUAI's VILA Lab, the group behind Elastic-Cache, one of the baselines it beats. It changes two things, and both are about moving fewer bytes. **Flash-Cache** is a Triton kernel that projects, rotates and writes keys and values straight into a flat, preallocated cache, and recomputes only a masked window plus a fixed budget of the most-attended decoded tokens each step. **Flash-Verify** lets the model check its own low-confidence guesses in one small extra forward pass, with no draft model. On LLaDA-1.5 on one A100 it reports 148.0 to 210.6 tokens/s across four benchmarks, and 5.1x and 11.0x the throughput of Elastic-Cache on GSM8K and HumanEval at 512 generated tokens.
+
+I read the paper and the released code. The code implements the paper's mechanism, with two differences that matter the moment you touch a threshold. The headline numbers are what the tables say; what they are measured against is the part to read slowly.
+
+| | |
+|---|---|
+| What it is | training-free inference for masked diffusion LLMs: an IO-aware KV cache plus self-verified parallel decoding |
+| Model tested | LLaDA-1.5 (8B), and only LLaDA-1.5 |
+| Hardware | one A100 80GB for every benchmark; the kernel microbenchmark is on an RTX 3090 |
+| Benchmarks | GSM8K (5-shot), MATH (4-shot), HumanEval (0-shot), MBPP (3-shot), at 256 and 512 generated tokens, batch 32 |
+| Headline | 210.6 tokens/s at 83.02% on GSM8K-512, against 41.7 tokens/s at 82.79% for Elastic-Cache |
+| Code | `VILA-Lab/Flash-dLLM`, Apache-2.0; kernels in `llada/flash_cache_triton.py` (644 lines), the decode loop in `llada/generate.py` (474 lines) |
+
+<RepoCard repo="VILA-Lab/Flash-dLLM" />
+
+## Why a diffusion LLM will not hold still
+
+A masked diffusion LM generates by filling in blanks. It appends a run of `[MASK]` tokens to the prompt, predicts every masked position at once, commits some of those predictions, and repeats until nothing is masked. The [iLLaDA write-up](/articles/illada-diffusion-language-model) covers the objective, and [Dream-Cubed](/articles/dream-cubed) runs the same absorbing-mask process on Minecraft blocks. For caching, one property matters: attention is bidirectional. Position $i$ at layer $l$ reads every other position, including masks that become real tokens two steps later.
+
+So when step $t$ commits position $j$, the input at $j$ changes, and every hidden state that attended to $j$ changes with it. In an autoregressive model the [KV cache](/articles/how-llm-inference-works) is exact by construction. Here it is stale by construction. Every dLLM cache makes the same move, which the paper writes as its Eq. (1):
+
+$$
+\mathbf{A}^{t,l}_{[\mathcal{Q}^t]} = \mathrm{softmax}\!\left(\frac{\mathbf{Q}^{t,l}_{[\mathcal{Q}^t]}\,(\tilde{\mathbf{K}}^{t,l})^{\top}}{\sqrt{d_k}}\right)\tilde{\mathbf{V}}^{t,l},
+\qquad
+\tilde{\mathbf{K}}^{t,l}_{[\mathcal{Q}^t]} \leftarrow \mathbf{K}^{t,l}_{[\mathcal{Q}^t]},\quad
+\tilde{\mathbf{V}}^{t,l}_{[\mathcal{Q}^t]} \leftarrow \mathbf{V}^{t,l}_{[\mathcal{Q}^t]}
+$$
+
+$\tilde{\mathbf K}$ and $\tilde{\mathbf V}$ are the cached keys and values for every position in layer $l$. $\mathcal Q^t$ is the set of positions recomputed at step $t$: their queries attend to the whole cache, and their fresh keys and values overwrite their own rows. Rows in $\mathcal Q^t$ are exact. Every other row is whatever it was the last time it was in $\mathcal Q$. The whole design space is two choices: which positions go into $\mathcal Q^t$, and how often everything gets recomputed.
+
+## What came before
+
+The prior methods differ in those two choices.
+
+- **[dLLM-Cache](https://arxiv.org/abs/2506.06295)** refreshes the prompt at long intervals and updates response tokens selectively, guided by feature similarity.
+- **[dKV-Cache](https://arxiv.org/abs/2505.15781)** caches keys and values with a delay, conditioned on each token's decoding state; the Flash-dLLM paper summarizes it as caching at fixed temporal intervals.
+- **[Fast-dLLM](https://arxiv.org/abs/2505.22618)** decodes block by block, caches the prefix outside the current block (and the suffix too, in its DualCache variant), and refreshes the entire cache at each block boundary.
+- **[Elastic-Cache](https://arxiv.org/abs/2510.14973)**, by the same authors, refreshes adaptively: when attention on the most-attended token drifts, it recomputes from a chosen layer upward.
+- **[FlashDLM](https://arxiv.org/abs/2505.21467)** pairs approximate caching with an external autoregressive model that guides unmasking, and **[FreeDave](https://arxiv.org/abs/2510.00294)** drafts tokens in one forward pass and verifies them in a second.
+
+The Flash-dLLM paper notes two things they share: the cache update is PyTorch, one kernel launch per operation, and caching and parallel decoding are studied separately.
+
+Parallel decoding has its own approximation. At one step, the model predicts every masked position from the same partially masked input $\mathbf x_t$, so committing several at once samples from a product of marginals, $\prod_i p_\theta(x^i \mid \mathbf x_t)$, while the true joint has dependencies between them. Fast-dLLM's confidence-aware decoding commits position $i$ only when its confidence $c^i = \max_x p_\theta(x^i \mid \mathbf x_t)$ clears a threshold $\epsilon$, usually 0.9. Fast-dLLM's theorem, restated in Flash-dLLM's appendix, is what makes that safe: if $n$ positions each have confidence above $1-\delta$ with $(n+1)\delta \le 1$, the product's mode is the joint's mode and the two are within $\tfrac{3n-1}{2}\delta$ in total variation.
+
+The cost is a throughput ceiling. On an uncertain stretch few tokens clear 0.9, the step count stays high, and many tokens thrown back were already right. The paper's Figure 1(c) reports a correlation of r = 0.48 between average confidence and the number of early-decodable tokens across denoising steps: moderate, and the motivation for Flash-Verify.
+
+## Where the time goes: four kernels and a round trip
+
+Take one layer of a cached step. The conventional path launches four kernels for the query set: QKV projection, rotary position embedding, the cache write, and attention. Each writes its output to HBM and the next reads it back. With $Q$ query tokens, a sequence of $N$ and hidden size $d_\text{model}$, the paper puts per-layer traffic at roughly $4 \times \mathcal O(Q\,d_\text{model}) + \mathcal O(N d)$. The three $\mathcal O(Q\,d_\text{model})$ steps do almost no arithmetic per byte, so they run at memory speed.
+
+<Figure
+  src="/articles/flash-dllm/fig3.png"
+  alt="A stacked bar chart of per-layer time in milliseconds. The conventional cache path stacks linear projection, positional embedding, gather positions and attention to about 0.57 ms, with positional embedding the largest segment. The Flash-Cache bar stacks the fused kernel and flash attention to about 0.42 ms, annotated 1.37x."
+  caption="Per-layer latency on LLaDA-1.5: in the conventional cache path, positional embedding and the cache gather take more time than attention does. Fusing them gives 1.37x per layer. This is a single-layer microbenchmark on an RTX 3090, not the A100 the benchmarks ran on (Flash-dLLM paper, Figure 1a)."
+/>
+
+In that chart, attention is only the top slice of the conventional bar; rotary embedding is the largest. Part of that is bytes. Part is PyTorch: several small launches per operation, and LLaDA's reference RoPE runs in fp32 (`rope_full_precision` is true in its `config.json`), so $q$ and $k$ are cast up and back down.
+
+The fix borrows [FlashAttention's](/articles/flash-attention-3) move: keep the intermediate in SRAM. The fused kernel loads a block of hidden states, computes $q$, $k$ and $v$ for one head, applies RoPE to the accumulators in registers, and writes $k$ and $v$ directly into the rows of the cache they belong to. No intermediate key or value tensor ever reaches HBM.
+
+<Figure
+  src="/articles/flash-dllm/fig2.png"
+  alt="A data-flow diagram across GPU SRAM and GPU HBM. The conventional flow reads the input from HBM into a linear projection, writes current KV back to HBM, round-trips it through positional embedding and a gather step, then writes the KV cache. The Flash-Cache flow reads the input once into a fused kernel in SRAM and writes directly to the KV cache."
+  caption="The conventional flow round-trips an intermediate current-KV tensor through HBM between its steps; the fused kernel reads the input once and writes the cache once (Flash-dLLM paper, Figure 3a)."
+/>
+
+The code does what the diagram says. `_flash_qkv_proj_cache_fwd` runs one Triton program per 16-row query block and head, accumulates the projection in fp32 over 64-wide slices of $d_\text{model}$, and scatters the result by absolute position:
+
+```python
+# llada/flash_cache_triton.py, _flash_qkv_proj_cache_fwd (abridged)
+pos = tl.load(Pos + offs_m, mask=q_mask, other=0.0)   # each query token's row in the flat cache
+offs_k = pos[:, None] * D_MODEL + offs_h[None, :]     # where its key and value belong
+# ... projection accumulated in fp32 over D_MODEL ...
+rk1 = acc_k1 * cos1 - acc_k2 * sin1                    # RoPE on the accumulators, in registers
+rk2 = acc_k2 * cos2 + acc_k1 * sin2
+tl.store(K + offs_k, rk1, mask=q_mask[:, None])       # straight into the cache
+tl.store(K + offs_k + HALF, rk2, mask=q_mask[:, None])
+tl.store(V + offs_k, acc_v1, mask=q_mask[:, None])
+tl.store(V + offs_k + HALF, acc_v2, mask=q_mask[:, None])
+```
+
+Two honest limits. Attention is still a separate kernel: the fusion covers projection, RoPE and the write, and the $\mathcal O(N d)$ stream over the cache is untouched. And attention tracking is not free. `_flash_masked_attention_fwd` writes every raw $q \cdot k$ logit for the 16 decoding-candidate rows into an fp32 buffer `S` shaped `(block_m, n_heads, batch, max_length)`, which PyTorch then averages. That is HBM traffic the paper's accounting does not mention.
+
+### A flat cache and a block table
+
+The cache is one tensor per layer for keys and one for values, each `(batch × max_length, d_model)`, allocated once before decoding (`generate.py`, lines 179 and 180). LLaDA-8B uses plain multi-head attention with 32 layers and $d_\text{model} = 4096$, so each cached position costs $2 \times 4096 \times 2$ bytes $= 16$ KiB per layer and 512 KiB across the model in bf16 (my arithmetic from the config). The flat layout does not shrink that. It removes allocator churn and the padding of the usual four-dimensional cache, which the paper credits for the memory gap below.
+
+Every query is cut into 16-row blocks, and a block table records each block's sample, key length and query range (`make_blocks`, read by the kernels as `bt_row = block_table + pid_m * 4`). One sample can be in its full first pass while another runs a cached step, in the same launch, with no padding; the paper calls this scheduled flash attention. The code also uses it for something the paper only calls "adding or removing blocks": when a sample finishes, `generate.py` puts the next prompt into its slot mid-run (lines 405 to 427), and each sample stops once every position before its end-of-sequence token is decoded. That is continuous batching, and part of why throughput scales with batch size. The paper says the baselines were re-run on identical hardware and software; it does not say whether their loops refill slots.
+
+## Which rows get recomputed
+
+Figure 1(b) of the paper is the observation behind the refresh policy: the 32 most-attended decoded tokens capture up to about half of all attention weight in the middle layers, 5 to 20. If a few rows carry most of the attention, recomputing those rows buys most of the accuracy.
+
+So the query at each step after the first is a masked window plus a tracking set, $\mathcal Q^{t+1} = \mathcal M^{t+1}_{\beta_m} \cup \mathcal T^{t+1}$. The tracking set holds the tokens decoded at the last step plus the highest-scoring previously decoded tokens, up to a budget $\beta_t$, scored by the paper's Eq. (2):
+
+$$
+a_i^t = \sum_{l=1}^{L}\frac{1}{H}\sum_{h=1}^{H}\frac{1}{|\mathcal M^t_{\beta_m}|}\sum_{j\in\mathcal M^t_{\beta_m}} \mathbf S^{t,l,h}_{j,i}
+$$
+
+$\mathbf S^{t,l,h}_{j,i}$ is the unnormalized attention logit from masked query $j$ to decoded key $i$ in head $h$ of layer $l$, with $H$ heads and $L$ layers: how much the positions still being decided look at token $i$.
+
+Here is what `generate.py` does with the settings its scripts use for Table 3 (blocks of 16, `mask_num=4`, `track_num=4`):
+
+- **Window.** The 16 leftmost undecoded positions. These are the only decoding candidates: logits are read for these 16 rows and no others.
+- **Look-ahead.** The next 48 masked positions ride along in the query to get fresh keys and values, but are not decoded this step. So in the code, the paper's $\beta_m = 64$ is 16 candidates plus 48 rows of context.
+- **Tracked.** All decoded positions, prompt included, are re-sorted by score every step, and 64 slots are recomputed. Tokens committed at the previous step take the first slots and the highest scores fill the rest. With Flash-Verify on, only the tokens accepted by verification are pinned that way: the variable `keep_num` is reused between the two passes, so tokens committed by confidence in the same step are sorted in with everything else and compete on score.
+- **Scores.** Summed from the third layer up (`if block_idx > 1`), not over all $L$ as Eq. (2) writes it. A small deviation.
+- **Full refresh.** None, after the first pass. A prompt token that never ranks keeps the key and value it had at step 0 for the entire generation. Setting `track_num` negative refreshes everything, which is the escape hatch.
+
+That is 128 recomputed rows per sample per step, against a full sequence of the prompt plus 512 masks. The toy below runs the three policies on the same decode schedule so you can see what each one leaves stale.
+
+<RefreshGrid />
+
+With the Flash-Cache policy and a budget of 4, the toy recomputes about a third of what no cache would, at a steady rate per step. The price shows in the prompt columns: rows that never rank are never refreshed. Block refresh does similar total work in bursts and bounds staleness at one block. Drag the budget to 0 and the committed tokens turn red: their rows were cached while they were still `[MASK]` and never updated. That is why fresh commits get the first tracking slots, and why the `keep_num` detail matters.
+
+One question the paper leaves open. Elastic-Cache, from the same authors, observed that the most-attended token is the one whose keys and values drift least. Flash-Cache spends its budget recomputing exactly those tokens. Both can be right, because the error a stale row injects scales roughly with its attention weight times its drift. But no ablation compares attention-ranked tracking against a random or most-recent set of the same size. Table 4 only varies the budget: going from 48 to 96 tracked tokens raises GSM8K accuracy by 0.83 to 1.69 points and costs 10.9% to 20.3% of throughput.
+
+## Flash-Verify: the model checks its own drafts
+
+<Figure
+  src="/articles/flash-dllm/fig1.png"
+  alt="Two-panel overview. Left, Flash-Cache: a query of tracked tokens and masked tokens attends bidirectionally to the full KV cache; attention scores to decoded tokens are accumulated across layers and the top-k become the next tracked tokens. Right, Flash-Verify: drafts are sorted by confidence, those above epsilon are decoded directly, the remaining drafts are duplicated as a draft view and a masked view under a causal bidirectional mask, and tokens are accepted in causality order while both views agree and the mask-view confidence clears gamma."
+  caption="Left, Flash-Cache: tracked plus masked tokens attend to the full cache, and the most-attended decoded tokens are re-selected every step. Right, Flash-Verify: low-confidence drafts are fed back twice, as drafts and as masks, and accepted left to right while the two views agree (Flash-dLLM paper, Figure 2)."
+/>
+
+Flash-Verify adds a second, small forward pass to each step. The first is the normal cached step, whose window predictions are sorted by confidence: positions with $c^i \ge \epsilon$ form the confident set $\mathcal D^t$ and are committed directly, and the rest form the search set $\mathcal S^t$.
+
+The verify pass builds a new query from three groups: a tracked context (previously decoded tokens plus $\mathcal D^t$), the search positions filled with their drafts (the draft view), and the same positions filled with `[MASK]` (the mask view). Both views share rotary positions; a custom mask keeps them apart, and the tracked context cannot see the draft view. Sort the search positions by draft confidence as $i_1, \dots, i_K$; the mask view at $i_k$ sees the drafts at $i_1$ to $i_{k-1}$ and the masks from $i_k$ onward, never its own draft. So its output is
+
+$$
+p_{i_k}(x) = p_\theta\!\left(x^{i_k} = x \,\middle|\, \mathbf x^t_{+},\ \hat x^{i_1}, \dots, \hat x^{i_{k-1}}\right),
+$$
+
+where $\mathbf x^t_+$ is the input with $\mathcal D^t$ committed and $\hat x$ are the drafts. That is the conditional that one-token-at-a-time decoding in this order would see at its $k$-th step, which is the same object speculative decoding verifies against ([EAGLE-3](/articles/eagle-3-speculative-decoding) and [Uno](/articles/uno-diffusion-augmented) cover that lineage). Here the drafter and the verifier are one model, and the verify query costs 32 rows, not a sequence.
+
+The paper's acceptance rule (Eq. 5) walks the search set in that order and stops at the first failure:
+
+$$
+\mathrm{accept}(i) = \mathbb I\!\left[\hat x^i = \tilde x^i\right]\cdot \mathbb I\!\left[\tilde c^i \ge \gamma\right]
+$$
+
+$\tilde x^i$ and $\tilde c^i$ are the mask view's top token and its probability, and $\gamma$ is the verify threshold. Appendix C proves the guarantee this buys, measured against the model's own sequential distribution rather than the data: an accepted token is within $1 - \tilde c^i \le 1 - \gamma$ of it in total variation, and a block of $m$ accepted tokens within $1 - \gamma^m \le m(1-\gamma)$. Tokens committed by confidence alone are outside this bound; they fall under Fast-dLLM's theorem.
+
+### The code's rule is stricter
+
+This is the first difference between paper and code, in `generate.py`:
+
+```python
+# llada/generate.py, lines 320-328 (abridged)
+p_verify = F.softmax(logits_verify_j.to(torch.float64), dim=-1)
+x0_p_verify = p_verify.gather(1, x_verify_j.unsqueeze(1)).view(-1)  # mask view's prob. of each draft
+x0_p_verify = x0_p_verify.cumprod(dim=0)                             # running product, causality order
+keep_idx = (x0_p_verify >= gamma)
+keep_num = keep_idx.sum().item()
+```
+
+The code thresholds the running product of the mask view's probabilities of the drafts. Each factor is at most 1, so a product at or above $\gamma$ means every factor is too, and for $\gamma > 0.5$ a token with probability at least $\gamma$ must be the top token, so agreement is implied. The code therefore accepts a prefix of what the paper's rule accepts, and that prefix meets the block bound $1 - \gamma$ directly instead of $1 - \gamma^m$. The README warns that the two definitions are not interchangeable. The released scripts carry Table 3's thresholds, so if the tables came from this code, their $\gamma$ values are code-rule values; port the paper's rule and re-tune.
+
+The other limits in the code: the search set is capped at 8 (`min(num_verify, block_m // 2)`), the verify query is always 32 rows, so the tracked context in the verify pass shrinks to $32 - 2|\mathcal S^t|$, the verify pass reads the cache but never writes it, and at least one token is committed every step. Try both rules on a toy window:
+
+<VerifyStep />
+
+At the defaults ($\epsilon = 0.9$, $\gamma = 0.8$), six positions clear the confidence threshold. The paper's rule adds five from the search set before " so" fails at 0.72. The code's rule adds four, because the running product drops to 0.740 at the fifth. Lower $\epsilon$ and more tokens are committed without verification; raise it and more of the step's work moves to the verify pass.
+
+The reported effect is in Table 6 of the paper: on GSM8K-512 with Flash-Cache, greedy decoding commits 1.0 token per step, confidence-aware decoding 2.8, and Flash-Verify 5.7. Twice the tokens per step does not mean twice the speed, since each step now runs two forward passes: at batch 32, Flash-Verify reaches 199.8 tokens/s against 139.5 for confidence-aware decoding in that table.
+
+<Figure
+  src="/articles/flash-dllm/fig5.png"
+  alt="A combined chart against the threshold value, 0.60 to 0.90. Bars give tokens decoded per iteration: Flash-Verify 7.2, 6.4, 6.1, 5.7, 5.2, 4.8; confidence-aware 5.6, 4.6, 3.6, 3.2, 2.8 at the thresholds it was run at. Lines give accuracy and throughput for both, with dashed greedy reference lines."
+  caption="Tokens per iteration, accuracy and throughput as the thresholds move: Flash-Verify decodes more tokens per step at every setting, and its throughput is at or above confidence-aware decoding's (Flash-dLLM paper, Figure 6)."
+/>
+
+The paper reads this figure as a matched comparison: Flash-Verify at 7.2 tokens per iteration runs at about the throughput of confidence-aware decoding at 5.6, with 3.5% higher accuracy, and its throughput advantage grows to 1.33x as more tokens are decoded per iteration.
+
+## The numbers
+
+All from Table 1 of the paper: LLaDA-1.5, one A100 80GB, batch 32, throughput in tokens/s. The last column is my division of two of the paper's numbers.
+
+| Benchmark | Len | Fast-dLLM | Elastic-Cache | Flash-Cache | + Flash-Verify | Accuracy, + Flash-Verify | Best accuracy in row | vs Elastic-Cache |
+|---|---|---|---|---|---|---|---|---|
+| GSM8K | 256 | 51.2 | 45.9 | 144.9 | 194.9 | 81.88 | 83.62 | 4.2x |
+| GSM8K | 512 | 36.8 | 41.7 | 149.4 | 210.6 | 83.02 | 83.02 | 5.1x |
+| MATH | 256 | 44.4 | 40.6 | 144.3 | 189.7 | 36.56 | 37.22 | 4.7x |
+| MATH | 512 | 44.4 | 41.4 | 149.9 | 210.1 | 35.98 | 37.76 | 5.1x |
+| HumanEval | 256 | 18.7 | 20.9 | 169.4 | 209.2 | 39.63 | 43.29 | 10.0x |
+| HumanEval | 512 | 15.4 | 16.8 | 145.7 | 185.6 | 40.24 | 42.07 | 11.0x |
+| MBPP | 256 | 28.0 | 32.7 | 115.9 | 148.0 | 38.20 | 41.80 | 4.5x |
+| MBPP | 512 | 17.8 | 32.8 | 102.2 | 148.2 | 39.00 | 40.20 | 4.5x |
+
+"Flash-Cache" here is Flash-Cache with confidence-aware decoding, the same decoding family as Fast-dLLM and Elastic-Cache. Four readings.
+
+**Most of the gap is the cache, not the verifier.** On GSM8K-512, Flash-Cache alone is 149.4 tokens/s against Elastic-Cache's 41.7 and Fast-dLLM's 36.8. Flash-Verify then adds a further 1.41x by my division, and the paper puts its gain across the eight settings at 23.5% to 45.0%. The paper has no ablation that splits the cache's share into kernel fusion, selective refresh and scheduling. The only isolated kernel number is the 1.37x single-layer microbenchmark, on a different GPU.
+
+**The 81.0x and 148.2x are against the slowest thing in the table.** They are relative to greedy decoding with no cache: one token per step, the full sequence recomputed every step, 2.6 tokens/s on GSM8K-512 and 1.0 on MBPP-512. They say how slow naive diffusion decoding is.
+
+**Accuracy is a trade, by task.** Flash-Cache plus Flash-Verify is the best configuration on GSM8K-512 and within 1.78 points of the row's best on the math tasks. It gives up 3.66 points on HumanEval-256 and 3.60 on MBPP-256. Table 1 reports no variance, and the paper's five-seed sweep in Table 4 shows standard deviations up to 1.03 points on GSM8K, so gaps under a point are inside the noise. One curiosity: greedy decoding with Flash-Cache is more accurate than greedy decoding without a cache on seven of the eight settings (37.22 against 33.52 on MATH-256). The approximate cache is not costing accuracy here, and the paper does not explain why it sometimes helps.
+
+**The extra baselines are slower.** Table 2 adds dKV-Cache, FlashDLM, dLLM-Cache, Dyna-dLLM and FreeDave on GSM8K-512: 14.9 to 42.8 tokens/s, at 79.32% to 81.50%.
+
+<Figure
+  src="/articles/flash-dllm/fig4.png"
+  alt="Two line charts against batch size 1 to 32 on GSM8K-512 with 1-shot prompts. Left, throughput: Flash-dLLM rises to roughly 475 tokens/s at batch 24 and dips at 32; Fast-dLLM stays near 100 and stops at 16; dLLM-Cache and LLaDA-1.5 stay flat and low; Llama3 rises past Flash-dLLM at the largest batches with 53.98% accuracy. Right, peak memory: Fast-dLLM reaches the 80 GB line at batch 24, Flash-dLLM grows to about 36 GB at batch 32."
+  caption="Throughput (left) and peak memory (right) against batch size on GSM8K-512 with 1-shot prompts. Fast-dLLM runs out of memory at batch 24; Llama3-8B is an autoregressive reference, not an accuracy-matched baseline (Flash-dLLM paper, Figure 4)."
+/>
+
+Memory is the cleanest win. At batch 16 the paper reports about 26 GB for Flash-dLLM against 50 GB for Fast-dLLM, about 48% less, and Fast-dLLM runs out of the A100's 80 GB at batch 24.
+
+Throughput scaling needs a closer look. The text says Flash-dLLM "scales nearly linearly" to batch 32, but in the left panel its curve peaks at batch 24 and dips at 32. Table 6, with 5-shot prompts, flattens: 186.2 tokens/s at batch 16 is 93.2% of the 199.8 at batch 32. And the figure's configuration is not stated. Read off the chart, Flash-dLLM runs at roughly 430 tokens/s at batch 16 with 78.62% accuracy, while Table 5(b), the same 1-shot GSM8K-512 setting at batch 16, reports 234.4 tokens/s at 80.12% for Flash-Cache plus Flash-Verify. The figure and the table are not the same configuration, and the paper does not say what differs.
+
+## What to keep in mind
+
+- **One model.** Every number is LLaDA-1.5. The limitations section says the method was evaluated on "two representative masked diffusion LLMs"; the paper reports one. Dream is cited, not tested.
+- **Structured outputs only.** Math and code. The authors flag open-ended generation, where confidence is flatter, as untested. That is where fewer tokens clear $\epsilon$, so where verification should matter most.
+- **The budget has three spellings.** Section 3.1 gives a default of 80 tracked tokens, Table 3 and the scripts use 64 (48 for MBPP), and the code counts it in 16-token blocks. The README says to follow Table 3.
+
+None of this undercuts the idea. A diffusion LLM's cache is always wrong somewhere; the engineering question is how cheaply you can keep the rows that matter most close to right. Flash-dLLM's answer is to make "recompute these 128 rows" one fused pass over a flat cache, and to spend part of what that saves on a second, 32-row pass that turns the model's near-misses into committed tokens. Most of the reported speed comes from the first half. The second half is the more original idea.
