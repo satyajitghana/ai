@@ -118,13 +118,15 @@ export default function RootLayout({
           <TerminalOverlay />
         </ThemeProvider>
         {/* Cloudflare Web Analytics: free, cookieless page views and Core Web
-            Vitals, no event cap. Works without proxying the site through
-            Cloudflare. Renders nothing until the site's beacon token is set. */}
+            Vitals, no event cap. ai. is a DNS-only record (Vercel serves it),
+            so Cloudflare cannot inject this itself: the beacon has to be on
+            the page. `spa` counts App Router navigations, which change the URL
+            without a page load. Renders nothing until the token is set. */}
         {CF_BEACON ? (
           <Script
             src="https://static.cloudflareinsights.com/beacon.min.js"
             strategy="afterInteractive"
-            data-cf-beacon={JSON.stringify({ token: CF_BEACON })}
+            data-cf-beacon={JSON.stringify({ token: CF_BEACON, spa: true })}
           />
         ) : null}
       </body>
