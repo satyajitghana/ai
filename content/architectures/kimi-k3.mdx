@@ -1,0 +1,125 @@
+---
+title: "Kimi K3's hybrid block, from first principles"
+description: "How Kimi K3 mixes information along three axes: Kimi Delta Attention, a gated delta rule derived from linear attention, on 69 of 93 layers; Gated MLA with no positional encoding on the other 24; Block Attention Residuals, which replace the residual sum with attention over earlier blocks; and Stable LatentMoE routing 16 of 896 experts in a half-width latent space. With the fixed state and the latent cache weighed in bytes, and where 2.78T parameters, 104.2B active, actually go."
+date: 2026-09-26
+tags:
+  - linear-attention
+  - hybrid-attention
+  - mixture-of-experts
+  - kimi
+  - explainer
+---
+
+Moonshot's Kimi K3 is a 2.78T-parameter mixture-of-experts model that activates 104.2B parameters per token and reads a context of 1,048,576 tokens. Its technical report organises the architecture around three directions information has to move: along the sequence, where a hybrid of linear and full attention mixes tokens; across depth, where Attention Residuals let each layer choose which earlier layers to read; and across width, where Stable LatentMoE sends each token to 16 of 896 experts. This page builds each one from first principles. The numbers come from the released `config.json`, the report, and this site's three pieces on the model: [the architecture and training](/articles/kimi-k3), [a reimplementation in C from the checkpoint's bytes](/articles/kimi-k3-in-c), and [a TPU megakernel that runs the decoder as one program](/articles/kimi-k3-tpu-megakernel).
+
+## The layer plan
+
+| | Kimi K3 |
+|---|---|
+| Layers | 93: the first has a dense FFN of width 33,792, the other 92 are MoE |
+| Sequence mixing | Kimi Delta Attention on 69 layers; Gated MLA on 24: layers 4, 8, …, 92, and 93 |
+| Width | 7,168, with 96 attention heads of 128 |
+| Experts per MoE layer | 896 routed, 16 per token, in a 3,584-wide latent; 2 shared at full width |
+| Attention Residuals | blocks of 12 layers |
+| Positional encoding | none |
+| Vocabulary, context | 163,840 tokens; 1,048,576 positions |
+
+Every block is three KDA layers and one Gated MLA layer, each followed by a feed-forward layer, a MoE in all but the first. The 23 blocks make 92 layers, and one extra MLA layer closes the stack, so the model always ends with a global look at the whole sequence.
+
+## From linear attention to the delta rule
+
+Softmax attention computes $o_t = \sum_{s \le t} \text{softmax}_s(q_t^\top k_s)\, v_s$ and has to keep every key and value to do it. Drop the softmax and the sum factors:
+
+$$
+o_t = \sum_{s \le t} (q_t^\top k_s)\, v_s = S_t^\top q_t, \qquad S_t = S_{t-1} + k_t v_t^\top
+$$
+
+The state $S_t$ is a $d_k \times d_v$ matrix, the same size at token 10 and token 1,000,000. That is linear attention. Its weakness is the plain sum: nothing is ever forgotten, and every association written along a key interferes with the ones already stored along similar keys.
+
+There are two repairs. A **decay** multiplies the state by a factor below 1 before each write, as Mamba-2's scalar $a_t$ does ([selective state spaces](/architectures/mamba-ssm)). The **delta rule** treats $S$ as a memory that maps keys to values: read what it currently predicts for $k_t$, and write only the error.
+
+$$
+S_t = S_{t-1} + \beta_t\, k_t \big(v_t - S_{t-1}^\top k_t\big)^\top = \big(I - \beta_t k_t k_t^\top\big) S_{t-1} + \beta_t\, k_t v_t^\top
+$$
+
+This is one step of gradient descent on $\tfrac{1}{2}\lVert S^\top k_t - v_t \rVert^2$ with learning rate $\beta_t$. With a unit-length key and $\beta_t = 1$, it replaces whatever was stored along $k_t$ with $v_t$ exactly. [Gated DeltaNet](https://arxiv.org/abs/2412.06464) combines the two with one decay per head.
+
+**Kimi Delta Attention** makes the decay per channel:
+
+$$
+S_t = \big(I - \beta_t k_t k_t^\top\big)\,\text{Diag}(\alpha_t)\,S_{t-1} + \beta_t\, k_t v_t^\top, \qquad \tilde{o}_t = S_t^\top q_t
+$$
+
+$\alpha_t \in (0, 1)^{d_k}$ holds one retention factor per key channel, so one channel can keep a value for hundreds of tokens while its neighbour forgets within a few. [KDA's half-life](/articles/kda-half-life) turns each factor into tokens: $n_{1/2} = \ln 0.5 / \ln \alpha$, and $\alpha = 0.99$ halves a channel's memory in about 69 tokens.
+
+The report gives the rest of the layer. Queries and keys pass through a short convolution of width 4, Swish and L2 normalisation; values through the convolution and Swish; $\beta_t$ is a sigmoid of a projection of the token. The decay logit $z_t$ comes from a low-rank projection plus a per-channel bias, and K3 bounds the log-decay from below:
+
+$$
+g_t = g_{\min}\,\sigma\!\big(e^{A_h} z_t\big), \qquad \alpha_t = \exp(g_t), \qquad g_{\min} = -5
+$$
+
+so every factor lies between $e^{-5} \approx 0.0067$ and 1, with one learned scale $A_h$ per head. The bound is for the kernel. KDA trains chunkwise, in parallel inside a chunk and recurrently across chunks, the same shape as Mamba-2's SSD. Over a 16-token tile the cumulative log-decay stays within $(-80, 0)$, so the rescaling factors fit in BF16's range and every tile, including the diagonal ones, runs as dense tensor-core matrix multiplies. The layer's output is RMSNorm'd per head and multiplied by a full-rank sigmoid gate of the token before the output projection. The C port confirms the same formula in code, with $g_{\min}$ read from the checkpoint's `gate_lower_bound`.
+
+**What the state costs.** Each head keeps a 128 × 128 matrix; 96 heads make 1,572,864 numbers per layer, and 69 layers make 108,527,616 numbers per sequence: 414 MiB in 32-bit floats, as the C port holds it, whatever the context length. A KDA layer does the same work for the millionth token as for the first.
+
+## Gated MLA without positions
+
+The other 24 layers are full attention, in the multi-head latent form from [DeepSeek-V2](https://arxiv.org/abs/2405.04434). Instead of per-head keys and values, MLA caches one compressed latent per token and reconstructs each head's keys and values from it with learned up-projections. K3's key-value latent rank is 512 and its query rank 1,536; the C port and the TPU kernel each cache one 576-wide latent per position. Full multi-head attention with 96 heads of 128 would cache $2 \times 96 \times 128 = 24{,}576$ numbers per layer per token, 42.7 times as many.
+
+Unlike K2, K3's MLA layers use **no positional encoding**. The report's division of labour: the KDA layers supply position-sensitive, recency-aware mixing, since a decaying recurrence is ordered by construction, and the MLA layers supply unrestricted global content interaction. With no RoPE base to retune, the report says the model extends to 1M tokens without any positional-encoding modification. Each MLA output also passes through an input-dependent, channel-wise, full-rank sigmoid gate, so a token chooses which channels it reads from global attention.
+
+**The cache, in bytes.** Here is what one sequence carries:
+
+| | Per sequence | At 16 bits |
+|---|---|---:|
+| KDA state, 69 layers | 108,527,616 numbers, fixed | (414 MiB in 32-bit) |
+| MLA latents, 24 layers | 24 × 576 = 13,824 numbers per token | 27 KiB per token; 27 GiB at 1,048,576 tokens |
+| The same latent on all 93 layers | 93 × 576 = 53,568 per token | 104.6 KiB per token |
+
+Counting numbers rather than bytes, the growing part passes the fixed part at about 7,851 tokens, and at a million tokens it is 134 times larger. Moving 69 of the 93 layers to KDA cuts the part that grows to 24/93 of an all-MLA stack. Moonshot reports up to 6.3× faster decoding in million-token contexts. Serving pays in complexity: two kinds of cache with different sizes and lifetimes, which K3's serving stack packs into one paged pool, and a cached prefix is reusable only if a KDA state was saved at that exact boundary.
+
+## Attention Residuals: attention over depth
+
+A residual stream adds every sublayer's output with weight one:
+
+$$
+h_l = h_1 + \sum_{i=1}^{l-1} f_i(h_i)
+$$
+
+The report calls that a bottleneck "reminiscent of RNNs over time": all prior layers compressed into one running sum. Attention Residuals apply the move the Transformer made along the sequence to depth. Each layer $l$ owns a learned pseudo-query $q_l = w_l$, a vector of width 7,168, and reads a weighted mix of everything below it:
+
+$$
+h_l = \sum_{i=0}^{l-1} \alpha_{i \to l}\, v_i, \qquad \alpha_{i \to l} = \frac{\exp\!\big(q_l^\top \text{RMSNorm}(k_i)\big)}{\sum_{j=0}^{l-1} \exp\!\big(q_l^\top \text{RMSNorm}(k_j)\big)}
+$$
+
+with $k_0 = v_0 = h_1$, the token embedding, and $k_i = v_i = f_i(h_i)$, layer $i$'s output. The query is fixed per layer, but the keys are the token's own earlier outputs, so every token gets its own mix. The RMSNorm stops a layer with large outputs from winning the softmax by magnitude alone.
+
+The full form costs $O(L^2 d)$ arithmetic, which is affordable at under 100 layers, and $O(Ld)$ memory to keep every layer's output alive, which is the real cost. **Block AttnRes** fixes it. Layers are grouped into blocks of 12, and within a block their outputs are summed into one representation $b_n$. A layer attends over the embedding, the finished blocks' sums and its own block's partial sum. The report finds about 8 blocks recover most of the benefit; K3's 93 layers make 8 blocks of 12, the last one partial, and 9 sources counting the embedding. Memory drops to $O(Nd)$, and at inference the inter-block reads merge with the running intra-block sum by online softmax. Moonshot reports about 25% higher training efficiency at under 2% additional cost.
+
+## Stable LatentMoE
+
+Each MoE layer has 2 shared experts that see the full 7,168-wide token and 896 routed experts that work in a latent space half as wide:
+
+$$
+u = \sum_{i \in \text{Top}_k(x)} p_i\, E_i^{\text{routed}}(W_{\downarrow} x), \qquad y = \sum_{j=1}^{2} E_j^{\text{shared}}(x) + W_{\uparrow}\,\text{RMSNorm}(u)
+$$
+
+$W_{\downarrow}$ maps 7,168 to 3,584 once; the 16 chosen experts each run a gated FFN of hidden width 3,072 inside the latent; $W_{\uparrow}$ maps the normalised sum back up. A routed expert is $3 \times 3{,}584 \times 3{,}072$, which is 33,030,144 weights. Routing 16 of 896 is a sparsity of 56, and the latent is what makes it affordable: dispatch traffic and expert weights scale with the latent width, not the model's.
+
+Two things keep it stable. The nonlinearity is SiTU-GLU, which caps both branches with $\beta \tanh(x/\beta)$, at $\beta_1 = 4$ and $\beta_2 = 25$, so its output never exceeds 100 in magnitude where SwiGLU is unbounded; with the RMSNorm before $W_{\uparrow}$, it tames the activation spikes a chain of nearly four matmuls produces at this scale. And the router, sigmoid-scored with no auxiliary loss, is balanced by **Quantile Balancing**: it routes Top-$(k{+}1)$, takes the $(k{+}1)$-th score as the cutoff a competitor had to beat, and sets each expert's bias from the $(1 - k/n)$-quantile of its margins over the batch, which hands every expert exactly its target load. Equal loads mean static tensor shapes, and static shapes mean expert-parallel training with no host synchronisation.
+
+## Where the parameters, FLOPs and bytes go
+
+**Parameters.** The 82,432 routed experts hold 2,722,740,830,208 parameters, 97.9% of the Hub's total of 2,779,931,837,184. A token uses 16 in each of 92 layers, 1,472 experts and 48.6B parameters; the other 55.6B of its 104.2B active are the always-on trunk: KDA and MLA projections, the shared experts, the latent projections, the dense first layer and the output head.
+
+**FLOPs.** At about 2 FLOPs per active weight, a token's forward pass costs roughly 208 GFLOPs in matrix multiplies, the cost of a dense 104B model, not a 2.78T one. Attention adds work that grows with context only in the 24 MLA layers. Training follows $C \approx 6\,N_{\text{active}}\,D$; Moonshot has not published K3's token budget, and K2 trained on 15.5T.
+
+**Bytes.** The experts ship in MXFP4, a 4-bit code per weight and one 8-bit scale per 32 weights: 17,547,264 bytes an expert, 25.83 GB for a token's 1,472. The dense trunk is 108.81 GB in bfloat16 and every token reads all of it. At batch 1 and short context, a decode step is almost pure weight streaming, which is what the TPU megakernel is built around, and streaming is also how the C port runs the model in 8.24 GB of RAM.
+
+## Good at, bad at
+
+The hybrid makes a million tokens affordable: a fixed state on three layers in four, a small latent on the rest, and positions that need no rescaling. AttnRes buys depth cheaply, and the three changes together, with the data and training recipe, give what Moonshot measures as a 2.5× gain in scaling efficiency over K2 on fitted scaling laws. The costs are the recurrence's: the KDA state is a lossy summary, so exact recall over long contexts rests on 24 layers of MLA. Serving must manage two cache types. And the flat expert usage that Quantile Balancing guarantees in training defeats caching experts at inference: the C port measured a 0% hit rate for its expert cache at 8 GB.
+
+## What changed
+
+Against K2, which the report tabulates: 61 MLA layers became 69 KDA and 24 MLA; RoPE became none; 384 experts with 8 active and 1 shared became 896 with 16 active and 2 shared, now in a latent; SwiGLU became SiTU-GLU; active parameters went from 32.6B to 104.2B, and the training context from 128K to 1M. Against [Kimi Linear](https://arxiv.org/abs/2510.26692), where KDA first appeared, the decay mapping changed from an unbounded softplus to the bounded sigmoid above, and the output gate went from low-rank to full-rank. Against [LatentMoE](https://arxiv.org/abs/2601.18089), the RMSNorm before the up-projection is new. The same delta rule appears in the [liquid time constants article](/articles/ltc-gated-delta), and the [mixture-of-experts from scratch](/articles/mixture-of-experts-from-scratch) article covers the routing it builds on.
