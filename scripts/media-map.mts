@@ -16,6 +16,15 @@
 //      - anything not an image or a video (captions, the JSON that <Receipts>
 //        reads, data files interactives fetch). The index never lists these.
 //
+// A merge to master starts this build and media-sync at the same moment, and
+// the sync publishes its index a minute or two later, after this script has
+// run. So a production build that finds media here the index does not match
+// yet waits (up to MEDIA_WAIT seconds, default 300) for the index of its own
+// commit; otherwise the figures that merge added would stay same-origin until
+// the next deploy (and the first merge that brought article media served
+// everything same-origin). Previews never wait: their new media is not synced
+// until it reaches master.
+//
 // Everything degrades to same-origin: no base, no index, a network error, a
 // hash mismatch. Locally it only writes the map when MEDIA_MAP=1, so a local
 // build is always same-origin and the committed lib/media-map.json stays `{}`.
@@ -26,7 +35,7 @@
 
 import { createHash } from "node:crypto"
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { dirname, extname, join } from "node:path"
+import { dirname, extname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..")
@@ -38,21 +47,40 @@ const onVercel = process.env.VERCEL === "1"
 const dryRun = process.argv.includes("--dry-run")
 const base = (process.env.NEXT_PUBLIC_MEDIA_BASE ?? "").replace(/\/+$/, "")
 
+const WAIT_S = Number(process.env.MEDIA_WAIT ?? 300)
+const TOPS = ["thumbs", "films", "articles"] // what media-sync uploads
+
 const log = (m: string) => console.log(`media-map: ${m}`)
 const write = (map: Record<string, string>) => writeFileSync(OUT, JSON.stringify(map, null, 0) + "\n")
 
-async function loadIndex(): Promise<Record<string, string> | null> {
+type Index = { commit?: string; files: Record<string, string> }
+
+async function loadIndex(quiet = false): Promise<Index | null> {
   try {
-    if (process.env.MEDIA_INDEX) return (JSON.parse(readFileSync(process.env.MEDIA_INDEX, "utf8")) as { files: Record<string, string> }).files
-    const res = await fetch(`${base}/index.json`, { signal: AbortSignal.timeout(15_000), cache: "no-store" })
+    if (process.env.MEDIA_INDEX) return JSON.parse(readFileSync(process.env.MEDIA_INDEX, "utf8")) as Index
+    const res = await fetch(`${base}/index.json?t=${Date.now()}`, { signal: AbortSignal.timeout(15_000), cache: "no-store" })
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-    const d = (await res.json()) as { files?: Record<string, string> }
+    const d = (await res.json()) as Partial<Index>
     if (!d.files || typeof d.files !== "object") throw new Error("no files in index")
-    return d.files
+    return { commit: d.commit, files: d.files }
   } catch (e) {
-    log(`index unavailable (${e instanceof Error ? e.message : e}); serving everything same-origin`)
+    if (!quiet) log(`index unavailable (${e instanceof Error ? e.message : e}); serving everything same-origin`)
     return null
   }
+}
+
+// every image and video media-sync would upload from this checkout, with its hash
+function localMedia(): Map<string, string> {
+  const out = new Map<string, string>()
+  const walk = (d: string) => {
+    for (const f of readdirSync(d)) {
+      const p = join(d, f)
+      if (statSync(p).isDirectory()) walk(p)
+      else if (MEDIA.has(extname(f).toLowerCase())) out.set("/" + relative(PUBLIC, p).split(sep).join("/"), sha16(p))
+    }
+  }
+  for (const t of TOPS) if (existsSync(join(PUBLIC, t))) walk(join(PUBLIC, t))
+  return out
 }
 
 // every "/articles/…" or "/films/…" literal in component code: served same-origin, never pruned
@@ -81,20 +109,35 @@ async function main() {
     log("NEXT_PUBLIC_MEDIA_BASE is unset: same-origin")
     return
   }
-  const index = await loadIndex()
+  let index = await loadIndex()
   if (!index) return write({})
+  const local = localMedia()
+  const unsynced = (i: Index) => [...local].filter(([p, h]) => i.files[p] !== h).length
+
+  const sha = process.env.VERCEL_GIT_COMMIT_SHA
+  let behind = unsynced(index)
+  if (process.env.VERCEL_ENV === "production" && sha && index.commit !== sha && behind > 0 && WAIT_S > 0) {
+    log(`${behind} files here are not in the index yet; waiting up to ${WAIT_S}s for media-sync to publish ${sha.slice(0, 7)}`)
+    const deadline = Date.now() + WAIT_S * 1000
+    while (Date.now() < deadline && index.commit !== sha && behind > 0) {
+      await new Promise((r) => setTimeout(r, 15_000))
+      index = (await loadIndex(true)) ?? index
+      behind = unsynced(index)
+    }
+    log(index.commit === sha || behind === 0 ? "index caught up" : `gave up waiting; ${behind} files stay same-origin`)
+  }
 
   const map: Record<string, string> = {}
   let mismatched = 0, missing = 0
-  for (const [path, hash] of Object.entries(index)) {
+  for (const [path, hash] of Object.entries(index.files)) {
     if (!path.startsWith("/") || path.includes("..") || !MEDIA.has(extname(path).toLowerCase())) continue
-    const file = join(PUBLIC, path)
-    if (!existsSync(file)) { missing++; continue }
-    if (sha16(file) !== hash) { mismatched++; continue }
+    const here = local.get(path)
+    if (!here) { missing++; continue }
+    if (here !== hash) { mismatched++; continue }
     map[path] = hash
   }
   write(Object.fromEntries(Object.entries(map).sort(([a], [b]) => a.localeCompare(b))))
-  log(`${Object.keys(map).length} of ${Object.keys(index).length} indexed files served from ${base} (${mismatched} changed here, ${missing} not in this checkout)`)
+  log(`${Object.keys(map).length} of ${Object.keys(index.files).length} indexed files served from ${base} (${mismatched} changed here, ${missing} not in this checkout)`)
 
   if (!onVercel && !dryRun) return
   const keep = literalPaths()
