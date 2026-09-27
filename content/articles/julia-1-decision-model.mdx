@@ -1,0 +1,201 @@
+---
+title: "Julia-1: one score per mask token, and a benchmark that turns on how the labels are worded"
+description: "Supersonic Labs' Julia-1 is a 144.3M-parameter decision model: mmBERT-small plus a 3.7M-parameter head that scores the mask token placed in front of each option. I rebuilt its input format, ran the official ONNX export on CPU, and reproduced the card's CPU typed-decisions total (1,451 of 2,000) and both small pilots (94 and 86 of 100) exactly. The same runs show what the pilots measure. The questions in Julia's own validation file come from the train splits of all three pilot datasets, and on the same 100 Banking77 questions the released Router scores 62 with the benchmark's label sentences and 91 with bare intent names. Beside Maxime Rivest's learning curve, where a 17M encoder fine-tuned on 9,493 labels reaches 91.5%, the useful question is what each setup was allowed to see."
+date: 2026-09-27
+tags:
+  - explainer
+  - encoders
+  - small-models
+  - benchmarks
+  - evaluation
+  - fine-tuning
+draft: false
+---
+
+import { DecisionHead } from "@/components/articles/julia-1-decision-model/decision-head"
+import { RouterRounds } from "@/components/articles/julia-1-decision-model/router-rounds"
+
+> "Our decision model that runs on almost anything."
+> — [Supersonic Labs, Introducing Julia 1](https://supersoniclabs.ia.br/julia-1/)
+
+Two reposts arrived in the same week, and they belong together. [Julia-1](https://huggingface.co/SupersonicLabs/Julia-1) is a decision model, one more of the [kind this site keeps taking apart](/articles/jev-alternatives-week-two): give it a state, a question and 2 to 20 options, and it returns one option with a probability, never a sentence. [Maxime Rivest's post](https://x.com/MaximeRivest/status/2103913023815422169) is a learning curve: tiny encoders fine-tuned on Banking77, with the headline "4 Million parameter! 10 000 examples can get even BERT tiny to beat opus and kimi!"
+
+Both are small encoders answering "which of these labels?", from opposite ends of one axis: how much of the task the model saw before the test. This piece takes Julia apart, re-runs its evaluation, and then puts the two setups side by side.
+
+Every number is labelled: **measured** means I computed it from a file or a run, **reported** is the publisher's figure, and **reasoned** is my arithmetic on the other two.
+
+| | Julia-1 |
+|---|---|
+| Interface | `state` + `question` + 2–20 `options` → one option and a full softmax (reported) |
+| Weights | 144,292,870 F32 parameters in one `model.safetensors`, Apache-2.0 (measured, from the header) |
+| Backbone | `jhu-clsp/mmBERT-small`: 22 ModernBERT layers, width 384, 256,000-token vocabulary (measured, `encoder/config.json`) |
+| Decision path above the encoder | 3,699,073 parameters (measured) |
+| Headline | 1,463 of 2,000 typed decisions (73.15%) against Jev's 72.70% (reported) |
+| Reproduced here | 1,451 of 2,000 on CPU, identical to the card's CPU run; 94 and 86 of 100 on the AG News and Emotion pilots (measured) |
+| Banking77 pilot, 72 labels | card: 64 of 100 (reported); released Router: 62 with the benchmark's label sentences, 91 with intent names (measured) |
+
+<ModelCard repo="SupersonicLabs/Julia-1" note="144,292,870 parameters: 98,304,384 in the embedding table, 42,189,312 in the 22 encoder layers and final norm, 3,699,073 in the decision path, and a 100,098-parameter action head that no released inference path calls." />
+
+## From a state to one decision
+
+An encoder cannot answer by generating, so Julia puts the options into the input and scores one position per option. The format is one function, `sequence()` in `julia/data.py`, mirrored by the ONNX repo's Rust encoder. For the card's routing example it writes:
+
+```text
+<bos> choice question: Which team should handle this request? <eos>
+<mask> Billing and payment disputes <mask> Shipping and delivery <mask> Account access and login <eos>
+I was charged twice for the same order. <eos>
+```
+
+The question comes first, prefixed with the decision type in plain words. Each option follows its own `<mask>` token, mmBERT's masked-language-model token reused as a marker, and the state goes last. The model reads the line bidirectionally in one pass and scores only the three `<mask>` positions (12, 17 and 21 here; measured).
+
+The same function sets the limits: 2 to 20 options, each at most 48 tokens, question plus options within a head budget (256 tokens by default, 512 in the card's example), and 8,192 tokens in all. With `strict_encoding=True` any overflow raises instead of truncating.
+
+The named-question API adds one more detail. In `criteria={"billing": "Billing and payment disputes", …}` the model reads only the description; the key `billing` is returned to you but never reaches the encoder.
+
+I did not run Supersonic's Python or JavaScript. I rewrote the serializer from `data.py` and ran the official ONNX export with `onnxruntime` 1.30 and the `tokenizers` wheel. It reproduces the Rust test's reference ids token for token, and all 100 of the ONNX repo's published PyTorch parity cases: same argmax on every one, largest logit difference 7.3e-5 (measured). The input format is known, not guessed.
+
+## The decision head
+
+The encoder is mmBERT-small: [ModernBERT's block](/architectures/encoder-bert#what-changed-since-2018), with 22 layers of width 384 and 6 heads. Every third layer attends globally and the rest use a 128-token sliding window (measured, config). On top of it, `JuliaDecisionModel.forward` does four things:
+
+1. Adds one learned row of a 3×384 type table to **every** position: row 0 for `choice`, 1 for `score`, 2 for `noul`.
+2. Runs two more pre-norm transformer layers (6 heads, feed-forward 1,536) over the whole sequence, so the markers attend to the state and to each other once more after the encoder.
+3. Gathers the hidden state at each `<mask>` position.
+4. Scores each one with `LayerNorm → Linear(384, 384) → GELU → Linear(384, 1)` and takes a softmax across the options.
+
+$$
+s_k = w_2^{\top}\,\mathrm{GELU}\!\left(W_1\,\mathrm{LN}(h'_{m_k}) + b_1\right) + b_2,\qquad
+h' = \mathrm{Head}_2\!\left(\mathrm{Enc}(x) + e_{t}\right),\qquad
+p_k = \frac{e^{s_k}}{\sum_j e^{s_j}}
+$$
+
+Here $x$ is the token sequence, $e_t$ is the type row for decision type $t$, $m_k$ is the position of option $k$'s marker, and $h'_{m_k}$ is that position's state after the two head layers. The head's output width is 1, so 2 options and 20 use the same weights. Reading the safetensors header (two HTTP range requests, no weights downloaded) gives the split:
+
+| component | parameters | share | used in a decision? |
+|---|---:|---:|---|
+| token embeddings, 256,000 × 384, plus norm | 98,304,384 | 68.1% | one row per token |
+| 22 encoder layers and final norm | 42,189,312 | 29.2% | yes |
+| two head transformer layers | 3,548,928 | 2.5% | yes |
+| scorer MLP | 148,993 | 0.1% | yes |
+| type embedding, 3 × 384 | 1,152 | | yes |
+| `act_head` | 100,098 | | no released path calls it |
+| `temperature` buffer, (1, 1, 1) | 3 | | never read |
+| **total** | **144,292,870** | | |
+
+All figures are measured. Two thirds of the model is the multilingual vocabulary; mmBERT-small's card lists 140M total and 42M non-embedding parameters (reported). The `act_head` reads the first position's state plus four features of the softmax (top probability, margin, normalised entropy, option count) and outputs two logits: it looks like an answer-or-abstain gate (reasoned). Nothing documents it, the ONNX export never calls it, and `inference-policy.json` says `"calibration": null`.
+
+This is the family of [GLiNER2.5-Decide](/articles/gliner-2-5-decide) and [Laya](/articles/laya-vs-jev): options as tokens in one bidirectional sequence, one scalar read per option. Julia adds the type row and two attention layers before the readout. The consequence is the same: [order is part of the input](/articles/gliner-2-5-decide#order-is-part-of-the-input). Reversing the option list on the 100-item pilots below changed 12 AG News answers (94 correct became 87) and 7 Emotion answers (86 became 87) (measured). GLiNER2.5-Decide changed 3.2% of its reorderings, on a different sample and procedure (reasoned comparison, not paired).
+
+## Three modes through one head
+
+`choice`, `score` and `noul` share every weight; only the type row and the word in the question prefix change. They differ in what you read off the softmax:
+
+- **choice**: the key of the argmax option.
+- **score**: an ordered rubric, where the API returns the expected level $\sum_i i\,p_i$. The benchmark's accuracy uses the argmax, not the rounded expectation.
+- **noul**: a Boolean. The options are always `[false, true]` in that order, and the answer is $p(\text{true})$. If you supply descriptions they replace the literal words.
+
+The descriptions carry much of the load. In the card's CPU run, replacing the 400 descriptive Boolean criteria with literal `false`/`true` drops Boolean accuracy from 483 to 391 of 600 (reported).
+
+<DecisionHead />
+
+The widget replays outputs I recorded, including all five questions of typed-decisions case `customer_service_000000`. Julia gets four right, each at 0.73 or above, and misses `action` (`request_information` at 0.84), where the dataset's own gold is split: 0.50 on `answer_directly`, 0.34 on `escalate_to_human`.
+
+The probabilities are a softmax at temperature 1, with nothing fitted. On the pilot items below I measured an expected calibration error of 0.021 on AG News and 0.129 on Emotion (10 bins), where mean confidence was 0.984 against 86% accuracy. Jev's figures on the same items were 0.064 and 0.351 (reported, pilot report).
+
+## More than 20 options: the Router
+
+The head is trained for 2–20 options. For longer lists, `julia/router/router.py` runs a tournament:
+
+1. Split the candidates, in order, into consecutive groups of at most 20.
+2. Score every group in one batch.
+3. Keep the winner alone if its softmax is above 0.95 and every other option is below 0.045; otherwise keep the top two (`survivors=2`).
+4. Repeat until 20 or fewer remain, then make one final call.
+
+Sixty options cost 3 calls in the first round and 1 final call. The 72-label Banking list costs 4 plus 1 (reasoned from the rule; the 5 is measured below).
+
+The card states two consequences: a correct answer that loses its group is gone, and the final probabilities cover only the final candidates. A third is only in the code. `Router.__init__` constructs a `BendReducer`, which raises unless the native `libjulia_router.so` was built with Bend 2.0.27 and Clang on Linux. The card's "no native router build is needed" is true of the engine, not, as far as I can read, of the Router (reasoned from code; not executed).
+
+<RouterRounds />
+
+I ran my reimplementation of the rule on the Banking77 pilot described below: 72 labels, two survivors, 5 model calls per decision. The correct intent reached the final call on 78 of 100 questions, and the final pick was right on 62 (measured). In one trace the right answer is dropped in round 1, and the final call then chooses among what is left at probability 1.000.
+
+## The evaluation, run again
+
+The card is candid about its evaluation, and the candour holds up.
+
+**The Jev column was not re-run.** It comes from [`AbdelStark/jev-benchmarks`](https://github.com/AbdelStark/jev-benchmarks/tree/0d610cc53e79bcbec691312b0c4adb4a0e371642), pilot v1. That pilot ran on 17 September against `jev-1.13.0`, on 100 deterministically sampled, approximately class-balanced test items from each of three [BTZSC](https://huggingface.co/datasets/btzsc/btzsc) datasets. BTZSC phrases every label as a sentence ("This example news text is about sports"). Its Banking77 has 72 of the 77 intents, and the pilot drops the 200 test rows whose intent has no sentence (reported). The typed-decisions reference, 72.7%, is Jev 1.13.0's row on that dataset's own leaderboard (reported).
+
+**I rebuilt the pilot.** I rewrote the pilot's sampler from its source and hashed the 300-item manifest the way the runner writes it. The result is `ec064c52…`, the SHA-256 the pilot report publishes, so these are the same items Jev saw (measured). Julia, with the pilot's framing (the text as `{"text": …}`, "Which single label best describes the input text?", the BTZSC sentences as options), gets **94/100 on AG News and 86/100 on Emotion**. Those are the card's numbers exactly (measured). On the full typed-decisions test set, 400 cases and 2,000 questions, it gets 426/600 choice, 542/800 score and 483/600 Boolean. That is the card's CPU result to the question, 1,451 (measured).
+
+**A hundred items is a wide interval.** The 95% Wilson interval on 94/100 is 87.5–97.2%, and on Jev's 91/100 it is 83.8–95.2%: the AG News lead is not resolved. Emotion (86 against 48) and Banking77 (64 against 87) are separated (reasoned). I could not do a paired test, because Jev's per-item predictions are not published.
+
+<Figure
+  src="/articles/julia-1-decision-model/fig1.png"
+  alt="A grouped bar chart titled 'Julia 1 across four tasks'. Blue bars for Julia 1, grey for the Jev reference: typed decisions about 73% each, AG News 94% against 91%, DAIR Emotion 86% against 48%, Banking77 64% against 87%."
+  caption="The headline chart, rendered from the SVG on Supersonic's page. Julia's three pilot bars are 100 items each, and the grey bars are a separate 17 September run of Jev, not a re-run. I reproduced the AG News and Emotion bars exactly on the same 100 items. (Supersonic Labs, Introducing Julia 1, results chart.)"
+/>
+
+**The pilots are in Julia's training distribution.** The ONNX repo publishes 100 parity requests drawn from `data/fast-frontier-v2/validation.jsonl`, Julia's own validation file. Of those, 26 are AG News topic questions, 13 are DAIR Emotion questions and 12 are Banking77 intent questions. Every one of those 51 states appears verbatim in its dataset's **train** split, and none appears in a test split (measured). `provenance.json` lists validation sets named `agnews`, `emotiondair`, `banking-rank` and `banking-joint`, and "replay" sets for all three (reported). It also lists sets named after typed-decisions' four workflows, a dataset whose leaderboard separates "general, zero-shot" entries from "specialist, fitted per workflow" ones. The card does not describe the training data. The reading that fits is that Julia was trained on these tasks' train splits and scored on their test splits (reasoned). If so, that is not contamination, since no test item turned up, but the pilots are not zero-shot either.
+
+**The Banking77 gap is mostly wording.** The card's 64 went through a "ranking/top-16 shortlist" that is not in the repository. Its provenance reports 83/100 with a 99% top-16 recall on an internal Banking77 set (reported). The released Router scores 62 on the pilot with the BTZSC sentences. On the same 100 questions, with the same Router, I swapped each sentence for a bare intent name and the question for the one Julia's validation file uses ("Which banking intent best describes this request?"). The score went to **91/100**, and the correct intent reached the final call 97 times instead of 78 (measured). The label strings are part of the model's input, and they move this result by 29 points.
+
+[Knowledge is outside](/articles/what-decision-models-cannot-do) what the pilots test, and the card says so: its provenance has MMLU at 52/198 (26.3%) and ARC-Challenge at 57/200 (28.5%) (reported), near the 25% of guessing among four options (reasoned). The same file carries an undocumented `"quality_gate": false`. MASSIVE scenario accuracy runs from 44.9% in Amharic to 86.8% in US English across 52 locales (reported).
+
+## The other repost: 9,493 labels and a learning curve
+
+Rivest's primary source is [`examples/banking77_lmfn/RESULTS.md`](https://github.com/MaximeRivest/lmfn/blob/master/examples/banking77_lmfn/RESULTS.md) in his `lmfn` repository. The chart itself is only in the post, so I describe it rather than reproduce it.
+
+<RepoCard repo="MaximeRivest/lmfn" />
+
+The setup is ordinary supervised fine-tuning. Banking77 has 9,993 training questions; he holds 500 out for validation and trains on up to 9,493. Each student is trained end to end with a 77-way classification head on one RTX 3090, with three seeds, and scored on all 3,076 test questions (reported). The Ettin-17M curve, from `RESULTS.md`:
+
+| human-labelled rows (≈ per intent) | Ettin-17M accuracy | training time |
+|---|---:|---:|
+| 100 (1.3) | 14.6% | 7 s |
+| 500 (6.5) | 44.7% | 23 s |
+| 1,000 (13) | 66.7% | 44 s |
+| 2,000 (26) | 81.0% | 43 s |
+| 4,000 (52) | 87.2% | 42 s |
+| 9,493 (123) | 91.5% | 42 s |
+
+All reported. `RESULTS.md` also gives ModernBERT-base at 93.2% on the full data. The other endpoints appear only on the chart in the post (reported): BERT-tiny 89.2%, Ettin-32M 92.5%, Ettin-68M 93.2%, Qwen3.5-0.8B 93.8% and ModernBERT-large 94.2%.
+
+The chart's dashed lines are "Claude Opus ≈ 92%" and "best distillation-allowed model ≈ 84%". In the file, Claude Opus 5.5 scores 92.0% on 200 random test questions, ±1.9 points. Models whose terms allow training on their outputs top out at 83.5% (Kimi K3, Qwen3.8 2.4T), 84.5% for the best five-model vote chosen on the same questions, and 85.0% for Kimi K2.6 at its highest reasoning setting (reported).
+
+Read against its own chart, the headline claim is half right. BERT-tiny's 89.2% clears the distillation-allowed line and Kimi. It sits below the Opus line. The students that cross 92.0% are Ettin-32M and up, and Ettin-17M's 91.5% is inside Opus's ±1.9 (reasoned).
+
+Rivest states the main caveat himself: the test labels come from the same annotators as the training labels, so accuracy against them "measures fit to this labelling scheme, not only understanding." And Banking77 has been public since 2020, so Opus may have memorised some of it.
+
+## Two setups, not a ranking
+
+The numbers answer different questions:
+
+| | Rivest's students | Julia-1 on the pilot |
+|---|---|---|
+| where the label set lives | in the weights: a 77-way output layer | in the input: 2–20 strings per call |
+| labelled data for this task | 100 to 9,493 human labels, stated | not stated; its validation file holds Banking77 train questions |
+| test | all 3,076 questions, 77 intents | 100 class-balanced questions, 72 intents |
+| what a new intent costs | new labels and a retrain (42 s at 9,493 rows) | a new string, with accuracy unknown until measured |
+| what moves the number | label count: 66.7% at 1,000 rows, 91.5% at 9,493 | label wording: 62 or 91 on the same items |
+
+The curve prices the supervised route: about 13 labelled messages per intent buys Ettin-17M 66.7%, and 26 buys 81.0%. A decision model promises to skip that bill by reading what a label means. Julia shows both sides: 91/100 on 72 intents with no retraining when they are written the way its own validation file writes them, 62 when they are sentences.
+
+Jev's Banking77 number moves too: 87/100 on the BTZSC pilot, 79.4% on Rivest's full 77-intent test (reported by each). Sample, label count and wording all differ, so the gap cannot be apportioned (reasoned).
+
+Neither Julia number is zero-shot on an unseen task, and Rivest's 91.5% is 9,493 labels. So the rule is short. With a fixed taxonomy and a few thousand labels, fine-tune a small encoder; the curve says under a minute on one GPU. With labels that change per call and no data, use a decision model, and the [four gates](/articles/where-to-use-jev) apply. Either way, freeze the label strings and their order with the model version, and measure with your own wording.
+
+## Does it run on almost anything?
+
+On CPUs, mostly yes. Supersonic reports medians of 33.15 ms per decision on an Apple M4 (four threads, 100-word state, four options), 294.81 ms per typed decision on an Intel Core i5-1235U, 203 ms on a Samsung tablet through ONNX Runtime, and 75.47 ms on WebGPU in a browser, with 100 of 100 predictions matching PyTorch (all reported).
+
+Mine are from a shared 4-core Xeon at 2.10 GHz with a load average near 7.7, ONNX Runtime at four threads. A cold start takes 3.4 to 5.7 s, mostly loading the 34 MB tokenizer and the session. A warm decision takes a median of 25 ms for the card's 37-token example and 62 to 74 ms for a 136-token request. The full typed-decisions set, median request 308.5 tokens, took 572 s at two threads (all measured).
+
+The outlier is Banking through the shortlist: a median of 3,713.54 ms per decision on the i5, against 107.83 ms for AG News (reported).
+
+## The ledger
+
+**Genuinely new.** An Apache-2.0 decision model on a multilingual encoder: 3.7M parameters of head on 140M of backbone, three typed modes through one scorer. An ONNX export with published parity cases, which made an outside reproduction possible, and an evaluation that states its own losses.
+
+**Overstated, mildly.** "No native router build is needed" holds for the engine, not the Router. The pilots follow a zero-shot protocol, but questions from the three tasks' train splits are in Julia's validation data. And Rivest's "beat opus" is not what his chart shows for BERT-tiny.
+
+**Unmeasured.** The training data. The `act_head`, and the top-16 shortlist behind the published Banking77 number. Calibration. And accuracy under anybody's label wording but the benchmark's, which, for a model whose options are its input, decides the result.
