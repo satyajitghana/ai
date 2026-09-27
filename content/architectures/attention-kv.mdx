@@ -1,0 +1,91 @@
+---
+title: "Attention and the KV cache: MHA, MQA, GQA and MLA, byte by byte"
+description: "How the key-value side of attention shrinks to cut the cache a decoder rereads at every step: the 2·n_kv·d_h numbers per token per layer that multi-head attention keeps, one shared head in MQA, a few groups in GQA, and DeepSeek-V2's MLA, which caches a 512-wide latent plus a 64-wide decoupled RoPE key, (9/2)·d_h in all. With the quality evidence for each, and the cache of one 128K-token sequence worked out for DeepSeek-V2's shape and for Llama 3.1 70B."
+date: 2026-09-26
+tags:
+  - kv-cache
+  - attention
+  - explainer
+---
+
+A decoder generates one token per forward pass, and each step's new query has to meet the key and value of every earlier token, at every layer. Under the causal mask those keys and values never change once computed, so they are kept: the **KV cache** ([the Transformer, from first principles](/architectures/transformer) derives it). Every decode step reads the whole cache, and at long context it outweighs the model's weights, so the speed of a step is set by how many bytes the cache holds rather than by how much arithmetic the step does.
+
+Multi-query, grouped-query and multi-head latent attention are three ways to hold fewer bytes per token without dropping any tokens. The diagram above shows the progression; this page counts the bytes. The [field guide to attention mechanisms](/articles/attention-mechanisms) places all four on its memory axis, beside the sparse and linear families that attack the other bill.
+
+## The bill
+
+For each token, each layer caches one key and one value for every key-value head:
+
+$$
+\text{cache per token per layer} = 2 \cdot n_{kv} \cdot d_h \cdot b \ \text{bytes}
+$$
+
+with $n_{kv}$ key-value heads of width $d_h$, stored at $b$ bytes per number (2 in 16-bit). A sequence multiplies that by the number of layers $L$ and tokens $T$. Plain multi-head attention (MHA) has one key-value head per query head, $n_{kv} = n_h$. Llama 2 7B has 32 heads of 128, so it caches 2 × 32 × 128 × 2 = 16,384 bytes per layer, 512 KiB per token over 32 layers, and 2 GiB for a 4,096-token context.
+
+Why the bytes set the speed: [Shazeer (2019)](https://arxiv.org/abs/1911.02150) counts memory traffic against arithmetic for incremental decoding with batch $b$, sequence length $n$ and width $d$, and gets a ratio of $\Theta(n/d + 1/b)$. The $1/b$ term is the weights, shared across the batch, so batching pays it down. The $n/d$ term is reloading $K$ and $V$, which belong to each sequence alone, so batching does nothing for it; once $n$ approaches $d$ the ratio nears 1 and the hardware waits on memory. Note what does not change in any variant below: every query still scores every cached token, so attention's FLOPs stay the same. Only the bytes read per score go down.
+
+## MQA: one key head, one value head
+
+Multi-query attention keeps all $n_h$ query heads and gives them a single shared key head and value head, so $n_{kv} = 1$: the cache is $2\,d_h\,b$ bytes per layer, $n_h$ times smaller, and the ratio above becomes $\Theta(1/d + n/(d\,n_h) + 1/b)$. The key and value projections shrink from $d \times d$ each to $d \times d_h$.
+
+In Shazeer's WMT14 English-German model (8 heads of 128), MQA cut the decoder's incremental inference cost from 46 to 3.8 TPUv2-microseconds per token, while dev BLEU went from 26.7 to 26.5; the feed-forward width was raised from 4,096 to 5,440 to keep the parameter count equal. Later evidence is less kind. The [GQA paper](https://arxiv.org/abs/2305.13245) notes that MQA can degrade quality and destabilise training, and DeepSeek's own ablation of 7B dense models trained on 1.33T tokens puts MMLU at 45.2 with MHA and 37.9 with MQA. There is also a systems wrinkle: tensor parallelism splits heads across devices, and a single key-value head has to be replicated on every one of them.
+
+## GQA: a few shared heads
+
+Grouped-query attention splits the $n_h$ query heads into $G$ groups, and each group shares one key head and one value head:
+
+$$
+\text{head}_i = \mathrm{softmax}\!\left(\frac{q_i K_{g(i)}^{\top}}{\sqrt{d_h}}\right) V_{g(i)},
+\qquad g(i) = \left\lfloor \frac{i\,G}{n_h} \right\rfloor
+$$
+
+So $n_{kv} = G$ and the cache is $2\,G\,d_h\,b$ bytes per layer. $G = 1$ is MQA and $G = n_h$ is MHA. Ainslie et al. also showed how to get there from an existing MHA checkpoint: mean-pool the key and value projections of the heads in each group, then keep pre-training for 5% of the original steps (about 600 TPUv3 chip-days for T5-XXL). On T5-XXL, MHA took 1.51 s per sample and averaged 47.2 across their tasks; GQA with 8 groups took 0.28 s and averaged 47.1; MQA took 0.24 s and averaged 46.6. Near-MHA quality at near-MQA speed.
+
+GQA with 8 groups became the default for large dense models. Llama 2 70B uses it, Llama 3 uses 8 key-value heads at all three sizes, and [Hunyuan-A13B](/articles/hunyuan-a13b) pairs 32 query heads with 8 key-value heads, so its key and value matrices are 1,024 × 4,096 instead of 4,096 × 4,096 and its cache is 128 KiB per token. Fixing $G$ while the model grows also keeps the saving proportional, which is why the paper expected GQA to suit larger models best. DeepSeek's 7B ablation shows a gap all the same: MMLU 41.2 with 8 groups, against 45.2 for MHA.
+
+## MLA: cache a latent, not the heads
+
+GQA shares heads. [DeepSeek-V2](https://arxiv.org/abs/2405.04434)'s multi-head latent attention compresses them instead. Each token's hidden state $h_t$ is projected down to a latent $c_t^{KV}$ of width $d_c$, and every head's key and value are up-projections of that one latent:
+
+$$
+c_t^{KV} = W^{DKV} h_t, \qquad k_t^{C} = W^{UK} c_t^{KV}, \qquad v_t^{C} = W^{UV} c_t^{KV}
+$$
+
+Only $c_t^{KV}$ is cached, and at decode time the keys and values are never rebuilt. The score of head $i$ against a cached token $j$ is $q_{t,i}^{\top} W^{UK}_i c_j^{KV}$, and matrix products associate, so $W^{UK}_i$ can be folded into the query projection; likewise $W^{UV}$ folds into the output projection $W^O$. Attention runs directly against the latents. DeepSeek-V2 compresses the queries the same way, to a 1,536-wide latent, which saves activation memory in training but no cache.
+
+**The catch is position.** RoPE rotates each key by a matrix that depends on its position. Rotate the compressed keys and that matrix sits between $W^Q$ and $W^{UK}$; matrix multiplication does not commute, so the fold breaks and every prefix key would have to be recomputed at every step. DeepSeek-V2's fix is a **decoupled RoPE key**: a small extra key $k_t^{R} = \mathrm{RoPE}(W^{KR} h_t)$ of width $d_h^R$, shared by all heads, with matching extra query dimensions in each head. A head's query and key are the concatenations of a compressed part and a rotary part, and scores are divided by $\sqrt{d_h + d_h^R}$. The rotary key is cached too:
+
+$$
+\text{MLA cache per token per layer} = (d_c + d_h^R)\, b \ \text{bytes}
+$$
+
+DeepSeek-V2 has 128 heads of $d_h = 128$ and sets $d_c = 4\,d_h = 512$ and $d_h^R = d_h / 2 = 64$. That is 576 numbers per token per layer, $\tfrac{9}{2}\,d_h$, the same as GQA with 2.25 groups. MHA with those 128 heads would cache 2 × 128 × 128 = 32,768, about 57 times more.
+
+The cost moves into arithmetic. With the folds, each head scores a cached token with a 576-wide dot product instead of MHA's 128-wide one, and mixes 512-wide latents instead of 128-wide values, but all 128 heads read the same 576 cached numbers. For a decoder that is waiting on memory, more multiply-adds per byte read is the right trade (reasoned).
+
+**Quality**, from DeepSeek's own ablations (reported). With MoE models of about 16B parameters trained on 1.33T tokens, MLA cached 15.6K numbers per token against MHA's 110.6K (14%) and scored higher on BBH, MMLU and CMMLU, slightly lower on C-Eval (50.9 against 51.6). At about 250B parameters and 420B tokens it cached 34.6K against 860.2K (4%) and scored higher on all four. That 34.6K is DeepSeek-V2's own cache: 576 × 60 layers = 34,560 numbers per token.
+
+The paper's headline, that DeepSeek-V2 "reduces the KV cache by 93.3%", is measured against DeepSeek 67B, which is itself GQA: 95 layers of 8 key-value heads of 128, 194,560 numbers per token. Counting numbers alone, 34,560 is 82.2% smaller. The deployed DeepSeek-V2 also stores its cache at 6 bits per number on average, and 0.1776 × 6/16 = 0.0666 against a 16-bit cache matches the 93.3% (reasoned). So the clean comparison stays the $\tfrac{9}{2}\,d_h$ figure.
+
+## One 128K sequence, worked through
+
+Take 128K as 131,072 tokens and 2 bytes per number. Here is DeepSeek-V2's shape, 60 layers of 128 query heads of 128, under each scheme:
+
+| Scheme | Numbers per token per layer | Per token, 60 layers | One 128K sequence |
+|---|---:|---:|---:|
+| MHA, 128 key-value heads | 32,768 | 3.75 MiB | 480 GiB |
+| GQA, 8 groups | 2,048 | 240 KiB | 30 GiB |
+| MLA, as shipped | 576 | 67.5 KiB | 8.44 GiB |
+| MQA, 1 key-value head | 256 | 30 KiB | 3.75 GiB |
+
+Full MHA would need 480 GiB for one sequence. The MLA cache takes 8.44 GiB, and at the deployed 6 bits per number, 25,920 bytes per token, 3.16 GiB. MLA lands between GQA and MQA in bytes while, by DeepSeek's measurements, matching or beating MHA in quality.
+
+A real GQA model for comparison: [Llama 3.1 70B](https://arxiv.org/abs/2407.21783) has 80 layers and 8 key-value heads of 128, so it caches 2 × 8 × 128 × 2 = 4,096 bytes per layer and 320 KiB per token. One 128K sequence is 40 GiB, and two of them, 85.9 GB, already exceed an 80 GB accelerator before a single weight is loaded. With MHA's 64 key-value heads it would be 320 GiB.
+
+## What each gives up
+
+**MQA** gives up the most quality, can destabilise training, and its one head is replicated under tensor parallelism. **GQA** is a dial: 8 groups kept T5-XXL within 0.1 points of MHA, though DeepSeek's 7B ablation found a larger gap. **MLA** gives up simplicity: down- and up-projections on both the query and the key-value side, the split between compressed and rotary dimensions, and kernels written around the folded form. None of the four changes how the cache grows, one entry per token per layer; for that the answers are windows, sparse selection and linear attention, all on the field guide's other axis.
+
+## What changed since
+
+MQA shipped in PaLM. GQA became the dense default. MLA carried over to [DeepSeek-V3](https://arxiv.org/abs/2412.19437) with the same 512-wide latent and 64-wide rotary key, and to [Kimi K3](/articles/kimi-k3) with the same 512-wide latent, where it runs in only 24 of the 93 layers, with no positional encoding at all; the other 69 are linear attention with a fixed-size state. Around all four, the cache itself keeps shrinking along axes that stack with head sharing: quantisation ([TurboQuant](/articles/turboquant-kv-cache), [SGLang's NVFP4 KV cache](/articles/nvfp4-kv-cache)), caching values and rebuilding keys ([Grouped Value Attention](/articles/grouped-value-attention)), and paging the cache so no byte is reserved before it is needed ([how LLM inference works](/articles/how-llm-inference-works)).
