@@ -156,7 +156,9 @@ push to master → GitHub Action social-publish
 - **Media:** DNS is already on Cloudflare. Create an R2 bucket (default name in
   the workflow: `ai-thesatyajit-media`, or set the `R2_BUCKET` repository
   variable), attach the custom domain `media.thesatyajit.com`, add the
-  secrets `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, run
+  secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT` (the S3
+  endpoint shown with the token, the jurisdiction one if the bucket has one;
+  the token's "token value" is not needed), run
   media-sync once (Actions → media-sync → Run workflow), then set
   `NEXT_PUBLIC_MEDIA_BASE=https://media.thesatyajit.com` on Vercel Production
   and redeploy.
