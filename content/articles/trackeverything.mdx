@@ -1,0 +1,412 @@
+---
+title: "TrackEverything: dense 3D tracking that grows with the scene, not the video"
+description: "TrackEverything (CMU and Meta, arXiv 2609.30222) tracks every visible point of 1000-frame videos in 3D by keeping one world-frame track per voxel of surface, merging duplicates at each 16-frame window boundary, decoding full trajectories only for moving points, and sampling features where a correlation volume used to be. How each piece works, and what the tables show: the 20-point APD margin is over one open baseline and holds on APD-P only, the long-video lead is 1.3 APD-P points, and 10+ FPS is the tracker without its geometry model."
+date: 2026-09-27
+interest: 4
+helpful: 4
+tags:
+  - 3d
+  - point-cloud
+  - 3d-perception
+  - computer-vision
+  - video-understanding
+  - slam
+  - benchmarks
+  - explainer
+draft: false
+---
+
+import { DedupTimeline } from "@/components/articles/trackeverything/dedup-timeline"
+
+A repost on X summed TrackEverything up in five claims. It treats the video as a 3D scene and
+removes duplicate points. It separates static from dynamic points and tracks the moving ones
+efficiently. 3D WAFT makes 4D correlation efficient. It runs at 10+ FPS on a 40 GB GPU. It
+tracks 1000+ frame videos.
+
+The paper is
+[TrackEverything: Long Horizon Dense Tracking via De-Duplicating 3D Scene Representations](https://arxiv.org/abs/2609.30222)
+(arXiv 2609.30222, posted 24 September 2026), by Ayush Jain, Sreeharsha Paruchuri, Ishita
+Gupta, Fan Zhang, Tanner Schmidt, Jakob Engel, Katerina Fragkiadaki and Adam W. Harley, of
+Carnegie Mellon and Meta. I read v1 and the [project page](https://trackeverything.github.io/).
+
+Three hold as written. WAFT does not make correlation efficient; it removes the correlation
+volume. The frame rate is the tracker's alone: with its geometry model in the loop, the paper's
+end-to-end figure is 7.2 FPS. The code is not out yet.
+
+The idea underneath is an old one from SLAM: store the world, not the observations. The map in
+[FAST-LIO2 from scratch](/articles/fast-lio2-lidar-inertial-odometry) downsamples each new scan
+into voxels it already has. TrackEverything does that to a point tracker's memory.
+
+<Figure
+  src="/articles/trackeverything/fig1.jpg"
+  alt="Left, top: a log-scale plot of active tokens against frames processed. A red line of frame-local tokens climbs from about 200 thousand to 4.86 million at 400 frames; a green line for the persistent 3D scene state stays near 10 thousand, ending at 13.4 thousand, annotated 362 times fewer. Left, bottom: a bar chart of 3D APD with D4RT and VDPM marked OOM and TrackEverything at 31.2. Right: six input videos (a show jumper, big cats, sheep in snow, a herd of horses, two robot arms) each with its dense 3D point tracks drawn as coloured trails over a grey point cloud."
+  caption="The teaser: frame-local tokens grow linearly with video length while the de-duplicated scene state stays near flat, and dense 3D tracks on six videos, with trails drawn only for moving points (TrackEverything paper, Figure 1)."
+/>
+
+## Why dense tracking forks in two
+
+A point tracker takes a pixel at time $t$ and returns where that bit of surface is in every
+other frame. Count what "every point" means for $T$ frames of $H \times W$ pixels.
+
+- **Sparse trackers** follow $N$ user-chosen points: $N \cdot T$ positions. PIPs, CoTracker3,
+  TAPIP-3D and SpatialTracker-v2 run in sliding windows and refine each point against a
+  correlation lookup (its feature against the features around its current guess). That runs for
+  long videos, but the correlation cost scales with $N$, so $N$ stays small.
+- **First-frame dense trackers** make every pixel of frame 0 a query: $HW \cdot T$ positions.
+  Linear in $T$, and blind to anything that appears later, like a person who walks in.
+- **All-frame dense trackers** make every pixel of every frame a query: $HWT$ tracks, each with
+  a position in all $T$ frames, so $HWT^2$ outputs. The paper's example is a 512 × 512,
+  200-frame video at "on the order of $10^{10}$ predictions" (512 × 512 × 200 × 200 is about
+  1.05 × 10¹⁰, reasoned). VDPM, TraceAnything and D4RT aim here and stop at clips of 48-64
+  frames.
+
+Memory grows with length because the representation is frame-local. Every frame arrives as a
+full grid of tokens whether it shows anything new or not: a camera panning across a desk
+re-encodes the same desk every frame. Tokens grow as $P \cdot T$ for $P$ tokens per frame, and
+whatever correlates tracks against frames grows faster. RAFT's all-pairs correlation volume for
+two frames holds $(hw)^2$ similarities, one per pair of feature pixels, hence "4D". At an eighth
+of a 512 × 512 frame's resolution that is 4,096² ≈ 16.8 million entries, 67 MB in fp32 per pair;
+at a quarter, TrackEverything's feature resolution, sixteen times that, about 1.07 GB (both
+reasoned).
+
+The way out follows from what a video is: 2D projections of one 3D world. The desk is one desk.
+Keep state per piece of surface in world coordinates, and a frame that re-observes the desk adds
+nothing.
+
+## A persistent world-frame scene track
+
+A scene track is a token that stands for a piece of physical surface rather than a pixel. It
+carries:
+
+- a feature vector, $D = 384$ wide;
+- its birth: the source frame $t_\text{src}$ and the 3D point $\mathbf{x}_\text{src}$ where it
+  was first seen;
+- its current 3D position in **world coordinates**: the frame of the first camera, scaled once
+  for the whole sequence to unit size, DUSt3R-style;
+- a visibility per frame and one static-or-dynamic label.
+
+*Persistent* means it survives occlusion and leaving the frame: once born, it stays in the
+scene memory. *World frame* means a static point does not move when the camera does, so its
+whole trajectory is one 3D point, not $T$ of them. That is where the static/dynamic split gets
+its savings. For all $N$ unique scene points the model outputs trajectories
+$\mathbf{X} \in \mathbb{R}^{N \times T \times 3}$, visibility logits
+$\mathbf{V} \in \mathbb{R}^{N \times T}$ and static/dynamic logits
+$\mathbf{S} \in \mathbb{R}^{N}$.
+
+## How it works
+
+The inputs are an RGB video and a per-frame pointmap, a 3D world point for every pixel, from
+depth sensors or a feedforward model: VGGT-Ω in the main results (the model
+[WorldCrafter](/articles/worldcrafter) is checked with), Pi3 in some ablations. The tracker never
+estimates geometry or poses itself (compare
+[Depth Anything 3 in ROS 2](/articles/depth-anything-3-ros2), where the metres also come from
+outside the model).
+
+<Figure
+  src="/articles/trackeverything/fig2.jpg"
+  alt="Architecture diagram in three panels. Encoding: an input video goes to a visual encoder producing 2D features and to a frozen geometry predictor producing a 3D point cloud; both are unprojected into a 3D feature cloud. Endpoint refinement: an endpoint refiner takes x-source, x-target, t-source and t-target and outputs a flow delta x at the target time, visibility in the target camera, and a static mask and a dynamic mask. Trajectory refinement for dynamic points: endpoint predictions and source positions are initialised with constant velocity into track tokens with a CLS summary token, pass through within-track attention and cross-attention to the scene (keys and values from the feature cloud), giving dense tracks for dynamic points, which are merged with static predictions into dense 3D tracks for all points."
+  caption="The architecture: encode and unproject a window into a 3D feature cloud, refine every point's endpoint and classify it static or dynamic, then decode full trajectories only for the dynamic points (TrackEverything paper, Figure 2)."
+/>
+
+### Encoding one window
+
+The video is cut into non-overlapping windows of $L = 16$ frames. A frozen DINOv3-small
+(20M parameters) plus a trainable ViT-Adapter head turns each frame into a feature map at a
+quarter resolution, $H/4 \times W/4$ tokens of width 384. Each token is paired with the 3D
+point under it from the downsampled pointmap.
+
+Within each frame, tokens are quantised into voxels of size $v$ (index
+$\lfloor \mathbf{x}/v \rfloor$) and tokens sharing a voxel are mean-pooled. Only within a frame:
+two surfaces can occupy the same place at different times, as when a hand passes where a cup
+was. The 16 frames' tokens join the tokens carried over from earlier windows (their
+$t_\text{src}$ is $-1$) in one space-time cloud.
+
+### The endpoint refiner
+
+To hand points to the next window and merge duplicates, the tracker only needs each point's
+position at the window's last frame, so it solves that first. At inference the target frame
+$t_\text{tgt}$ is always $L - 1$.
+
+Each point's feature gets four sinusoidal embeddings: source position, current guess of the
+target position, source frame, target frame. Then 3D WAFT: the 3D guess is projected into frame
+$t_\text{tgt}$ with that camera's intrinsics and extrinsics, and the feature map is bilinearly
+sampled there, giving $\mathbf{g}_\text{tgt}$. The feature at the point's birth,
+$\mathbf{g}_\text{src}$, is sampled once. The transformer sees
+$[\mathbf{f}_i; \mathbf{g}_\text{src}; \mathbf{g}_\text{tgt}]$, runs self-attention over the
+whole cloud, and a small MLP decodes a 3D update $\Delta\mathbf{x}$, a visibility logit and a
+static/dynamic logit. The guess moves, $\mathbf{g}_\text{tgt}$ is resampled, and the loop runs
+again. The paper does not state the iteration count; its Figure 6 shows three.
+
+### What WAFT is
+
+[WAFT](https://arxiv.org/abs/2506.21526), Warping-Alone Field Transforms (Yihan Wang and Jia
+Deng), is optical flow built like RAFT without the cost volume. Instead of correlating every
+pixel with every other, it warps the second image's features by the current flow estimate, at
+high resolution, and lets the network compare them with the first image's. Its abstract reports
+first place on Spring, Sintel and KITTI at lower memory cost.
+
+In 3D the warp is a camera projection of the 3D guess. The signal is template matching: if
+$\mathbf{g}_\text{tgt}$ looks like $\mathbf{g}_\text{src}$, the guess is on the right surface;
+if not, it must move. Each point costs one feature vector per iteration, not a volume. A guess
+that projects off-screen is clamped to an extended canvas and sampled with replicate padding;
+the mismatch is what the visibility head learns to read as "not visible". (The paper expands
+WAFT as "warp-aligned feature transforms"; the paper it cites is titled Warping-Alone Field
+Transforms. Same method.)
+
+<Figure
+  src="/articles/trackeverything/fig6.jpg"
+  alt="Top row: a source frame at T equals 0 with red dots on toys on a table, then frames T equals 7 and 15 where red dots show where the zero-velocity guess projects and green dots show the true locations, joined by green arrows where they differ, mostly on a moving red cylinder and a box. Bottom: zoomed patches over iterations 0, 1 and 2. For a static point on a green toy, the sample sits on the right spot from iteration 0 onward. For a dynamic point on the red cylinder, iteration 0 samples the table beside it; by iteration 1 the sample is on the cylinder and by iteration 2 it is locked onto the right place."
+  caption="3D WAFT in action. With a zero-velocity guess, camera projection alone puts static points close to the truth; a moving point's guess lands on background, and the mismatch between source and sampled features drives it onto the right surface within two iterations (TrackEverything paper, Figure 6)."
+/>
+
+### The trajectory refiner, for moving points only
+
+Only points classified dynamic get a full 16-frame trajectory, starting from constant velocity
+between source and endpoint. Each timestep's token combines the point's transformer feature,
+its $\mathbf{g}_\text{src}$ and a feature sampled at that frame's constant-velocity position,
+plus a [cls] summary token per track. Layers alternate attention along one track's timesteps
+with cross-attention from its [cls] token to the scene cloud. Tracks never attend to each other
+(as in PIPs and D4RT), so training can decode a random subset and inference all of them. Static
+points keep their position.
+
+Misclassification is cheap one way. A static point called dynamic just gets decoded, and can come
+back with zero motion. A dynamic point called static is frozen for the window, up to 16 frames of
+missed motion, and is reclassified in the next.
+
+### What one window predicts
+
+- Every active point: its 3D position at frame $L - 1$, a visibility logit, a static/dynamic
+  logit.
+- Every dynamic point: a 16-frame 3D trajectory and a visibility per frame.
+- Every static point: one position, held for the window.
+- Updated features for the next window. The loop across windows is the loop across iterations
+  with a new starting point, which is how a model trained on 32- and 64-frame clips runs on
+  1000-frame videos.
+
+### De-duplication at the boundary
+
+At the end of a window every point sits at the same timestep, and the rule that makes
+cross-frame merging safe applies: two things cannot occupy the same voxel at the same time. The
+cloud is voxelised at the predicted positions with $v = 0.02$ in normalised scene units, through
+a sparse hash over $\lfloor \mathbf{x}/v \rfloor$, so there is no bounded grid. Tokens in a
+voxel are mean-pooled and keep the earliest birth. The survivors are the scene memory the next
+window's frames join.
+
+Each merge also records which voxel every point went into and its offset $\mathbf{r}$, so any
+pixel's full track can be exported by walking the maps back:
+$\mathbf{X}_\text{orig}(t) = \mathbf{X}_\text{vox}[\mathbf{p}](t) + \mathbf{r}$. The offset is
+fixed over time, so everything within a voxel moves together.
+
+<Figure
+  src="/articles/trackeverything/fig5.jpg"
+  alt="Two rows. Top, window i: frames of a child cycling go into TrackEverything, giving 3D point tracks for the window; the points at the end of the window, 46k points, are voxelised into deduplicated points, 16k points. Bottom, window i plus 1: new frames go through a geometry predictor into a 3D point cloud of the current window, which is added to the scene memory from previous windows to make a new set of points to track; TrackEverything then produces 3D point tracks for window i plus 1."
+  caption="Sliding windows and de-duplication: at one boundary, 46k end-of-window points collapse to 16k, which become the scene memory the next window's new points join (TrackEverything paper, Figure 5)."
+/>
+
+User query points, given as $(t, x, y)$, are never merged. An optional **early merge** (the
+appendix names the switch `voxelize_on_endpoints`) merges co-located static points after the
+first iteration instead of at the boundary; the labels settle in one iteration, so the rest of
+the window runs on fewer tokens.
+
+### The growth law
+
+Put numbers on it with $P$ tokens per frame, windows of $L = 16$, and $\rho$ the fraction of
+each frame that shows surface never seen before:
+
+$$
+N_\text{frame}(T) = P\,T, \qquad
+M(T) = P\,\bigl(1 + \rho\,(T - 1)\bigr), \qquad
+A(T) = M(T - L) + L\,P
+$$
+
+$N_\text{frame}$ is what a frame-local tracker holds, $M$ the de-duplicated memory after the
+last merge, $A$ the peak inside the window in flight (memory carried in plus the window's own
+frames). Both $N_\text{frame}$ and $M$ are linear in $T$; de-duplication cuts the slope from $P$
+to $\rho P$. A camera in a room it has already seen has $\rho \to 0$ and the memory stops
+growing. A camera seeing only new ground has $\rho = 1$, and de-duplication saves nothing.
+
+The teaser gives the rate. Its red line reaches 4.86M frame-local tokens at 400 frames, so
+$P = 12{,}150$ (reasoned). Its green line ends at 13.4k, 362 times fewer: in this model that clip
+has $\rho$ of about 0.03%, a camera that reveals very little that is new (reasoned).
+
+<DedupTimeline />
+
+At 400 frames and $\rho = 0.5\%$ the widget holds 4.86M tokens frame-local, 36.4k in
+de-duplicated memory and 229.8k at the peak of the last window, 21.1× fewer; at 1,200 frames it
+is 14.58M against 278.4k, 52.4× (measured in the widget). Two things fall out.
+
+First, the window in flight is a floor: its 16 frames (194,400 tokens at this rate) are held
+whatever the voxel size, because merging happens only at the boundary. The voxel ablation shows
+the floor in gigabytes: coarsening $v$ from 0.05 to 0.2 moves peak memory only from 11.2 to
+10.7 GB (reported). Per-frame voxelisation shrinks it in the real model; the widget leaves that
+out, so its green lines are an upper bound.
+
+Second, memory still grows with new territory. The limitations section says so ("active memory
+still continues to expand during perpetual open-world exploration"), and throughput tracks scene
+extent: the tracker alone runs at 8.4 FPS on Aria Digital Twin's multi-room scenes and 41.5 FPS
+on Panoptic Studio's single lab (reported).
+
+## Checking the results
+
+### TAPVid-3D and "over 20% APD"
+
+TAPVid-3D is three datasets: Aria Digital Twin (ADT, egocentric indoor, about 300 frames),
+DriveTrack (driving, 25-300 frames) and Panoptic Studio (PStudio, about 150 frames), 50 clips
+each here. Real video has no dense ground truth, so scoring is on annotated query points. APD is
+the fraction of predictions within a distance of the truth, averaged over thresholds: APD-P uses
+1, 2, 4, 8 and 16 pixels unprojected into 3D and is the stricter; APD-M uses 0.1, 0.3, 0.5 and
+1.0 m.
+
+On the first 48 frames (paper, Table 1; APD-P per dataset, reported):
+
+| Method | Kind | ADT | DriveTrack | PStudio | Avg APD-P | Avg APD-M |
+|---|---|---|---|---|---|---|
+| D4RT (closed, its own numbers) | all-frame dense | 40.8 | 41.0 | 49.6 | 43.8 | – |
+| VDPM | all-frame dense | 4.8 | 14.7 | 13.1 | 10.9 | 56.8 |
+| **TrackEverything** | all-frame dense | 45.7 | 28.2 | 30.1 | 34.7 | 72.6 |
+| DeltaV2 | first-frame dense | 44.3 | 28.4 | 30.4 | 34.4 | 73.0 |
+| TAPIP-3D | sparse | 45.6 | 26.7 | 30.0 | 34.1 | 72.2 |
+| CoTracker3 | sparse | 43.1 | 29.7 | 29.6 | 34.1 | 72.8 |
+
+Every row but D4RT and VDPM uses VGGT-Ω geometry. What the "over 20% APD" claim is made of:
+
+- It is 34.7 against 10.9, a gap of 23.8 **percentage points of APD-P** (reasoned). In APD-M the
+  gap is 15.8. So the claim holds for APD-P only.
+- The average clears 20 because of ADT (+40.9). On DriveTrack the gap is 13.5, on PStudio 17.0
+  (reasoned).
+- "All open-source all-frame dense 3D trackers" is one method in the table: VDPM. D4RT is ahead
+  by 9.1 APD-P on average, and on DriveTrack and PStudio. The paper says plainly that D4RT has
+  no public code, about 20× the parameters (a 1B backbone and a 144M decoder, against 61M) and
+  private training data.
+- Geometry does some of the work; VDPM cannot take external geometry. With Pi3 pointmaps
+  instead of VGGT-Ω, TrackEverything averages 30.2 APD-P (paper, Table 5), 19.3 above VDPM
+  (reasoned), just under the headline.
+
+The more interesting result is the tie. Tracking every point in every frame costs nothing on the
+annotated points: 34.7 against 34.4 for first-frame DeltaV2 and 34.1 for both sparse trackers.
+
+### Long sequences against sparse trackers
+
+On full-length TAPVid-3D (paper, Table 1; all with VGGT-Ω, reported):
+
+| Method | ADT | DriveTrack | PStudio | Avg APD-P | Avg APD-M |
+|---|---|---|---|---|---|
+| **TrackEverything** | 40.0 | 26.5 | 27.2 | 31.2 | 72.0 |
+| DeltaV2 | 34.7 | 27.3 | 27.7 | 29.9 | 70.7 |
+| TAPIP-3D | 37.2 | 24.5 | 27.6 | 29.8 | 71.2 |
+| CoTracker3 | 34.5 | 27.4 | 27.1 | 29.7 | 72.1 |
+| SpatialTracker-v2 | 36.6 | 28.1 | 23.7 | 29.5 | 71.4 |
+
+- TrackEverything leads APD-P by 1.3 points and trails CoTracker3 by 0.1 in APD-M (reasoned).
+  The lead is ADT. On DriveTrack it is fourth of five; on PStudio, third.
+- With Pi3 geometry the order changes: 24.9 APD-P against 25.8 (DeltaV2), 25.6 (TAPIP-3D), 25.2
+  (SpatialTracker-v2) and 24.8 (CoTracker3), fourth of five (paper, Table 6). "Competitive" is
+  the right word; "matches the state of the art" needs VGGT-Ω.
+- "Full length" here means at most about 300 frames. The 1000+ frame evidence is PointOdyssey:
+  1000+ frame videos scored on all 10k+ labelled points, 31.8 APD-P and 74.5 APD-M, with no
+  baselines because none runs there (Appendix A.1). The teaser's bar chart says "All-frame
+  tracking in 1000+ frame videos", but its 31.2 is the TAPVid-3D full-length average, and it marks
+  D4RT out of memory though the paper says D4RT has no public code to run. It is a summary.
+
+### Memory and speed, and on which GPU
+
+The complexity study runs on one L40S (the paper writes L40S-46G) on PointOdyssey, with 384
+query points. TrackEverything tracks every point as well; the others track only the 384.
+
+<Figure
+  src="/articles/trackeverything/fig3.png"
+  alt="Six line plots. Top row against number of frames up to about 900: APD-M, latency in seconds per clip, and peak GPU memory in GB, for CoTracker3, Any4D, SpatialTracker-v2, DeltaV2-sparse, DeltaV2-dense and TrackEverything. Crosses mark out-of-memory. Any4D stops near 96 frames, SpatialTracker-v2 near 150, DeltaV2-dense near 200, DeltaV2-sparse near 450 and CoTracker3 near 550; TrackEverything continues to about 900 frames, with the highest APD-M, latency rising to about 43 s and memory rising slowly to about 15 GB. Bottom row against number of query points up to 10 thousand at 120 frames: TrackEverything's latency and memory stay nearly flat while DeltaV2-sparse and CoTracker3 latency climb and SpatialTracker-v2 runs out of memory near 1 thousand points."
+  caption="Scaling with video length (top, 384 query points) and with query count (bottom, 120 frames) on PointOdyssey, on one L40S; crosses mark out-of-memory (TrackEverything paper, Figure 3)."
+/>
+
+The figure ships as a vector file, so I read the curves off its path coordinates (measured
+from the SVG). TrackEverything's peak memory is 8.1 GB at 48 frames, 10.0 GB at 336 and 14.9 GB
+at 896, the last point plotted; its latency is 2.1 s at 48 frames and 43.0 s at 896, about 20.8
+frames per second (reasoned). CoTracker3 goes from 4.7 GB at 48 frames to 32.4 GB at 336 and
+runs out of memory after its 550-frame point. That is roughly 8 MB of growth per frame against
+96 MB (reasoned).
+
+The text says memory "remains under 30 GB even at 900 frames"; the plot shows half that. The
+abstract claims videos "exceeding 1000 frames within 40 GB of GPU memory", but nothing plotted
+reaches 1,000 frames. Extending the last segment gives about 15.8 GB at 1,000 (reasoned), on this
+dataset; a scene that keeps revealing new surface would climb faster.
+
+Frame rates come from the appendix (paper, Table 4, full-length TAPVid-3D, reported):
+
+| Configuration | ADT | DriveTrack | PStudio | Avg FPS |
+|---|---|---|---|---|
+| Tracker only, early merge | 8.4 | 19.5 | 41.5 | 23.1 |
+| With VGGT-Ω geometry, early merge | 4.5 | 8.7 | 8.4 | 7.2 |
+
+Without early merge the averages are 12.6 and 5.6 FPS, at 31.2 APD-P against 31.3 with it. The
+table names no GPU; the paper's other timings are on the L40S. So "10+ FPS on a 40 GB GPU" is
+half true: the 10+ is the tracker without its geometry model (ADT's 8.4 misses it even then), end
+to end it is 5.6-7.2, and 40 GB is the paper's memory ceiling, not the card.
+
+### Ablations
+
+From the paper's Table 2 (reported):
+
+| Change | APD-P | s/frame | Peak memory |
+|---|---|---|---|
+| Full model | 31.2 | 0.05 | 9.1 GB |
+| Every point through the trajectory decoder | 31.2 | 0.24 | 22.4 GB |
+| Without 3D WAFT features | 29.3 | – | – |
+| Without iterative refinement | 26.4 | – | – |
+| No voxelisation (PointOdyssey) | – | – | out of memory |
+| Voxel 0.005 / 0.02 / 0.2 (PointOdyssey) | 31.4 / 30.9 / 23.5 | 0.23 / 0.11 / 0.03 | 24.0 / 15.0 / 10.7 GB |
+| Window 8 / 16 / 24 frames | 31.3 / 31.2 / 29.8 | 0.04 / 0.05 / 0.06 | 8.1 / 9.1 / 11.3 GB |
+
+- The static/dynamic split is the cleanest result in the paper: identical accuracy, 4.8× the
+  latency and 2.5× the memory without it.
+- Without voxelisation the model runs out of memory. De-duplication is load-bearing, not a tweak.
+- The WAFT row removes the sampled features; it does not put a 4D correlation volume back. It
+  shows WAFT is worth 1.9 APD-P. The memory claim against correlation volumes is argued, not
+  isolated: the Figure 3 comparisons are against other trackers that differ in more than one way.
+- The text says the default voxel retains peak accuracy "while halving latency and memory"
+  against 0.005. Latency halves (0.23 to 0.11 s); memory drops by 37.5% (24.0 to 15.0 GB,
+  reasoned).
+- The classifier is said to reach "93.1 and 92.5 F1" on Dynamic Replica and PointOdyssey.
+  Appendix A.1's full-length PointOdyssey run gives 78.5 F1 for the dynamic class and 92.5 for
+  the static one. The ablation does not say which class its number is for, and the moving class
+  is both the harder one and the one whose errors freeze motion for a window.
+
+## What is not in the box
+
+**The code.** The repository linked from the project page, `ayushjain1144/trackeverything`, is
+at commit `5ac9cfe` (24 September 2026): a README that says "Code release soon (maybe next
+week)" and a teaser image. Nothing here is checked against code; the only identifier the paper
+leaks is the early-merge switch. The release is also to carry the authors' PointOdyssey fixes:
+camera poses off by one frame in 16 sequences (about 25k frames), enough to move reprojected
+tracks by more than 600 px in fast pans. Anyone training on PointOdyssey wants those.
+
+**Merges are permanent.** Mean-pooling cannot be undone, so a tracking error that puts two
+surfaces in one voxel fuses them for good. The paper's mitigation is to pass important points as
+queries, which are never merged.
+
+**There is no eviction.** Memory grows with explored space; the authors name spatial cache
+eviction as the next step for hour-long sequences. FAST-LIO2 deletes map points as its local
+window moves. This does not, yet.
+
+**The tracker is only as good as its pointmaps.** On PStudio, APD-P is 23.5 with Pi3 geometry,
+30.1 with VGGT-Ω and 71.7 with sensor depth, with no retraining. That is a strength (better
+geometry is free accuracy) and a dependence: from the two frame rates above, geometry is about
+70% of the end-to-end time (reasoned).
+
+**The voxel is relative.** $v = 0.02$ is in unit-normalised scene coordinates, so its physical
+size scales with the scene: if normalisation puts the average point 3 m from the first camera, a
+voxel is about 6 cm across (reasoned, with an assumed scene size).
+
+The model itself is small: 61M parameters, 20M of them the frozen DINOv3-small, trained on eight
+L40S GPUs for 100k iterations on 32-frame clips and 300k on a mix of 32 and 64, on Kubric,
+PointOdyssey and Dynamic Replica.
+
+## Where it sits
+
+Most 3D work on this site reconstructs things that hold still: the rooms in the
+[3D reconstruction roundup](/articles/3d-reconstruction-roundup), the wreck in
+[SurfSLAM](/articles/surfslam), FAST-LIO2's map. TrackEverything keeps a map in which things may
+move, and pays for motion only where it happens; the voxel as the unit of memory is the move
+[VoxelTTO](/articles/voxel-tto) makes for Gaussians. The result is a tracker whose memory follows
+the scene rather than the clock, level on the annotated points with trackers that follow a few
+hundred. The code will say whether the mechanism is as clean as the paper.
