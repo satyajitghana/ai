@@ -13,9 +13,14 @@ import { JsonLd, personJsonLd, websiteJsonLd } from "@/lib/jsonld"
 import { WebMcp } from "@/components/site/webmcp"
 import { siteUrl } from "@/lib/site"
 
-// The Cloudflare Web Analytics site token (Cloudflare dashboard → Analytics &
-// Logs → Web Analytics → add site). Public by design: it only labels beacons.
-const CF_BEACON = process.env.NEXT_PUBLIC_CF_ANALYTICS_TOKEN
+// The Cloudflare Web Analytics site token for ai.thesatyajit.com (Cloudflare
+// dashboard → Analytics & Logs → Web Analytics). Public by design: it only
+// labels beacons, and every page carries it. NEXT_PUBLIC_CF_ANALYTICS_TOKEN
+// overrides it; the default applies only to Vercel's production deployment,
+// so preview deployments and local runs never count as visits.
+const CF_BEACON =
+  process.env.NEXT_PUBLIC_CF_ANALYTICS_TOKEN ||
+  (process.env.VERCEL_ENV === "production" ? "01352c08cb60400182d05faca846f4d2" : undefined)
 
 // Grotesk for display + body (unified, minimal), IBM Plex Mono as the accent.
 const fontSans = Hanken_Grotesk({

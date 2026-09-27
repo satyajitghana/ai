@@ -184,7 +184,9 @@ push to master → GitHub Action social-publish
   media-sync once (Actions → media-sync → Run workflow), then set
   `NEXT_PUBLIC_MEDIA_BASE=https://media.thesatyajit.com/ai` on Vercel Production
   and redeploy. **Done, 2026-09-27:** bucket, domain and the three secrets.
-- **Analytics:** `ai.` is DNS-only, so Cloudflare's automatic setup (which
+- **Analytics (done, 2026-09-27):** the site token is the default in
+  `app/layout.tsx`, used on Vercel production only. Kept for reference:
+  `ai.` is DNS-only, so Cloudflare's automatic setup (which
   injects the beacon at its edge) cannot apply; add the site with the manual
   JavaScript snippet, take the token from it, and set
   `NEXT_PUBLIC_CF_ANALYTICS_TOKEN` in Vercel (or commit it as the default: it
