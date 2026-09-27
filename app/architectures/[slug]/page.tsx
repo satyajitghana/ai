@@ -16,6 +16,7 @@ import { architectureJsonLd, breadcrumbJsonLd, JsonLd } from "@/lib/jsonld"
 import { isAbsolute } from "@/lib/media"
 import { absoluteUrl } from "@/lib/site"
 import { getThumb } from "@/lib/thumbs"
+import { seo } from "@/lib/seo"
 
 // One architecture from the /architectures gallery, explained in full: its
 // entry in data/architectures.ts (name, family, year, tags, paper, related
@@ -52,13 +53,8 @@ export async function generateMetadata({
   const arch = entryOf(slug)
   if (!doc || !arch) return {}
   const film = getFilm(archFilmKey(slug))
-  return {
-    title: doc.title,
-    description: doc.description,
-    alternates: {
-      canonical: `/architectures/${slug}`,
-      types: { "text/markdown": `/architectures/${slug}.md` },
-    },
+  return seo(`/architectures/${slug}`, doc.title, doc.description, {
+    markdown: true,
     openGraph: {
       type: "article",
       publishedTime: doc.date,
@@ -68,7 +64,7 @@ export async function generateMetadata({
       // Absolute: metadataBase resolves og:image URLs but not og:video ones.
       ...(film ? { videos: [{ url: isAbsolute(film.src) ? film.src : absoluteUrl(film.src), type: "video/mp4", width: film.width, height: film.height }] } : {}),
     },
-  }
+  })
 }
 
 export default async function Page({

@@ -7,6 +7,7 @@ import { getGitHubStats } from "@/lib/github"
 export const metadata = {
   title: "GitHub",
   description: "GitHub activity, top repositories, and language breakdown.",
+  alternates: { canonical: "/github" },
 }
 
 function SectionHeader({ label }: { label: string }) {
