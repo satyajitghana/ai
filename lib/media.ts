@@ -1,22 +1,42 @@
-// Where the heavy public assets — film videos, posters and article thumbnails —
-// are served from.
+// Where the heavy public assets are served from: films and their posters,
+// thumbnails, and the images and clips articles embed with <Figure> and <Video>.
 //
-// Today they are committed to the repository and served by Vercel's CDN from
-// public/, so the base is empty and every URL is same-origin. To move them to a
-// dedicated media CDN (a bucket that mirrors public/films and public/thumbs
-// behind a custom domain), set NEXT_PUBLIC_MEDIA_BASE to
-// https://media.thesatyajit.com/ai — the bucket is shared by every
-// thesatyajit.com site, and this one's files live under ai/ — and nothing
-// else changes. Captions stay
-// same-origin: a <track> from another origin needs CORS and crossorigin="".
+// Every file stays committed under public/, and that is what `pnpm validate`,
+// `pnpm dev` and local builds use. On Vercel, NEXT_PUBLIC_MEDIA_BASE
+// (https://media.thesatyajit.com/ai) points at Cloudflare R2, where
+// .github/workflows/media-sync.yml mirrors them under ai/ and publishes
+// ai/index.json: every uploaded path with the first 16 hex digits of its
+// SHA-256. Before `next build`, scripts/media-map.mts fetches that index and
+// keeps only the entries whose hash matches the file in this checkout, writing
+// them to lib/media-map.json. So:
 //
-// On the media CDN every file is cached for a year (.github/workflows/media-sync.yml
-// uploads it with `Cache-Control: immutable`), but a re-rendered film keeps its
-// filename, so its URL carries the render's hash from the manifest: a new render
-// is a new URL, and nothing stale is ever served. Same-origin URLs stay bare —
-// Vercel's CDN starts afresh on every deploy.
-const MEDIA_BASE = (process.env.NEXT_PUBLIC_MEDIA_BASE ?? "").replace(/\/+$/, "")
+//   - a file R2 already holds, byte for byte, is served from R2 at
+//     `${base}${path}?v=${hash}`. The URL changes when the content does, which
+//     is what makes the bucket's year of immutable caching safe;
+//   - anything else (a figure a pull request adds or changes, or everything if
+//     the index cannot be fetched) stays same-origin, so a preview is never
+//     broken by media that has not reached the bucket yet.
+//
+// The committed lib/media-map.json is empty: a local build is always
+// same-origin. Captions stay same-origin too (a cross-origin <track> needs CORS),
+// and so do the data files interactives fetch.
+import map from "@/lib/media-map.json"
 
-export const mediaUrl = (path: string, version?: string) =>
-  MEDIA_BASE && version ? `${MEDIA_BASE}${path}?v=${version}` : `${MEDIA_BASE}${path}`
+import { absoluteUrl } from "@/lib/site"
+
+const MEDIA_BASE = (process.env.NEXT_PUBLIC_MEDIA_BASE ?? "").replace(/\/+$/, "")
+const MAP = map as Record<string, string>
+
+/** The URL a page should use for a file under public/ (path starts with "/"). */
+export const mediaUrl = (path: string): string => {
+  const v = MEDIA_BASE ? MAP[path] : undefined
+  return v ? `${MEDIA_BASE}${path}?v=${v}` : path
+}
+
+/** mediaUrl as an absolute URL, for JSON-LD, feeds and the .md twins. */
+export const absoluteMediaUrl = (path: string): string => {
+  const u = mediaUrl(path)
+  return isAbsolute(u) ? u : absoluteUrl(u)
+}
+
 export const isAbsolute = (url: string) => /^https?:\/\//.test(url)

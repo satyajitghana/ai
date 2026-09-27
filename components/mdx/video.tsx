@@ -11,6 +11,11 @@
 //              only autoplay muted) and rude. Gets controls and waits to be
 //              started, and takes a `captions` VTT so the narration is
 //              readable as well as audible.
+//
+// The clips and the poster resolve through mediaUrl (lib/media.ts); the
+// captions track stays same-origin, because a cross-origin <track> needs CORS.
+import { mediaUrl } from "@/lib/media"
+
 export function Video({
   src,
   poster,
@@ -36,17 +41,17 @@ export function Video({
         controls={narrated}
         preload={narrated ? "metadata" : undefined}
         playsInline
-        poster={poster}
+        poster={poster ? mediaUrl(poster) : undefined}
         aria-label={alt}
       >
-        <source src={`${src}.webm`} type="video/webm" />
-        <source src={`${src}.mp4`} type="video/mp4" />
+        <source src={mediaUrl(`${src}.webm`)} type="video/webm" />
+        <source src={mediaUrl(`${src}.mp4`)} type="video/mp4" />
         {captions ? (
           <track kind="captions" src={captions} srcLang="en" label="English" default />
         ) : null}
         {poster ? (
           /* eslint-disable-next-line @next/next/no-img-element */
-          <img src={poster} alt={alt ?? ""} className="w-full rounded-md border" />
+          <img src={mediaUrl(poster)} alt={alt ?? ""} className="w-full rounded-md border" />
         ) : null}
       </video>
       {caption ? (

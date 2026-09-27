@@ -9,6 +9,7 @@ export const metadata: Metadata = {
   title: "Health",
   description:
     "A quantified-self biomarker dashboard — lab panels rendered as a category treemap, with optimal/borderline/elevated status derived per marker.",
+  alternates: { canonical: "/health" },
 }
 
 export default function HealthPage() {

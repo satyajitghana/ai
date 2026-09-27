@@ -8,6 +8,7 @@ export const metadata: Metadata = {
   title: "Snippets",
   description:
     "Small, copy-paste-able code snippets — CUDA, PyTorch, and systems tricks.",
+  alternates: { canonical: "/snippets" },
 }
 
 // Pull the intro prose and the first fenced code block out of a snippet body.

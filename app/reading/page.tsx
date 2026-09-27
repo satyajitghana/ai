@@ -6,6 +6,7 @@ import { reading, type ReadingItem } from "@/data/reading"
 export const metadata: Metadata = {
   title: "Reading",
   description: "Papers and books Satyajit Ghana is reading, has read, or has queued.",
+  alternates: { canonical: "/reading" },
 }
 
 const STATUS_ORDER: ReadingItem["status"][] = ["reading", "queued", "read"]

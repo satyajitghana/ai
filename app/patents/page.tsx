@@ -7,6 +7,7 @@ export const metadata: Metadata = {
   title: "Patents",
   description:
     "USPTO patent applications by Satyajit Ghana — structural-defect analysis and data-acquisition systems for industrial AI.",
+  alternates: { canonical: "/patents" },
 }
 
 export default function PatentsPage() {

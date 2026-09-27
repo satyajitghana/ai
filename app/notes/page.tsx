@@ -8,6 +8,7 @@ export const metadata: Metadata = {
   title: "Notes",
   description:
     "A digital garden of evergreen, interlinked notes on 3D perception, CUDA, and systems.",
+  alternates: { canonical: "/notes" },
 }
 
 export default function NotesPage() {
