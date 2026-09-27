@@ -1,0 +1,118 @@
+---
+title: "Mixture-of-Experts, from the router to the all-to-all"
+description: "How a sparse MoE layer replaces one feed-forward network with many experts and a router: softmax top-k gating, fine-grained and shared experts, why total and active parameters come apart (Hunyuan-A13B's 80.39B against 12.75B, counted to the weight, with Mixtral, DeepSeek-V2, DeepSeek-V3 and Kimi K3 beside it), load balancing from Shazeer's auxiliary losses to DeepSeek's routing bias, capacity and token dropping, and the two all-to-alls of expert parallelism."
+date: 2026-09-26
+tags:
+  - mixture-of-experts
+  - sparse
+  - explainer
+---
+
+In a dense Transformer every token runs the same MLP, and that MLP holds about two thirds of each block's weights ([the Transformer, from first principles](/architectures/transformer)). A mixture-of-experts (MoE) layer keeps many MLPs, called **experts**, and adds a small **router** that sends each token to a few of them. The model stores every expert and runs only the chosen ones, so its parameter count and its per-token compute stop being the same number.
+
+[Shazeer et al. (2017)](https://arxiv.org/abs/1701.06538) put a sparsely gated MoE between stacked LSTM layers, with up to 131,072 experts and 137 billion parameters in that one layer. [GShard](https://arxiv.org/abs/2006.16668) moved it into the Transformer's feed-forward slot, in every other layer, and trained a 600B-parameter translation model in 4 days on 2,048 TPU v3 cores. [Switch Transformers](https://arxiv.org/abs/2101.03961) cut routing to a single expert and reached 1.6 trillion parameters. [DeepSeekMoE](https://arxiv.org/abs/2401.06066) made the experts small and numerous and added experts that every token uses. The diagram above is one such layer: a router, the top 2 of six routed experts, and a shared expert that always runs.
+
+## The router
+
+The router is one matrix, $W_g$, of shape $d \times E$ for $E$ experts. For a token vector $x$ it produces a score per expert, keeps the best $k$, and mixes their outputs by their scores:
+
+$$
+s = \mathrm{softmax}(x W_g), \qquad
+\mathcal{T} = \mathrm{TopK}(s, k), \qquad
+y = \sum_{i \in \mathcal{T}} g_i \, E_i(x)
+$$
+
+The gate $g_i$ is $s_i$, often renormalised over the chosen $k$. It is what trains the router: a hard $\arg\max$ has no gradient, but the output is gate times expert output, so the loss reaches $W_g$ through every gate used.
+
+The variants differ in order and squashing. Shazeer's layer kept the top $k$ of noisy logits *before* the softmax, setting the rest to $-\infty$, so that borderline experts sometimes win. GShard takes the top 2 after the softmax; Switch takes the top 1 and computes $y = p_i(x)\,E_i(x)$. [Hunyuan-A13B](/articles/hunyuan-a13b) softmaxes over 64 experts, keeps 8 and renormalises. [DeepSeek-V3](https://arxiv.org/abs/2412.19437) scores each expert with a sigmoid instead of a softmax and normalises among the selected scores.
+
+The router is cheap: $d \cdot E$ multiply-adds per token. Hunyuan-A13B's is 64 × 4,096 = 262,144 weights per layer; a single one of its experts has 37,748,736. For the gating built up in code, from a dense ensemble to noisy top-k, see [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch).
+
+## Experts, fine-grained and shared
+
+An expert is an ordinary feed-forward network. In a modern model that is a SwiGLU MLP with three matrices, so $P_e = 3\,d\,d_\text{ff}$ weights. DeepSeekMoE changed two things about how they are cut.
+
+**Fine-grained segmentation.** Split each of $N$ experts into $m$ smaller ones and activate $mK$ of the $mN$ instead of $K$ of $N$. The compute per token is unchanged, and the number of ways to combine experts explodes: the paper's example is 120 possible pairs for top-2 of 16, against 4,426,165,368 combinations for top-8 of 64.
+
+**Shared experts.** Set $K_s$ experts aside that every token passes through without asking the router, so the routed experts stop relearning the same common knowledge:
+
+$$
+h = u + \sum_{i=1}^{K_s} \mathrm{FFN}_i(u) + \sum_{i \in \mathcal{T}} g_i \, \mathrm{FFN}_i(u)
+$$
+
+DeepSeekMoE 16B has 2 shared and 64 routed experts per layer, each a quarter the size of a standard FFN, and routes each token to 6 of the 64: 16.4B parameters in total, about 2.8B active. The paper reports it matching LLaMA2 7B with about 40% of the computations. DeepSeek-V2, DeepSeek-V3, Hunyuan-A13B and Kimi K3 all follow this pattern.
+
+## Why total and active parameters come apart
+
+Take a model with $L$ MoE layers, $E$ routed experts of $P_e$ weights each, and $k$ routed experts per token. Call everything else $N_0$: attention, shared experts, routers, norms and embeddings, all of which every token uses. Then
+
+$$
+N_\text{total} = N_0 + L\,E\,P_e, \qquad N_\text{active} = N_0 + L\,k\,P_e
+$$
+
+and the gap, $L\,(E-k)\,P_e$, is weight a given token never touches.
+
+Hunyuan-A13B, counted exactly: $L = 32$, $E = 64$, $k = 8$, and one SwiGLU expert is 3 × 4,096 × 3,072 = 37,748,736 weights. The routed experts are 32 × 64 × 37,748,736 = 77,309,411,328 weights, 96% of the model. Everything else is 3,083,771,904: per layer, attention, one shared expert, the router and four norms, plus the tied embedding and a final norm. So the total is 80,393,183,232, and a token reads 3,083,771,904 + 32 × 8 × 37,748,736 = 12,747,448,320, which is 80,393,183,232 − 32 × 56 × 37,748,736. The [Hunyuan-A13B article](/articles/hunyuan-a13b) sums the safetensors headers and reaches the same 80.39B and 12.75B.
+
+The ratio of stored to active weights has grown with each generation:
+
+| Model | Routed experts, active per token | Shared | Total | Active | Total per active |
+|---|---|---:|---:|---:|---:|
+| Mixtral 8x7B | 8, top-2 | 0 | 47B | 13B | 3.6 |
+| Hunyuan-A13B | 64, top-8 | 1 | 80.39B | 12.75B | 6.3 |
+| DeepSeek-V2 | 160, top-6 | 2 | 236B | 21B | 11.2 |
+| DeepSeek-V3 | 256, top-8 | 1 | 671B | 37B | 18.1 |
+| Kimi K3 | 896, top-16 | 2 | 2.78T | 104.2B | 26.7 |
+
+Sources: [Mixtral](https://arxiv.org/abs/2401.04088) (also in the [from-scratch article](/articles/mixture-of-experts-from-scratch)), [DeepSeek-V2](https://arxiv.org/abs/2405.04434), DeepSeek-V3 and the [Kimi K3 article](/articles/kimi-k3). DeepSeek-V3's experts are 3 × 7,168 × 2,048 = 44,040,192 weights each, and 58 of its 61 layers are MoE, so its routed experts alone come to 653,908,770,816, about 97% of the 671B (reasoned). Kimi K3 routes 16 of 896, a sparsity of 56, and runs its routed experts in a 3,584-wide latent space, half the model width.
+
+What the gap buys is compute. A forward pass costs about 2 FLOPs per active weight per token, so Hunyuan-A13B spends about 25.5 GFLOPs per token, like a 12.75B dense model, while every one of its 80.39B weights stays in memory. At batch 1 a decode step also reads only the active experts. A batch does not: each token picks its own experts, so the step reads the union. If a batch of 32 tokens each picked 8 of 64 experts uniformly at random, the chance that a given expert goes unused is $(56/64)^{32}$, about 1.4%, so the step would read about 98.6% of every layer's experts (reasoned). Sparsity saves FLOPs at any batch size; it saves memory bandwidth mostly at small ones.
+
+## Load balancing
+
+Routing is a feedback loop. An expert that wins a few tokens early gets gradient, improves and wins more; the losers get none and never improve. Left alone, a few experts take everything.
+
+**Auxiliary losses.** Shazeer's layer added two: the squared coefficient of variation of each expert's summed gate values ("importance") and of a smooth estimate of its token count ("load"). GShard used $\ell_\text{aux} = \frac{1}{E}\sum_e \frac{c_e}{S}\, m_e$, the fraction of tokens sent to expert $e$ times its mean gate. Switch wrote the form most models used afterwards:
+
+$$
+\mathcal{L}_\text{aux} = \alpha \, N \sum_{i=1}^{N} f_i \, P_i
+$$
+
+with $f_i$ the fraction of tokens dispatched to expert $i$ and $P_i$ its mean router probability. Under uniform routing each is $1/N$, so the loss equals $\alpha$ whatever $N$ is. Switch used $\alpha = 10^{-2}$; DeepSeek-V2 used 0.003 at the expert level and added device-level and communication balance terms at 0.05 and 0.02. The trouble is that this gradient competes with the language-modelling loss: too little and experts collapse, too much and the router is pushed away from the assignment the task wants.
+
+**A bias instead of a loss.** [Wang et al. (2024)](https://arxiv.org/abs/2408.15664) add a per-expert bias $b_i$ to the scores, but only for choosing:
+
+$$
+g_i = \begin{cases} s_i & s_i + b_i \in \mathrm{TopK}\big(\{s_j + b_j\}, k\big) \\ 0 & \text{otherwise} \end{cases}
+$$
+
+The gate is the unbiased score, so the bias moves traffic without entering the output or the gradient. After each step the bias of an overloaded expert drops by $\gamma$ and that of an underloaded one rises by $\gamma$. The update uses loads from past batches, not the current sequence's, which would leak information about future tokens. DeepSeek-V3 trains this way with $\gamma = 0.001$ for the first 14.3T tokens and 0 for the last 500B, keeping only a tiny sequence-wise loss at 0.0001 against extreme imbalance within one sequence. Kimi K3 replaces the fixed step with a solve: each bias becomes a quantile of how far that expert's scores fall from the cutoff, which hands every expert exactly its share.
+
+**Expert choice.** [Zhou et al. (2022)](https://arxiv.org/abs/2202.09368) flip the choice: each expert takes its top tokens, so load is balanced by construction. In a causal language model that selection depends on later tokens in the sequence, the same problem [Mixture-of-Depths](/architectures/mixture-of-depths) has to solve.
+
+## Capacity and token dropping
+
+Accelerators want fixed tensor shapes, so the classic MoE gives each expert a fixed number of slots per batch. Switch defines
+
+$$
+\text{capacity} = \frac{\text{tokens per batch}}{\text{number of experts}} \times \text{capacity factor}
+$$
+
+multiplied by $k$ when each token picks $k$ experts. A token that finds its expert full is **dropped** from it: that expert contributes nothing, and if every choice overflows, the residual connection carries the token to the next layer unchanged. With 4,096 tokens, 64 experts, top-8 and a capacity factor of 1.0, each expert has 4,096 × 8 / 64 = 512 slots; an expert picked 600 times drops 88 of them. Switch found drops typically under 1% with its balancing loss, and did best at capacity factors of 1.0 and 1.25 ([Switch Transformers](/articles/switch-transformer) walks through it). Better balancing has made dropping optional: DeepSeek-V2 dropped at the device level during training but never at evaluation, and DeepSeek-V3 drops no tokens in training or inference.
+
+## Expert parallelism and the all-to-all
+
+A model with hundreds of experts per layer does not fit on one accelerator, so the experts are spread out: each device holds a slice of every layer's experts. One MoE layer then runs in four moves:
+
+1. **Route** each token on the device that holds it.
+2. **Dispatch**, an all-to-all: every device sends each token's hidden vector to the devices that host its chosen experts.
+3. **Compute**: each device runs its experts on the tokens it received, one grouped matrix multiply per expert.
+4. **Combine**, a second all-to-all: expert outputs travel back to the token's home device, where they are weighted by the gates and summed.
+
+The backward pass repeats both exchanges. A token sends up to $k$ copies of a $d$-wide vector each way per layer: for DeepSeek-V3, 8 × 7,168 = 57,344 numbers out. DeepSeek-V3 dispatches them in FP8 and combines in BF16, and limits each token to 4 nodes, so it crosses the slower InfiniBand link at most 4 times and is forwarded over NVLink inside each node; the paper notes the same traffic could serve up to 13 experts. DeepSeek-V2 capped each token at 3 devices. The busiest device sets the pace, so balance is a systems problem too: Kimi K3's MoonEP adds redundant copies of hot experts so every rank receives exactly the same number of tokens.
+
+## What it is good and bad at
+
+MoE buys capacity per FLOP: Switch reported up to 7x faster pre-training than T5-Base at the same FLOPs per token. The costs move rather than vanish: every expert stays resident, a batch reads most of them, two all-to-alls sit in every MoE layer, and routing can collapse. Training is touchier too: Switch kept the router in float32 for stability, and RL post-training can pick different experts at rollout and at update ([Rollout Routing Replay](/articles/rollout-routing-replay)).
+
+Since 2017 the layer has moved from between LSTMs, and then every other Transformer block, to every block but the first few (DeepSeek-V3 keeps its first three dense, Kimi K3 its first one); from top-2 of large experts to top-8 or top-16 of hundreds of small ones plus shared experts; from auxiliary losses to biases and quantiles; and from dropping tokens to dropping none. The one-matrix router at its centre has barely changed.
