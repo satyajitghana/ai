@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 import { Hanken_Grotesk, IBM_Plex_Mono } from "next/font/google"
 import Script from "next/script"
+import { Analytics } from "@vercel/analytics/next"
 
 import "./globals.css"
 import "katex/dist/katex.min.css"
@@ -122,6 +123,10 @@ export default function RootLayout({
           <SiteFooter />
           <TerminalOverlay />
         </ThemeProvider>
+        {/* Vercel Web Analytics: page views and routes as Vercel sees them,
+            enabled per project in the Vercel dashboard (Analytics tab). It sends
+            only from a Vercel deployment and is a no-op locally. */}
+        <Analytics />
         {/* Cloudflare Web Analytics: free, cookieless page views and Core Web
             Vitals, no event cap. ai. is a DNS-only record (Vercel serves it),
             so Cloudflare cannot inject this itself: the beacon has to be on

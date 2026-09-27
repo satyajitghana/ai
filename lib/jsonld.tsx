@@ -15,7 +15,7 @@ import type { Publication } from "@/data/publications"
 import type { ArchitectureDoc, Article as ContentArticle, BlogPost, Project } from "@/lib/content"
 import { absoluteUrl, siteUrl } from "@/lib/site"
 import { archFilmKey, type Film, getFilm, isoDuration } from "@/lib/films"
-import { isAbsolute } from "@/lib/media"
+import { absoluteMediaUrl, isAbsolute } from "@/lib/media"
 
 // Centralized JSON-LD builders (schema-dts-typed). Injected via <JsonLd /> with
 // the `<` escape the Next.js json-ld guide requires.
@@ -120,7 +120,7 @@ export function blogPostingJsonLd(post: BlogPost): WithContext<BlogPosting> {
     "@type": "BlogPosting",
     headline: post.title,
     description: post.description,
-    image: post.cover ? [absoluteUrl(post.cover), ogImage] : [ogImage],
+    image: post.cover ? [absoluteMediaUrl(post.cover), ogImage] : [ogImage],
     datePublished: post.date,
     dateModified: post.updated ?? post.date,
     url,
@@ -145,7 +145,7 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
     "@type": "TechArticle",
     headline: article.title,
     description: article.description,
-    image: article.cover ? [absoluteUrl(article.cover), ogImage] : [ogImage],
+    image: article.cover ? [absoluteMediaUrl(article.cover), ogImage] : [ogImage],
     datePublished: article.date,
     dateModified: article.lastUpdated,
     url,
