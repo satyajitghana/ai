@@ -51,6 +51,19 @@ meant for attachments), `raw.githubusercontent.com` (`text/plain` with
 `nosniff`, so video may not play), jsDelivr's GitHub CDN (fair-use policy is
 for code, 20 MB file cap).
 
+**Status, 2026-09-27:** `thesatyajit.com` is on Cloudflare DNS, and
+`ai.thesatyajit.com` is a DNS-only CNAME to Vercel (answers carry
+`server: Vercel`), so nothing about the site's own serving changes. Built:
+`.github/workflows/media-sync.yml` (sparse checkout, `rclone sync --checksum`
+of `public/films` and `public/thumbs` to R2, a year of immutable caching) and
+version-stamped media URLs (`mediaUrl(path, sha)` appends `?v=<render hash>`
+when `NEXT_PUBLIC_MEDIA_BASE` is set, because a re-rendered film keeps its
+filename). The files stay in git: `validate:films` checks them and the OG
+images read the thumbnails at build. Left for the owner: the R2 bucket, its
+custom domain, the three secrets, one workflow run, then the env var on
+Vercel's **Production** environment only. Previews stay same-origin, because
+media-sync only uploads what reached `master`.
+
 ## 2. Analytics
 
 **Done:** Cloudflare Web Analytics — the beacon in `app/layout.tsx`, rendered
@@ -140,9 +153,13 @@ push to master → GitHub Action social-publish
 
 ## Decisions needed
 
-- **Media:** move `thesatyajit.com`'s DNS to Cloudflare (free), create an R2
-  bucket with the custom domain `media.thesatyajit.com`, and add R2 API keys as
-  GitHub secrets; the sync Action and the switch are then one PR.
+- **Media:** DNS is already on Cloudflare. Create an R2 bucket (default name in
+  the workflow: `ai-thesatyajit-media`, or set the `R2_BUCKET` repository
+  variable), attach the custom domain `media.thesatyajit.com`, add the
+  secrets `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, run
+  media-sync once (Actions → media-sync → Run workflow), then set
+  `NEXT_PUBLIC_MEDIA_BASE=https://media.thesatyajit.com` on Vercel Production
+  and redeploy.
 - **Analytics:** create the Cloudflare Web Analytics site and set
   `NEXT_PUBLIC_CF_ANALYTICS_TOKEN` in Vercel. Decide whether film engagement
   is worth adding PostHog or Umami.

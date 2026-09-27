@@ -7,7 +7,14 @@
 // behind a custom domain), set NEXT_PUBLIC_MEDIA_BASE, e.g.
 // https://media.thesatyajit.com — nothing else changes. Captions stay
 // same-origin: a <track> from another origin needs CORS and crossorigin="".
+//
+// On the media CDN every file is cached for a year (.github/workflows/media-sync.yml
+// uploads it with `Cache-Control: immutable`), but a re-rendered film keeps its
+// filename, so its URL carries the render's hash from the manifest: a new render
+// is a new URL, and nothing stale is ever served. Same-origin URLs stay bare —
+// Vercel's CDN starts afresh on every deploy.
 const MEDIA_BASE = (process.env.NEXT_PUBLIC_MEDIA_BASE ?? "").replace(/\/+$/, "")
 
-export const mediaUrl = (path: string) => `${MEDIA_BASE}${path}`
+export const mediaUrl = (path: string, version?: string) =>
+  MEDIA_BASE && version ? `${MEDIA_BASE}${path}?v=${version}` : `${MEDIA_BASE}${path}`
 export const isAbsolute = (url: string) => /^https?:\/\//.test(url)
