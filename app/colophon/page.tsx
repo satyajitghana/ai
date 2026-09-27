@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   title: "Colophon",
   description:
     "How this site is built — the dual-native thesis, the stack, and the Claude agent crew that maintains it.",
+  alternates: { canonical: "/colophon" },
 }
 
 function CommandHeader({ cmd }: { cmd: string }) {

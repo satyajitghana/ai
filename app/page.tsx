@@ -1,3 +1,4 @@
+import type { Metadata } from "next"
 import Link from "next/link"
 import { StarIcon } from "@phosphor-icons/react/dist/ssr"
 
@@ -11,7 +12,13 @@ import {
   getLogs,
   getProjects,
 } from "@/lib/content"
+import { seo } from "@/lib/seo"
+import { HOME_TITLE, SITE_DESCRIPTION } from "@/lib/site"
 
+export const metadata: Metadata = {
+  ...seo("/", HOME_TITLE, SITE_DESCRIPTION),
+  title: { absolute: HOME_TITLE },
+}
 const STAR = "oklch(0.79 0.15 82)" // warm gold, matches the articles page
 
 function SectionHeader({ path, href }: { path: string; href: string }) {
