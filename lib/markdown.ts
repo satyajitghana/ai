@@ -14,6 +14,7 @@ import {
   getSnippet,
   paperLinks,
 } from "@/lib/content"
+import { absoluteMediaUrl } from "@/lib/media"
 import { absoluteUrl } from "@/lib/site"
 
 // Markdown serializers for the agent-facing `.md` variants. Everything an agent
@@ -31,6 +32,17 @@ function header(title: string, canonical: string, meta: string[] = []): string {
     "",
     "",
   ].join("\n")
+}
+
+// <Figure src="/articles/…"> and <Video poster="…"> keep site-relative paths in
+// the MDX, but a deployment may not carry the file (lib/media.ts: it can be
+// served from the media CDN instead), so an agent reading the .md twin gets
+// the absolute URL the page itself uses.
+function absoluteMedia(body: string): string {
+  return body.replace(
+    /\b(src|poster)="(\/(?:articles|films|thumbs|projects)\/[^"]+)"/g,
+    (_, attr: string, path: string) => `${attr}="${absoluteMediaUrl(path)}"`
+  )
 }
 
 // <Receipts src="…"> renders a dataset that lives in a separate JSON file, so an
@@ -116,7 +128,7 @@ export function contentMarkdown(
         header(post.title, `/blog/${slug}`, [
           `date: ${post.date}`,
           ...(post.tags.length ? [`tags: ${post.tags.join(", ")}`] : []),
-        ]) + post.body
+        ]) + absoluteMedia(post.body)
       )
     }
     case "articles": {
@@ -128,7 +140,7 @@ export function contentMarkdown(
           ...(article.tags.length
             ? [`tags: ${article.tags.join(", ")}`]
             : []),
-        ]) + expandReceipts(article.body)
+        ]) + absoluteMedia(expandReceipts(article.body))
       )
     }
     case "architectures": {
@@ -141,7 +153,7 @@ export function contentMarkdown(
           `date: ${doc.date}`,
           ...(doc.tags.length ? [`tags: ${doc.tags.join(", ")}`] : []),
           ...(arch.paper ? [`paper: ${arch.paper}`] : []),
-        ]) + doc.body
+        ]) + absoluteMedia(doc.body)
       )
     }
     case "logs": {

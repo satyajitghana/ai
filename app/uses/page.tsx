@@ -6,6 +6,7 @@ import { uses } from "@/data/uses"
 export const metadata: Metadata = {
   title: "Uses",
   description: "The hardware, editor, terminal, and stack Satyajit Ghana uses.",
+  alternates: { canonical: "/uses" },
 }
 
 export default function UsesPage() {

@@ -8,6 +8,7 @@ export const metadata: Metadata = {
   title: "Publications",
   description:
     "Peer-reviewed publications by Satyajit Ghana — augmented reality, machine learning, and computer vision.",
+  alternates: { canonical: "/publications" },
 }
 
 export default function PublicationsPage() {

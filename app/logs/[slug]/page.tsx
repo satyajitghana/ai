@@ -4,6 +4,7 @@ import { notFound } from "next/navigation"
 import { AgentChip } from "@/components/site/agent-chip"
 import { PageShell } from "@/components/site/page-shell"
 import { getLog, getLogs } from "@/lib/content"
+import { seo } from "@/lib/seo"
 
 // Paired with the template-literal `await import()` below, per the Next.js MDX
 // guide, which documents that pattern with dynamicParams = false. With `true`
@@ -24,10 +25,7 @@ export async function generateMetadata({
   const { slug } = await params
   const log = getLog(slug)
   if (!log) return {}
-  return {
-    title: log.title ?? `Log — ${log.date}`,
-    alternates: { canonical: `/logs/${slug}` },
-  }
+  return seo(`/logs/${slug}`, log.title ?? `Log — ${log.date}`)
 }
 
 export default async function Page({

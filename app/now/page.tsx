@@ -6,6 +6,7 @@ import { now } from "@/data/now"
 export const metadata: Metadata = {
   title: "Now",
   description: "What Satyajit Ghana is focused on right now.",
+  alternates: { canonical: "/now" },
 }
 
 export default function NowPage() {

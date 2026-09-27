@@ -8,6 +8,7 @@ export const metadata: Metadata = {
   title: "Resume",
   description:
     "Resume of Satyajit Ghana — Head of Engineering at Inkers Technology. Deep learning, 3D perception, and high-performance systems.",
+  alternates: { canonical: "/resume" },
 }
 
 const PDF_PATH = "/satyajit-ghana-resume.pdf"

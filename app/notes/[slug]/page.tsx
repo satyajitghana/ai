@@ -5,6 +5,7 @@ import { notFound } from "next/navigation"
 import { PageShell } from "@/components/site/page-shell"
 import { getNote, getNotes } from "@/lib/content"
 import { resolveBacklinks, slugifyLink } from "@/lib/notes"
+import { seo } from "@/lib/seo"
 
 // Unknown slugs still 404 via notFound() below; `true` (a static literal, as
 // Next requires) lets newly-added content resolve in dev without a restart.
@@ -22,10 +23,7 @@ export async function generateMetadata({
   const { slug } = await params
   const note = getNote(slug)
   if (!note) return {}
-  return {
-    title: note.title,
-    description: `Note: ${note.title}`,
-  }
+  return seo(`/notes/${slug}`, note.title, `Note: ${note.title}`)
 }
 
 // Split a line of text on [[wikilinks]] and render each link as a <Link>. A

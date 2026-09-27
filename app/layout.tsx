@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 import { Hanken_Grotesk, IBM_Plex_Mono } from "next/font/google"
 import Script from "next/script"
+import { Analytics } from "@vercel/analytics/next"
 
 import "./globals.css"
 import "katex/dist/katex.min.css"
@@ -11,7 +12,7 @@ import { TerminalOverlay } from "@/components/terminal/terminal-overlay"
 import { cn } from "@/lib/utils"
 import { JsonLd, personJsonLd, websiteJsonLd } from "@/lib/jsonld"
 import { WebMcp } from "@/components/site/webmcp"
-import { siteUrl } from "@/lib/site"
+import { HOME_TITLE, SITE_DESCRIPTION, SITE_NAME, siteUrl } from "@/lib/site"
 
 // The Cloudflare Web Analytics site token for ai.thesatyajit.com (Cloudflare
 // dashboard → Analytics & Logs → Web Analytics). Public by design: it only
@@ -36,21 +37,17 @@ const fontMono = IBM_Plex_Mono({
   display: "swap",
 })
 
-const SITE_TITLE = "Satyajit Ghana"
-const SITE_DESCRIPTION =
-  "Satyajit Ghana — Head of Engineering at Inkers. Deep learning, 3D perception, CUDA, and high-performance systems. An AI-native, agent-readable homepage with projects, curated AI articles, a daily arXiv digest, and a downloadable resume."
-
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: `${SITE_TITLE} — Head of Engineering, AI & 3D Perception`,
-    template: `%s · ${SITE_TITLE}`,
+    default: HOME_TITLE,
+    template: `%s · ${SITE_NAME}`,
   },
   description: SITE_DESCRIPTION,
-  applicationName: SITE_TITLE,
-  authors: [{ name: SITE_TITLE, url: siteUrl }],
-  creator: SITE_TITLE,
-  publisher: SITE_TITLE,
+  applicationName: SITE_NAME,
+  authors: [{ name: SITE_NAME, url: siteUrl }],
+  creator: SITE_NAME,
+  publisher: SITE_NAME,
   keywords: [
     "Satyajit Ghana",
     "deep learning engineer",
@@ -65,8 +62,11 @@ export const metadata: Metadata = {
     "AI articles",
     "arXiv digest",
   ],
+  // Only what is true of every page. Next merges metadata one key deep, so a
+  // canonical, og:url, og:title or twitter title here would be inherited by
+  // every route that sets no block of its own; each page names those itself
+  // (lib/seo.ts, app/page.tsx).
   alternates: {
-    canonical: "/",
     types: {
       "application/rss+xml": "/feed.xml",
       "text/plain": "/llms.txt",
@@ -74,16 +74,11 @@ export const metadata: Metadata = {
   },
   openGraph: {
     type: "website",
-    siteName: SITE_TITLE,
-    title: `${SITE_TITLE} — Head of Engineering, AI & 3D Perception`,
-    description: SITE_DESCRIPTION,
-    url: siteUrl,
+    siteName: SITE_NAME,
     locale: "en_US",
   },
   twitter: {
     card: "summary_large_image",
-    title: `${SITE_TITLE} — AI & 3D Perception`,
-    description: SITE_DESCRIPTION,
     creator: "@thesudoer_",
   },
   robots: {
@@ -99,7 +94,6 @@ export const metadata: Metadata = {
   },
   category: "technology",
 }
-
 
 export default function RootLayout({
   children,
@@ -122,6 +116,10 @@ export default function RootLayout({
           <SiteFooter />
           <TerminalOverlay />
         </ThemeProvider>
+        {/* Vercel Web Analytics: page views and routes as Vercel sees them,
+            enabled per project in the Vercel dashboard (Analytics tab). It sends
+            only from a Vercel deployment and is a no-op locally. */}
+        <Analytics />
         {/* Cloudflare Web Analytics: free, cookieless page views and Core Web
             Vitals, no event cap. ai. is a DNS-only record (Vercel serves it),
             so Cloudflare cannot inject this itself: the beacon has to be on

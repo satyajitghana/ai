@@ -13,6 +13,7 @@ import { isAbsolute } from "@/lib/media"
 import { getThumb } from "@/lib/thumbs"
 import { articleJsonLd, breadcrumbJsonLd, JsonLd } from "@/lib/jsonld"
 import { absoluteUrl } from "@/lib/site"
+import { seo } from "@/lib/seo"
 
 // MUST stay false. This route's body does a template-literal dynamic import
 // (`@/content/articles/${slug}.mdx`), so the bundler cannot know which article
@@ -39,13 +40,8 @@ export async function generateMetadata({
   const article = getArticle(slug)
   if (!article) return {}
   const film = getFilm(slug)
-  return {
-    title: article.title,
-    description: article.description,
-    alternates: {
-      canonical: `/articles/${slug}`,
-      types: { "text/markdown": `/articles/${slug}.md` },
-    },
+  return seo(`/articles/${slug}`, article.title, article.description, {
+    markdown: true,
     openGraph: {
       type: "article",
       publishedTime: article.date,
@@ -55,7 +51,7 @@ export async function generateMetadata({
       // Absolute: metadataBase resolves og:image URLs but not og:video ones.
       ...(film ? { videos: [{ url: isAbsolute(film.src) ? film.src : absoluteUrl(film.src), type: "video/mp4", width: film.width, height: film.height }] } : {}),
     },
-  }
+  })
 }
 
 export default async function Page({

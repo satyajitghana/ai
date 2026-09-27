@@ -6,6 +6,7 @@ import { PageShell } from "@/components/site/page-shell"
 import { ShareButtons } from "@/components/site/share-buttons"
 import { getBlogPost, getBlogPosts } from "@/lib/content"
 import { blogPostingJsonLd, JsonLd } from "@/lib/jsonld"
+import { seo } from "@/lib/seo"
 
 // Paired with the template-literal `await import()` below, per the Next.js MDX
 // guide, which documents that pattern with dynamicParams = false. With `true`
@@ -26,20 +27,15 @@ export async function generateMetadata({
   const { slug } = await params
   const post = getBlogPost(slug)
   if (!post) return {}
-  return {
-    title: post.title,
-    description: post.description,
-    alternates: {
-      canonical: `/blog/${slug}`,
-      types: { "text/markdown": `/blog/${slug}.md` },
-    },
+  return seo(`/blog/${slug}`, post.title, post.description, {
+    markdown: true,
     openGraph: {
       type: "article",
       publishedTime: post.date,
       modifiedTime: post.updated ?? post.date,
       tags: post.tags,
     },
-  }
+  })
 }
 
 export default async function Page({

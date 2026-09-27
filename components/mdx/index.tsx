@@ -11,6 +11,7 @@ import { Receipts } from "@/components/mdx/receipts"
 import { RepoCard } from "@/components/mdx/repo-card"
 import { StepThrough } from "@/components/mdx/step-through"
 import { Video } from "@/components/mdx/video"
+import { mediaUrl } from "@/lib/media"
 import { Zoomable } from "@/components/mdx/zoomable"
 import { cn } from "@/lib/utils"
 
@@ -60,7 +61,7 @@ function Figure({
     <figure className="my-8">
       <Zoomable label="figure">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={src} alt={alt} className="w-full rounded-md border" />
+        <img src={mediaUrl(src)} alt={alt} className="w-full rounded-md border" />
       </Zoomable>
       {caption ? (
         <figcaption className="mt-2 text-center font-mono text-xs text-muted-foreground">

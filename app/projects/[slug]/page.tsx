@@ -7,6 +7,7 @@ import { PageShell } from "@/components/site/page-shell"
 import { ShareButtons } from "@/components/site/share-buttons"
 import { getProject, getProjects } from "@/lib/content"
 import { JsonLd, softwareSourceCodeJsonLd } from "@/lib/jsonld"
+import { seo } from "@/lib/seo"
 
 // Paired with the template-literal `await import()` below, per the Next.js MDX
 // guide, which documents that pattern with dynamicParams = false. With `true`
@@ -27,11 +28,7 @@ export async function generateMetadata({
   const { slug } = await params
   const project = getProject(slug)
   if (!project) return {}
-  return {
-    title: project.title,
-    description: project.description,
-    alternates: { canonical: `/projects/${slug}` },
-  }
+  return seo(`/projects/${slug}`, project.title, project.description)
 }
 
 export default async function Page({
