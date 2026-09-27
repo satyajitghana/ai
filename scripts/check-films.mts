@@ -1,4 +1,4 @@
-// pnpm validate:films [--only=slug,slug] [--storyboards]
+// pnpm validate:films [--only=slug,architectures/slug] [--storyboards]
 //
 // Explainer films (brand-crew/skills/explainer-films) explain how the thing an
 // article is about works, in the article's own terms, and every article gets a
@@ -9,7 +9,8 @@
 //            budget that keeps it under two minutes
 //   explain  it has a mechanism scene (diagram, stack, steps, grid, equation or
 //            compare) — a film that only quotes numbers is not an explainer —
-//            and exactly one takeaway; diagrams have no overlapping nodes and
+//            and exactly one takeaway; diagrams have no overlapping nodes, no
+//            arrow drawn backwards between two boxes set too close, and
 //            keep clear of the side the host presents from
 //   facts    every digit string a viewer sees or hears appears in the article's
 //            MDX (thousands separators and number words both count), a key
@@ -25,12 +26,20 @@
 //            a thumbnail; nothing in public/films or public/thumbs is unaccounted
 // A storyboard with no film is fine: films ship for a chosen set.
 //
+// Namespaces (hash.mjs NAMESPACES). Articles are keyed by their bare slug.
+// Every other kind that gets films is keyed `<kind>/<slug>`: its storyboard is
+// data/films/<kind>/<slug>.json, "the article" in everything above is
+// content/<kind>/<slug>.mdx, and its files are public/films/<kind>/<slug>.* and
+// public/thumbs/<kind>/<slug>.jpg under the same manifest key. Hosts are unique
+// across every namespace. Every doc that exists in a namespace needs a
+// storyboard and a thumbnail, as every article does.
+//
 // It cannot tell whether an explanation is right. That part is the author's,
 // and SKILL.md says how.
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
-import { articleDate, filmSha, fontsSha } from "../brand-crew/skills/explainer-films/hash.mjs"
+import { NAMESPACES, articleDate, filmSha, fontsSha, sourceOf, splitKey, storyboardKeys } from "../brand-crew/skills/explainer-films/hash.mjs"
 
 const ROOT = process.cwd()
 const SB_DIR = join(ROOT, "data", "films")
@@ -119,7 +128,7 @@ const Scene = z.discriminatedUnion("type", [
   z.object({ type: z.literal("equation"), title: str(8).optional(), text: z.string().min(3).max(48), say, parts: z.array(z.object({ match: z.string().min(1), note: str(12), say }).strict()).min(1).max(4) }).strict(),
   z.object({
     type: z.literal("figure"), title: str(8).optional(),
-    src: z.string().regex(/^\/articles\/[^\s"]+$/, "a path under /articles/ that the article itself shows"),
+    src: z.string().regex(new RegExp(`^/(${["articles", ...NAMESPACES].join("|")})/[^\\s"]+$`), "a path under /articles/ (or a namespace's /<kind>/) that the article itself shows"),
     credit: str(10), clip: z.tuple([z.number().min(0), z.number().min(0)]).optional(),
     steps: z.array(z.object({ focus: z.tuple([pct, pct, pct, pct]).optional(), note, say: sayReq }).strict()).min(1).max(4),
   }).strict(),
@@ -291,7 +300,10 @@ function guessBox(n: { label: string; sub?: string; kind?: string }, cx: number,
 const errors: string[] = []
 const fail = (slug: string, msg: string) => errors.push(`${slug}: ${msg}`)
 
-const files = readdirSync(SB_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort()
+// every storyboard key: article slugs, then `<kind>/<slug>` for each namespace
+const files = storyboardKeys()
+// a directory under data/films that is not a namespace would be silently skipped
+for (const d of readdirSync(SB_DIR, { withFileTypes: true })) if (d.isDirectory() && !NAMESPACES.includes(d.name)) fail(d.name, `data/films/${d.name}/ is not a film namespace (${NAMESPACES.join(", ")})`)
 type Man = { films: Record<string, { sha: string; duration: number; mp4Bytes: number; posterBytes: number; vttBytes?: number }> }
 const manifest: Man = existsSync(MAN) ? JSON.parse(readFileSync(MAN, "utf8")) : { films: {} }
 const thumbs: { thumbs: Record<string, { sha: string; bytes: number }> } = existsSync(TMAN) ? JSON.parse(readFileSync(TMAN, "utf8")) : { thumbs: {} }
@@ -307,15 +319,15 @@ for (const slug of files) {
   if (m0) { const k = [m0.species, m0.fur, m0.ears, m0.hat, m0.glasses, m0.outfit, m0.prop].join("/"); const o = outfits.get(k); if (o && (!only || only.includes(slug) || only.includes(o))) fail(slug, `mascot looks exactly like ${o}'s (${k}); change one thing`); outfits.set(k, slug) }
   if (only && !only.includes(slug)) continue
   checked++
-  const mdxPath = join(ROOT, "content", "articles", `${slug}.mdx`)
-  if (!existsSync(mdxPath)) { fail(slug, "no article content/articles/" + slug + ".mdx"); continue }
+  const mdxPath = sourceOf(slug)
+  if (!existsSync(mdxPath)) { fail(slug, splitKey(slug).ns ? `no doc ${mdxPath.slice(ROOT.length + 1)}` : "no article content/articles/" + slug + ".mdx"); continue }
   const parsed = Storyboard.safeParse(raw)
   if (!parsed.success) {
     for (const i of parsed.error.issues.slice(0, 8)) fail(slug, `${i.path.join(".") || "(root)"}: ${i.message}`)
     continue
   }
   const sb = parsed.data
-  if (sb.slug !== slug) fail(slug, `slug field is "${sb.slug}"`)
+  if (sb.slug !== slug) fail(slug, `slug field is "${sb.slug}"; it must be the film's key, "${slug}"`)
   if (sb.palette && !STYLES[sb.style].includes(sb.palette)) fail(slug, `palette "${sb.palette}" is not one of ${sb.style}'s: ${STYLES[sb.style].join(", ")}`)
   const types = sb.scenes.map((s) => s.type)
   if (types[0] !== "title") fail(slug, "first scene must be title")
@@ -391,6 +403,27 @@ for (const slug of files) {
         const a = boxes[i], b = boxes[j]
         if (a.x0 < b.x1 + 24 && b.x0 < a.x1 + 24 && a.y0 < b.y1 + 24 && b.y0 < a.y1 + 24) fail(slug, `${at}: nodes "${a.id}" and "${b.id}" overlap; move them apart`)
       }
+      // An edge runs from 12px outside its source box to 12px outside its target
+      // (engine/explainer.js edgePath). Two boxes close together along the edge
+      // put those two points past each other, and the line then runs backwards:
+      // the arrowhead lands on the source, pointing the wrong way.
+      const byId = new Map(sc.nodes.map((n, i) => [n.id, { ...boxes[i], op: n.kind === "op" }]))
+      for (const e of sc.edges ?? []) {
+        const A = byId.get(e.from), B = byId.get(e.to)
+        if (!A || !B) continue
+        const ax = (A.x0 + A.x1) / 2, ay = (A.y0 + A.y1) / 2, bx = (B.x0 + B.x1) / 2, by = (B.y0 + B.y1) / 2
+        const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1, bend = (e.bend ?? 0) * L * 0.35
+        const Cx = (ax + bx) / 2 - (dy / L) * bend, Cy = (ay + by) / 2 + (dx / L) * bend
+        const end = (N: typeof A, x: number, y: number) => {
+          const tx = Cx - x, ty = Cy - y, d = Math.hypot(tx, ty) || 1, ux = tx / d, uy = ty / d
+          const t = N.op ? (N.x1 - N.x0) / 2 + 10 : Math.min(Math.abs(ux) > 1e-6 ? ((N.x1 - N.x0) / 2 + 12) / Math.abs(ux) : 1e9, Math.abs(uy) > 1e-6 ? ((N.y1 - N.y0) / 2 + 12) / Math.abs(uy) : 1e9)
+          return [x + ux * t, y + uy * t]
+        }
+        const [p0x, p0y] = end(A, ax, ay), [p2x, p2y] = end(B, bx, by)
+        const run = ((p2x - p0x) * dx + (p2y - p0y) * dy) / L
+        // A short run still reads (the head sits in the gap); a negative one never does.
+        if (run < 0) fail(slug, `${at}: edge ${e.from}>${e.to} runs ${Math.round(run)}px, so its arrow is drawn backwards; move the two nodes further apart along it, or bend it`)
+      }
     }
   })
 
@@ -414,12 +447,31 @@ for (const slug of files) {
 if (!only && !sbOnly) {
   for (const slug of Object.keys(manifest.films)) if (!files.includes(slug)) fail(slug, "in the film manifest but has no storyboard")
   for (const slug of Object.keys(thumbs.thumbs)) if (!files.includes(slug)) fail(slug, "in the thumbnail manifest but has no storyboard")
+  // every file, the top level and one directory per namespace, named by its key
+  const listed = (dir: string) => {
+    const out: string[] = []
+    for (const d of readdirSync(dir, { withFileTypes: true })) {
+      if (!d.isDirectory()) out.push(d.name)
+      else if (NAMESPACES.includes(d.name)) out.push(...readdirSync(join(dir, d.name)).map((f) => `${d.name}/${f}`))
+      else fail(d.name, `${dir.slice(ROOT.length + 1)}/${d.name}/ is not a film namespace`)
+    }
+    return out
+  }
   if (existsSync(FILMS))
-    for (const f of readdirSync(FILMS)) { const slug = f.replace(/(-poster)?\.(mp4|webp|vtt)$/, ""); if (!manifest.films[slug]) fail(slug, `public/films/${f} is not in the manifest`) }
+    for (const f of listed(FILMS)) { const slug = f.replace(/(-poster)?\.(mp4|webp|vtt)$/, ""); if (!manifest.films[slug]) fail(slug, `public/films/${f} is not in the manifest`) }
   if (existsSync(THUMBS))
-    for (const f of readdirSync(THUMBS)) { const slug = f.replace(/\.jpg$/, ""); if (!thumbs.thumbs[slug]) fail(slug, `public/thumbs/${f} is not in the thumbnail manifest`) }
+    for (const f of listed(THUMBS)) { const slug = f.replace(/\.jpg$/, ""); if (!thumbs.thumbs[slug]) fail(slug, `public/thumbs/${f} is not in the thumbnail manifest`) }
   const arts = readdirSync(join(ROOT, "content", "articles")).filter((f) => f.endsWith(".mdx")).map((f) => f.slice(0, -4))
   for (const a of arts) if (!files.includes(a)) fail(a, "article has no storyboard in data/films/ (every article gets a thumbnail)")
+  // a namespace's docs are held to the same rule, for the docs that exist
+  for (const ns of NAMESPACES) {
+    const dir = join(ROOT, "content", ns)
+    if (!existsSync(dir)) continue
+    for (const f of readdirSync(dir).filter((f) => f.endsWith(".mdx"))) {
+      const key = `${ns}/${f.slice(0, -4)}`
+      if (!files.includes(key)) fail(key, `content/${ns}/${f} has no storyboard data/films/${key}.json (every doc gets a thumbnail)`)
+    }
+  }
 }
 
 if (errors.length) {

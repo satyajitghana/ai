@@ -1,0 +1,235 @@
+---
+title: "Tokenizers v1 and Combinatorial BPE: a faster BPE, and the six ways to spell 'the'"
+description: "Hugging Face's tokenizers v1 release candidate keeps every token ID and rebuilds the engine behind it: a bitstream pre-tokenizer instead of a regex, a word cache, an allocation-free merge loop, a lock-free batch planner and a crate split. Combinatorial BPE goes after the vocabulary instead, folding ' the', 'The' and ' THE' into one core row plus modifiers. BPE from first principles, both designs read from their code, and my own measurements: identical IDs over 20 million tokens, 7-54x single-core speedups, a 3x smaller wheel, and 19-32% of three real vocabularies spent on space and case variants."
+date: 2026-09-26
+tags:
+  - tokenization
+  - systems
+  - performance
+  - rust
+  - open-source
+  - benchmarks
+  - explainer
+cover: /articles/tokenizers-v1-combinatorial-bpe/fig4.png
+---
+
+import { MergeStepper } from "@/components/articles/tokenizers-v1-combinatorial-bpe/merge-stepper"
+import { MeasuredSpeedups } from "@/components/articles/tokenizers-v1-combinatorial-bpe/measured-speedups"
+
+Two tokenizer releases landed in the same week of September 2026, and they attack byte-pair encoding from opposite ends. On 21 September Hugging Face shipped a release candidate of [`tokenizers` v1](https://huggingface-tokenizers-v1.static.hf.space/index.html): the same token IDs as 0.23 from a rewritten engine. Two days later SwayStar123 posted [Combinatorial BPE](https://github.com/SwayStar123/CombinatorialBPE), which questions the IDs themselves: why store `" the"`, `"The"` and `" THE"` as unrelated rows?
+
+I read both codebases, installed both `tokenizers` wheels from PyPI and measured what I could on one CPU core. Every number is labelled **measured** (by me), **reported** (by the authors) or **reasoned** (arithmetic or inference).
+
+## BPE from first principles
+
+A tokenizer turns text into integers that pick rows of the embedding table ([how that table feeds the model](/articles/how-llm-inference-works)). Byte-level BPE, behind GPT-2, Llama 3 and Qwen, does it in three moves.
+
+**Bytes first.** The base alphabet is the 256 byte values of UTF-8, so every string encodes and there is no unknown token. GPT-2 maps each byte to a printable character so every entry is a readable string; the space becomes `Ġ`, which is why vocabulary dumps are full of `Ġthe`.
+
+**Pre-tokenize with a regex.** A fixed regular expression cuts the text into pre-tokens first. GPT-2's:
+
+```text
+'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+```
+
+The branch that matters is ` ?\p{L}+`: a run of letters takes the space in front of it, so `the cat` becomes `the` and ` cat`. Llama 3 and Qwen use the cl100k-style `[^\r\n\p{L}\p{N}]?\p{L}+`, which does the same with any one leading space or punctuation mark. Merges never cross a pre-token boundary, so this split decides everything downstream.
+
+**Merge by rank.** Training counts adjacent pairs over the corpus, merges the most frequent into a new symbol, appends that merge to a list, and repeats until the vocabulary is full. A merge's position in the list is its rank. Encoding replays the list inside each pre-token: merge the lowest-ranked adjacent pair until none is left.
+
+```python
+def bpe(pretoken: str, ranks: dict[tuple[str, str], int]) -> list[str]:
+    syms = list(pretoken)                      # bytes, in the real thing
+    while len(syms) > 1:
+        rank, i = min((ranks.get(p, 1 << 60), i) for i, p in enumerate(zip(syms, syms[1:])))
+        if rank == 1 << 60:                    # no ranked pair left
+            break
+        syms[i:i + 2] = [syms[i] + syms[i + 1]]
+    return syms
+```
+
+It is deterministic, which is what lets Hugging Face rewrite every stage and promise identical output. The stepper runs this on whatever you type, with a table learned from a six-sentence paragraph.
+
+<MergeStepper />
+
+With the default sentence and 80 table rows, the standard table holds separate rows for ` the`, ` The` and ` THE`, and for the letters `T` and `t`: 25 of its 80 rows spell a word another row already spells, and the sentence costs 15 tokens. In combinatorial mode the same 80 rows hold no variants, the freed rows become longer merges (`then` is one row), and the sentence costs 12. That is a toy; the rest is about real tables.
+
+## Why vocabularies fill up with " the", "The" and " THE"
+
+BPE does not know that `The` and `the` are one word. They are different bytes, and the pre-tokenizer glues the space on, so a word comes in two spacings times three casings (`the`, `The`, `THE`): six spellings, six merge chains, six rows, each kept if it is frequent enough to beat the next candidate merge.
+
+I counted this on three real vocabularies (measured): every letters-only entry, with its leading space stripped and lower-cased (only where the case round-trips exactly), grouped by what was left. "Rows saved" is what storing each group once would save:
+
+| tokenizer | vocabulary | rows saved | share | words with all six spellings |
+|---|---:|---:|---:|---:|
+| GPT-2 | 50,257 | 16,302 | 32.4% | 391 |
+| Llama 3 (8B) | 128,000 | 31,285 | 24.4% | 1,078 |
+| Qwen2.5 | 151,643 | 29,406 | 19.4% | 1,074 |
+
+Combinatorial BPE's README says "about 20% of a 32k vocabulary" for its own trained tokenizers (reported). Production vocabularies are no better.
+
+Then I encoded Hugging Face's own English benchmark text, the `english` fixture of `huggingface/tokbench-corpora` (5.2 MB of web prose, 1,140,538 Llama 3 tokens), and counted each spelling of *the* (measured):
+
+| row | `" the"` | `" The"` | `"The"` | `"the"` | `" THE"` | `"THE"` |
+|---|---:|---:|---:|---:|---:|---:|
+| uses | 40,351 | 3,340 | 2,060 | 204 | 82 | 16 |
+
+## What the duplicates cost
+
+**Embedding rows.** Each row is as wide as the model. Llama 3 8B is 4,096 wide with untied input and output tables, so its 31,285 foldable rows are about 128 million parameters in the embedding and as many again in the output head (reasoned: 31,285 × 4,096). Qwen2.5-0.5B, 896 wide with one tied table, spends about 26 million of its half-billion. Small models inherit a big vocabulary and pay a larger share, the squeeze behind the [softmax bottleneck](/articles/softmax-bottleneck).
+
+**Undertrained rows.** An input embedding row gets gradient only where its own ID appears, and the six spellings share nothing: `" THE"` learns from 82 occurrences where `" the"` learns from 40,351. Across the whole Llama 3 vocabulary, I took every family seen at least once in that text and set aside its most-used spelling (measured). Of the 24,907 spellings left, 22,308 appeared fewer than 10 times: 89.6%. Nothing ties `" THE"` to `" the"` except what the network works out for itself. The output head has the mirror problem: every row is pushed down on every step and pulled up only on its own rare occurrences.
+
+**Inconsistent splits.** [Land and Meister](https://arxiv.org/abs/2608.08847) note that `" together"` can be one entry while `"together"` is `to|gether`.
+
+## Hugging Face tokenizers v1: same IDs, new engine
+
+This is a release candidate. Tags `v1.0.0-rc.0` to `rc.2` went up on 21 September, with `1.0.0rc2` on PyPI and a crates.io pre-release the same day. The release notes claim the same API and IDs, a crate six times smaller and lower peak memory (reported). The IDs hold. I ran the GPT-2, Llama 3 and Qwen2.5 tokenizers over English, Hindi and Chinese web text and over Llama 3 chat transcripts full of special tokens: 12 cases, 20,250,213 tokens per version, and the SHA-256 over every ID matched 0.23.2 in all 12 (measured). The API claim does not hold in Python; more on that below.
+
+<RepoCard repo="huggingface/tokenizers" />
+
+The pipeline is still normalize, pre-tokenize, model, post-process; each stage changed inside.
+
+**The split: bitstreams instead of a regex.** 0.23 hands the pattern to a general regex engine, Oniguruma by default. v1's `bitcannon` crate runs a hand-written program per known pattern. Each byte gets one of 16 atom tags from a table generated at development time, so no Unicode crate ships in the binary. Each grammar folds the tags into a 3-bit code held as three bit-planes; every character class becomes a bitstream, one bit per input byte, and a pre-token boundary is a boolean expression over shifted streams. That decides 64 bytes per register operation with no data-dependent branch. It follows a MICRO'25 paper on bitstream regex matching ([doi 10.1145/3725843.3756052](https://doi.org/10.1145/3725843.3756052)), with parity tests against Oniguruma. It covers GPT-2's byte-level pattern, cl100k (Llama 3, GLM, and Qwen with its one-digit rule), o200k (gpt-oss, Llama 4, MiniMax), Tekken, DeepSeek and Kimi K2. Any other pattern keeps a regex and none of the speed-up.
+
+**The word cache.** A pre-token always produces the same IDs, so v1 keeps a thread-local table from pre-token bytes to IDs, laid out like a Swiss table: one hash byte per slot in a tag row, a 16-slot probe window, 32-byte slots holding up to three IDs inline. Its header is candid that hits are exact only up to 15 bytes; longer words match on 127 bits of hash. The cache pays in proportion to repetition. The page's ablation, cache on over cache off, is 0.93× on its English corpus and 0.98× on Chinese, but 1.38× on agent traces and 2.03× when 100 requests share an 8 KiB prefix (reported). On plain prose, then, the speed comes from the split and the merge loop (reasoned).
+
+**The merge loop.** 0.23 allocated memory and built a priority queue for every pre-token. v1 merges in caller-owned scratch buffers reused from word to word. A candidate pair is one 64-bit key, `rank << 32 | index`, so comparing keys compares ranks and breaks ties leftmost, as BPE prescribes. For longer words, pairs the word starts with are sorted once; only pairs created by merges go into a small heap. The model is called once per chunk of pre-tokens, not once per pre-token. Decode writes straight into a reusable buffer: 5.4 to 8.8 times 0.23's throughput across six model families (reported).
+
+<Figure
+  src="/articles/tokenizers-v1-combinatorial-bpe/fig1.png"
+  alt="Horizontal bar chart of single-thread encode throughput in MB/s: tokenizers v1 139.6 (15.9 times 0.23), gigatoken 137.2, fastokens 59.6, wordchipper 50.1, tiktoken 29.3, tokie 26.7, kitoken 25.8, tokenizers 0.23 8.8."
+  caption="Single-thread encode throughput, Rust crates on an Apple M4 Max, ratios against tokenizers 0.23. Hugging Face's numbers, from a benchmark that refuses to rank an engine whose IDs differ (tokenizers v1 announcement, Figure 1)."
+/>
+
+### How the benchmark was run
+
+The benchmark is [tokbench](https://github.com/huggingface/tokbench), on an Apple M4 Max (reported), timing Rust crates in-process rather than the Python bindings. Text is cut into 10 KiB documents; the warm-up slice is disjoint from the timed ones, so no timed pass re-encodes text the cache has seen; every engine's IDs are hashed against the reference, and all 176 cells verified. Baselines: `tokenizers` 0.23.1, gigatoken, fastokens 0.3.1, wordchipper, tiktoken (the `tiktoken-rs` crate, 0.12.0), tokie 0.1.4 and kitoken. The v1 build is `rc0 @ 199d9a13`.
+
+The headline is 139.6 MB/s against 8.8, 15.9×, with gigatoken at 137.2 and tiktoken at 29.3. Per model family it runs from 3.33× (T5, a Unigram model) to 29.83× (GPT-2); BPE models together reach 18.02×, WordPiece 6.73×. By language: 22.44× on English and 12.52× on Hindi, down to 6.77× on Chinese and 6.08× on Thai. The p99 latency for a 512-byte English document is 7.0 µs against 110.0 µs. The language spread follows repetition: tokbench puts real English at a pre-token recurrence of 8.3×, Chinese at 1.31×.
+
+I ran the same protocol through the Python bindings (measured): the same tokbench fixtures in 10 KiB documents, the first fifth to warm up, the next two fifths timed with one `encode()` call per document, the median of three fresh processes. It ran pinned to one core at `nice -n 19` on a shared 4-vCPU Xeon at 2.10 GHz whose other cores were busy, so read the ratios, not the MB/s:
+
+<MeasuredSpeedups />
+
+| tokenizer | English | Hindi | Chinese |
+|---|---:|---:|---:|
+| GPT-2 | 2.18 → 89.05 MB/s (40.9×) | 2.18 → 117.12 (53.8×) | 1.86 → 35.39 (19.0×) |
+| Llama 3 | 2.03 → 77.00 (37.9×) | 2.58 → 125.84 (48.8×) | 2.48 → 18.35 (7.4×) |
+| Qwen2.5 | 1.89 → 78.58 (41.6×) | 2.30 → 42.73 (18.6×) | 1.89 → 16.29 (8.6×) |
+
+The direction matches and Chinese gains least of the three; my English and Hindi ratios are larger than Hugging Face's. This Xeon has AVX-512 VBMI, `bitcannon`'s fastest x86 path, and a starved core may hurt the older, branchier code more; I cannot separate the two. Nor can I explain why Qwen2.5 gets 18.6× on Hindi where Llama 3, same grammar family, gets 48.8×.
+
+### Multi-thread scaling
+
+In native-thread mode all workers share one tokenizer and the library spreads a batch over its own pool. The planner in `pipeline/parallel.rs` is built around not sharing:
+
+- A batch under 8 KiB, or a single text under 16 KiB, runs serially on the calling thread.
+- Otherwise each text is a chunk, cut at special-token boundaries if it is 16 KiB or more. Chunks of 8 KiB or more go first so a big one never straggles, and chunks are grouped into tasks of at least 8 KiB so workers do not fight over crumbs.
+- Workers claim tasks with one atomic add on a cursor padded to its own cache line and write into result slots allocated up front. A per-text atomic counter tells whichever worker finishes a text's last chunk to assemble its `Encoding`. The calling thread takes tasks too instead of parking.
+- Each worker has its own scratch pool and word cache; the `rayon` pool is rebuilt after `fork()`.
+
+<Figure
+  src="/articles/tokenizers-v1-combinatorial-bpe/fig2.png"
+  alt="Step chart of encode throughput against thread count, 1 to 8, on an Apple M4 Max: tokenizers v1 rises from 130 to 833 MB/s, tokenizers 0.23 from 8 to 44. A table below adds fastokens at 153 on one thread and 166 on eight, and gigatoken falling from 177 to 101, with efficiencies of 76%, 13%, 16% and 77%."
+  caption="Native-thread scaling on an Apple M4 Max, one tokenizer shared by 1 to 8 workers: v1 goes from 130 to 833 MB/s, 76% of linear; 0.23 from 8 to 44, 77% (tokenizers v1 announcement, Figure 2)."
+/>
+
+v1 goes 130, 245, 450, 833 MB/s at 1, 2, 4, 8 threads, 76% of linear; 0.23 went 8, 15, 26, 44, 77% (reported). So v1 scales no better than 0.23; it kept the scaling while each thread got about 16 times faster (reasoned). gigatoken, level with v1 in the single-thread ranking, falls from 177 to 101 MB/s under native threads; the page notes it prefers one instance per worker.
+
+### Package size and memory
+
+v1 splits the old crate into a workspace: `tk-encode` is the runtime, `tk-serialize` reads and writes `tokenizer.json`, `tk-convert` upgrades legacy JSON, and `tk-train` holds the trainers. The default runtime has no regex engine (`fancy-regex` is opt-in), no `serde`, and neither native library 0.23 built by default: Oniguruma in C, and the C++ `esaxx` suffix array for Unigram training.
+
+<Figure
+  src="/articles/tokenizers-v1-combinatorial-bpe/fig3.png"
+  alt="Two boxes: tokenizers before the split, 665.3 kB; tk-encode with the minsize profile, 306.0 kB. Below, optional crates and what each adds: tk-serialize +32.0 kB, tk-convert +27.4 kB, tk-train +118.8 kB."
+  caption="Gzipped executable size, minsize profile, stripped, BPE-only runtime on aarch64 macOS: 665.3 kB before the split, 306.0 kB for tk-encode, and what each optional crate adds (tokenizers v1 announcement, Figure 3)."
+/>
+
+That is 2.2× smaller (reported). The page's headline 4.1× compares against a 164,189-byte nightly build with `panic_immediate_abort`, and none of its configurations reaches the release notes' six times. Memory, with the gpt-oss tokenizer: a loaded heap of 16.9 MB against 47.8 MB, 2.8×; 19.1 against 51.3 MB after a warm encode; 34.6 against 52.8 MB with eight native threads (reported).
+
+The manylinux x86_64 wheel shrinks from 3,386,843 bytes to 1,104,880, 3.1×, and the installed package from 11.1 MiB to 2.6 MiB (measured). The catch: `numpy` is now a hard dependency, for the NumPy array accessors, at 67.9 MiB installed. Process RSS under CPython 3.11, whose bare interpreter is 8.8 MiB:
+
+| RSS, MiB | 0.23.2 | 1.0.0rc2 |
+|---|---:|---:|
+| after `import tokenizers` | 15.6 | 10.4 |
+| GPT-2 loaded, after `malloc_trim` | 29.5 | 15.1 |
+| Qwen2.5 loaded, after `malloc_trim` | 57.1 | 20.7 |
+| Llama 3 loaded, after `malloc_trim` | 60.7 | 21.9 |
+| Llama 3 loaded, before `malloc_trim` | 85.6 | 133.6 |
+
+`malloc_trim` returns freed heap to the OS, so the trimmed rows minus the interpreter are what the tokenizer keeps: 6.4 against 20.7 MiB for GPT-2, about 4 times less for the big vocabularies. The last row is the load's high-water mark: for Llama 3, v1 briefly touches more memory while building its tables; I did not profile why.
+
+### What breaks
+
+In Python, "same API" is not true (measured on `1.0.0rc2`). The module exports four classes: `Tokenizer`, `Encoding`, `Padding`, `Truncation`. `tokenizers.models`, `tokenizers.trainers` and the other component modules are gone. `Tokenizer` has 9 public attributes where 0.23.2 had 38: no `get_vocab`, `token_to_id`, `add_tokens`, `save`, `train` or `decode_batch`. `encode()` takes one text and keyword-only options, so `encode("question", "context")` raises `TypeError`. `Encoding` keeps 3 of its 22 public attributes (`ids`, `type_ids`, `attention_mask`), adds NumPy twins, and loses `tokens`, `offsets` and `word_ids` with the rest. `transformers` 5.17.0 pins `tokenizers>=0.23.1,<0.24.0`, so pip will not install the candidate beside it. The README promises most of it back before 1.0.0.
+
+In Rust the break is larger (read from the tagged tree, not compiled). No crate at `v1.0.0-rc.2` defines a `Tokenizer` type: the entry point is `from_json_file`, which returns a read-only `PipelineTokenizer`. `REQUIRED_FOR_V1.md` lists the rest as dropped on purpose: `TokenizerBuilder`, the wrapper enums, the config-shaped `BPE`, the `vocab.json` plus `merges.txt` loaders, and `tk-train`, excluded from the workspace, so nothing can train. The announcement's Rust example still calls `Tokenizer::from_pretrained` and tells you to switch off a default-on training feature; at the tag the only features are `progressbar`, `regex`, `http` and `unstable_wasm`. This is an inference release.
+
+## Combinatorial BPE: fold the variants out
+
+[Combinatorial BPE](https://github.com/SwayStar123/CombinatorialBPE) is MIT-licensed code with pretrained tokenizers and a results report; I read it but did not run it. Every token is a 4-tuple, `(variation, prefix, core, suffix)`:
+
+- **variation** is hand-coded: as-is, Capitalised or UPPER, plus an optional Traditional variation for Chinese. Case folds only when a character round-trips exactly, so encoding stays lossless.
+- **prefix** is a learned string of non-letters on the left of a word: `" "`, `" ("`, `' "'`.
+- **core** is ordinary BPE over case-folded text with the spaces taken off.
+- **suffix** is a learned run of trailing punctuation: `","`, `'."'`, `"();"`.
+
+A word needing several core pieces becomes several tuples, the prefix on the first and the suffix on the last. A piece cased neither Capitalised nor UPPER (the code's example is `cDo`) is spelled one character per tuple, and anything outside the alphabet falls back to UTF-8 bytes. The four tables share one budget, 4 + 777 + 31,427 + 560 = 32,768 rows in the flagship tokenizer, and the split is learned: an affix stays only if it saves more tokens than the core merge it displaces.
+
+<Figure
+  src="/articles/tokenizers-v1-combinatorial-bpe/fig4.png"
+  alt="Diagram in three parts. Five spellings of 'the' map to 4-tuples that share the core row 'the', with prefix, variation and suffix boxes. Inventories for a 32k budget: 4 variation rows, 777 prefix rows, 31,427 core rows, 560 suffix rows. The model sums four embeddings into an unchanged transformer and predicts prefix, then core, then variation, then suffix, each conditioned on the parts before it."
+  caption="Every token is a (variation, prefix, core, suffix) tuple; the model sums the four embeddings in and predicts the four parts out through a chained head (Combinatorial BPE README, Figure 1)."
+/>
+
+The model changes at both ends: the input is the sum of four embeddings, and a chained head predicts prefix, core, variation and suffix in turn, each conditioned on the parts before it, with tied tables. The author argues this is a proper distribution, so bits per byte compares directly with standard BPE.
+
+The claims (reported) come from one 32k tokenizer and an 8-layer GPT of 42-45M parameters, trained for 22,500 steps of 16k tokens on Wikipedia in six languages and GitHub code in five:
+
+- 32% fewer tokens for the same text: 22-25% on natural language, 42-50% on code.
+- 1.261 bits per byte against 1.309 at equal compute, 3.7% lower, better on all 11 sources.
+- The baseline's final quality with 32% less compute and 6.5% less data; at equal data, 1.0% better.
+- With a third of the training, the two are roughly level (0.6%).
+- A 9.3k-row tokenizer against a 128k standard one: 0.5% worse bits per byte with 14× fewer embedding rows, in models of 32.6M and 92.6M parameters.
+
+<Figure
+  src="/articles/tokenizers-v1-combinatorial-bpe/fig5.png"
+  alt="Two bar charts over 11 sources. Fewer tokens for the same text: 32.3% overall, 41.6 to 50.0% for Python, Go, Java, JavaScript and C++, 22.2 to 25.3% for Russian, German, Chinese, French, English and Japanese. Lower bits per byte: 3.7% overall, from 8.8% for Python down to 2.2% for Japanese."
+  caption="Same 32,768 embedding rows, same 8-layer GPT, same compute: token count and bits-per-byte change per source, single seed, 42-45M parameters; the author's claims (Combinatorial BPE README, Figure 2)."
+/>
+
+### Where the shorter sequences come from
+
+The tweet pitches folding `" Hello"` into `"Hello"`, but the author's own ablation says case is the smaller half. On English Wikipedia at 16k rows, the best standard BPE gets 4.082 characters per token, the full scheme 5.197, the scheme without case 4.974, and without affixes 2.678 (reported); without a prefix table even the space costs a token (reasoned from the code). The affixes do most of the compressing by gluing ` (`, ` "`, `,` and `."` onto words, so one position often carries what a standard tokenizer splits into two or three pre-tokens.
+
+To isolate what the tweet describes, I reimplemented only the space and case factoring (measured, my own toy, not the author's code): a letter word loses its leading space and its case, a 2-row space table and a 3-row case table carry them, and core BPE gets the remaining rows. No punctuation affixes. Trained on the first 4 million characters of the tokbench English fixture, tested on the last million, at equal rows:
+
+| table rows | standard, chars/token | space + case factored | tokens |
+|---:|---:|---:|---:|
+| 4,096 | 3.300 | 3.680 | −10.3% |
+| 8,192 | 3.717 | 4.082 | −9.0% |
+| 16,384 | 4.058 | 4.363 | −7.0% |
+| 32,768 | 4.306 | 4.533 | −5.0% |
+
+The gain shrinks as the table grows, since a big table can afford the variants anyway. Land and Meister's boundary markers remove the same duplication, stay within one percent of the baseline's compression, and still lower bits per byte. Read together (reasoned): folding space and case buys better-trained rows and a few percent of length; the big cut in sequence length is the punctuation affixes.
+
+### What it costs
+
+- **The model interface.** Every inference engine assumes one ID and one softmax per position. Here each position needs four sequential draws, so sampling, logit bias, grammar-constrained decoding, speculative verification and the tokenizer API all need rewriting (reasoned). The chained head adds about 2.4M parameters, roughly 6%, with no parameter-matched baseline (reported).
+- **Decoding ambiguity.** Decoding a tuple is deterministic, but different tuples can spell the same text: UPPER on a core of digits changes nothing, and a `" ("` prefix spells the same as the characters ` (` encoded as core tokens. The reported bits per byte scores only the canonical encoding, so it is conservative, but a sampler can emit a non-canonical tuple that decodes fine and leaves the next step off-distribution (reasoned).
+- **Shorter is not free.** The headline compares at equal compute, where shorter sequences also mean more text per step. At equal data, single-domain JavaScript comes out 2.7% worse (reported).
+- **Case fallback.** On code without camelCase splitting, up to 18.5% of identifier characters needed per-character tuples (reported); `split_camel` is the author's answer.
+- **Scale.** Models of 30-45M parameters, at most 369M training tokens, one seed per run. The README says behaviour at real scale is untested.
+
+Factoring case out is not new: Marian NMT had factored vocabularies, and [Wilken and Matusov](https://arxiv.org/abs/1910.03912) predicted case as a separate factor in 2019. What is new is learned affixes, a learned budget split and a language-modelling evaluation.
+
+## What I take from both
+
+tokenizers v1 is a performance release done properly: the output is pinned and verified, and every stage was rebuilt around not allocating, not branching and not sharing. On my one busy core it encoded 7 to 54 times faster than 0.23 with identical IDs, from a wheel a third the size. For a Rust pipeline that only encodes, it is worth trying now through `from_json_file`; for Python code that touches vocabularies, offsets, training or `transformers`, it is not a drop-in yet.
+
+Combinatorial BPE targets a waste I can measure, 19-32% of three production vocabularies, mostly trained on almost nothing. Its fix changes the contract between tokenizer and model, on single-seed evidence at 45M parameters. [Gigatoken](/articles/gigatoken) showed the regex was the slow part; v1 made it fast without changing an ID. Combinatorial BPE asks whether the IDs were right.
+
+---
+
+*Sources: the [tokenizers v1 announcement](https://huggingface-tokenizers-v1.static.hf.space/index.html) and its embedded benchmark data, `huggingface/tokenizers` at tag `v1.0.0-rc.2` (7616272), [tokbench](https://github.com/huggingface/tokbench), and the [Combinatorial BPE repository](https://github.com/SwayStar123/CombinatorialBPE) at 84b3e5d. Figures 1-3 are Hugging Face's and figures 4-5 are SwayStar123's; the widgets, the measured tables and the toy reimplementation are mine.*

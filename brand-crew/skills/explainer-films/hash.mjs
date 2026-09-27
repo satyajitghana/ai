@@ -3,7 +3,7 @@
 // so a storyboard edit, an article re-date or an engine change can't ship
 // with yesterday's video still attached.
 import { createHash } from 'node:crypto'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -55,10 +55,43 @@ export function engineSha(style) {
   return sha
 }
 
-export function articleDate(slug) {
-  const src = readFileSync(join(ROOT, 'content', 'articles', `${slug}.mdx`), 'utf8')
+// Films live in namespaces, one per content kind that gets them. An article's
+// film is keyed by its bare slug, as it always was: data/films/<slug>.json,
+// told against content/articles/<slug>.mdx. Every other kind is keyed
+// `<kind>/<slug>`: data/films/<kind>/<slug>.json against
+// content/<kind>/<slug>.mdx. The key is also the manifest key and the path
+// under public/films and public/thumbs, and a storyboard's `slug` field. An
+// article slug never contains a slash, so the two can't collide.
+export const NAMESPACES = ['architectures']
+
+export function splitKey(key) {
+  const i = key.indexOf('/')
+  if (i < 0) return { ns: '', slug: key }
+  const ns = key.slice(0, i), slug = key.slice(i + 1)
+  if (!NAMESPACES.includes(ns) || !slug || slug.includes('/')) throw new Error(`${key}: not a film key (a slug, or one of ${NAMESPACES.map(n => n + '/<slug>').join(', ')})`)
+  return { ns, slug }
+}
+
+// the MDX a film is held to: every digit, quote and label it shows is checked against it
+export function sourceOf(key) {
+  const { ns, slug } = splitKey(key)
+  return join(ROOT, 'content', ns || 'articles', `${slug}.mdx`)
+}
+
+// every storyboard's key, articles' and each namespace's, sorted
+export function storyboardKeys() {
+  const dir = join(ROOT, 'data', 'films'), json = d => readdirSync(d).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5))
+  const keys = json(dir)
+  for (const ns of NAMESPACES) if (existsSync(join(dir, ns))) keys.push(...json(join(dir, ns)).map(s => `${ns}/${s}`))
+  return keys.sort()
+}
+
+// The date a film depends on. Named for articles, which were the only kind;
+// it takes any key.
+export function articleDate(key) {
+  const src = readFileSync(sourceOf(key), 'utf8')
   const m = src.match(/^date:\s*["']?(\d{4}-\d{2}-\d{2})/m)
-  if (!m) throw new Error(`${slug}: no date in frontmatter`)
+  if (!m) throw new Error(`${key}: no date in frontmatter`)
   return m[1]
 }
 

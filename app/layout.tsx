@@ -13,9 +13,14 @@ import { JsonLd, personJsonLd, websiteJsonLd } from "@/lib/jsonld"
 import { WebMcp } from "@/components/site/webmcp"
 import { siteUrl } from "@/lib/site"
 
-// The Cloudflare Web Analytics site token (Cloudflare dashboard → Analytics &
-// Logs → Web Analytics → add site). Public by design: it only labels beacons.
-const CF_BEACON = process.env.NEXT_PUBLIC_CF_ANALYTICS_TOKEN
+// The Cloudflare Web Analytics site token for ai.thesatyajit.com (Cloudflare
+// dashboard → Analytics & Logs → Web Analytics). Public by design: it only
+// labels beacons, and every page carries it. NEXT_PUBLIC_CF_ANALYTICS_TOKEN
+// overrides it; the default applies only to Vercel's production deployment,
+// so preview deployments and local runs never count as visits.
+const CF_BEACON =
+  process.env.NEXT_PUBLIC_CF_ANALYTICS_TOKEN ||
+  (process.env.VERCEL_ENV === "production" ? "01352c08cb60400182d05faca846f4d2" : undefined)
 
 // Grotesk for display + body (unified, minimal), IBM Plex Mono as the accent.
 const fontSans = Hanken_Grotesk({
@@ -118,13 +123,15 @@ export default function RootLayout({
           <TerminalOverlay />
         </ThemeProvider>
         {/* Cloudflare Web Analytics: free, cookieless page views and Core Web
-            Vitals, no event cap. Works without proxying the site through
-            Cloudflare. Renders nothing until the site's beacon token is set. */}
+            Vitals, no event cap. ai. is a DNS-only record (Vercel serves it),
+            so Cloudflare cannot inject this itself: the beacon has to be on
+            the page. `spa` counts App Router navigations, which change the URL
+            without a page load. Renders nothing until the token is set. */}
         {CF_BEACON ? (
           <Script
             src="https://static.cloudflareinsights.com/beacon.min.js"
             strategy="afterInteractive"
-            data-cf-beacon={JSON.stringify({ token: CF_BEACON })}
+            data-cf-beacon={JSON.stringify({ token: CF_BEACON, spa: true })}
           />
         ) : null}
       </body>

@@ -1,0 +1,136 @@
+---
+title: "Mamba and selective state spaces, from first principles"
+description: "How a state space model turns a sequence into a fixed-size state: the continuous SSM and its zero-order-hold discretisation, why S4's time-invariant form is a convolution, why Mamba's input-dependent B, C and Δ break that and need a hardware-aware parallel scan, Mamba-2's state space duality with its scalar decay and chunked matrix multiplies, Mamba-2.8B counted to the last weight, its state weighed against a Transformer's KV cache, and why hybrids keep some attention."
+date: 2026-09-26
+tags:
+  - state-space-models
+  - mamba
+  - recurrence
+  - explainer
+---
+
+A Transformer keeps every token it has read: the KV cache grows by one entry per token, and each new token attends over all of them. A recurrent model keeps a state of fixed size and folds each token into it. The Mamba paper puts the trade in one line: "attention is both effective and inefficient because it explicitly does not compress context at all." [Mamba](https://arxiv.org/abs/2312.00752) (Gu and Dao, December 2023) is a recurrence that decides, token by token, what to compress into its state and what to drop. [Mamba-2](https://arxiv.org/abs/2405.21060) (Dao and Gu, May 2024) restricts it just enough that it trains as matrix multiplies.
+
+The worked numbers use three models trained on the same 300B tokens of the Pile: Mamba-2.8B (width 2,560, 64 layers), Mamba-2 2.7B (the same width and depth), and Pythia-2.8B, the Transformer the papers compare against (width 2,560, 32 layers).
+
+## A state space model
+
+A state space model maps an input signal $x(t)$ to an output $y(t)$ through a hidden state $h(t) \in \mathbb{R}^N$:
+
+$$
+h'(t) = A\,h(t) + B\,x(t), \qquad y(t) = C\,h(t)
+$$
+
+$A$ is $N \times N$, $B$ is $N \times 1$, $C$ is $1 \times N$. In practice $A$ is diagonal, so the state is $N$ independent components, each decaying toward zero at its own rate while the input pushes on it. Mamba initialises the diagonal to $A_n = -(n+1)$, the S4D-Real scheme, so every component is stable. One SSM handles one input channel; a layer runs $D$ of them side by side, one per channel, so its state is $D \times N$ numbers.
+
+## Discretisation: zero-order hold
+
+Tokens arrive at discrete steps, so the ODE is discretised with a step size $\Delta$. Zero-order hold assumes the input is constant across a step and solves the linear ODE exactly over it:
+
+$$
+h_t = \bar{A}\,h_{t-1} + \bar{B}\,x_t, \qquad y_t = C\,h_t
+$$
+
+$$
+\bar{A} = \exp(\Delta A), \qquad \bar{B} = (\Delta A)^{-1}\big(\exp(\Delta A) - I\big)\,\Delta B
+$$
+
+The second formula is $\int_0^{\Delta} e^{sA}\,ds\; B$ written out: the input's push, integrated over the step and decayed by the time that remains. For one diagonal entry $a \lt 0$, $\bar{a} = e^{\Delta a}$ lies between 0 and 1. A small $\Delta$ gives $\bar{a} \approx 1$ and $\bar{B} \approx 0$: the state persists and the token barely registers. A large $\Delta$ gives $\bar{a} \to 0$: the state is wiped and replaced by the current input. To first order in $\Delta$, $\bar{B} = \Delta B$, and that is what the reference implementation computes (`deltaB_u` in `selective_scan_ref`).
+
+The paper proves the connection to gated RNNs directly. With $N = 1$, $A = -1$, $B = 1$ and $\Delta = \text{softplus}(z_t)$, the recurrence becomes $h_t = (1 - g_t)\,h_{t-1} + g_t\,x_t$ with $g_t = \sigma(z_t)$: $\Delta$ is a forget gate.
+
+## S4: fixed dynamics, so a convolution
+
+If $\bar{A}$, $\bar{B}$ and $C$ are the same at every step, the recurrence can be unrolled:
+
+$$
+y_t = \sum_{k=0}^{t} C\bar{A}^{k}\bar{B}\,x_{t-k}, \qquad \bar{K} = \big(C\bar{B},\; C\bar{A}\bar{B},\; \dots,\; C\bar{A}^{L-1}\bar{B}\big)
+$$
+
+That is a convolution $y = x * \bar{K}$ with a kernel of length $L$. [S4](https://arxiv.org/abs/2111.00396) computes the kernel once and applies it with an FFT: fully parallel over the sequence in training, and a cheap recurrence at inference. The property that allows it is linear time invariance, and it is also the weakness. The kernel is the same whatever the tokens are, so the model cannot decide that this token matters and that one is filler. It solves copying at fixed spacing, which needs only a sense of time, but not the paper's Selective Copying task, where the spacing is random. On that task S4 scores 18.3% accuracy; the same layer made selective scores 97.0%, and 99.8% inside the full Mamba block.
+
+## Selection: B, C and Δ from the token
+
+Mamba makes three of the four parameters functions of the input: $B_t = \text{Linear}_N(x_t)$, $C_t = \text{Linear}_N(x_t)$, and $\Delta_t = \text{softplus}(\text{bias} + \text{Linear}_D(\text{Linear}_R(x_t)))$, a low-rank projection whose rank $R$ is $\lceil D_{\text{model}}/16 \rceil$ in the code, 160 for Mamba-2.8B. $A$ stays a learned constant, but it only ever acts through $\bar{A}_t = \exp(\Delta_t A)$, so it is selective too.
+
+Now the model can ignore a token (small $\Delta_t$), reset at a document boundary (large $\Delta_t$), and choose what enters the state and what is read out ($B_t$, $C_t$). The cost is the convolution. The output is now
+
+$$
+y_t = \sum_{s \le t} C_t \Big(\prod_{r=s+1}^{t} \bar{A}_r\Big) \bar{B}_s\, x_s
+$$
+
+and the product depends on every step in between, so there is no fixed kernel and no FFT. The paper calls the selective layer S6.
+
+## The hardware-aware scan
+
+The recurrence is still linear in $h$, and a linear recurrence $h_t = a_t h_{t-1} + b_t$ parallelises. Represent each step as the pair $(a_t, b_t)$. Applying $(a_1, b_1)$ then $(a_2, b_2)$ gives $(a_2 a_1,\; a_2 b_1 + b_2)$, an associative operation, so a parallel scan computes all $L$ states in $O(\log L)$ sequential depth.
+
+Memory is the real problem. The discretised $\bar{A}$ and $\bar{B}$ have shape (batch, $L$, $D$, $N$), $N$ times larger than the input. Written to GPU memory (HBM), the scan is bound by those reads and writes. Mamba's kernel fuses the whole layer instead: it loads $\Delta$, $A$, $B$ and $C$ from HBM into on-chip SRAM, discretises there, scans there, multiplies by $C$ there, and writes back only the output of shape (batch, $L$, $D$). The backward pass recomputes the states rather than storing them. That cuts memory traffic by a factor of order $N$; the paper measures it at 20-40× faster than a standard scan in PyTorch, and faster than FlashAttention-2 beyond sequence length 2K.
+
+## The Mamba block
+
+Mamba drops the attention-then-MLP pattern for one homogeneous block. An input projection widens $D$ to $2ED$ and splits into two branches. One goes through a causal depthwise convolution of width 4, SiLU and the selective SSM; the other through SiLU as a gate; they multiply, and an output projection narrows back to $D$. With $E = 2$ the projections hold $3ED^2 = 6D^2$ weights, so two Mamba blocks match the $12D^2$ of one Transformer layer, and Mamba stacks twice as many.
+
+Here is one layer of Mamba-2.8B ($D = 2{,}560$, 5,120 inner channels, $N = 16$), counted from the code:
+
+| Part | Shape | Parameters |
+|---|---|---:|
+| Input projection | 2,560 × 10,240 | 26,214,400 |
+| Convolution, with bias | 5,120 × 4 + 5,120 | 25,600 |
+| B, C and Δ projection | 5,120 × 192 | 983,040 |
+| Δ up-projection, with bias | 160 × 5,120 + 5,120 | 824,320 |
+| $A$ (stored as its log) | 5,120 × 16 | 81,920 |
+| Skip weight $D$ | 5,120 | 5,120 |
+| Output projection | 5,120 × 2,560 | 13,107,200 |
+| RMSNorm | 2,560 | 2,560 |
+| **One layer** | | **41,244,160** |
+
+Sixty-four layers, a tied embedding of 50,280 × 2,560 and a final norm give 2,768,345,600, exactly the Hub's count. The two big projections are 95% of every layer; everything that makes it an SSM is 1,894,400 weights, 4.6%. So FLOPs follow the usual rule of about 2 per weight per token, 82.5 million per layer. The scan adds work in proportion to the 81,920 state entries per layer, and none in proportion to the position $t$: the 10,000th token costs what the first did, where attention's cost per token grows with $t$.
+
+On the Pile, Mamba-2.8B averages 63.3 on the paper's zero-shot suite against Pythia-2.8B's 59.1, and the paper reports 5× the generation throughput of a Transformer of similar size. A two-layer Mamba trained on induction heads at length 256 still solves it at 1,048,576, 4000× longer.
+
+## Mamba-2: state space duality
+
+Mamba-2 makes one restriction: $A_t$ is a scalar times the identity, $a_t I$, with $a_t = \exp(\Delta_t A_h)$ and one learned $A_h$ per head. Channels are grouped into heads of dimension $P$ (64 here) that share $a_t$, $B_t$ and $C_t$, so each head's state is an $N \times P$ matrix:
+
+$$
+H_t = a_t\,H_{t-1} + B_t\,x_t^{\top}, \qquad y_t = H_t^{\top} C_t
+$$
+
+Unroll it and the whole layer is one matrix product:
+
+$$
+Y = \big(L \circ C B^{\top}\big)\,X, \qquad L_{ts} = \begin{cases} a_t\,a_{t-1} \cdots a_{s+1} & t \ge s \\ 0 & t \lt s \end{cases}
+$$
+
+Read $C$ as queries, $B$ as keys and $X$ as values: this is causal attention with the softmax removed and a data-dependent decay mask $L$ in place of positional encoding. That is the duality: the same layer is a linear recurrence, costing $O(TNP)$ but sequential, and a masked attention, costing $O(T^2)$ but all matrix multiplies.
+
+The SSD algorithm uses both. Cut the sequence into chunks of $Q$ tokens (256 in the code). Inside each chunk, use the attention form: small dense matmuls. Compute each chunk's final state with one more matmul, pass states from chunk to chunk with the scalar recurrence, only $T/Q$ steps long, and add each chunk's contribution from the state it inherited. With $N = P = Q$ it costs $O(TN^2)$ FLOPs and $O(TN)$ memory, nearly all on tensor cores. The paper measures it 2-8× faster than Mamba's scan, while allowing a state "8× the size of Mamba or even higher", and 6× faster than FlashAttention-2 at 16K. The same chunking splits a long sequence across GPUs: each device hands its final state to the next.
+
+The block changes too: one input projection produces $x$, the gate, $B$, $C$ and $\Delta$ in parallel, like Q, K and V, and a norm sits before the output projection. In Mamba-2 2.7B the 5,120 inner channels are 80 heads of 64 with $N = 128$. Its input projection is 2,560 × 10,576 (5,120 + 5,120 + 128 + 128 + 80); $A$ is 80 numbers per layer where Mamba-1 had 81,920; a layer is 40,216,560 weights. Trained on the same 300B tokens, it outperforms Mamba-2.8B, Pythia-2.8B and even Pythia-6.9B, the paper reports.
+
+## A fixed state against a growing cache
+
+Here is what each model carries per sequence, at 2 bytes a number:
+
+| Model | What is kept | Numbers | Size |
+|---|---|---:|---:|
+| Mamba-2.8B | 64 × (5,120 × 16 state + 5,120 × 3 convolution inputs) | 6,225,920 | 11.9 MiB, at any length |
+| Mamba-2 2.7B | 64 × (80 × 64 × 128 state + 5,376 × 3 convolution inputs) | 42,975,232 | 82 MiB, at any length |
+| Pythia-2.8B | 2 × 32 × 2,560 keys and values per token | 163,840 per token | 320 KiB per token; 640 MiB at 2,048 |
+
+Pythia's cache equals Mamba-2.8B's whole state at 38 tokens and passes Mamba-2's at 263. At Pythia's full 2,048-token context it is 54 times Mamba-2.8B's state, and it keeps growing with every token after that. Decode is bound by memory traffic, so a state this small means big batches: the paper credits Mamba's 4-5× inference throughput to having no KV cache.
+
+## What a fixed state is bad at
+
+A state of 6,225,920 numbers cannot hold a long document verbatim. Selection chooses what to keep, but it has to choose before it knows the question. [Jelassi et al.](https://arxiv.org/abs/2402.01032) prove that a two-layer Transformer can copy strings of exponential length, while a fixed-state model cannot, and find pretrained Transformers "dramatically outperform state space models at copying and retrieving information from context". Recall improves with state size: on multi-query associative recall, the Mamba-2 paper shows accuracy rising as $N$ goes from 16 to 64 to 256. At scale, [Waleffe et al.](https://arxiv.org/abs/2406.07887) trained 8B Mamba, Mamba-2 and Transformer models on up to 3.5T tokens: the pure SSMs lagged on 5-shot MMLU and the Phonebook lookup task.
+
+## Why hybrids keep some attention
+
+A few attention layers fix most of it. In the Mamba-2 paper's 48-layer, 350M model, perplexity is 8.60 with no attention, 8.26 with 6 attention layers and 8.68 for the Transformer++ baseline; about 10% attention was best. At 2.7B, 58 SSD layers plus 6 attention layers average 61.0 against 60.2 for both pure Mamba-2 and Transformer++. Waleffe et al.'s 8B hybrid, 43% Mamba-2, 7% attention and 50% MLP, beat their Transformer on all 12 standard tasks, by 2.65 points on average.
+
+That is now the default shape of a deployed SSM. [Rigel](/articles/rigel-hybrid-mamba) repeats three Mamba-2 layers and one attention layer ten times, and chunks its scan at 256 so a 4,096-token sequence needs 16 state hand-offs. [Soofi S](/articles/soofi-s) and the Nemotron 3 Nano backbone under [TwoTower](/articles/nemotron-twotower) keep 6 attention layers in 52, about 6 KB of attention cache per token. [Nemotron's NVFP4 run](/articles/nemotron-nvfp4) trains a 550B-total hybrid on the same plan. The Mamba layers carry the gist; the attention layers look up the exact token.
+
+## What changed since 2023
+
+The selective scan is still the idea. What moved is everything around it. Mamba-2's scalar decay made SSMs one member of the linear-attention family, which let them borrow attention's kernels and parallelism. Its relatives now write to the state with a delta rule instead of adding to it: [Gated DeltaNet](https://arxiv.org/abs/2412.06464), and Kimi Delta Attention, which gives each channel its own decay and powers the hybrid in [Kimi K3](/architectures/kimi-k3). [Liquid time constants and gated delta rules](/articles/ltc-gated-delta) derives how these recurrences relate, and [KDA's half-life](/articles/kda-half-life) shows the price every one of them pays: a gated state forgets on a schedule. And pure SSMs mostly gave way to hybrids. The [Transformer page](/architectures/transformer) builds the attention those hybrids keep.
