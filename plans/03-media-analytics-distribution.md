@@ -51,18 +51,37 @@ meant for attachments), `raw.githubusercontent.com` (`text/plain` with
 `nosniff`, so video may not play), jsDelivr's GitHub CDN (fair-use policy is
 for code, 20 MB file cap).
 
-**Status, 2026-09-27:** `thesatyajit.com` is on Cloudflare DNS, and
+**Status, 2026-09-27 (done):** `thesatyajit.com` is on Cloudflare DNS, and
 `ai.thesatyajit.com` is a DNS-only CNAME to Vercel (answers carry
-`server: Vercel`), so nothing about the site's own serving changes. Built:
-`.github/workflows/media-sync.yml` (sparse checkout, `rclone sync --checksum`
-of `public/films` and `public/thumbs` to R2, a year of immutable caching) and
-version-stamped media URLs (`mediaUrl(path, sha)` appends `?v=<render hash>`
-when `NEXT_PUBLIC_MEDIA_BASE` is set (to `https://media.thesatyajit.com/ai`), because a re-rendered film keeps its
-filename). The files stay in git: `validate:films` checks them and the OG
-images read the thumbnails at build. Left for the owner: the R2 bucket, its
-custom domain, the three secrets, one workflow run, then the env var on
-Vercel's **Production** environment only. Previews stay same-origin, because
-media-sync only uploads what reached `master`.
+`server: Vercel`), so nothing about the site's own serving changes. Films,
+posters, thumbnails and every article figure and clip are served from R2:
+
+- `.github/workflows/media-sync.yml` runs on each push to `master` that
+  touches `public/films`, `public/thumbs` or `public/articles`. It uses a
+  pinned rclone (Ubuntu's 1.60 reports R2 uploads as 501 errors), a canary
+  upload, and `rclone sync --checksum` of the images and videos under `ai/`,
+  with a year of immutable caching. Last of all it publishes `ai/index.json`,
+  every uploaded path with the first 16 hex digits of its SHA-256.
+- Before `next build`, `scripts/media-map.mts` fetches that index and keeps an
+  entry only where this checkout's file has the same hash, writing
+  `lib/media-map.json`; `mediaUrl(path)` links a kept file as
+  `${base}${path}?v=${hash}`, so a changed file is a new URL. Anything else
+  stays same-origin, including a figure a pull request adds before it reaches
+  the bucket, and everything if the index cannot be fetched. That is why
+  `NEXT_PUBLIC_MEDIA_BASE` is safe on **Preview** as well as Production.
+- On Vercel the same script deletes the served-from-R2 files from the build's
+  copy of `public/` (~409 MB of 420), so a deployment no longer carries them.
+  It keeps thumbnails (the OG image routes read them at build), any path a
+  component names as a literal, and every non-media file (captions, which a
+  cross-origin `<track>` would need CORS for, the JSON `<Receipts>` reads,
+  interactives' data files). The files stay in git: `validate:films` and
+  `validate:assets` check them, and a local build is always same-origin.
+
+Why the pruning matters: Vercel stores every deployment's static output,
+previews included, until it is deleted, and each one carried the whole of
+`public/`. About eighty deployments of ~420 MB is how the project reached
+35 GB of Deployment Storage. Set a retention policy (Project → Settings →
+Deployment Retention) and push each branch in batches, not a commit at a time.
 
 ### The shared bucket
 
@@ -77,7 +96,8 @@ ai-thesatyajit-media/                  https://media.thesatyajit.com/…
     films/architectures/<slug>.*
     thumbs/<slug>.jpg
     thumbs/architectures/<slug>.jpg
-    articles/<slug>/…                  (later: article figures)
+    articles/<slug>/…                  article figures and clips (images and videos only)
+    index.json                         path → sha256[:16], written last (scripts/media-map.mts)
   <site>/                              another subdomain's own prefix
   shared/                              anything two sites both link to
 ```
@@ -88,12 +108,18 @@ prefix. This site's `NEXT_PUBLIC_MEDIA_BASE` is `https://media.thesatyajit.com/a
 
 ## 2. Analytics
 
-**Done:** Cloudflare Web Analytics — the beacon in `app/layout.tsx`, rendered
-only when `NEXT_PUBLIC_CF_ANALYTICS_TOKEN` is set (Cloudflare dashboard →
-Analytics & Logs → Web Analytics → add `ai.thesatyajit.com` → copy the token
-into Vercel's environment variables). Free, cookieless, no consent banner, no
+**Done:** Cloudflare Web Analytics — the beacon in `app/layout.tsx`, on
+Vercel production with the site's token as the default
+(`NEXT_PUBLIC_CF_ANALYTICS_TOKEN` overrides it). Free, cookieless, no consent banner, no
 event cap, Core Web Vitals included, and it works without the site being
 proxied through Cloudflare. It does not do custom events.
+
+**Done:** Vercel Web Analytics — `<Analytics />` from `@vercel/analytics/next`
+in `app/layout.tsx`, which starts reporting once Analytics is enabled on the
+project (Vercel → Project → Analytics). It counts page views by route,
+referrer and country, and is also cookieless. The two overlap on purpose:
+Cloudflare's has no event cap and Web Vitals; Vercel's sits beside the
+deployment and usage numbers.
 
 Next, by need:
 
@@ -183,7 +209,8 @@ push to master → GitHub Action social-publish
   the token's "token value" is not needed), run
   media-sync once (Actions → media-sync → Run workflow), then set
   `NEXT_PUBLIC_MEDIA_BASE=https://media.thesatyajit.com/ai` on Vercel Production
-  and redeploy. **Done, 2026-09-27:** bucket, domain and the three secrets.
+  and redeploy. **Done, 2026-09-27:** bucket, domain, secrets, sync, the
+  env var on Production, and article media. Left: the env var on Preview too.
 - **Analytics (done, 2026-09-27):** the site token is the default in
   `app/layout.tsx`, used on Vercel production only. Kept for reference:
   `ai.` is DNS-only, so Cloudflare's automatic setup (which
