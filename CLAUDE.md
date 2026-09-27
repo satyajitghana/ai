@@ -9,7 +9,7 @@ The agent map for this repo. An **AI-native personal site** (Next.js 16, App Rou
 - `lib/content/` — the content layer. `schema.ts` = Zod frontmatter schemas; `index.ts` = loaders that validate every MDX file (throws loudly on bad frontmatter).
 - `content/**` — MDX content (blog, logs, projects, papers, snippets, notes).
 - `data/*.ts` — typed, hand-curated records (profile, resume, etc.) — single sources of truth for pages, `/api/*`, JSON-LD, the resume PDF, and `llms.txt`.
-- `scripts/` — `validate-content.mts` (the safety net), `build-resume-pdf.mts`, `fetch-arxiv.mts` (arXiv candidate fetcher — dedups against ids already in `content/arxiv/`, and anchors its date window to arXiv's newest returned paper so a fast local clock never empties the results).
+- `scripts/` — `validate-content.mts` (the safety net), `build-resume-pdf.mts`, `fetch-reposts.mts` (the reposts Satyajit wants covered, read through the fxtwitter mirror and diffed against `data/reposts-ledger.json`), `fetch-arxiv.mts` (arXiv candidate fetcher — dedups against ids already in `content/arxiv/`, and anchors its date window to arXiv's newest returned paper so a fast local clock never empties the results).
 - `brand-crew/` — the installable plugin: `skills/`, `commands/`, `agents/`, `hooks/`, `brand/voice.md` (the brand DNA every author reads), `.claude-plugin/plugin.json`. Two skills are vendored rather than ours — `skills/hand-drawn-canvas-animation/` (MIT, Alexey Fateev) and `skills/claude-animation-base/` (MIT, John Heibel); each `VENDORED.md` gives the upstream commit and the local deltas.
 - `data/.generated/` — machine-written snapshots, never hand-edited. `model-cards.json` and `repo-cards.json` back `<ModelCard repo="owner/name" />` and `<RepoCard repo="owner/name" />`: a model's or a repository's own facts, committed rather than fetched at render time so the numbers land in a PR diff and get reviewed like any other content, and so a published page stays pinned to the date — and, for a repo, the commit — the card displays instead of silently restating itself whenever someone pushes upstream.
 - `lib/media.ts` — `mediaUrl()`: every film, poster and thumbnail URL goes through it. Empty `NEXT_PUBLIC_MEDIA_BASE` = served from `public/` by Vercel's CDN (committed to GitHub); set it to move them to a media CDN (the plan is Cloudflare R2 at `media.thesatyajit.com`). Page analytics is Cloudflare Web Analytics, a beacon in `app/layout.tsx` that renders only when `NEXT_PUBLIC_CF_ANALYTICS_TOKEN` is set.
@@ -90,6 +90,7 @@ What none of this fixes is **backlinks**, which come from other people citing th
 - Publication / patent → `/pub` (**add-publication** / **add-patent**)
 - Health panel → `/health` (**update-health**)
 - Refresh GitHub seed stats → `/refresh` (**refresh-seed-stats**)
+- Recheck Satyajit's X reposts for things to write up → `/reposts` (**recheck-reposts**) → `pnpm reposts` lists what is not yet in `data/reposts-ledger.json`; every decision (article, update, covered, skip) is recorded there with `pnpm reposts record`
 - Cross-platform social drafts → `/amplify` (**amplify**) → `drafts/<date>/…`
 - An article's explainer film and thumbnail → `/film <slug>` (**explainer-films**) → `data/films/<slug>.json` + `public/thumbs/<slug>.jpg` (+ `public/films/<slug>.mp4` for filmed articles)
 - An architecture explainer → `content/architectures/<slug>.mdx` (slug from `data/architectures.ts`) + `data/films/architectures/<slug>.json` + `build.mjs --thumbs architectures/<slug>`; pilot: `transformer`
@@ -97,6 +98,7 @@ What none of this fixes is **backlinks**, which come from other people citing th
 
 ## Commands
 - `pnpm dev` — dev server · `pnpm build` — production build · `pnpm start` — serve build
+- `pnpm reposts [--all] [--pages=N] [--json]` — new X reposts with coverage hints (which pages already cite the same arXiv ids, repos or names); `pnpm reposts record --status=article|update|covered|skip|triaged [--slug=…] [--note=…] <id>…` records a decision in the ledger
 - `pnpm typecheck` — `tsc --noEmit`
 - `pnpm validate:content` — load every MDX through the Zod content layer (loud failure)
 - `pnpm validate:mdx` — **compile** every MDX body the way the build does (same remark plugins), so JSX/MDX syntax errors fail here instead of at the Vercel build
