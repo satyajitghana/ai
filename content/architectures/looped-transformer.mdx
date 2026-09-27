@@ -1,0 +1,90 @@
+---
+title: "Looped Transformers: depth from passes, not parameters"
+description: "How a looped, recurrent-depth Transformer runs one block of layers again and again: the prelude, core and coda, why depth then costs FLOPs, latency and KV cache but no weights, input injection and why it keeps the loop stable, recurrent-state initialisation, adaptive halting from the Universal Transformer's ACT to Huginn's zero-shot exits, training by truncated backpropagation through depth, what compute-matched comparisons leave of the gains, and what LOTUS and IFM's controlled ablations found."
+date: 2026-09-26
+tags:
+  - looped-transformers
+  - recurrent-depth
+  - latent-reasoning
+  - explainer
+---
+
+A standard [Transformer](/architectures/transformer) buys depth with parameters: 32 layers means 32 blocks, each with its own weights. A looped Transformer stores a few blocks and runs them again and again, feeding each pass's output back in as the next pass's input. Its depth is a number of passes, chosen at run time, and every pass reuses the same weights. Depth stops costing parameters and starts costing FLOPs.
+
+The idea goes back to the [Universal Transformer](https://arxiv.org/abs/1807.03819) (Dehghani et al., 2018). It came back at scale with [Huginn](https://arxiv.org/abs/2502.05171) (Geiping et al., 2025), a 3.5B model trained on 800 billion tokens, and [Ouro](https://arxiv.org/abs/2510.25741), 1.4B and 2.6B models trained on 7.7T tokens. This site has covered the latest round: [LOTUS](/articles/lotus-latent-reasoning), [IFM's controlled ablations](/articles/looped-models-done-right), [SMELT's compute-matched scaling laws](/articles/looped-transformers-matched-compute) and the shipped [Nanbeige4.2-3B](/articles/nanbeige-4-2-3b). The worked numbers below use Huginn.
+
+## Prelude, core, coda
+
+Huginn's paper writes the model in four lines. Given tokens $x$ and a number of passes $r$:
+
+$$
+e = P(x), \qquad s_0 \sim \mathcal{N}(0, \sigma^2 I), \qquad s_i = R(e, s_{i-1}) \;\; \text{for } i = 1, \dots, r, \qquad p = C(s_r)
+$$
+
+The **prelude** $P$ embeds the tokens into a latent vector $e$ once. The **core** $R$ is the recurrent block: it reads the previous state and $e$, and writes the next state. The **coda** $C$ reads the last state and produces the next-token distribution. Each is an ordinary stack of causal Transformer layers; only $R$ repeats. Huginn's shape is $(2, 4, 2)$: 2 prelude layers, 4 core layers, 2 coda layers, at width 5,280 with 55 heads of 96. Iterated 32 times, those 8 stored layers unfold to an effective depth of $2 + 4 \cdot 32 + 2 = 132$ layers.
+
+That is one of two designs. The other loops the whole stack: $P$ and $C$ are the identity and $s_0 = e$, the token embeddings themselves. IFM calls it Ouro-style, after Ouro, which loops its full stack 4 times. Nanbeige4.2-3B loops its full stack twice.
+
+## Depth in FLOPs, not parameters
+
+Count what a pass costs. Stored parameters are those of $P$, $R$ and $C$, fixed whatever $r$ is. A forward pass costs about 2 FLOPs per weight per token, and the core's weights are used $r$ times:
+
+$$
+\text{params} = N_P + N_R + N_C, \qquad \text{FLOPs per token} \approx 2\,(N_P + r\,N_R + N_C)
+$$
+
+Huginn's paper splits its 3.5B parameters as about 1.5B in the prelude and coda, 1.5B in the core, and 0.5B in the tied embedding. At $r = 32$, the weights a token passes through add up to $1.5 + 32 \times 1.5 = 49.5$ billion, which is the paper's "computation load equivalent to 50 billion parameters": roughly 99 GFLOPs per token forward, from 3.5B stored. Training runs every pass forward too; how much of the backward pass it pays for depends on truncation, below.
+
+Three other costs scale with $r$ too:
+
+- **Latency.** The passes are sequential. At decode, a token's 132 layer-passes run one after another, as in a 132-layer model.
+- **KV cache.** Every pass of every attention layer in the core attends over earlier tokens, and its keys and values differ from pass to pass because its input does. At $r = 32$ Huginn caches keys and values for 132 layer-passes per token, 16.5 times what its 8 stored layers would need.
+- **Attention arithmetic**, which grows with context length at every one of those layer-passes.
+
+This is why the fair comparison matters. A looped model is usually shown beating an unlooped model with the same parameters, which spends a fraction of its compute. SMELT matches FLOPs, parameters and KV cache at once, on MoE models up to 54B non-embedding parameters, by narrowing the looped model's width and adding experts. Looping still wins, but by a saving of 6.8-18.0% of training FLOPs at matched loss, not by a free lunch. Its recipe loops the middle half of the layers twice and scales each looped sub-layer's residual write by $1/r$.
+
+## Input injection
+
+Why pass $e$ into every step rather than only the first? Huginn's argument is gradient descent. Minimising a function of some data starts from a state and repeats one operation that depends on the current state and on the data. Drop the data after the first step and the iteration's answer depends only on where it started. Re-injecting $e$ at every pass lets the core behave like an iterative solver for the input it was given. Huginn concatenates $s_{i-1}$ and $e$ and maps them back to width $h$ with an adapter matrix $A: \mathbb{R}^{2h} \to \mathbb{R}^{h}$; addition worked as well at small scale, concatenation best at scale.
+
+IFM's report writes the injection as a learned per-channel gate:
+
+$$
+D(z_t, v) = \alpha \odot z_t + \delta \odot W_{\text{in}} v, \qquad \delta = \text{softplus}(b_\delta), \qquad \alpha = \exp\{-\delta \odot \exp(a)\}
+$$
+
+That $\alpha$ is the zero-order-hold decay of a [state space model](/architectures/mamba-ssm), with $\delta$ as the step size. In IFM's matched-depth ablations, 730M parameters stored and 112 block executions for every model, adding this write to a middle loop lifted MMLU by 2.53, BBH-CoT by 6.63 and HumanEval+ by 5.49 points, and cost 3.60 on MATH500 and 2.51 on GSM8K. Untying a prelude and coda from the loop, before any injection, lifted MATH500 by 12.00 and DROP by 2.61. With both, the model beat full-stack Ouro-style looping on 8 of 10 benchmarks. LOTUS re-injects too: each of its passes computes $h^{(t)} = f_\theta(E + h^{(t-1)} \mid C_{\text{pre}})$, adding the latent embeddings $E$ back in.
+
+## The starting state
+
+Huginn samples $s_0$ from a Gaussian, following the deep-equilibrium argument: a loop that must converge from any starting point learns a computation that does not depend on its start, which the paper calls path independence. IFM tested that assumption against starting from $s_0 = e$. Random initialisation gained 3.34 points on ARC-C and 1.22 on GSM8K, lost more than a point on four other benchmarks, and lost 6 of 10 overall. Their reading: it is "a task- and objective-dependent inductive bias", not a required ingredient.
+
+## Adaptive halting
+
+A fixed $r$ spends the same compute on "the" as on the answer to an arithmetic problem. The Universal Transformer let each position decide. Each step applies the same attention and transition function to every position, with a sinusoidal embedding of both position and step number added to the input, so the shared weights can tell which pass they are on. On top it adds Adaptive Computation Time ([ACT](https://arxiv.org/abs/1603.08983), Graves, 2016) per position: after each pass, a halting unit emits a probability; when a position's running sum crosses a threshold near 1, it stops, and its state is copied forward until every position halts or a maximum step count is reached. On bAbI the learned ponder time tracked difficulty: 3.8 ± 2.2 steps on questions needing three supporting facts, 3.1 ± 1.1 for two, 2.3 ± 0.8 for one. The Universal Transformer also improved on the Transformer by 0.9 BLEU on WMT14 English-German.
+
+Huginn halts without training for it. It stops a token's passes when the KL divergence between two successive passes' predictions falls below $5 \times 10^{-4}$. Across MMLU categories the model took, on average, 3.5 more steps on moral scenarios than on high school mathematics, and MTBench barely moved: 5.63 with every pass, 5.56 with early exits. The early exit breaks the usual KV cache, because a later token's deep passes want keys from passes an earlier token skipped. Huginn attends to each earlier token's latest available entry instead, which works because every entry comes from the same key and value weights. The same property lets it share cache slots across passes: with a budget of $k$ entries per token, pass $i$ reads and writes slot $i \bmod k$, and a budget of 4 scored 5.86 on MTBench. Nanbeige found the opposite in training: sharing the KV cache across its two passes consistently underperformed, so it keeps the full cache.
+
+Ouro learns its exit instead: a gate after each pass trained with an entropy regulariser, so the exits spread across depths rather than collapsing to the shallowest or the deepest. LOTUS does not halt at all. It runs a fixed $R$ passes over 150 latent positions, and a model trained at $R = 6$ drops to 69.3% on GSM8K when run at $R = 7$: its depth is a trained budget, not a dial.
+
+## Training: truncated backpropagation through depth
+
+The core's weights $\theta_R$ receive a gradient from every pass:
+
+$$
+\frac{\partial \mathcal{L}}{\partial \theta_R} = \sum_{i=1}^{r} \frac{\partial \mathcal{L}}{\partial s_i} \, \frac{\partial R(e, s_{i-1}; \theta_R)}{\partial \theta_R}
+$$
+
+Backpropagating through all $r$ passes stores the activations of all of them. Huginn truncates, as RNNs truncate through time: it backpropagates through only the last $k = 8$ passes, treating the state entering them as a constant. Activation memory and backward compute no longer depend on $r$. The prelude still learns at every step, because $e$ is injected into each of those 8 passes.
+
+The number of passes is sampled at random during training, from a heavy-tailed log-normal Poisson distribution with a mean recurrence of 32, so that the model still works when it is run for more passes at test time. One $r$ is drawn per micro-batch and shared across all workers, so none idles waiting for the deepest. LOTUS trains differently, with a fixed $R$ and a loss on every latent position after the last pass, read out through the language model head against the gold chain-of-thought token for that slot.
+
+## What looping is good and bad at
+
+The gains land on computation, not on memory. Ouro's authors find their advantage "stems not from increased knowledge capacity, but from superior knowledge manipulation capabilities", and IFM's prelude-and-coda envelope helped multi-step reasoning, not knowledge recall or code. In SMELT, code gained most among its training domains, and long samples gained more than short ones. Tracing a second visit through a shared layer, SMELT finds its queries and keys nearly unchanged (cosine similarity 0.89-0.93) while its values move more (0.65-0.74). LOTUS turns the loop into a reasoning phase with a fixed cost: on Llama-3.2-3B it reaches 70.0% on GSM8K against explicit chain-of-thought's 71.5%, with a thought phase 2.5-6.9× faster, because all 150 latent positions are refined together in $R$ passes instead of one token at a time.
+
+The costs are the ones above. Parameters bound what a model can memorise, and looping adds none. Every pass is serial latency, extra KV cache and extra training compute. The number of passes is also a hyperparameter that is hard to move after training, and more passes are not reliably better: SMELT's ablations and Nanbeige's report both land on 2.
+
+## What changed since 2018
+
+The Universal Transformer looped the whole encoder and decoder, with halting per position. The current designs agree on three changes. Loop the middle, not the ends: Huginn's prelude and coda, SMELT's middle half, and IFM's measurement that untying the envelope is what helps reasoning. Re-inject the input at every pass. And count honestly: loops are now compared at matched FLOPs and cache, where the gain is 6.8-18.0% of training compute rather than a model several times larger. What has not settled is halting. Huginn exits zero-shot, Ouro trains a gate, and LOTUS and Nanbeige run a fixed count.
