@@ -1,0 +1,231 @@
+---
+title: "Qwen3.8-27B on a 12 GB card: a hashed trellis and a ternary with a draft head"
+description: "Two builds fit Qwen3.8-27B and a 128K window into 12 GB. Mirai S is a QTIP-style trellis whose codebook is a hash, not a table; its llama.cpp port carries the codes bit for bit (checked by byte range), the '2.4 bits' is 2.45 to 2.51 depending on what you count, and the 40 tok/s was measured on an RTX 3090 capped to 12 GB, not on a 12 GB card. Ternary Bonsai 2 with a grafted MTP head does 50 tok/s on a real RTX 3060, and the arithmetic of the kernel fix explains why the head only paid after it. Neither build has a quality number you can compare."
+date: 2026-09-27
+tags:
+  - quantization
+  - qwen
+  - llama-cpp
+  - kv-cache
+  - speculative-decoding
+  - kernels
+  - inference-optimization
+  - explainer
+---
+
+import { TrellisDecode } from "@/components/articles/qwen3-8-27b-on-12gb/trellis-decode"
+import { VramPlanner } from "@/components/articles/qwen3-8-27b-on-12gb/vram-planner"
+
+Two reposts this week make the same claim: a 27B model plus a long window on a gaming card.
+
+@superalesha: *"Mirai Labs (@trymirai) compressed Qwen3.8-27B to 2.4 bits. I ported it to llama.cpp and now it runs on a 12 GB card with 128K context."* Decode at 40 tok/s, prefill near 1,000, *"No requant anywhere. The GGUF carries Mirai's compressed codes bit for bit."*
+
+@sudoingX: Ternary Bonsai 2 27B at 50 tok/s on an RTX 3060, a 7 GB download, a 262K window with the draft head off. *"25 tok/s stock, 50 tok/s now."*
+
+Both start from `Qwen/Qwen3.8-27B`, which this site has taken apart [in the open-weights piece](/articles/qwen3-8-open-weights) and [the variants piece](/articles/qwen3-8-27b-variants). I read the configs and tensor headers by HTTP range request, the CUDA kernels of both forks, the Mirai vLLM plugin, and the kernel PR. There is no GPU here, so every speed below is **reported**. Bits, bytes and cache sizes are **measured** from the files or **reasoned** from them.
+
+## What has to fit
+
+Qwen3.8-27B is a hybrid. Its `layer_types` list puts a full-attention layer at every fourth position and Gated DeltaNet everywhere else: 16 attention layers, 48 DeltaNet layers. Only the 16 keep a KV cache. Each has 4 KV heads of 256 dimensions, so one token costs
+
+$$
+2\ (\text{K, V}) \times 16 \times 4 \times 256 = 32{,}768 \text{ numbers}
+$$
+
+That is 65,536 bytes at f16, 34,816 at `q8_0` (34 bytes per 32 values) and 18,432 at `q4_0` (18 per 32). At 131,072 tokens: 8 GiB, 4.25 GiB and 2.25 GiB (**reasoned** from `config.json`). The cache math is the one in [the attention and KV explainer](/architectures/attention-kv).
+
+The 48 DeltaNet layers keep a fixed state instead, [the way an SSM does](/architectures/mamba-ssm): 48 heads of 128 × 128 in fp32, plus a short conv tail. That is 156,893,184 bytes per sequence at any context. Both projects warn that llama-server's default slots add about 450 MB. Three extra slots of 157 MB each is 471 MB, so the warning checks out (**reasoned**).
+
+The open-weights article left one question open: a GGUF publisher quoted 256 KB of cache per token, four times the 16-layer figure, as if every layer kept a cache. The peaks reported below settle it. With 64 layers cached, a `q4_0` cache at 128K would be 9 GiB on its own and nothing would fit in 12 GB. llama.cpp caches the 16.
+
+## Mirai S: a QTIP-style trellis
+
+The `model.safetensors` of `trymirai/Qwen3.8-27B-S-experimental` is 8,447,545,388 bytes, the card's "8.45 GB". Its safetensors metadata names the codec for each matrix: `QtipGaussianSpec`, with a `vector_width`, `transition_bits` and `restart_columns`. It is a QTIP-style trellis code ([arXiv 2406.11235](https://arxiv.org/abs/2406.11235)), the same family as the EXL3 codec [inside OrcaSAQ-2](/articles/qwen3-8-27b-variants).
+
+<ModelCard
+  repo="trymirai/Qwen3.8-27B-S-experimental"
+  claimed="2.4 bits per weight, 8.45 GB"
+  note="The Hub's parameter count is stored elements, mostly uint8 trellis bytes; the text model is 26,895,998,464 parameters. The storage figure is every upload in the repository: the 8.45 GB uzu package, a DFlash drafter for Macs, the 9.3 GB vLLM folder, and superseded files."
+/>
+
+### Why two bits is hard for a rounding quantizer
+
+Rotate a weight matrix with a random Hadamard transform and its entries look like i.i.d. Gaussians. That is the incoherence step, the same idea [TurboQuant applies to the KV cache](/articles/turboquant-kv-cache). Now quantize them at 2 bits. Rate-distortion theory says no quantizer can beat a mean squared error of $2^{-2R} = 0.0625$ at $R = 2$. Rounding each weight to the best four levels gets 0.118. QTIP's Table 1 (**reported**):
+
+| quantizer | dimension | MSE, unit Gaussian, 2 bits |
+|---|---:|---:|
+| Lloyd-Max scalar | 1 | 0.118 |
+| QuIP# E8P lattice | 8 | 0.089 |
+| QTIP trellis, computed codes | 256 | 0.069 |
+| distortion-rate bound | ∞ | 0.063 |
+
+Quantizing vectors closes the gap, but a codebook for $d$ weights at $k$ bits has $2^{kd}$ entries. A trellis gets the dimension without the table.
+
+Why chase hundredths of MSE? At a fixed size, a bigger model at 2 bits can match a smaller one at 4:
+
+<Figure
+  src="/articles/qwen3-8-27b-on-12gb/fig3.png"
+  alt="Log-x line chart titled Llama 2 Scaling: Wikitext2 perplexity at context 4096 against total model size in GB. Lines for QTIP at 2, 3 and 4 bits, QuIP# 2-bit, AQLM 2-bit and FP16 at 4 bits each fall from about 6 at 2 GB to about 3.2 at 35 GB. The QTIP 2-bit and 3-bit lines run on or just below the FP16-at-4-bit line; the QuIP# and AQLM 2-bit lines sit above it."
+  caption="Perplexity against total size for Llama 2 7B, 13B and 70B. 'FP16 @ 4 Bit' plots the full-precision model at the size it would have at 4 bits; QTIP's 2-bit line runs on or below it. In the paper's words, '2 bit models scale better than theoretically optimal 4 bit models.' (QTIP paper, Figure 1.)"
+/>
+
+### A trellis is a codebook you walk
+
+<Figure
+  src="/articles/qwen3-8-27b-on-12gb/fig1.png"
+  alt="Left: a four-state trellis graph with states 00, 01, 11 and 10 and arrows between states that share a bit. Right: a codebook assigning 0.5, 0.1, 0.3 and 0.8 to the four states, and six columns of states with a red path chosen through them. Above, the unquantized sequence 0.54, 0.03, 0.72, 0.19, 0.26, 0.89; below, the quantized sequence 0.5, 0.1, 0.8, 0.1, 0.3, 0.8 read off the path. Labelled: minimize squared error."
+  caption="A bitshift trellis with 2-bit states. Each state has a code value; each step may only move to states that share a bit with the current one. Encoding picks the path with the least squared error (Viterbi); decoding reads the values off the path. (QTIP paper, Figure 2.)"
+/>
+
+The state is $L$ bits. Each step shifts $T$ new bits in and emits $V$ weights, so the rate is $T/V$ bits per weight. In a *bitshift* trellis the state is just the last $L$ bits of the stream, so decoding position $i$ means reading one $L$-bit window. No step depends on the previous one's output. QTIP's encoder runs Viterbi over the whole sequence; the decoder is embarrassingly parallel. Mirai's encoder is not in the release.
+
+Mirai uses $L = 16$ and three layouts, read off the header (**measured**):
+
+- `V4T8`: 4 weights per 8-bit step, 2 bits per weight. A fresh entry byte every 64 columns makes it 2.125.
+- `V2T6`: 2 weights per 6-bit step, 3 bits per weight.
+- `V2T4`: 2 weights per 4-bit step, 2 bits per weight.
+
+### The codebook is a hash
+
+A 16-bit state with 4 values each is a 65,536 × 4 table, 1 MiB in fp32. The uzu file stores exactly that, `qtip_shared.codebook_v4`. The CUDA kernel does not read it. It computes each state's values:
+
+```cuda
+// mirai_s/kernels.cu (vLLM plugin 0.2.1), abridged
+u32 x = state * 0xCFCCB83Fu + 0x584B4AA3u;  // fmix_hash
+x ^= x >> 16;  x *= 0x85EBCA6Bu;  h = x ^ (x >> 16);
+// per byte b of h:  level = 8 * pairs(b) + ((3 * (b & 15)) & 15) - 54
+// pairs(b) = sum of b's four 2-bit fields;  weight_j = c * level_j + d_j
+```
+
+The sum of four 2-bit fields is a small binomial, the dither spreads it over 16 steps, and the result is a rough Gaussian from −54 to 57. I recomputed all 65,536 states and compared them with the stored table: every value matches to within 2.4e-7, and the table has mean 0 and standard deviation 1.00 (**measured**). QTIP's 1MAD and 3INST codes do the same thing with different instructions:
+
+<Figure
+  src="/articles/qwen3-8-27b-on-12gb/fig2.png"
+  alt="Four scatter plots of pairs of neighbouring code values. The first shows a strongly structured grid of stripes; the second, labelled 1MAD in the caption, is a roughly Gaussian cloud with faint diagonal stripes; the third, 3INST, and the fourth, a random Gaussian code, are round Gaussian clouds."
+  caption="Pairs of neighbouring values a 16-bit bitshift trellis can represent, for (left to right) a badly correlated code, the 1MAD and 3INST computed codes, and a random Gaussian table. The computed codes come close to the table. (QTIP paper, Figure 3.)"
+/>
+
+There is a reason Mirai went this way. Its June quantization post passed on vector quantizers because their GPU implementations "suffer from shared-memory congestion and bank conflicts when reading from lookup tables". A hash reads no table. Here is one real packet, row 0 of layer 10's `ffn_down`, decoded step by step:
+
+<TrellisDecode />
+
+The first entry byte is `0x34` and the first symbol `0x23`, so the first state is `0x3423`. Its hash is `0xe2c031a7`. Byte `0xa7` has 2-bit fields 3, 1, 2 and 2, so pairs = 8, and its low nibble 7 gives a dither of 5. The level is 64 + 5 − 54 = 15, and the weight is $0.0520 \times 15 - 0.0821 = 0.699$. The kernel keeps levels as integers and applies $c$ and $d_j$ once per output value.
+
+### What the kernel does per token
+
+The weights are stored rotated, so the input is rotated at runtime instead: $x_{\text{rot}} = (H \otimes Q)(S x)$, where $S$ is random signs, $H$ a 1024- or 2048-point Walsh-Hadamard, and $Q$ a small orthogonal matrix. The header carries `q_5120` as 5 × 5, `q_6144` as 3 × 3 and `q_17408` as 17 × 17, because 5,120 = 5 × 1,024, 6,144 = 3 × 2,048 and 17,408 = 17 × 1,024 (**measured**).
+
+Then the activation becomes two int8 planes: $s = \max|x_{\text{rot}}|/127$, $q_0 = \text{round}(x/s)$, $q_1 = \text{round}((x/s - q_0) \cdot 254)$. Levels are shifted by +54 into bytes from 0 to 111, and `dp4a` computes two exact int32 dot products, one per plane. The epilogue undoes the shift and scales. One token decodes in registers; 2 to 384 tokens decode each weight once per tile of up to 64 tokens, into shared memory, for int8 tensor-core MMAs; longer prompts decode to int8 and call cuBLAS. All three paths produce the same integers, so a token's output does not depend on its batch.
+
+That is several integer operations per weight. The fork's 40 tok/s moves about 8.2 GB per token, 35% of a 3090's 936 GB/s roofline (**reasoned**). QTIP's own kernels have the same shape: a 2-bit Llama 2 7B at 127 tok/s on a 3090 (**reported**).
+
+### Counting the bits
+
+"2.4 bits per weight" depends on the scope. From the header (**measured**):
+
+| what is counted | bytes | weights | bits per weight |
+|---|---:|---:|---:|
+| trellis codes, 272 matrices | 7,450,044,672 | 24,350,556,160 | 2.448 |
+| plus per-row scales and gains | 7,469,655,040 | 24,350,556,160 | 2.454 |
+| plus 2-bit embedding and 3-bit head | 8,285,137,920 | 26,893,352,960 | 2.465 |
+| the whole file | 8,447,545,388 | 26,895,998,464 | 2.513 |
+| runtime tapes in the GGUF | 7,607,009,280 | 24,326,963,200 | 2.502 |
+
+Every scope lands between 2.45 and 2.51; "2.4" truncates. The file also carries 134,217,728 bytes of precomputed RoPE cosines and sines, which are not weights. The runtime tapes cost more than the codes because both runtimes store an entry state for every packet of the `V2` formats so each warp can start decoding on its own. Those bits are redundant: the entry state is the tail of the previous packet.
+
+The allocation is mixed. 97 matrices are at 3 bits, 166 at 2.125 and 9 at 2.0; by weight that is 37%, 59% and 4%. Every attention q/k/v projection is at 3 bits. So is every DeltaNet input projection except in layers 1, 2, 4 and 62. Every MLP down-projection is at 2 bits. The MLP gate and up projections get 3 bits in 24 of 64 layers, nine of them in layers 53 to 61. Like OrcaSAQ-2, spare bits go to the back of the network.
+
+### Bit for bit, checked
+
+<RepoCard repo="alesha-pro/llama.cpp-mirai-s" />
+
+The converter says it copies Mirai's packets verbatim, so I compared bytes. For four tensors, one or two per format (`blk.10.ffn_down`, `blk.0.ffn_down`, `blk.40.ssm_out`, `blk.20.attn_qkv`), I fetched the first two 32-row groups from the GGUF and from Mirai's vLLM sidecar: all identical (**measured**). The sidecar's first packet also holds the same bits as the uzu file's first 17 bytes for that row, re-laid out.
+
+Three things are not trellis codes, and the fork says so. The embedding is decoded to F16, 2.54 GB, and stays in system RAM. The 48-row DeltaNet gates are decoded to F16. The MTP block, bf16 in Mirai's checkpoint, is written as `Q8_0`: that one is a requant, of a drafter whose tokens are always verified. Greedy output matched Mirai's vLLM plugin on 8 of 10 prompts; the other 2 split at near-ties (**reported**).
+
+### The VRAM arithmetic
+
+At 128K with a `q4_0` cache: 7.61 GiB of weights on the GPU (the header sum without the MTP block; the card says 7.8 GB), 2.25 GiB of KV and 0.15 GiB of DeltaNet state make 10.0 GiB. The reported peak is 11.3, so the runtime took 1.3 GiB. At 74K with `q8_0`, 2.39 GiB of KV makes 10.14 against 11.1 reported. A `q8_0` cache at 128K would be 4.25 GiB, 12.0 GiB before any runtime, which is why the fork stops it at 74K (all **reasoned**).
+
+<VramPlanner />
+
+Fitting nine reported peaks from both projects, the runtime comes out as 0.52 GiB plus 0.51 GiB per 100K tokens of context, plus 0.57 GiB with an MTP head, within 0.17 GiB of each (**reasoned**). It is a fit, not a measurement of llama.cpp's buffers. By that arithmetic S fits about 167K tokens of `q4_0` cache and the ternary the full 262K; with its draft head the ternary tops out near 193K, and its card found that 196,608 did not fit. A stock `Q4_K_M` needs 14.34 GiB for weights alone and fits 12 GB at no context.
+
+The speed numbers need the same care. All of them come from **one RTX 3090 at 300 W, capped to what fits in 12 GB**, and the card says speeds on smaller cards will be lower. A 3090 has 936 GB/s; a 12 GB RTX 3060 has 360 GB/s and about a third of the cores. If a 3060 reached the same 35% of its roofline, Mirai S would decode near 15 tok/s on it (**reasoned**, unmeasured). "Runs on a 12 GB card" is true of the memory. The 40 tok/s is a 3090's. On that same 3090, Mirai's own vLLM plugin decodes faster, 44 tok/s against 39, but fits only 37.6K tokens of bf16 cache in 12 GB (**reported**). The port's gain is the window.
+
+### What nobody has measured: quality
+
+The current card has no quality number. An earlier revision said the model was "tuned against the teacher's KL" and listed "KL to the teacher 0.062"; that line went on 23 September, and no evaluation set was ever named. `physical_package_report.json` names its source as a QAT build. For its 4-bit Mirai-M build, Mirai does publish a proper chart:
+
+<Figure
+  src="/articles/qwen3-8-27b-on-12gb/fig4.png"
+  alt="Scatter of KL divergence on a log scale from about 0.004 to 0.05 against language-model checkpoint size from 12 to 19 GB for Qwen3.8 27B quantizations. Mirai-M, highlighted in orange near 14.5 GB, sits between 0.01 and 0.02, on the lower-left frontier with Unsloth's UD-IQ4_XS, UD-Q4_K_S and UD-Q4_K_M. Bartowski's IQ3 and Q3 builds sit near 0.04 to 0.05; MLX 4-bit near 0.04."
+  caption="KL against the bf16 model versus size, vision and MTP heads excluded, on Mirai's own evaluation mixture. This is the 4-bit M build; S has no such chart. (Mirai Labs, Qwen3.8-27B-M model card.)"
+/>
+
+If the 0.062 was measured on this mixture, S would sit above every point on it, at a little over half of Mirai-M's size. Nobody has run S through a benchmark either.
+
+## Ternary Bonsai 2 with a draft head
+
+The second build is [Ternary Bonsai 2 27B](/articles/bonsai-2-27b), PrismML's ternary compression of the same base, as `PTQ1_0`. `sudoingx/Ternary-Bonsai-2-27B-PTQ1_0-MTP-GGUF` adds two things: a faster mat-vec kernel and Qwen's MTP head.
+
+<ModelCard
+  repo="sudoingx/Ternary-Bonsai-2-27B-PTQ1_0-MTP-GGUF"
+  claimed="50 tok/s on an RTX 3060, 7 GB"
+  note="The file every number is measured on is Ternary-Bonsai-2-27B-PTQ1_0-mtp.gguf, 7,012,820,512 bytes. The storage figure adds the 6.30 GB lean variant, a 515 MB prebuilt Linux bundle and superseded uploads."
+/>
+
+### Trits, five to a byte
+
+A `PTQ1_0` block is 128 weights in 28 bytes: 24 bytes holding five trits each ($3^5 = 243$ fits in a byte), 2 bytes holding four, and an FP16 scale. That is 1.75 bits per weight. The kernel pulls one trit per multiply: `v * 3` puts the next base-3 digit in the high byte and the remainder in the low one. Then `(q + 0x7F7F7F7F) ^ 0x80808080` maps 0, 1, 2 to −1, 0, +1 as signed bytes, ready for `dp4a` against int8 activations. The weights sit in a Hadamard-rotated basis, as [the Bonsai 2 article](/articles/bonsai-2-27b) describes.
+
+Over the text model the trunk, head and embedding are 5,935,527,936 bytes, 1.765 bits per weight, and the GPU holds 5.66 GB of it (**measured** from the GGUF header). The same `ffn_up` is 1.75 bits here and 2 to 3 in Mirai S. The trits are also cheaper to decode: a multiply and a byte shuffle, no hash.
+
+### The idle threads
+
+The quote says the kernel left "two thirds of the card's threads idle on the biggest matrices". The PR's own code comment explains it: the generic kernel "gives every thread of a 128-thread block one 128-weight K block of the same row, so a K = 5120 projection (40 blocks per row) keeps 40 of 128 threads busy". 88 of 128 idle is 69%. The new kernel flattens (row group, K block) into work items so every thread has one, and reduces in a fixed order so results do not depend on batch size.
+
+**Reported**, on an RTX 3060: `llama-bench` decode 26.32 → 40.54 tok/s, prefill unchanged. A 3060 moving 5.66 GB per token has a roofline near 64 tok/s, so the fix took decode from 41% to 64% of it (**reasoned**). The PR says the K = 5120 matrices are three quarters of the weights; I count 16.6 billion of 24.3 billion, 68% (**reasoned**).
+
+### The draft head
+
+Qwen3.8-27B ships a multi-token-prediction block: `eh_proj` mixes the embedding of the token just produced with the trunk's last hidden state, then one gated attention layer and one MLP predict the token after next through the shared LM head. With `--spec-draft-n-max 1` the head drafts one token and the trunk checks two positions in one pass. The graft copies Qwen's head from unsloth's `UD-Q4_K_M` file, 15 tensors and 351,008,768 bytes, plus a `Q4_K` copy of the unrotated embedding, because Bonsai's own embedding is stored rotated. The file is 7,012,820,512 bytes, exactly the sum of its header (**measured**).
+
+Why it paid only after the kernel fix is arithmetic. With acceptance $a$, a pass commits $1 + a$ tokens and costs the two-token verify plus the draft:
+
+$$
+\text{speedup} \approx \frac{1 + a}{t_2/t_1 + t_{\text{draft}}/t_1}
+$$
+
+The draft reads the MTP block and the LM head, about 0.63 GB against the trunk's 5.66, so $t_{\text{draft}}/t_1 \approx 0.11$. The PR measured $t_2/t_1$ at 1.48 before and 1.22 after. At $a = 0.7$, mid-range for the reported acceptance, that predicts 1.07× before and 1.28× after (**reasoned**). The card reports 25.0 → 27.1 tok/s before and 39.8 → 50.1 after, +8% and +26%. So "25 stock, 50 now" is 1.59× from the kernel and 1.26× from the head. Reported acceptance runs 0.85 to 0.95 on Python and 0.45 to 0.68 on prose, which is why prose gets 41.8 tok/s and code 53.2.
+
+The head only drafts; the trunk decides. With `GGML_CUDA_BATCH_INVARIANT=1`, greedy output with the head on matched the head off over three prompts of 300 tokens (**reported**). Mirai's plugin trims its drafter instead: the head scores only the first 98,304 vocabulary ids, the idea behind [the 32,768-token FastMTP sidecar](/articles/hauhaucs-qwen-fastmtp) for this model.
+
+### The window, and where speed goes
+
+The claims check against the card and its repository: 262K with the head off in 11.7 GB, 163,840 with it in 11,726 MiB, 131,072 in 10,638 MiB (**reported**). Depth is the catch. Decode with the head off falls from 40.5 tok/s fresh to 17.9 at 64K and 11.4 at 131K (**reported**). At 131K a `q4_0` cache adds 2.4 GB of reads to 5.66 GB of weights, which alone would allow about 45 tok/s (**reasoned**). The Mirai fork names a likely culprit on Ampere: single-token attention over a quantized cache read every K/V row once per query head, six times with this model's 24:4 grouping, and it fixed that for its own build. PR #218 does not change how that kernel reads the cache.
+
+## Side by side
+
+| | Mirai S, llama.cpp fork | Ternary Bonsai 2 + MTP |
+|---|---|---|
+| bits per weight, text model | 2.465 (codes), 2.502 (tapes) | 1.765 |
+| weights on the GPU | 7.61 GiB | 5.27 GiB, plus 0.99 for the head |
+| 128K in 12 GB | `q4_0`, 11.3 GB peak, no MTP | `q4_0` with MTP, 10,638 MiB |
+| measured on | RTX 3090 at 300 W, 12 GB cap | RTX 3060 12GB |
+| decode, fresh | 39.7 tok/s | 39.8 head off, 50.1 head on |
+| decode, deep | 34.6 at 62K | 17.9 at 64K, head off |
+| prefill | 1,008 tok/s | 268.7 tok/s at `pp512` |
+| quality evidence | none current | PrismML's 98.2% aggregate |
+
+Speeds are **reported**, on different cards, and not comparable across columns. The quality row compares nothing: the ternary number is PrismML's, for the ternary trunk, and [on long-horizon agent benchmarks it keeps about three quarters](/articles/bonsai-2-27b). S has no number.
+
+## What is not verified
+
+- **Any speed.** Every tok/s is the publisher's.
+- **S on an actual 12 GB card.** The 15 tok/s estimate for a 3060 is mine.
+- **S's quality.** One KL value, since deleted, on an unnamed set.
+- **The runtime slice** in the planner is a fit to reported peaks.
+- **Bit-for-bit** is checked for 8 row groups of 4 tensors, not all 416 matrices. The converter's own check correlates every matrix with the bf16 base.
+
+Both builds reach 12 GB the same way. Fewer bits buy the window, and the kernel decides the speed. Mirai's hash makes 2.5 bits cost ALU time. The ternary trits are cheap to decode, and one fixed kernel let a draft head pay. What neither has shown is how much of Qwen3.8-27B survives.
