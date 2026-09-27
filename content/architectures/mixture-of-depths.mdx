@@ -1,0 +1,71 @@
+---
+title: "Mixture-of-Depths: a router decides which tokens a block computes"
+description: "How Mixture-of-Depths caps a routed block at a fixed number of tokens: a scalar router per block, top-k over the sequence, the chosen tokens sent through attention and the MLP and scaled by their router weight, the rest carried past on the residual stream. The 12.5% capacity that worked best, what it saves (an eighth of the projections and MLP, a sixty-fourth of the attention scores), why top-k breaks causal sampling and the small predictor that fixes it, and how it relates to mixture-of-experts and early exit."
+date: 2026-09-26
+tags:
+  - conditional-compute
+  - token-routing
+  - explainer
+---
+
+A Transformer spends the same compute on every token at every layer. A comma gets the same attention and the same MLP as the hardest word in the sentence ([the Transformer, from first principles](/architectures/transformer)). [Mixture-of-Depths](https://arxiv.org/abs/2404.02258) (MoD; Raposo et al., Google DeepMind, 2024) gives some blocks a fixed budget instead: only $k$ tokens of each sequence go through the block, a router picks which, and the rest go around it on the residual stream.
+
+Because $k$ is fixed before training, every tensor has a known size and the compute of a forward pass is known exactly. Which tokens spend it is decided by the network, per token and per block. The diagram above shows two routed blocks choosing different subsets of the same six tokens.
+
+## One router, one block, one skip
+
+Take layer $l$ and a sequence of $S$ token vectors $x_i$. The router is a single learned vector $w$ that gives each token one scalar weight, $r_i = w^{\top} x_i$: $d$ multiply-adds per token, negligible beside the block. The block has a capacity $C < S$ and processes the $C$ tokens with the largest weights. With $P_\beta$ the $\beta$-th percentile of the sequence's router weights and $\beta = 1 - C/S$:
+
+$$
+x_i^{l+1} =
+\begin{cases}
+r_i \, f_i(\tilde{X}^l) + x_i^l & r_i > P_\beta(R^l) \\
+x_i^l & \text{otherwise}
+\end{cases}
+$$
+
+Here $f$ is the block's attention and MLP, and $\tilde{X}^l$ is the set of selected tokens. Three details carry the design.
+
+**Skipping is total.** A skipped token is not just spared the MLP. It is absent from the block's attention, neither a query nor a key or value, so a selected token attends only to other selected tokens there. In the paper's words, the routing decides "not only about which tokens to update, but also which tokens are made available to attend to."
+
+**The weight multiplies the output.** Scaling $f$ by $r_i$ puts the router on the gradient path. Top-k selection by itself gives the router no gradient; through the product, the loss reaches the weight of every selected token.
+
+**The block chooses its tokens.** MoD uses expert-choice routing: the block takes its top $k$, rather than each token asking for the block. With $k$ fixed, load is balanced by construction, so there is no auxiliary balancing loss. With only two paths, one top-k splits the sequence into two disjoint sets, so no token is over- or under-processed.
+
+## Capacity: 12.5%, every other block
+
+The paper trains on sequences of 2,048 tokens with a batch of 128. Its best variant routes every other block with a capacity of 256 tokens, 12.5% of the sequence, so 1,792 tokens, 87.5%, go around each routed block while the blocks between them stay full. Performance improved as capacity came down to 12.5% and degraded below it. Routing every block did worse than routing every other one: the network tolerates aggressive skipping "as long as there is frequent opportunity for full capacity self-attention and MLP computations". Routing matters too: MoD models that picked tokens by top-k on random Gaussian weights did drastically worse than both the baseline and learned routing.
+
+What the router learns is not only "easy token, skip". In a trained model some tokens engage every routed block and others skip whenever they can, and in the authors' preliminary analysis the tokens that engage more often are the ones whose predictions have higher entropy.
+
+## Where the FLOPs go
+
+Inside a routed block with $C$ of $S$ tokens, two kinds of work shrink at different rates:
+
+- **Per-token matrix products**, the query, key, value and output projections and the whole MLP, scale with the number of tokens: $C/S$, an eighth at 12.5%.
+- **The attention scores**, $QK^{\top}$, and the weighted sum over values, pair every selected query with every selected key: $(C/S)^2$. The paper's example is a capacity of half the sequence, which leaves $QK^{\top}$ 25% as expensive; at 12.5% it is a sixty-fourth, 1/64.
+
+For a model of the same size, half the blocks at full cost and half at an eighth give $(1 + 1/8)/2 = 9/16$, or 56.25% of a vanilla model's weight FLOPs per forward pass (reasoned; embeddings, the router and the attention-score term, which shrinks faster, left out). A token skipped by a routed block also writes no key or value there, so at sampling time a routed layer's cache should hold about one token in eight (reasoned; the paper anticipates KV-cache savings but does not measure them).
+
+The paper's own comparisons are isoFLOP rather than same-size: for a fixed training budget, the best MoD model is larger than the best vanilla one and reaches a lower loss. The authors report up to 1.5% better on the final log-probability training objective at equal training FLOPs and wall-clock time, or loss parity with the isoFLOP-optimal baseline at a fraction of the FLOPs per forward pass, upwards of 50% fewer. In their tuning sweep a 220M MoD model matched a 220M isoFLOP-optimal baseline and stepped 66% faster. The analysis spans 60M to 3B parameters at budgets of 6e18, 2e19 and 1e20 FLOPs, and found that adding depth beat adding width when adding FLOPs.
+
+## The causality problem
+
+Top-k over a sequence is non-causal. Whether token $i$ makes the cut depends on the router weights of the tokens after it, which exist during training, when the whole sequence is at hand, and do not exist during autoregressive sampling. The paper tests two fixes, both of which teach a causal decision to imitate the non-causal one:
+
+1. **An auxiliary loss on the router.** A binary cross-entropy with the router outputs as logits and top-k membership as targets pushes the sigmoid of $r_i$ above 0.5 for selected tokens and below it for the rest. At sampling time a token can then take the block when its sigmoid exceeds 0.5. This costs about 0.2 to 0.3% on the language-modelling objective; in the trained model about 12.5% of router weights sit above 0.5, as the loss dictates.
+2. **A small auxiliary predictor.** A separate small MLP reads the same input as the router, behind a stop-gradient, and predicts whether the token will be in the top $k$. It leaves the language-modelling objective untouched and does not significantly slow a step.
+
+The prediction is easy: the paper reports 99% accuracy quickly, and "upwards of 97%" soon into training in its evaluation figure. Switching from top-k to the predictor for sampling, on 256,000 held-out sequences (500M tokens), degraded performance minimally. One consequence follows (reasoned): once each token decides for itself, the number of tokens a block processes is no longer exactly $k$. The budget becomes an expectation instead of a guarantee, and sequences in a batch can route different numbers of tokens.
+
+## MoD, MoE and early exit
+
+MoD takes its routing from [mixture-of-experts](/architectures/mixture-of-experts), but routes between different kinds of computation. MoE sends each token to some of many MLPs and keeps compute per token roughly constant, with attention untouched. MoD offers one block or a no-op, so compute per token falls, and attention is routed too. The paper calls it "a single expert which can be dynamically skipped". An MoE that drops a token at capacity is doing MoD by accident: the overflowing token rides the residual past the expert it wanted ([Switch Transformers](/articles/switch-transformer) shows the capacity buffer).
+
+The two combine. The paper's **MoDE** comes in two forms: *staged*, which routes around the whole block before attention and then routes the chosen tokens among experts, and *integrated*, which adds no-op experts beside the MLP experts. Integrated MoDE beat simply lowering expert capacity and relying on dropping, which the authors attribute to tokens learning to choose the residual rather than being dropped from an expert they preferred.
+
+**Early exit** is the older way to vary depth: a token stops at some layer and skips every layer after it ([Depth-Adaptive Transformer](https://arxiv.org/abs/1910.10073), [CALM](https://arxiv.org/abs/2207.07061)). Its hard part is that later tokens want to attend to hidden states an exited token never computed; CALM lists "attending back to missing hidden representations" among its challenges. MoD avoids it by construction: a skipped token is simply absent from that block's attention, and it can skip middle blocks and then return, attending to tokens that went through all of them. Looped models vary depth a third way, reusing one stack of weights: [Mixture-of-Recursions](https://arxiv.org/abs/2507.10524) puts MoD-style routers on the loop, so each token gets its own number of passes, attention runs only among tokens still active at a given depth, and only their keys and values are cached.
+
+## What it is good and bad at
+
+MoD's strength is that its savings are planned. The capacity fixes the FLOPs and the tensor shapes before training, which suits hardware built for static graphs, and it stacks with MoE. Its weaknesses are the evidence and the sampling path. The results are language-modelling loss at up to 3B parameters and 1e20 FLOPs, with no downstream benchmarks; sampling needs the extra predictor or loss; and the per-token decisions at sampling time give each sequence in a batch its own routed count, which serving systems built around uniform batches do not like (reasoned). None of the MoE models on the [mixture-of-experts page](/architectures/mixture-of-experts) routes around whole blocks: their conditional compute runs across experts, with depth fixed. Per-token depth has instead gone on in research, through Mixture-of-Recursions and in looped Transformers, where [SMELT](/articles/looped-transformers-matched-compute) lists per-token adaptive depth as future work.
