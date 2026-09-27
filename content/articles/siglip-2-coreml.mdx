@@ -1,0 +1,202 @@
+---
+title: "SigLIP 2 from first principles, and what its Core ML port measured"
+description: "SigLIP 2 keeps SigLIP's pairwise sigmoid loss, which asks one yes-or-no question per image-caption pair so no pair waits on the rest of the batch, and adds a LocCa captioning and referring decoder, late self-distillation and masked prediction, data curation for the small models, a 90/10 multilingual mix with de-biasing, and a native-aspect NaFlex variant. I walk through each against the paper's own tables, then check FluidInference's Core ML port of the base model: the baseline is fp32 PyTorch on the Apple GPU at batch 32; 715 MB against 1.5 GB is fp16 against fp32 in mixed units, exactly 2.00x in bytes; 'same accuracy' is accuracy against the Oxford-IIIT Pet labels, 94.26% against 94.11% on all 7,349 photos; the text tower ships and is three quarters of the download; and the 262 MB peak is a process footprint smaller than the weights the process loads."
+date: 2026-09-26
+tags:
+  - explainer
+  - multimodal
+  - vision-language-models
+  - pretraining
+  - distillation
+  - retrieval
+  - on-device
+  - apple-silicon
+  - benchmarks
+draft: false
+---
+
+import { LossExplorer } from "@/components/articles/siglip-2-coreml/loss-explorer"
+import { ByteLedger } from "@/components/articles/siglip-2-coreml/byte-ledger"
+
+> "Introducing SigLIP2: now trained with additional captioning and self-supervised losses! … Try it out, backward compatible!"
+> — [Xiaohua Zhai, 21 February 2025](https://x.com/XiaohuaZhai/status/1892830768197751107)
+
+> "we converted SigLIP 2 to Core ML and sorted 7,349 pet photos into 37 breeds on a M5"
+> — [Alex, FluidInference, 26 September 2026](https://x.com/Alex_tra_memory/status/2103694091326308415)
+
+SigLIP 2 is everywhere on this site without ever having been explained. It is the NaFlex encoder inside [LFM2.5-VL-3B](/articles/lfm2-5-vl-3b), one of the teachers named in the RADIO config that [ZDTaichu5.0-9B](/articles/zdtaichu-5-9b) ships, and the kind of contrastive starting point [Kimi K3](/articles/kimi-k3) decided it could do without. [Qwen-Drive](/articles/qwen-drive-1-0)'s encoder and [Intern-S2-Mobius](/articles/intern-s2-mobius)'s vision tower come from, or match, the SigLIP family. This piece does two things. It builds [SigLIP 2](https://arxiv.org/abs/2502.14786) from the loss up. Then it checks FluidInference's Core ML port of the base model the way [GLiNER2.5-Decide](/articles/gliner-2-5-decide) and [Kev](/articles/jev-alternatives-week-two) were checked: which baseline, which precision, which compute units, and what each headline number counts.
+
+| | |
+|---|---|
+| What it is | a two-tower image-text encoder: an image and a caption each become one 768-wide unit vector (base size), compared by cosine |
+| Loss | SigLIP's pairwise sigmoid, plus a LocCa decoder from the start and self-distillation with masked prediction from 80% of training |
+| Sizes | vision towers ViT-B (86M), L (303M), So400m (400M), g (1B); fixed 224 to 512 px, plus NaFlex |
+| Base checkpoint | `google/siglip2-base-patch16-256`: **375,234,050** F32 parameters, 92,930,304 image and 282,303,744 text (measured, safetensors header) |
+| Core ML port | both towers in fp16, 176 MiB + 539 MiB, image encoder on the Neural Engine |
+| Port's claim | Core ML against "base PyTorch", same accuracy: 36 s against 102 s, 5 ms against 14 ms per photo, 262 MB against 4.2 GB peak, 715 MB against 1.5 GB on disk |
+| What that is | Core ML fp16 on CPU + Neural Engine, 4 photos in flight, against transformers fp32 on MPS at batch 32 (reported) |
+
+## Part 1: SigLIP 2 from the loss up
+
+### The problem a contrastive loss solves
+
+An image encoder $f$ and a text encoder $g$ each emit a vector, normalised to unit length: $\mathbf{x}_i = f(I_i)/\lVert f(I_i)\rVert$ and $\mathbf{y}_i = g(T_i)/\lVert g(T_i)\rVert$. Training should make $\mathbf{x}_i \cdot \mathbf{y}_i$ large for a photo and its own alt-text and small for every other pairing. Web alt-text is noisy, so the signal comes from volume: billions of pairs, and within each batch, every mismatched pair as a free negative.
+
+CLIP phrases that as classification. For image $i$, which of the $|\mathcal{B}|$ captions in the batch is mine? Then the same question from each caption's side. The SigLIP paper writes it as:
+
+$$
+\mathcal{L}_{\text{softmax}} = -\frac{1}{2|\mathcal{B}|}\sum_{i=1}^{|\mathcal{B}|}\left(\log\frac{e^{t\,\mathbf{x}_i\cdot\mathbf{y}_i}}{\sum_{j=1}^{|\mathcal{B}|} e^{t\,\mathbf{x}_i\cdot\mathbf{y}_j}} + \log\frac{e^{t\,\mathbf{x}_i\cdot\mathbf{y}_i}}{\sum_{j=1}^{|\mathcal{B}|} e^{t\,\mathbf{x}_j\cdot\mathbf{y}_i}}\right)
+$$
+
+$t$ is a learned temperature. The denominators are the problem. Row $i$'s normaliser sums over every caption in the global batch, so the gradient on any one pair depends on all the others:
+
+$$
+\frac{\partial \mathcal{L}_{\text{softmax}}}{\partial \ell_{ij}} = \frac{1}{2|\mathcal{B}|}\Big[\big(p^{\text{row}}_{ij} - [i{=}j]\big) + \big(p^{\text{col}}_{ij} - [i{=}j]\big)\Big]
+$$
+
+where $\ell_{ij} = t\,\mathbf{x}_i\cdot\mathbf{y}_j$ and $p^{\text{row}}$, $p^{\text{col}}$ are the row and column softmaxes. On a cluster that means gathering every embedding onto every device and materialising the full $|\mathcal{B}| \times |\mathcal{B}|$ similarity matrix.
+
+### The sigmoid loss: one binary question per pair
+
+SigLIP ([Zhai et al., 2023](https://arxiv.org/abs/2303.15343)) replaces the classification with $|\mathcal{B}|^2$ independent yes-or-no questions. Label a pair $z_{ij} = 1$ if it matches and $-1$ otherwise:
+
+$$
+\mathcal{L}_{\text{sigmoid}} = -\frac{1}{|\mathcal{B}|}\sum_{i=1}^{|\mathcal{B}|}\sum_{j=1}^{|\mathcal{B}|}\log\frac{1}{1+e^{z_{ij}(-t\,\mathbf{x}_i\cdot\mathbf{y}_j+b)}}
+\qquad
+\frac{\partial \mathcal{L}_{\text{sigmoid}}}{\partial \ell_{ij}} = \frac{\sigma(\ell_{ij}) - [i{=}j]}{|\mathcal{B}|}
+$$
+
+with $\ell_{ij} = t\,\mathbf{x}_i\cdot\mathbf{y}_j + b$. Each pair's gradient now depends on that pair alone. The bias $b$ exists because negatives outnumber positives: at a 16k batch, the paper counts 268M negatives for 16k positives. SigLIP starts the scale at $t = 10$ and the bias at $b = -10$ (big_vision stores the scale as its log), so every pair begins looking like a negative, which is almost always right. In the paper's ablation, starting the bias at 0 instead does significantly worse.
+
+Independence buys the systems property. The paper's "chunked" implementation keeps each device's images, passes caption chunks around the ring with collective permutes and accumulates the loss block by block. No all-gather, and memory per step drops from $|\mathcal{B}|^2$ to $b^2$ for a per-device batch $b$. On four TPU-v4 chips a Base SigLIP fits a 4,096 batch where CLIP fits 2,048. Below a 16k batch the sigmoid loss scores well above softmax, and both saturate around 32k (all reported).
+
+<LossExplorer />
+
+The explorer puts both losses on one 4 × 4 batch of illustrative cosines. The beagle photo against the "pug" caption is already picked; move its cosine. Under softmax, the gradient changes on that pair's whole row and column, 7 of 16 cells, because every normaliser they share moved. Under sigmoid, one cell changes. Two more things are visible. The bias does nothing under softmax, since adding a constant to every logit in a row cancels in the normalisation. And at the trained base constants, $t = 112.9$ and $b = -16.77$ (as FluidInference's converter read them from the checkpoint), a pair's probability crosses 0.5 at a cosine of $16.77 / 112.9 = 0.149$ (reasoned). Clear matches sit far above that and clear mismatches far below. The hard negatives, a dog photo against another dog's caption or a cat against another cat's, are the ones still producing gradient.
+
+### What SigLIP 2 adds
+
+The architecture does not change, which is what "backward compatible" in the launch post means: a ViT with learned position embeddings and an attention-pooling (MAP) head, a text transformer over 64 lower-cased tokens (the released base checkpoint reads its last token through a linear head; measured, safetensors header). The one swap is the multilingual Gemma tokenizer with a 256k vocabulary. Training is WebLI, 10 billion images and 12 billion alt-texts in 109 languages, mixed 90% English and 10% not, with de-biasing filters on top. Batch 32k, 40B examples seen, up to 2,048 TPUv5e chips. What changes is everything attached to the encoder during training.
+
+<Figure
+  src="/articles/siglip-2-coreml/fig1.png"
+  alt="Diagram of the SigLIP 2 training setup. In the centre, an image encoder whose MAP head feeds a sigmoid loss (100%) together with a text encoder on the right; a dashed box marks this pair as SigLIP v1. From the image encoder, cross-attention feeds an AR decoder whose LocCa loss (100%) covers captioning, dense captioning and referring expressions. An auxiliary head feeds a SILC/TIPS loss (20%) for self-distillation and masked prediction, against an EMA image encoder teacher on the left behind a stop gradient."
+  caption="SigLIP 2's recipe: the SigLIP pair in the dashed box, a LocCa decoder on the un-pooled patch features for the whole run, and SILC/TIPS self-distillation and masked prediction against an EMA teacher for the last 20% (SigLIP 2 paper, Figure 1)."
+/>
+
+**A LocCa decoder, from step one.** A transformer decoder cross-attends to the un-pooled patch features, before the MAP head, and is trained with equal weight to the sigmoid loss. It has the text encoder's shapes with half the layers, and three jobs per example: caption the image, predict the box for a region caption (referring expressions), and caption a given box (grounded captioning). Region-caption pairs come from n-grams of the alt-text run through an open-vocabulary detector. Half the time the caption is predicted in parallel from mask tokens rather than left to right. The decoder is not released. Its job is to shape the patch features, and the paper attributes the localisation gains below to it.
+
+**Self-distillation and masked prediction, from 80% of training.** Two terms from SILC and TIPS. An EMA copy of the image encoder sees the full image; the student sees 8 local crops and must match the teacher's global representation. Then the student sees the global view with 50% of patches replaced by mask tokens and must match the teacher's features at the masked positions. The weights are 1 and 0.25, scaled again by 0.25, 0.5, 1.0 and 0.5 for B, L, So400m and g to balance dense tasks against global ones. These losses run on augmented views; the image-text losses keep the original image, so augmentation cannot blur the alignment.
+
+**Resolution, two ways.** Fixed-resolution checkpoints resume from 95% of training with the position embedding resized to the target grid. NaFlex resumes from 90%: resize each image so both sides are multiples of the patch size with the least aspect distortion that fits a token budget, resize the learned 16 × 16 position grid bilinearly to the actual grid, and mask the padding. Each mini-batch samples a budget from 128, 256, 576, 784 or 1024 tokens. NaFlex skips the self-distillation stage.
+
+**Curation for the small models.** The fixed-resolution B/16 and B/32 get 4B more examples at learning rate $10^{-5}$ with only the sigmoid loss, while ACID picks each 32k batch out of a 64k super-batch by "learnability" as scored by a teacher and the learner. The teacher is the SigLIP 2 So400m, fine-tuned for 1B examples on curated data. The paper credits this step for the B models' margins.
+
+### Results
+
+All from the paper's tables; "B/16" means 256 px unless noted.
+
+| Task | SigLIP | SigLIP 2 | Source |
+|---|---:|---:|---|
+| ImageNet zero-shot, B/16 | 76.7 | **79.1** | Table 1 |
+| COCO text→image R@1, B/16 | 47.4 | **53.2** | Table 1 |
+| XM3600 text→image R@1, B/16 (36 languages) | 22.5 | **40.7** | Table 1 |
+| ADE20k segmentation mIoU, So/14 224 px, frozen probe | 37.6 | **41.8** | Table 2 |
+| NYUv2 depth RMSE (lower is better), So/14 224 px | 0.576 | **0.493** | Table 2 |
+| RefCOCO val acc@0.5, B, 256 tokens | 64.05 | **83.76** | Table 5 |
+| LVIS rare AP with OWL-ViT, B/16 | 31.0 | **32.7** | Table 4 |
+| Representation bias (lower is better), B/16 | 35.6 | **19.4** | Table 9 |
+
+The localisation jump is the largest thing in the paper: nearly 20 points on RefCOCO for the same base encoder, from a decoder that never ships. Where it does not win is also printed. LocCa itself beats SigLIP 2 at L size, 88.34 against 86.04 on RefCOCO val. The multilingual-only mSigLIP beats it on XM3600, 50.0 against 48.1 at So400m.
+
+As a VLM encoder (frozen, Gemma 2 2B, PaliGemma-style transfer), I counted Table 6: SigLIP 2 beats SigLIP on 34 of 35 tasks at L/16, 32 at So400m 224 px and 33 at 384 px. Against AIMv2 at L size it wins 28, ties 1 and loses 6. The biggest gains are text-heavy: TextVQA 69.7 to 74.0 and DocVQA 62.7 to 65.9 at So400m 384 px.
+
+<Figure
+  src="/articles/siglip-2-coreml/fig3.png"
+  alt="A grid of 36 bar charts, one per VLM transfer benchmark plus an average, each comparing SigLIP, AIMv2 and SigLIP 2 encoders at L/16 256 px, So400m/14 224 px and So400m/14 384 px. SigLIP 2's darker bars are higher than the matching SigLIP bars in nearly every panel, most visibly on text-heavy tasks such as TextVQA, TextCaps, DocVQA and InfoVQA."
+  caption="Frozen encoders under a Gemma 2 2B language model, fine-tuned per task: SigLIP 2 against SigLIP and AIMv2 at three size and resolution settings. Same data as the paper's Table 6 (SigLIP 2 paper, Figure 4)."
+/>
+
+NaFlex is a trade, not an upgrade. At 256 tokens the B/16 NaFlex checkpoint scores 78.5 on ImageNet against 79.1 for the square one. On document and screen retrieval it wins: HierText text→image 7.4 against 6.1, Screen2Words image→text 26.6 against 22.9. The paper puts the natural-image gap down, "arguably", to the curation step the square B models got; at So400m, where neither variant got it, the two are on par.
+
+<Figure
+  src="/articles/siglip-2-coreml/fig2.png"
+  alt="Fourteen line charts of zero-shot and retrieval scores against sequence length from 64 to 1024 tokens, comparing SigLIP 2 NaFlex (blue) with standard square SigLIP 2 (orange) at B/16 (solid) and So400m/16 (dashed). Standard B/16 is above NaFlex B/16 on the ImageNet and COCO panels; NaFlex is above standard on most TextCaps, HierText, SciCap and Screen2Words panels, especially at short sequence lengths."
+  caption="One NaFlex checkpoint across sequence lengths against a separate square checkpoint per length. NaFlex wins on OCR, document and screen retrieval, especially at short lengths, and loses slightly on natural images at B size (SigLIP 2 paper, Figure 3)."
+/>
+
+## Part 2: the Core ML port, checked
+
+[FluidInference](https://huggingface.co/FluidInference/siglip2-base-patch16-256-coreml) converted the base 256 px checkpoint on 25 September. The conversion is plain: each tower is traced with `torch.jit.trace` and converted with coremltools 9.0 at fp16 compute precision, with a macOS 14 deployment target, wrapped so the output is already L2-normalised. There are no graph rewrites and no quantisation (read from the conversion script and the package metadata). The image package takes `pixel_values` as a fixed `[1, 3, 256, 256]`; the text package takes `input_ids` as a fixed `[1, 64]`.
+
+<ModelCard repo="FluidInference/siglip2-base-patch16-256-coreml" note="Both towers as fixed-shape fp16 Core ML packages: the image encoder (184,692,800 bytes of weights) and the text encoder (564,620,224 bytes). Reports for ImageNet-1k, Oxford-IIIT Pets and the 7,349-photo run sit in reports/." />
+
+<RepoCard repo="FluidInference/FluidUse" note="SigLIP2Manager, a Swift Gemma tokenizer, a Swift port of PIL's bilinear resize, and the ImageSortCheck program the 36 s figure comes from." />
+
+Every number in the post traces to one JSON report, `reports/pets-7349-coreml-vs-pytorch.json`, and to the two scripts that produce its sides: FluidUse's Swift `ImageSortCheck` and mobius's `bench-pytorch-pets.py`.
+
+| Claim | Reported, M5 Pro 24 GB, macOS 27 | What it is |
+|---|---|---|
+| 36 s vs 102 s | 36.34 s against 102.24 s for 7,349 photos | Swift, CPU + Neural Engine, 4 in flight, against transformers fp32 on MPS at batch 32; decode, resize, encode, score |
+| 5 ms vs 14 ms per photo | 4.95 against 13.91 ms | the same two totals divided by 7,349: throughput, not latency |
+| 262 MB vs 4.2 GB peak | 262 MB against 4,238 MB | `/usr/bin/time -l` peak footprint of each process |
+| 715 MB vs 1.5 GB | 176 + 539 MiB against 1,501 MB | fp16 against fp32, in mixed units |
+| same accuracy | 94.26% against 94.11% | top-1 against the Oxford-IIIT Pet labels |
+
+### The baseline
+
+The PyTorch side is `transformers`' full `SiglipModel`, loaded in fp32 and moved to `mps`, the Apple GPU. It runs a serial loop: open 32 JPEGs with PIL, run the Hugging Face processor, run the vision tower, copy the argmax back to the CPU. The Core ML side is a Swift process with four photos in flight, so JPEG decoding and resizing on the CPU overlap the encoder on the Neural Engine.
+
+So the 2.8x end to end is three differences at once: fp16 against fp32, a compiled static graph against eager PyTorch, and a pipelined loop against a serial one. FluidInference's per-call latencies separate some of it (reported, batch 1, median):
+
+| Backend | Image encoder | Text encoder |
+|---|---:|---:|
+| Core ML, CPU + Neural Engine | 5.2 ms | 1.3 ms |
+| Core ML, CPU + GPU | 3.5 ms | 3.0 ms |
+| Core ML, CPU only | 17.4 ms | 4.1 ms |
+| PyTorch fp32, MPS | 19.1 ms | — |
+| PyTorch fp32, CPU | 91.4 ms | — |
+
+Two readings. Core ML on the CPU alone already beats PyTorch on the GPU, so most of the per-call gap is precision and graph compilation, not the Neural Engine. And this is not the GLiNER or Kev pattern, where the Neural Engine path was 689 ms and 740 ms against GPU times of 14.7 and 30.8 ms. A ViT-B at a fixed 256 tokens is a shape the Neural Engine runs well, reported at 100% of the image encoder's ops. The GPU is still faster per call, 3.5 against 5.2 ms. Power, the usual argument for the Neural Engine, is not measured. `bench-pytorch-pets.py` has a `--dtype` flag, but no fp16 PyTorch run is reported, so how much of the gap is fp16 alone is unknown.
+
+The loop is not the main cost. PyTorch at batch 1 takes 20.88 ms a photo end to end against 19.1 ms for the encoder alone, which leaves under 2 ms a photo for decoding, resizing and scoring (reasoned, across two runs). Core ML's 4.95 ms a photo sits just under its own 5.2 ms single-call latency: with four in flight, the Swift pipeline runs at the speed of the Neural Engine (reasoned).
+
+### Memory: two different quantities
+
+The Core ML process peaks at 262 MB while holding models whose weights are 715 MiB. A footprint smaller than the weights cannot include the weights. Core ML maps compiled weights from disk as file-backed pages, and a model resident on the Neural Engine is managed by a system service, so neither lands fully in this process's footprint (reasoned; nothing in the reports measures system-wide memory). 262 MB is what this process costs beyond the models, not what the model costs.
+
+The 4.24 GB is closer to all-in, and its size is not batch 32. The batch-1 run peaks at 3.64 GB, so batch 32 adds 0.6 GB. The rest starts with fp32 weights for both towers, 1.50 GB, of which 1.13 GB is the text tower and 786 MB its token table, all loaded to embed 37 prompts once. A transient second copy while the weights move to MPS buffers, plus the Python, PyTorch and transformers runtime, would account for the remainder at batch 1 (reasoned, not measured). A PyTorch baseline that embedded the prompts, dropped the text tower and ran fp16 would hold 186 MB of weights.
+
+### Disk: fp16 against fp32, in two units
+
+I read the file sizes through the Hub API. The two Core ML `weight.bin` files are 184,692,800 and 564,620,224 bytes: 176.1 and 538.5 MiB, the "715 MB". Google's `model.safetensors` is 1,500,985,224 bytes: the "1.50 GB" is decimal. In one unit it is 749.3 MB against 1,501.0 MB, or 714.6 MiB against 1,431.5 MiB: a ratio of 2.00. The size claim is precision and nothing else.
+
+<ModelCard repo="google/siglip2-base-patch16-256" note="The source checkpoint: one model.safetensors, 375,234,050 F32 parameters, both towers. 196,608,000 of them are the text tower's 256,000 x 768 token table." />
+
+The header gives the split. The text package is exactly the fp16 text tower plus 12,736 bytes of blob headers. The image package is 1,167,808 bytes smaller than the fp16 vision tower. The pooling head computes its query from a fixed learned probe, so the converter can fold that projection into a constant and drop one 768 × 768 matrix: 1,179,648 bytes in fp16, the whole gap once the package's own blob headers are added back. The image spec names no probe or input-projection constant (reasoned from the arithmetic and the op names).
+
+<ByteLedger />
+
+The text tower is 75% of the download and the 256,000 × 768 token table is 52% of it. That is the price of labels typed at run time in 109 languages. For a sorter whose 37 labels never change, the prompts could ship as 37 vectors, 113,664 bytes, beside a 185 MB image package (reasoned). The port keeps the text tower, which is the right default for a general `SigLIP2Manager` and an easy saving for a fixed app.
+
+### "Same accuracy" is accuracy, and it holds
+
+`ImageSortCheck` compares each prediction to the photo's gold breed, so 94.26% and 94.11% are accuracies against the Oxford-IIIT Pet labels, not agreement between runtimes: about 6,927 against 6,916 correct (derived from the rounded rates). The two sides also resize differently: Swift uses its own port of PIL's bilinear filter, Python the Hugging Face processor. The cleaner test is mobius's `score-pets.py`, which feeds identical pixel tensors to both: on the 3,669 test photos, Core ML 94.77% against PyTorch 94.74%, 3,477 against 3,476 correct, with 4 predictions different (derived from the report's rates). On all 50,000 ImageNet validation images, 76.76% against 76.79% with 99.32% agreement, so 338 predictions differ, and the worst image embedding has a cosine of 0.975 to PyTorch's.
+
+76.79% is not Google's 79.1%. The port scores with one prompt, `this is a photo of {class}.`, and its card puts the gap down to Google's own class names and prompts. Both runtimes share the lower number, so it says nothing about the conversion.
+
+The dataset checks out: 7,349 is the whole of Oxford-IIIT Pet, 3,680 train plus 3,669 test (measured, dataset viewer). Scoring the train split is fair for a zero-shot model that never trained on it. One gap: FluidUse only downloads the test split, and the 7,349-photo run needs a train split in its cache that nothing in FluidUse, or in mobius's SigLIP 2 directory, puts there.
+
+### The text tower is in the package
+
+Both towers ship, and `ImageSorter` embeds the 37 prompts once, as `a photo of a {breed}, a type of pet.`, then scores every photo against those cached vectors. The timed loop runs only the image encoder. The same is true on the PyTorch side, so the comparison is fair on this point; it just makes the 36 s a benchmark of the image tower and the pipeline around it.
+
+## The ledger
+
+**Holds.** The speedup and the accuracy. On the same Mac, the Core ML pipeline sorts 7,349 photos in 36 s against 102 s, and loses nothing: 94.26% against 94.11% against real labels, 4 of 3,669 predictions different on identical inputs, 99.32% agreement on ImageNet. The conversion is plain and faithful, and the Neural Engine path is 5.2 ms a call against 3.5 ms on the GPU, which the last two FluidInference ports could not claim.
+
+**Different from how it reads.** "Base PyTorch" is fp32 on the Apple GPU at batch 32. "Per photo" is total time divided by photos. 715 MB against 1.5 GB mixes MiB and MB and is exactly fp16 against fp32. 262 MB is a process footprint that excludes the weights; 4.2 GB is a process that holds both towers in fp32.
+
+**Unmeasured.** Power. An fp16 PyTorch baseline. System-wide memory for the Core ML run. Per-photo agreement on the 7,349.
+
+SigLIP 2's own story is similar in shape. The part that ships is the same ViT with the same sigmoid question at the end. Everything that made it better, the decoder, the EMA teacher, the curation, is scaffolding that exists only during training. The port inherits that simplicity: two encoders, one dot product, one sigmoid. The only decision left for an app is whether it needs the text tower at all.

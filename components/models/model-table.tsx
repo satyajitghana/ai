@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react"
 
 import { cn } from "@/lib/utils"
-import { blendedPrice, type ModelRecord } from "@/data/models"
+import { blendedPrice, contextLabel, type ModelRecord } from "@/data/models"
 
 // The workhorse: a sortable, filterable table over every model in the snapshot.
 // Click a column header to sort (numeric columns default high→low, then toggle);
@@ -28,7 +28,7 @@ const COLS: Col[] = [
   { key: "blended", label: "$/M blend", num: true, get: (m) => blendedPrice(m), fmt: (m) => { const b = blendedPrice(m); return b == null ? "—" : `$${b}` } },
   { key: "speedTps", label: "tok/s", num: true, get: (m) => m.speedTps, fmt: (m) => (m.speedTps == null ? "—" : `${Math.round(m.speedTps)}`) },
   { key: "latencyS", label: "TTFT", num: true, get: (m) => m.latencyS, fmt: (m) => (m.latencyS == null ? "—" : `${m.latencyS}s`) },
-  { key: "contextK", label: "Context", num: true, get: (m) => m.contextK, fmt: (m) => (m.contextK == null ? "—" : m.contextK >= 1000 ? `${m.contextK / 1000}M` : `${m.contextK}K`) },
+  { key: "contextK", label: "Context", num: true, get: (m) => m.contextK, fmt: (m) => (m.contextK == null ? "—" : contextLabel(m.contextK)) },
   { key: "sizeB", label: "Size", num: true, get: (m) => m.sizeB, fmt: (m) => (m.sizeB == null ? "—" : m.sizeB >= 1000 ? `${(m.sizeB / 1000).toFixed(1)}T` : `${m.sizeB}B`) },
   { key: "released", label: "Released", get: (m) => m.released, fmt: (m) => m.released ?? "—" },
 ]

@@ -1,0 +1,293 @@
+---
+title: "NVIDIA Model Optimizer: from mtq.quantize to a 4.95-bit DeepSeek-R1"
+description: "NVIDIA's Model Optimizer is the open-source library behind its own FP8 and FP4 checkpoints on Hugging Face. It puts post-training quantization, QAT and QAD, Minitron pruning, distillation, 2:4 sparsity and EAGLE draft training behind one Python API. I read the source at 23355ed: how mtq.quantize swaps every nn.Linear for a module carrying three TensorQuantizers, how max, AWQ and a 126-candidate FP8 sweep pick a scale, and how NVFP4's per-16 E4M3 scale and per-tensor FP32 scale land in the export. Then I counted the bytes of nvidia/DeepSeek-R1-FP4 from its safetensors headers. It stores 4.5 bits per quantized weight and 4.95 across the file, and it is 1.63x smaller than DeepSeek's FP8 release rather than 2x."
+date: 2026-09-26
+tags:
+  - quantization
+  - inference-optimization
+  - open-source
+  - distillation
+  - speculative-decoding
+  - explainer
+---
+
+import { Nvfp4BlockQuantizer } from "@/components/articles/nvidia-model-optimizer/nvfp4-block-quantizer"
+import { CheckpointLedger } from "@/components/articles/nvidia-model-optimizer/checkpoint-ledger"
+
+This week @Ryrenz posted a short spotlight on NVIDIA's Model-Optimizer: 3,902 stars, one Python interface for quantization, pruning, distillation, sparsity and speculative decoding, and the pre-quantized checkpoints NVIDIA made with it on Hugging Face, such as DeepSeek-R1-FP4 and Llama-3.3-70B-Instruct-FP4. The pitch: when a model almost fits, make it smaller.
+
+That misses the interesting part. ModelOpt is the tool NVIDIA uses to make its own releases, so the library and the checkpoints are two ends of one pipeline. I read both ends:
+
+- the source at commit `23355ed`, the tip of `main` on 26 September 2026;
+- the published checkpoints' `safetensors` headers, fetched with HTTP range requests. No weights were downloaded and no code was run.
+
+Every number below carries a label. **Measured** means I counted it from the source tree or the file headers. **Reported** means NVIDIA (or the post) says so. **Reasoned** means arithmetic on those.
+
+<RepoCard repo="NVIDIA/Model-Optimizer" />
+
+| | |
+|---|---|
+| Commit | `23355ed`, 26 September 2026, Apache 2.0 (measured) |
+| Library | **608** Python files, **173,439** lines under `modelopt/` (measured) |
+| Quantization | **81** files, **31,783** lines in `modelopt/torch/quantization/` (measured) |
+| Export | **44** files, **20,733** lines in `modelopt/torch/export/` (measured) |
+| Recipes | **37** model-level PTQ presets, **179** recipe YAMLs, **18** per-checkpoint recipes (measured) |
+| Agent skills | **15** `SKILL.md` files under `plugins/modelopt/skills/` (measured) |
+| Stars | **3,902** (reported by the post) |
+
+## What is in the box
+
+The README lists six techniques. Here is where each one lives in the tree and how much code backs it (line counts measured):
+
+| Technique | Where | What it does |
+|---|---|---|
+| Post-training quantization | `modelopt/torch/quantization/` | FP8, NVFP4, MXFP4/6/8, INT8 SmoothQuant, INT4 AWQ, W4A8 and GGML-style IQ formats, all through `mtq.quantize` |
+| QAT and QAD | the same quantizers, plus `modelopt/torch/distill/` (2,425 lines) | train through the fake quantizers; QAD adds a distillation loss against the full-precision teacher |
+| Pruning | `modelopt/torch/prune/` (3,865 lines), `mtp.prune` | Minitron (activation-magnitude importance over width, experts and depth) for Megatron models, FastNAS for vision |
+| Distillation | `modelopt/torch/distill/` | teacher/student wrapper and losses |
+| Sparsity | `modelopt/torch/sparsity/` (9,370 lines) | 2:4 weight sparsity by magnitude or SparseGPT, plus skip-softmax attention sparsity |
+| Speculative decoding | `modelopt/torch/speculative/` (11,807 lines), `mtsp.convert` | trains EAGLE-3, EAGLE-MTP, Medusa and DFlash draft heads |
+
+There is also `modelopt/onnx/` (32,156 lines) for ONNX PTQ and `modelopt/torch/puzzletron/` (19,435 lines) for heterogeneous pruning. The training techniques mostly plug into someone else's loop (Hugging Face Trainer, Megatron-Bridge, Megatron-LM, Accelerate). Quantization and export are ModelOpt's own, 52,516 lines between them (reasoned), so that is where I spent my time. The draft heads are the subject of my [EAGLE-3](/articles/eagle-3-speculative-decoding) piece. On pruning, the README reports that Domyn cut Colosseum-355B to 260B with Minitron pruning plus distillation (reported).
+
+## `mtq.quantize` is three moves
+
+The whole post-training path, as the README uses it:
+
+```python
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export import export_hf_checkpoint
+
+def forward_loop(model):
+    for batch in calib_loader:   # your calibration set
+        model(**batch)
+
+model = mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop)
+export_hf_checkpoint(model, export_dir="model-nvfp4")
+```
+
+`quantize()` in `modelopt/torch/quantization/model_quant.py` does three things in order.
+
+**1. Convert.** `convert_to_quantized_model` calls `replace_quant_module`. That walks `named_children()` and swaps every module whose type is in `QuantModuleRegistry` for its quantized twin: `nn.Linear` becomes `_QuantLinear`, one of 95 registrations in 23 files covering Hugging Face, Megatron, Transformer Engine, vLLM and PEFT layers (measured). The twin's `_setup` (in `nn/modules/quant_module.py`) registers three `TensorQuantizer` children: `input_quantizer`, `weight_quantizer`, and `output_quantizer`, which starts disabled.
+
+The neat part is the weight. The twin registers `weight` as a *dynamic attribute*, so inside `forward` any read of `self.weight` returns `weight_quantizer(weight)`. The module's original `F.linear` call runs unchanged and simply sees quantized weights. When the swap finishes, the code prints `Inserted N quantizers`.
+
+**2. Configure.** `set_quantizer_by_cfg` applies an *ordered* list of entries to quantizer names with `fnmatch`, and later entries win. The NVFP4 preset (`modelopt_recipes/configs/ptq/presets/model/nvfp4.yaml`) is three imports:
+
+1. disable everything;
+2. enable `*weight_quantizer` and `*input_quantizer` with the NVFP4 numerics;
+3. apply `default_disabled_quantizers`, which switches `*lm_head*`, `*router*`, `*mlp.gate.*`, `mtp.*`, vision towers, BatchNorm and Embedding back off.
+
+The numerics file is the format, in full:
+
+```yaml
+# modelopt_recipes/configs/numerics/nvfp4.yaml
+num_bits: e2m1        # the 4-bit element
+block_sizes:
+  -1: 16              # one scale per 16 values along the last dim
+  type: dynamic
+  scale_bits: e4m3    # the block scale is FP8
+effective_bits: 4.5   # 4 value bits + 8/16 scale bits
+```
+
+Then `_check_weight_quantization_took_effect` raises if the config asked for weight quantization and no weight quantizer is enabled. Its docstring says why: MoE models whose module names missed the wildcards used to sail through export as a checkpoint reading `"quant_algo": null`, with nothing quantized.
+
+**3. Calibrate.** `calibrate()` puts the model in eval mode and runs whatever the config's `algorithm` field names. Both the `nvfp4` and `fp8` presets say `max`.
+
+Inside `TensorQuantizer.forward`, calibration mode calls `collect()` and passes the tensor through untouched; quantize mode calls `_fake_quantize`, which rounds and dequantizes back to the input dtype (or `_real_quantize`, which returns packed storage). Fake quantization is what makes QAT work: the backward is a straight-through estimator (`pass_through_bwd` defaults to `True`), so you fine-tune through the rounding with an ordinary optimizer. QAD swaps the label loss for a distillation loss against the BF16 teacher.
+
+## Where the scales come from
+
+A quantizer needs one number per scaling group, `amax`: the magnitude that maps to the format's largest code. Calibration is the search for it. ModelOpt offers several rules, all in `model_calib.py` and `calib/`.
+
+**Max.** `MaxCalibrator.collect` keeps a running `torch.max` of the absolute maxima. Before any data flows, `max_calibrate` calibrates every weight quantizer directly on its weight tensor (`weight_only_quantize`). That way an MoE expert the calibration tokens never reach still gets a scale. Then `forward_loop` runs for the activations.
+
+**Percentile.** `HistogramCalibrator` builds a 2,048-bin histogram, and `compute_amax("percentile")` returns the bin edge where the CDF crosses 99.99% by default. It is per-tensor only, and no shipped recipe selects it (measured). Percentiles return in the newer `nvfp4_act_headroom` algorithm, which sets the NVFP4 *activation* global amax to `max(rho × anchor, upper)` from the 1st and 99.99th percentiles of the per-block activation amaxes, to leave headroom for activations calibration never saw.
+
+**SmoothQuant.** This path collects per-channel activation amax. It then multiplies each input channel by $s = \max|W|^{1-\alpha} / \max|X|^{\alpha}$ and the matching weight column by $1/s$. That moves activation outliers into the weights, where per-channel INT8 absorbs them. The default is $\alpha = 1.0$, and the path is INT8 only.
+
+**AWQ lite, the search.** Two passes over `forward_loop`. The first caches, per input channel, the mean $|x|$ ($\bar{x}_c$) and the mean block-normalized $|w|$ ($\bar{w}_c$). The second tries every $\alpha$ in 0, 0.1, …, 1.0 (11 candidates at the default `alpha_step` of 0.1) and builds a per-channel scale for each:
+
+$$s_c = \frac{\bar{x}_c^{\,\alpha}}{\bar{w}_c^{\,1-\alpha}}$$
+
+The scale is clamped to [1e-4, 1e4] and normalized by $\sqrt{\max s \cdot \min s}$. The weight is multiplied by $s$ and the input by $1/s$, the quantized layer runs, and the mean squared error against the unquantized output accumulates.
+
+The $\alpha$ with the least error wins, and the scale is folded into the weights with its inverse kept as the input's `pre_quant_scale`. `awq_clip` searches a clip ratio from 0.5 to 1.0 in steps of 0.05 instead, and `awq_full` does both.
+
+**NVFP4's own rules.** For NVFP4 the block scale itself can be searched.
+
+- `mse` tries all 126 positive finite E4M3 values as a block's scale code and keeps the one with the least squared *weight* error. A single Triton kernel does this (`kernels/quantization/gemm/nvfp4_fp8_sweep.py`).
+- `local_hessian` weights that error by the block's 16×16 input second-moment matrix $X_b X_b^{\top}$, so it minimizes the layer's *output* error instead.
+
+Here is what the three rules do to the values that reach the 4-bit cast:
+
+<Figure
+  src="/articles/nvidia-model-optimizer/fig1.png"
+  alt="Histogram of scaled weight magnitudes W over s, 0 to 8, with dashed lines at the E2M1 grid values. The Max curve falls smoothly and has a bump between about 5.6 and 6.4; the MSE and Local-Hessian curves cluster on the grid lines."
+  caption="Scaled weights W/s for the first gate projection of Qwen3.8-27B under three block-scale rules. Max scaling piles a bump around 6, the largest E2M1 value; MSE and local-Hessian pull the mass onto grid points. The bump's spread from about 5.6 to 6.4 is the FP8 rounding of each block's scale (ModelOpt local-Hessian post, Figure 2)."
+/>
+
+That bump is the max rule doing exactly what its formula says. Each block's largest value is sent to 6. The scale that does the sending is itself rounded to E4M3's 3 mantissa bits, so it can be off by up to about 1/16 either way, and the maximum lands anywhere from about 5.6 to 6.4 (reasoned). Values above 6 round down to 6.
+
+NVIDIA reports what the smarter scales buy on Qwen3.5-9B under W4A4. The average drop against BF16 across MMLU, HellaSwag, WinoGrande and GSM8K is:
+
+| Scale rule | Average drop (points) |
+|---|---|
+| max | 5.10 |
+| four-over-six | 4.75 |
+| MSE | 3.87 |
+| local-Hessian | 3.10 |
+| local-Hessian + GPTQ | 2.94 |
+
+All reported. The same post measures this on the 27B model it shipped:
+
+<Figure
+  src="/articles/nvidia-model-optimizer/fig2.png"
+  alt="Grouped bar chart of Qwen3.8-27B scores for BF16, Max and Local-Hessian NVFP4 on Terminal-Bench 2.1, IFBench, SciCode, MMMU-Pro and GPQA Diamond. An inset table gives the mean accuracy drop from BF16: Max 2.31, Local-Hessian 0.77."
+  caption="Qwen3.8-27B in NVFP4 with max scales against local-Hessian scales. The mean drop from BF16 falls from 2.31 to 0.77 points, with nothing changed at inference: the scale is computed once, at export. NVIDIA's numbers (ModelOpt local-Hessian post, Figure 1)."
+/>
+
+## NVFP4 in the code: two scales and a nibble
+
+I covered NVFP4 as a format in the [Nemotron piece](/articles/nemotron-nvfp4). Here is the same format as ModelOpt computes it, in `qtensor/nvfp4_tensor.py`. For a weight matrix $W$ and a block $b$ of 16 consecutive weights along the input dimension:
+
+$$g = \frac{\max_i |W_i|}{6 \times 448}, \qquad s_b = \mathrm{E4M3}\!\left(\frac{\max_{i \in b} |W_i|}{6\,g}\right), \qquad \hat{W}_i = \mathrm{E2M1}\!\left(\frac{W_i}{s_b\, g}\right) s_b\, g$$
+
+The symbols:
+
+- **6** is the largest E2M1 value.
+- **448** is the largest E4M3 value.
+- **$g$** is the FP32 per-tensor scale, computed by `get_weights_scaling_factor_2`.
+- **$s_b$** is the FP8 per-block scale, computed by `get_weights_scaling_factor`. That function sets a zero scale to 1.0, clamps to [2⁻⁹, 448] and casts.
+
+The 448 in $g$'s denominator is the whole trick. The block that holds the tensor's largest value gets a scale of exactly 448, the top of the E4M3 range. Every other block gets a smaller code (reasoned from the formula). So the FP32 scale absorbs the tensor's overall magnitude, and the 8-bit block scale only has to span the ratio between blocks.
+
+The element cast, `_cast_fp4`, finds each value's position among the bounds `[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5]` with `searchsorted`. Ties at 0.75, 1.75 and 3.5 are bumped up, which amounts to round-half-to-even on the grid `{0, 0.5, 1, 1.5, 2, 3, 4, 6}`. A sign bit makes the code 4 bits. Then `(q[..., 1::2] << 4) | q[..., 0::2]` packs two codes into each byte.
+
+Here is that arithmetic on 32 weights in two blocks, with an outlier you can grow in block A:
+
+<Nvfp4BlockQuantizer />
+
+Grow the outlier and watch block B. Its own FP8 scale code shrinks to keep its largest value near 6, so its error barely moves. INT4 with one scale across all 32 values has no such escape: in the default state it rounds most of block B to zero, 84.5% relative error on that block against 10.4% for NVFP4 (illustrative, seed 1, outlier at 6×). Per-tensor FP8 wins on error at every setting, because every value keeps 3 mantissa bits; it just costs 8 bits a weight instead of 4.5. Switch the block scale to the MSE sweep and the codes move. Some blocks pick a smaller code, clipping their maximum to 6 in exchange for a finer grid under it; others pick a larger one. That is the mechanism behind Figure 1.
+
+On disk, each quantized linear becomes four tensors. The shapes below are for one DeepSeek-R1 expert's `gate_proj`, a 2048×7168 matrix (measured):
+
+| Tensor | Dtype | Shape | Bits per weight |
+|---|---|---|---|
+| `weight` | U8 | 2048 × 3584, two E2M1 codes per byte | 4 |
+| `weight_scale` | F8_E4M3 | 2048 × 448, one per 16 weights | 0.5 |
+| `weight_scale_2` | F32 | scalar, the $g$ above | ≈ 0 |
+| `input_scale` | F32 | scalar, the activations' $g$ | none |
+
+The file confirms `effective_bits: 4.5`: across DeepSeek-R1-FP4's 44,727 quantized linears, the E4M3 scale bytes are exactly one eighth of the packed-weight bytes, 41,103,261,696 against 328,826,093,568 (measured).
+
+Activations get only the scalar `input_scale`, which is calibrated amax over (6 × 448). The YAML says `type: dynamic`, and the file has nowhere to keep per-block activation scales, so the kernel must compute them at inference time (reasoned from the layout).
+
+## Export: one checkpoint, three runtimes
+
+`export_hf_checkpoint` calls `_export_quantized_weight` (in `export/unified_export_hf.py`) on each quantized module. For NVFP4 it registers `weight_scale_2`, computes `weight_scale` against it, packs the weight, and registers `input_scale` from the input quantizer's amax. Tensor names stay the Hugging Face names, so the checkpoint is the original layout plus scale tensors, and two configs:
+
+- **`hf_quant_config.json`:** producer, `quant_algo`, `kv_cache_quant_algo`, `group_size` and `exclude_modules`.
+- **A `quantization_config` block in `config.json`:** `quant_method: "modelopt"` plus compressed-tensors-style `config_groups`.
+
+That single tag is what the runtimes key on: `LLM(model=path, quantization="modelopt")` in vLLM, `sgl.Engine(model_path=path, quantization="modelopt")` in SGLang, and a plain `LLM(model=path)` in TensorRT-LLM. There is still a legacy `export_tensorrt_llm_checkpoint` for the TensorRT-LLM C++ backend.
+
+The README is honest about how thin the support matrix's evidence is: its entries come from `tests/examples/hf_ptq/test_deploy.py`, whose cases "are marked `release` and run out-of-band — no workflow currently passes `--run-release`", and each is a load-and-generate smoke test. My [vLLM](/articles/vllm) and [SGLang](/articles/sglang) reads cover the other side of that tag.
+
+## What is in nvidia/DeepSeek-R1-FP4
+
+<ModelCard repo="nvidia/DeepSeek-R1-FP4" claimed="FP4, ~1.6x smaller than FP8" note="The Hub counts storage elements as parameters, so its figure (396.77B when I fetched it) treats each packed byte of two FP4 weights, and each FP8 block scale, as one. Counted as weights, the file stores 684.49B." />
+
+Summing the tensor sizes in the headers of all 80 shards gives **180,364** tensors and **423,605,060,024** bytes (measured). By dtype:
+
+| Dtype | Bytes | Share |
+|---|---|---|
+| U8 (packed E2M1) | 328,826,093,568 | 77.63% |
+| BF16 | 53,675,286,528 | 12.67% |
+| F8_E4M3 (block scales) | 41,103,261,696 | 9.70% |
+| F32 (tensor and input scales) | 418,232 | 0.00% |
+
+`hf_quant_config.json` names `modelopt` 0.23.0 as producer, `NVFP4` with `group_size` 16, no KV-cache quantization, and 245 `exclude_modules` (measured):
+
+- `self_attn*` in all 61 decoder layers;
+- the router `mlp.gate` in the 58 MoE layers;
+- 122 layernorms;
+- `model.norm`, `model.embed_tokens` and `lm_head`;
+- `model.layers.61*`, the multi-token-prediction layer.
+
+So every attention projection is BF16. The card's line, "only the weights and activations of the linear operators within transformers blocks are quantized," is looser than the file: attention projections are linear operators inside transformer blocks too.
+
+For the baseline I read the headers of `deepseek-ai/DeepSeek-R1`'s 163 shards the same way: **688,574,839,360** bytes (measured), FP8 with F32 scales per 128×128 block. Its index file's `total_size` claims 1,369,062,772,000, about double, which is why I sum headers. Both files store the same 684,489,845,504 parameters. The FP8 original is 688.6 GB at 8.05 bits a weight; the FP4 release is 423.6 GB at **4.95 bits a weight**, 1.63x smaller (measured). The card's "approximately 1.6x" holds (reported).
+
+<CheckpointLedger />
+
+The ledger explains the missing half of a 2x.
+
+- **The saving:** the routed experts go from 654.07 GB to 367.82 GB, 8 bits to 4.5. They are 95.53% of the parameters and carry the whole saving (measured).
+- **The growth:** attention was FP8 in DeepSeek's release and is BF16 in NVIDIA's, so it doubled from 11.42 GB to 22.83 GB. The MTP layer went from 15.42 GB to 26.93 GB. Together those two groups *grew* by 22.9 GB (measured).
+
+Leave out the MTP layer, which only matters if you serve with multi-token prediction, and the rest averages 4.73 bits (reasoned from the measured counts). The file does not say why attention was excluded rather than kept at FP8.
+
+<ModelCard repo="nvidia/Llama-3.3-70B-Instruct-FP4" claimed="FP4, ~3.3x smaller than BF16" note="The Hub's parameter count (40.61B when I fetched it) counts packed bytes and FP8 scales as parameters. Counted as weights, the file stores 70.55B." />
+
+`nvidia/Llama-3.3-70B-Instruct-FP4` is the simpler case, with nine shards and **42,709,045,632** bytes (measured):
+
+- **Exclusions:** `exclude_modules` is just `lm_head`, so attention is quantized too.
+- **KV cache:** `kv_cache_quant_algo` is `FP8`, with a BF16 `k_scale` and `v_scale` per layer.
+- **Coverage:** 97.02% of the 70,553,706,496 parameters are NVFP4, and the file averages **4.84** bits a weight.
+- **Size:** the BF16 source is gated, so I computed its size as two bytes a parameter: 141.11 GB, making the FP4 file 3.30x smaller (reasoned). The card says approximately 3.3x (reported).
+- **A quirk:** `weight_scale_2` is an F32 scalar for q, k, v, gate and up, but a BF16 tensor of shape `[1]` in all 160 `o_proj` and `down_proj` layers (measured). Harmless, and a sign the 0.23.0 exporter was not uniform.
+
+## The claims, marked reported
+
+**Accuracy.** Both cards give one accuracy table and no speed numbers (all reported):
+
+| Benchmark | DeepSeek-R1 FP8 | DeepSeek-R1 FP4 | Llama-3.3-70B BF16 | Llama-3.3-70B FP4 |
+|---|---|---|---|---|
+| MMLU | 90.8 | 90.7 | 83.3 | 81.1 |
+| GSM8K (Llama: `GSM8K_COT`) | 96.3 | 96.1 | 95.3 | 92.6 |
+| AIME2024 | 80.0 | 80.0 | | |
+| GPQA Diamond | 69.7 | 69.2 | | |
+| MATH-500 | 95.4 | 94.2 | | |
+| ARC Challenge | | | 93.7 | 93.3 |
+| IFEVAL | | | 92.1 | 92.0 |
+
+R1's baseline is DeepSeek's FP8 release, not BF16. Both checkpoints name modelopt 0.23.0, published on PyPI on 28 January 2025, with cnn_dailymail as R1's calibration set; the local-Hessian scales above arrived about 19 months later.
+
+**Speed.** The repo's `examples/benchmark.md` gives H200 numbers (modelopt 0.21.1, TensorRT-LLM 0.15, 2,048 tokens in and 128 out, speedup normalized per GPU). For Llama3.1-8B, all reported:
+
+| Batch | FP8 | INT4 AWQ | W4A8 AWQ |
+|---|---|---|---|
+| 1 | 1.41x | 1.33x | 1.38x |
+| 8 | 1.31x | 0.75x | 1.00x |
+| 64 | 1.30x | 0.83x | 1.15x |
+
+The same page reports an MMLU loss of 1.50% for FP8 and 5.66% for INT4 AWQ on the 8B model, and 0.38% and 1.07% on the 70B model.
+
+**Weight-only 4-bit** helps at batch 1 and hurts once the batch grows: [decode is memory-bound](/articles/how-llm-inference-works), so fewer weight bytes pay at small batches, and at larger ones the dequantization shows. The newest post in the repo finds the same for NVFP4 on Blackwell, on Qwen3.6-35B-A3B in vLLM on 4× GB200 (all reported):
+
+- **W4A16 (weights only):** slower than BF16 in 10 of 12 shapes, because a BF16 activation sends vLLM to the Marlin dequant-to-BF16 fallback, which never reaches the FP4 tensor cores.
+- **W4A4 (weights and activations):** faster in 9 of 12 shapes, by up to 1.30x, and 0.87–0.88x at concurrency 1.
+- **Size:** the checkpoint goes from 67 GiB to 22 GiB.
+- **Accuracy after QAD:** 500 iterations of QAD bring IFBench from −2.6 points after PTQ to −0.3, and MMMU-Pro from −1.2 to −0.7.
+
+Mixed precision is the other knob. AutoQuantize scores every layer's sensitivity with one backward pass and solves an integer program for the best format assignment under an effective-bits budget:
+
+<Figure
+  src="/articles/nvidia-model-optimizer/fig3.png"
+  alt="Two line charts of MMLU against effective bits, 4 to 9, for Qwen3.5-2B and 9B. The search over NVFP4, FP8 and BF16 sits above the NVFP4-plus-BF16 search at every budget; an orange triangle marks the NVFP4 default, above 4.5 bits."
+  caption="MMLU against effective bits under AutoQuantize for Qwen3.5-2B and 9B. Adding FP8 to the menu beats NVFP4 plus BF16 at every budget. The NVFP4 defaults sit well above 4.5 bits because lm_head stays BF16, the same effect as in the checkpoints above. NVIDIA's measurements (ModelOpt AutoQuantize post, Figure 1)."
+/>
+
+## What I'd take from it
+
+- **The format is 4.5 bits; the file is whatever you leave in BF16.** R1-FP4 averages 4.95 and Llama 4.84. Budget GPU memory from `hf_quant_config.json` and the headers, not from the format name.
+- **The default scale rule is max.** NVIDIA's newer Qwen3.8-27B checkpoint ships local-Hessian scales, which are computed once at export and cost nothing at inference. That is the cheapest accuracy in the library.
+- **The metadata can be wrong in either direction.** The guard in `quantize()` exists because a missed wildcard produced a valid, unquantized checkpoint. A changelog entry fixes an export whose `ignore` list could "claim a layer is unquantized that the export in fact quantized". Read `exclude_modules` and the headers before you trust an "FP4" label.
+- **For throughput, quantize activations too.** Weight-only 4-bit is a memory win, and a speed win only at small batches.
+
+For runtime tricks that go below 4 bits, see [runtime dynamic compression](/articles/runtime-dynamic-compression). For the KV cache side, see [TurboQuant](/articles/turboquant-kv-cache).
+
+---
+
+*Sources: NVIDIA/Model-Optimizer at `23355ed` (Apache 2.0), NVIDIA's model cards, and the safetensors headers of `nvidia/DeepSeek-R1-FP4`, `deepseek-ai/DeepSeek-R1` and `nvidia/Llama-3.3-70B-Instruct-FP4`. Figures are reproduced from the repository's documentation for commentary; the widgets are my illustrations of ModelOpt's arithmetic.*

@@ -1,4 +1,5 @@
 import {
+  getArchitectureDocs,
   getArticles,
   getArxivDigests,
   getBlogPosts,
@@ -30,6 +31,7 @@ export function generateStaticParams() {
     ...getArticles({ includeDrafts: true }).map((a) => ({
       slug: ["articles", a.slug],
     })),
+    ...getArchitectureDocs().map((d) => ({ slug: ["architectures", d.slug] })),
     ...getLogs().map((l) => ({ slug: ["logs", l.slug] })),
     ...getProjects().map((p) => ({ slug: ["projects", p.slug] })),
     ...getArxivDigests().map((d) => ({ slug: ["arxiv", d.slug] })),

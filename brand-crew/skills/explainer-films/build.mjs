@@ -1,6 +1,8 @@
 // Build explainer films: storyboard → narration → frames → score → one mp4.
 //
 //   node brand-crew/skills/explainer-films/build.mjs <slug ...>     these films
+//   node brand-crew/skills/explainer-films/build.mjs architectures/<slug>
+//                                                                   a film in a namespace other than articles (hash.mjs NAMESPACES)
 //   node brand-crew/skills/explainer-films/build.mjs --stale        every rendered film whose hash changed or whose files are missing
 //   node brand-crew/skills/explainer-films/build.mjs --all          every storyboard
 //   node brand-crew/skills/explainer-films/build.mjs --thumbs [slug ...]
@@ -30,13 +32,20 @@
 //   5. ffmpeg muxes picture and sound into public/films/<slug>.mp4
 // Thumbnails (--thumbs) are one still per storyboard, public/thumbs/<slug>.jpg,
 // recorded in data/.generated/thumbs.json; every article gets one, film or not.
+// A film is named by its key: an article's bare slug, or `<kind>/<slug>` for
+// another kind (hash.mjs), which is also its storyboard's path under
+// data/films, its manifest key and its path under public/films and
+// public/thumbs. So architectures/transformer reads
+// data/films/architectures/transformer.json, is held to
+// content/architectures/transformer.mdx, and writes
+// public/films/architectures/transformer.mp4.
 // The site cut is downscaled to 960x540 in the encoder: the article column is
 // ~700 px wide, and type stays sharper than if it were painted at 960.
 import { spawn, spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, rmSync, renameSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, renameSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
-import { SKILL_DIR, ROOT, articleDate, filmSha } from './hash.mjs'
+import { SKILL_DIR, ROOT, articleDate, filmSha, storyboardKeys } from './hash.mjs'
 
 const args = process.argv.slice(2)
 const opt = Object.fromEntries(args.filter(a => a.startsWith('--')).map(a => { const [k, ...v] = a.slice(2).split('='); return [k, v.join('=') || true] }))
@@ -48,7 +57,12 @@ const OUT = opt.out ? (opt.out.startsWith('/') ? opt.out : join(ROOT, opt.out)) 
 const CACHE = process.env.EXPLAINER_CACHE || join(homedir(), '.cache', 'explainer-films')
 export const VOICE = 'af_heart'
 
-const all = readdirSync(SB).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5)).sort()
+const all = storyboardKeys()
+// scratch files are flat; a namespaced key's slash would make them a directory
+const flat = key => key.replace(/\//g, '__')
+// the renderer names what it writes after the storyboard's slug field, the key,
+// so a namespaced film's directory has to exist before it writes there
+const dirFor = (dir, key) => mkdirSync(dirname(join(dir, key)), { recursive: true })
 const manifest = existsSync(MAN) ? JSON.parse(readFileSync(MAN, 'utf8')) : { films: {} }
 const load = slug => JSON.parse(readFileSync(join(SB, `${slug}.json`), 'utf8'))
 const shaOf = slug => filmSha(load(slug), articleDate(slug))
@@ -66,7 +80,8 @@ if (!slugs.length) { if (keep) save(); console.log('nothing to render'); process
 
 const tmp = join(tmpdir(), `explainer-${process.pid}`), frames = join(tmp, 'video')
 mkdirSync(frames, { recursive: true }); mkdirSync(OUT, { recursive: true }); mkdirSync(CACHE, { recursive: true })
-const sbPath = slug => join(tmp, `${slug}.json`)
+const sbPath = slug => join(tmp, `${flat(slug)}.json`)
+for (const slug of slugs) { dirFor(frames, slug); dirFor(OUT, slug) }
 for (const slug of slugs) writeFileSync(sbPath(slug), JSON.stringify({ ...load(slug), date: articleDate(slug), ...(opt.style ? { style: opt.style, palette: undefined } : {}) }))
 
 const run = (cmd, a) => { const r = spawnSync(cmd, a, { encoding: 'utf8', maxBuffer: 1 << 26 }); if (r.status !== 0) throw new Error(`${cmd} ${a.slice(0, 3).join(' ')}: ${r.stderr}`); return r.stdout }
@@ -108,7 +123,7 @@ child.on('close', code => {
 
 function finish(r) {
   const slug = r.slug
-  const film = join(tmp, `${slug}.film.json`), m4a = join(tmp, `${slug}.m4a`), vtt = join(OUT, `${slug}.vtt`)
+  const film = join(tmp, `${flat(slug)}.film.json`), m4a = join(tmp, `${flat(slug)}.m4a`), vtt = join(OUT, `${slug}.vtt`)
   writeFileSync(film, JSON.stringify(r))
   run('python3', [join(SKILL_DIR, 'audio.py'), 'mix', '--film', film, '--voice', join(CACHE, 'voice', slug), '--out', m4a, '--vtt', vtt])
   const out = join(OUT, `${slug}.mp4`)
@@ -147,7 +162,8 @@ function thumbs(list) {
   const out = join(ROOT, 'public', 'thumbs'), tmp = join(tmpdir(), `thumbs-${process.pid}`)
   mkdirSync(out, { recursive: true }); mkdirSync(tmp, { recursive: true })
   const man = existsSync(TMAN) ? JSON.parse(readFileSync(TMAN, 'utf8')) : { thumbs: {} }
-  const files = list.map(slug => { const f = join(tmp, `${slug}.json`); writeFileSync(f, JSON.stringify({ ...load(slug), date: articleDate(slug) })); return f })
+  for (const slug of list) if (!all.includes(slug)) throw new Error(`no storyboard: data/films/${slug}.json`)
+  const files = list.map(slug => { dirFor(out, slug); const f = join(tmp, `${flat(slug)}.json`); writeFileSync(f, JSON.stringify({ ...load(slug), date: articleDate(slug) })); return f })
   for (let i = 0; i < files.length; i += 40) {
     const r = spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'thumb', ...files.slice(i, i + 40), `--out=${out}`, `--workers=${opt.workers || 3}`], { encoding: 'utf8', maxBuffer: 1 << 26 })
     if (r.status !== 0) throw new Error(r.stderr)

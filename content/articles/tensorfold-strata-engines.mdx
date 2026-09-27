@@ -1,0 +1,429 @@
+---
+title: "TensorFold and Strata: two one-person inference engines, checked against the memory bus"
+description: "Two solo engines went viral the same week: TensorFold claims 120-124 tok/s for Qwen3.8-27B on an M5 Max, and Strata claims 65 tok/s for the 125B Qwen3.8-Flash-Next on a 12 GB RTX 5070. Both have real code, both verify several drafted tokens per weight pass, and the arithmetic mostly holds. TensorFold's 120 needs about three committed tokens per pass even at the full measured 569 GB/s, and its exactness is a byte-for-byte guarantee built from keyed Gumbel sampling and row-invariant kernels. Strata's number is a Q2_0 file at a 128K prompt set against a 15 tok/s IQ3_XXS llama.cpp run whose flags were never posted, which the same author had already tuned to 32 six days later. Its engine prints a warning on every default start that its GPU expert path diverges from a cache-off run, and the repository ships no licence."
+date: 2026-09-26
+interest: 4
+helpful: 4
+tags:
+  - explainer
+  - inference-optimization
+  - speculative-decoding
+  - mixture-of-experts
+  - on-device
+  - llama-cpp
+  - qwen
+  - systems
+draft: false
+---
+
+import { RowCost } from "@/components/articles/tensorfold-strata-engines/row-cost"
+import { DecodeRoofline } from "@/components/articles/tensorfold-strata-engines/decode-roofline"
+
+Two posts crossed my feed on 26 September, each about an inference engine one
+person wrote for a handful of models.
+
+[@ashxhart](https://x.com/ashxhart/status/2103643602937114924) announced
+**TensorFold**: *"I spent six months making one weight read count for more than
+one token on Apple Silicon. Draft tokens run through parallel lanes; the model
+verifies them together and keeps only what passes."* The numbers: Qwen3.8-27B at
+120-124 tok/s, Nemotron Lightning at 188-206, Qwen3.8 Flash Next at 88-92, all
+MLX 4-bit.
+
+[@TeksEdge](https://x.com/TeksEdge/status/2103726260555842047) amplified a
+[r/LocalLLaMA post](https://www.reddit.com/r/LocalLLaMA/comments/1wp7zyb/qwen38flashnext_on_12gb_vram_65_tokens_per_second/)
+about **Strata**: someone running Qwen3.8-Flash-Next on a 12 GB RTX 5070 went
+from *"llama.cpp → ~15 tps"* to *"Strata → up to 65.1 tps"*.
+
+Both engines have code.
+[`ashhart/TensorFold`](https://github.com/ashhart/TensorFold) is MIT, with a
+recipe page per model recording what worked, what was thrown away and the
+measurement behind each. [`Niko1221/Strata`](https://github.com/Niko1221/Strata)
+is CUDA and C++, with a nine-page paper and raw benchmark JSON. So both can be
+checked against the one thing no engine negotiates with: bytes per token over
+bandwidth.
+
+## The arithmetic both engines are fighting
+
+Decoding one token means reading every weight that token touches, and on a
+single stream that read sets the speed. Speculative decoding drafts a few tokens
+cheaply and verifies them all in one forward pass, so one weight read commits
+several tokens. That is the post's "one weight read counts for more than one
+token".
+
+For a dense model in fast memory the ceiling is a straight line:
+
+$$
+\text{tok/s} \;\le\; \frac{B}{D} \times L
+$$
+
+where $B$ is the memory bandwidth, $D$ the bytes read per forward pass and $L$
+the tokens committed per pass (accepted drafts plus the one the model always
+adds). Nothing in a kernel can put a point above that line.
+
+A mixture-of-experts model that does not fit in VRAM has two rooflines in
+series. The always-used weights (attention, DeltaNet, routers, shared experts,
+the head) are read once per pass from VRAM. But each token in the pass routes to
+its own experts, and the ones not cached on the GPU come down a slow path: the
+CPU reading system RAM, or PCIe. With $E$ the expert bytes one token reads and
+$h$ the share already in VRAM:
+
+$$
+t_\text{pass} = \frac{D}{B_\text{fast}} + \max\!\Big(\frac{h\,E\,L}{B_\text{fast}},\ \frac{(1-h)\,E\,L}{B_\text{slow}}\Big) + t_\text{fixed},
+\qquad \text{tok/s} = \frac{L}{t_\text{pass}}
+$$
+
+The first term is paid once per pass; the expert term grows with $L$. That one
+difference decides what drafting can buy each engine, and it is the thread
+through everything below.
+
+## TensorFold: what the lanes are
+
+<RepoCard repo="ashhart/TensorFold" />
+
+"Parallel lanes" are the rows of one verify pass. The docstring of
+`engine/lane_engine.py` says it directly: *"The rows of one pass can hold the
+near future of one stream (drafts), alternative futures (a draft tree), or rows
+of other streams."* Where the drafts come from depends on the model.
+
+**Qwen3.8-27B** drafts with a separate model, z-lab's
+[DFlash2](/articles/dflash2) block drafter: five layers, trained on blocks of
+8, reading the target's hidden states at layers 5, 19, 33, 47 and 61. TensorFold
+builds a best-first tree over the drafter's candidates, 4 children a node and up
+to 15 nodes, and verifies it in one forward. It is not the MTP head. The recipe
+tried the checkpoint's MTP head as a chain: more tokens a pass (5.33 against
+4.55) but a step cost 1.5-2.9 ms, too slow to pay. It also tried lanes with no
+drafter at all, Jacobi decoding: 1.07 tokens a pass. On top of the tree sit copy
+windows (continue an earlier span once 8 or more tokens match) and a session
+n-gram prior on the tree scores. The fast path needs an M5-generation GPU for its
+tensor units; elsewhere the 27B runs on MLX's kernels, and drafted rows are
+checked at width rather than bit-identical to one-row decoding.
+
+**Qwen3.8 Flash Next** drafts with its own MTP head, as a chain of up to 3. The
+depth follows a running average of acceptance: 1 draft below 80%, 2 below 90%,
+otherwise 3. Acceptance runs about 87% on code and 73% on prose.
+
+**Nemotron 3.5 Lightning** is the surprise. The README says its speed rows
+*"predate its MTP drafts"*. The 188-206 tok/s in the post is mostly kernel fusion
+(about 900 kernels a token down to 370), tokens drawn on the GPU and one step
+decoded ahead, against 138 for `mlx_lm`. Flash Next is similar: fusion took it
+from 30 tok/s at first port to 79 serial, and drafting adds about a third. Only
+the 27B's number, 27 serial to 120-124, is mostly about drafting.
+
+### Why sixteen rows cost what one does
+
+A lane pays only if a pass over many rows costs little more than a pass over one.
+For a dense model that is a kernel question, and the recipe measured it: the
+whole-model forward of the 27B at 1, 2, 4, 8 and 16 rows.
+
+<RowCost />
+
+TensorFold's lane matmul does 4-bit weights times bf16 activations on the M5's
+tensor units with one arithmetic for every row count: 46.8 ms at one row, 53.7
+at sixteen. MLX's own quantized matmul starts cheaper, 32.9 ms, and climbs to
+112.6. The recipe puts one lane row at about 1.35x MLX's vector kernel, and
+states the trade plainly: pay more for one row so that sixteen cost what one
+does.
+
+The MoE line is different in kind. Flash Next on the M3 Ultra goes from 11.0 ms
+at one row to 36.7 at eight, because each row brings experts of its own: 8
+consecutive tokens pick about 40 distinct experts across their 80 slots. That is
+the dense term against the expert term of the equation above, measured inside
+one project.
+
+### Exact means byte-identical
+
+Most speculative decoders accept a draft with a random test (Leviathan et al.),
+so the text depends on how drafting went. TensorFold replaces the test with a
+coupling. The token at position $p$ is
+
+$$
+\arg\max_i \;\Big(\frac{\text{logit}_i}{T} + g(\text{seed}, p, i)\Big)
+$$
+
+over the top-k/top-p candidates, with $g$ Gumbel noise hashed from the seed,
+the position and the token id (`engine/exact_sampling.py`). That is an exact
+draw from the model's distribution, and it depends only on the row's logits and
+its position. The kernels give a row of a multi-row pass the same bits as a
+one-row step. So a draft is accepted exactly when it equals the token serial
+decoding would sample there, and drafted output is byte-identical to serial
+output. Send `"draft": false` to check.
+
+This is what Daliri, Musco and Suresh call
+[drafter-invariant speculative decoding](https://arxiv.org/abs/2408.07978).
+TensorFold does not cite it, but the construction is the same, and so is the
+price. A shared-noise coupling agrees with probability at least
+$(1-D_\text{TV})/(1+D_\text{TV})$, where the optimal coupling that rejection
+sampling uses reaches $1-D_\text{TV}$. At a total-variation distance of 0.2 that is
+a floor of 0.67 against 0.80 per draft. Byte-exactness costs some acceptance in
+the worst case. The recipe also names a limit: for Flash Next and Nemotron a
+reply can depend on which prompt prefix was already cached, down to the last
+bits.
+
+## TensorFold: what 120 tok/s implies
+
+The byte count is checkable. The site's [Splash piece](/articles/splash-engine)
+counted this checkpoint at 26,935,320,064 parameters in 15.155 GB at 4.5 bits
+per weight (4-bit values plus a bf16 scale and bias per 64). Decode reads one
+row of the embedding table, not all of it; drop its 1,271,398,400 parameters and
+**14.44 GB** remains per forward. The recipe says *"about 14.4 GB"*. Reasoned,
+and it agrees. The download is consistent too: TensorFold's README lists the
+checkpoint at 16.1 GB, and 15.155 GB plus the 0.93 GB bf16 vision tower the
+Splash piece found is 16.09.
+
+The recipe measured the M5 Max reading about **569 GB/s**. That rules out the 32-core
+M5 Max, whose rated peak is 460 GB/s, so this is the 40-core part (614 GB/s).
+Then:
+
+- **Serial ceiling:** 569 / 14.44 = **39.4 tok/s**. The measured serial rate
+  is 27, about 69% of it.
+- **120 tok/s needs at least 3.05 tokens per pass**, even at the full 569 GB/s
+  and zero overhead.
+- **At the recipe's own round times** (45-55 ms, measured in agent sessions),
+  120 tok/s needs **5.4-6.6 tokens a round**. The same sessions measured 4.0-5.2
+  and 75-94 tok/s. But the drafter's top 16 candidates hold the right answer for
+  6.5-7.0 tokens a round, so 120 on a short answer with predictable thinking is
+  inside what the tree can reach.
+
+At five tokens a round, each committed token costs 14.44 / 5 = 2.9 GB of weight
+traffic instead of 14.44. That is the whole trick.
+
+<Figure
+  src="/articles/tensorfold-strata-engines/fig1.png"
+  alt="TensorFold's banner: a folded mesh on dark blue with the text 'Qwen3.8 27B 120-124 tok/s M5 Max, Nemotron 3.5 188-206 tok/s M5 Max, Qwen3.8 Flash Next 88-92 tok/s M3 Ultra, 4-bit, short answers with thinking, server decode'."
+  caption="The numbers in the post, from the banner at the top of the README. Its Flash Next figure is older than the README's own table, which reads 105-107; its Nemotron row predates MTP drafts (TensorFold README, assets/tensorfold-hero-speeds.png)."
+/>
+
+The git history dates the numbers. The banner was committed at 01:24 (UTC+1) on
+26 September, the post went out at 01:31, and *"perf: Flash Next decode 15-17%
+faster, byte-exact"* landed at 02:45. So the README table says 105-107 for Flash
+Next (79 without drafts) while the banner above it still says 88-92.
+
+**What the baselines are.** "27 without drafts" is TensorFold's own serial
+engine, not stock MLX; `mlx_lm` is quoted only for Nemotron. No run compares
+against `mlx_lm` with its own draft model. The most careful comparison in the
+repository is on NVIDIA: on one DGX Spark, the 27B does 49.6 tok/s on sampled
+code against vLLM's 17.7 with MTP=3, the same client, a median of five seeds.
+vLLM ran an NVFP4 checkpoint rather than TensorFold's 4-bit MLX weights, which
+is a real difference. With its own DFlash2 at seven drafts, vLLM reached 28.3 and
+22.9 tok/s on one Spark; the recipe does not say which prompt is which. Against
+that, TensorFold's 49.6 and 45.8 are about 2x, not 3x.
+
+## Strata: 66 GB into 12 GB
+
+<RepoCard repo="Niko1221/Strata" />
+
+Qwen3.8-Flash-Next is 125B parameters plus 51B of n-gram embeddings, with 6B
+active per token (see [the model piece](/articles/qwen3-8-flash-next)). Its 48
+layers each carry 512 routed experts of width 640, of which the router picks 10.
+Strata's paper opens with a byte census.
+
+<Figure
+  src="/articles/tensorfold-strata-engines/fig2.png"
+  alt="Three stacked tiers. GPU VRAM, 12 GB at 672 GB/s: dense weights about 3.3 GB, an expert cache of about 4,500 of 24,576 experts, the MTP layer at 0.8 GB, KV and state. PCIe 4.0 x16 at about 26 GB/s carries experts by DMA. System RAM, 64 GB DDR5 at 41-52 GB/s with 6 AVX-512 cores: a pinned arena of all 24,576 experts, 34 GB for Q2_0, where the CPU computes misses in place. SSD: the GGUF shard read once at start and the 28.8 GB n-gram table, memory-mapped."
+  caption="Where every byte lives. The design is organised around the 0.66 GB of routed experts a token reads, not the 34 GB they occupy (Strata paper, Figure 1)."
+/>
+
+I recomputed the number the design is built around. One token routes to 10
+experts in each of 48 layers; each expert is three matrices of 2,560 × 640. That
+is 2,359,296,000 weights, and at the Q2_0 file's 2.25 bits per weight it is
+**0.66 GB** per token, 2% of the 34.0 GB arena. The same share of the other
+arenas gives 0.69 GB for IQ2_XS and 0.84 GB for IQ3_XXS. The always-used
+weights are about 3.5 GB per pass (1.8 GB of mixers and shared experts, 1.3 GB
+of gated residual, a 0.44 GB head). One user's log in the thread even prints the
+head: *"experimental native Q5_K head, 437043200 bytes"*. 2,560 × 248,320
+weights at 5.5 bits is exactly 437,043,200 bytes.
+
+The n-gram table is kept, not dropped. It lives on the SSD as a 28.8 GB
+memory-mapped file, and a token reads 16 rows of it, at most 23 KB. That is the
+opposite of the `--no-ngram` fork the model piece traced.
+
+### One layer, three workers
+
+<Figure
+  src="/articles/tensorfold-strata-engines/fig3.png"
+  alt="A timeline of one layer. The GPU runs gated read, mixer, gated write and router, then writes 10 expert ids to a doorbell. The GPU then runs the shared expert and cached experts while PCIe copies 20% of the misses by DMA and the CPU computes the missed experts in place in RAM on 6 threads. The GPU combines the results and starts the next layer. One layer is about 0.6 ms at 4K."
+  caption="The GPU never waits on the driver; the CPU spins on a doorbell in pinned memory, and the next layer waits for the slower half (Strata paper, Figure 2)."
+/>
+
+The CPU splits each layer's ten experts: cached ones go to the GPU, a share of the
+misses is copied over PCIe by the copy engine (20% for Q2_0, 55% for the i-quants,
+whose CPU is arithmetic-bound and leaves RAM bandwidth free), and six AVX-512
+cores compute the rest where they sit in RAM. The 48-layer pass is one captured
+CUDA graph per window size. The PCIe-or-CPU split is the trade the site worked
+through for [FreeToken](/articles/freetoken).
+
+Three more pieces carry the speed:
+
+- **An adaptive expert cache.** Filled at start from a routing profile, then every
+  four rounds up to 96 experts the conversation keeps asking for are swapped in.
+  The profile alone serves 50% of expert reads from VRAM at 4K; with swapping the
+  engine measures 72%.
+- **MTP speculation.** The GGUF files lack the MTP head, so Strata fetches its
+  5 GB of tensors from the BF16 checkpoint and keeps it in VRAM with 2-bit experts
+  and a head over 40,525 likely tokens: 0.8 GB in the paper, 949 MiB in a user's
+  log. A commenter read 5 GB and 0.8 GB as a contradiction; one is the download,
+  the other what stays resident. Up to 3 drafts enter a window, each only while
+  the head is at least 50% confident. The paper puts the gain at 1.6-1.8x: 47-57
+  tok/s plain at 4K, 82-92 with the window.
+- **Kernels per format.** Q2_0 experts are repacked once and run through a
+  hand-written AVX-512 VNNI kernel at about 42 GB/s. The i-quants keep llama.cpp's
+  layout and manage 23-26 GB/s on six cores, limited by codebook arithmetic.
+
+<Figure
+  src="/articles/tensorfold-strata-engines/fig4.png"
+  alt="A curve of hit rate against experts held in VRAM, rising steeply from 0 to about 0.5 at 4,500 experts, 0.67 at about 7,500, and flattening toward 1.0 at 24,576. Points mark 12 GB at 4K, 16 GB and 24 GB cards."
+  caption="The profile-filled cache alone. The adaptive swapping lifts the 12 GB card from the curve's 0.50 to a measured 0.72 at 4K (Strata paper, Figure 3)."
+/>
+
+## Strata: what 65 tok/s implies
+
+First, which 65. The **65.1** is the Q2_0 file at a 128K context: a
+128,478-token code-review prompt, 256 generated tokens, greedy decoding, one run
+from a cold start, 2.65 tokens per verify window, 3,079 experts in VRAM. The
+Reddit title's "65" is also the IQ3_XXS file at 4K (65.6). A short chat on Q2_0
+runs 95.
+
+Now the bytes. Every token needs 0.66 GB of experts from somewhere.
+
+- If every expert crossed PCIe at 26 GB/s, the ceiling would be **39 tok/s**
+  before drafting helps at all, because each extra token in a window brings its
+  own experts. Streaming alone cannot produce 65.
+- If the CPU computed every expert at 41 GB/s, the ceiling would be **62 tok/s**
+  with nothing else costing time. Close, but not 65 with a GPU half to wait on.
+
+So the VRAM cache is doing real work. The paper's Table 5 gives the 4K round
+for Q2_0: 34.3 ms, of which the GPU takes 14.6, the CPU's experts 13.4, drafting
+2.0 and the rest 4.3, at 3.23 tokens per window and a 0.72 hit rate. Laying the
+bytes out (reasoned, assuming no two tokens share an expert):
+
+| Per 4K window, Q2_0 | GB | where |
+|---|---:|---|
+| dense weights | 3.54 | VRAM |
+| expert hits (0.72 × 0.66 × 3.23) | 1.53 | VRAM |
+| expert misses, CPU share | 0.48 | RAM |
+| expert misses, DMA share | 0.12 | PCIe |
+
+About nine bytes in ten come from VRAM and one in fifty crosses PCIe. The time
+splits the other way. At 672 GB/s the GPU's 5.1 GB is 7.6 ms of reading
+against 14.6 measured, about half its roofline. The CPU's 0.48 GB at 41 GB/s is
+11.6 ms against 13.4 measured, close to its. The CPU reads a twelfth of the bytes
+and takes almost as long as the GPU does for everything else.
+
+<DecodeRoofline />
+
+With the paper's own inputs the model puts the Q2_0 4K ceiling at about 124
+tok/s against 94.6 measured, and IQ3_XXS at about 72 against 65.6. The shape is
+the lesson. On the dense 27B preset the curve is a straight line. On the Strata
+presets it bends toward a limit set by the miss path (about 222 tok/s for Q2_0
+at 4K), because drafting multiplies expert traffic as fast as it multiplies
+tokens. A higher hit rate is worth more than a deeper draft, which is why the
+paper says of the GPU: *"its size matters more than its speed"*.
+
+At 128K the same engine gives 65.1: the KV cache takes VRAM, the cache shrinks
+from 4,464 to 3,079 experts, and windows fall from 3.23 to 2.65 tokens. The paper
+does not publish the 128K hit rate, so I stop there.
+
+### The 15 it is measured against
+
+The "~15 tps" comes from the author's own
+[post on 16 September](https://www.reddit.com/r/LocalLLaMA/comments/1wi46on/qwen38_flash_on_12gb_vram_15_tokenss/),
+same PC, the **IQ3_XXS** file: 13.8 tok/s at 1K, 14.6 at 8K, 14.0 at 20K and
+11.3 at 90-100K. Asked, he said speculative decoding was on and that it *"ran over
+llamacpp"*. Flags were requested in both threads and never posted; in the Strata
+thread the answer was *"There's no flags since its a custom engine."*
+
+The same thread shows the baseline moving. On 17 September: 19-20 tok/s, then 21
+at 128K. On 18 September: 29. On 22 September: *"around 32tps + 550 ppts"*. So the
+post compares the first, untuned llama.cpp run on IQ3_XXS with Strata's best file,
+Q2_0, at a different context.
+
+Like for like on IQ3_XXS: Strata's 44.8 at 128K against llama.cpp's 11.3 at
+90-100K is 3.96x; Strata's 65.6 at 4K against the author's best reported 32
+(context not stated) is 2.05x. A 2x to 4x speedup is a real result. It is not the
+4.3x the post implies by pairing 65.1 with 15. One more check: if the 32 was still
+IQ3_XXS, it is above what an all-CPU expert path gives on this box, Strata's
+measured 24 GB/s over my 0.84 GB per token, or 28.6 tok/s even with unlimited
+drafting, unless drafted tokens shared experts. Keeping some experts on the GPU,
+the usual `--n-cpu-moe` setup, is the likelier explanation.
+
+Other users' numbers fit a 2x reading. One got 38.0-51.6 tok/s from
+`ik_llama.cpp` with the MTP head on a 12 GB RTX 3060, though beside an 8-channel
+DDR4 server CPU. Another, on a 12 GB laptop GPU, got 50 tok/s from Strata against
+23 from a llama.cpp fork on the same quant.
+
+## Is the output the same?
+
+**TensorFold** is exact by construction and says how to check it. For Flash Next
+on DGX Spark the recipe compares drafted replies against `"draft": false` for 3
+prompts, 2 seeds and greedy: 9 of 9 equal on one and on two Sparks.
+
+**Strata** claims its speculative output is *"identical, token for token, to plain
+greedy decoding"*, tested with forced wrong drafts, and a mean KL of 0.022 against
+llama.cpp, below the 0.058 between llama.cpp's own CPU and GPU builds. Both
+reported, both plausible.
+
+But Strata's default launch passes `--expert-cache auto`, and with the cache on,
+`src/program/generate.cpp` prints this every time:
+
+```text
+strata generate: *** WARNING: --expert-cache is enabled and the GPU hit path is NOT
+                 CORRECT. The generated tokens diverge from a cache-off run (measured:
+                 first difference at token 40 at 2.97% hits, token 0 at 54.4%). Any
+                 timing from this run is real; any OUTPUT from it is not. ***
+```
+
+One user's log in the thread shows it, verbatim. The comment above it dates it to
+"round 328". A later change marked "R4.2h, round 331" names a cause: GPU hits
+quantized their activations with an fp16 scale while CPU misses used fp32, *"80 of
+80 chunks differing by up to 4.761e-04 relative"*, and fixes it so a hit
+reproduces a miss. The warning was never removed, and nothing in the repository
+re-measures cache-on against cache-off. It matters because the cache adapts to the
+conversation: if hits and misses disagree, the same prompt can decode differently
+depending on what came before it. I cannot tell from the tree which is true. The
+author can, with one diff.
+
+Two limits are stated plainly in the docs and worth knowing before pointing an
+agent at it. Decoding is greedy only; temperature is ignored. And every request
+re-reads its whole prompt, about a minute per 30,000 tokens, because nothing is
+kept between requests.
+
+## Openness
+
+| | TensorFold | Strata |
+|---|---|---|
+| Licence | MIT, with third-party notices | no licence file; the README says *"Free and open source"* |
+| History | 14 commits, 25-26 Sep | 4 commits, 24-25 Sep |
+| Tests | 45 test files; lane kernels need an M5 GPU, CUDA tests an NVIDIA one | 11 test files; in-tree parity checks run with `--selftest` |
+| Benchmark client | `tools/bench_openai.py`, used for every number | raw JSON in `bench/results/` |
+| Missing | nothing I needed | `ref/*.py` references (only `ref/load.py` ships), the llama.cpp-oracle tests in `bench/micro/`, `tools/logits_identical.py` |
+
+Without a licence file, Strata is all rights reserved by default, whatever the
+README says; it does carry ggml's MIT notice for the code it transcribes. Its
+llama.cpp-oracle parity tests are wired into CMake, but their sources are not in
+the tree, so the llama.cpp comparisons the paper leans on cannot be rerun from
+what was published.
+
+## What I would take from both
+
+Both multipliers come from bytes per committed token. TensorFold's is a kernel
+result: make a row's arithmetic independent of how many rows share the pass, put
+the rows on tensor units, and a dense model verifies a 16-node tree for about what
+one token costs. Strata's is a placement result: the 3.5 GB every token needs in
+VRAM, as many hot experts beside it as fit, and six CPU cores computing the rest
+where they sit.
+
+The equation says which lever each engine should pull next. For a dense model in
+fast memory, more tokens per pass. For an offloaded MoE, a higher hit rate first,
+because a deeper draft drags its experts down the slow path with it.
+
+<ChangeMyMind>
+<Falsifier claim="Strata's expert cache changes the generated tokens.">
+Run one prompt greedy with `--expert-cache auto` and with the cache off. If the token ids match for a few hundred tokens at a realistic hit rate, the R4.2h fix worked and the warning is stale.
+</Falsifier>
+<Falsifier claim="TensorFold's 120 tok/s on the 27B needs at least three committed tokens per pass.">
+If a forward reads materially less than 14.44 GB, or the chip sustains more than 569 GB/s, the floor drops. A count of tokens per round during a 120 tok/s run settles it.
+</Falsifier>
+<Falsifier claim="Against a tuned llama.cpp on the same PC and file, Strata is about 2x, not 4x.">
+Rerun the llama.cpp command behind the 32 tok/s run on IQ3_XXS at 4K and 128K beside Strata. If it lands near 15, the 4x holds and my reading of the thread is wrong.
+</Falsifier>
+</ChangeMyMind>

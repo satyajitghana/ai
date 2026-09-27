@@ -119,6 +119,22 @@ export const noteFrontmatter = z.object({
 })
 export type NoteFrontmatter = z.infer<typeof noteFrontmatter>
 
+// Architecture explainers: one long-form doc per entry of the /architectures
+// gallery, at content/architectures/<slug>.mdx, rendered at
+// /architectures/<slug>. <slug> must be a slug in data/architectures.ts
+// (validate-content fails otherwise): the architecture's name, family, year,
+// tags, paper and related article live there, and its diagram in
+// components/architectures/registry.tsx; the frontmatter describes the doc.
+// Each doc also gets an explainer-film storyboard, data/films/architectures/<slug>.json.
+export const architectureDocFrontmatter = z.object({
+  title: z.string().min(1),
+  description: z.string().min(1),
+  date: dateString,
+  updated: dateString.optional(),
+  tags: z.array(z.string()).default([]),
+})
+export type ArchitectureDocFrontmatter = z.infer<typeof architectureDocFrontmatter>
+
 export type ContentKind =
   | "blog"
   | "articles"
@@ -127,6 +143,7 @@ export type ContentKind =
   | "arxiv"
   | "snippets"
   | "notes"
+  | "architectures"
 
 // A loaded content item: validated frontmatter + slug + raw markdown body + derived fields.
 // `lastUpdated` is always present (`updated ?? date`) so every kind has a single,
@@ -147,6 +164,7 @@ export type Project = ContentItem<ProjectFrontmatter>
 export type PapersDigest = ContentItem<PapersDigestFrontmatter>
 export type Snippet = ContentItem<SnippetFrontmatter>
 export type Note = ContentItem<NoteFrontmatter>
+export type ArchitectureDoc = ContentItem<ArchitectureDocFrontmatter>
 
 // Derived, never stored: human/abs, pdf, and HTML-view links for a paper.
 // arXiv serves native HTML for most modern papers; ar5iv is the fallback renderer.

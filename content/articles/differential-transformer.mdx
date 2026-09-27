@@ -1,0 +1,500 @@
+---
+title: "Differential Transformer: softmax can't say zero, so it subtracts"
+description: "DIFF Transformer gives every head two softmax maps and returns their difference, so a head can put zero or negative weight on context that softmax is forced to pay. The mechanism is walked through from the paper and the code, and the evidence is read at its denominators. The '65% of the parameters' headline is a roughly constant 0.025-nat loss gap read off fitted curves from 10B-token runs. The needle and hallucination wins are consistent but small-sample. The low-bit result quantizes attention logits, not weights. The noise-cancelling analogy holds only as far as the two maps learn to share their noise, and the authors' own V2 has since dropped the per-head norm and the fixed λ."
+date: 2026-09-26
+interest: 5
+helpful: 4
+tags:
+  - explainer
+  - llm
+  - attention
+  - transformers
+  - architecture
+  - long-context
+  - quantization
+draft: false
+---
+
+import { SoftmaxFloor } from "@/components/articles/differential-transformer/softmax-floor"
+import { AttentionPlayground } from "@/components/articles/differential-transformer/attention-playground"
+
+The version that travels: *Attention is inherently noisy. The Differential
+Transformer subtracts two attention maps to cancel out noise and focus purely on
+the signal. A massive leap for long-context reasoning without hallucinations.*
+
+The first two sentences are the paper's own framing, and they are fair. The third
+has two words the paper does not support: "massive" and "without".
+[DIFF Transformer](https://arxiv.org/abs/2410.05258) (Ye et al., Microsoft Research
+and Tsinghua, ICLR 2025) is a small, well-argued change to attention with a
+consistent set of wins at 3B parameters and below.
+
+Where this lands. The mechanism gives a head something softmax cannot: a weight of
+zero, or below zero. Noise cancelling is what a trained model *learns* to do with
+that, not something the architecture guarantees. The "65% of the parameters"
+headline is a steady loss gap of about 0.025 nats read off a fitted curve. And the
+authors have since shipped a V2 that drops the per-head norm and the λ scheme.
+
+## Why softmax can't say zero
+
+A softmax weight is $a_j = e^{z_j} / \sum_k e^{z_k}$, strictly positive for every
+key. A head can make an irrelevant token's weight small, never zero, and it pays
+that on every irrelevant token in the window. Put one needle with a logit
+advantage of $D$ nats among $n-1$ distractors at logit zero:
+
+$$
+p(n) \;=\; \frac{e^{D}}{e^{D} + n - 1}
+\qquad\Longrightarrow\qquad
+D_{p=1/2} \;=\; \ln(n-1)
+$$
+
+*(Reasoned; exact arithmetic.)* Keeping half the weight on the needle takes a gap
+of 3.43 nats at 32 keys, 8.32 at 4,096 and 11.09 at 65,536. At a fixed gap the
+needle's share falls roughly as $1/n$.
+
+<SoftmaxFloor />
+
+The paper measures the same thing in a trained 3B model retrieving an answer
+planted among documents:
+
+<Figure
+  src="/articles/differential-transformer/fig1.png"
+  alt="Bar charts of normalised attention. Transformer: BOS 0.32, context noise 0.18 and 0.34, answer 0.03, query 0.13. DIFF: BOS 0.19, context 0.01 and 0.01 with some bars below zero, answer 0.31, query 0.48. Retrieval accuracy 55% against 85%."
+  caption="The Transformer puts 0.03 on the answer and 0.52 on the rest of the context; DIFF puts 0.31 on the answer. DIFF's small context bars dip below the axis: its 0.01 buckets are signed sums (DIFF Transformer paper, Figure 1)."
+/>
+
+Table 3 repeats this at five answer depths: the Transformer puts 0.03 to 0.09 on
+the answer and 0.49 to 0.54 on noise; DIFF puts 0.27 to 0.40 on the answer and
+0.01 to 0.02 on noise *(reported)*.
+
+Read the figure before the summary. The Transformer's heaviest single token is
+`<BOS>`, at 0.32. DIFF still gives `<BOS>` 0.19 and the query 0.48, so its answer
+is not a lone peak. And some DIFF context bars sit *below* the axis, so "0.01 of
+noise" sums positive and negative weights; the paper never says how it normalised
+a signed row. Those negative bars turn out to be the whole story.
+
+## The mechanism, exactly
+
+One head projects $X \in \mathbb{R}^{N\times d_{\text{model}}}$ into two query
+groups, two key groups and one double-width value:
+
+$$
+[Q_1;Q_2] = XW^Q,\quad [K_1;K_2] = XW^K,\quad V = XW^V,\qquad Q_i, K_i \in \mathbb{R}^{N\times d},\; V \in \mathbb{R}^{N\times 2d}
+$$
+
+$$
+\operatorname{DiffAttn}(X) \;=\; \Big(\operatorname{softmax}\!\big(\tfrac{Q_1K_1^{\top}}{\sqrt d}\big) \;-\; \lambda\,\operatorname{softmax}\!\big(\tfrac{Q_2K_2^{\top}}{\sqrt d}\big)\Big)\,V
+$$
+
+Two ordinary causal maps, $A_1$ and $A_2$, read the *same* values, and the head
+returns $A_1 - \lambda A_2$ applied to them.
+
+<Figure
+  src="/articles/differential-transformer/fig2.png"
+  alt="Block diagram: X feeds linear projections for Q1, Q2, K1, K2 and V; a box computes softmax of Q1 K1 transpose minus lambda times softmax of Q2 K2 transpose, times V, for h heads; then per-head GroupNorm, a multiply by one minus lambda init, Concat and a Linear layer."
+  caption="Two maps from split queries and keys, one shared value, then a per-head norm and a fixed (1 − λ_init) scale (DIFF Transformer paper, Figure 2)."
+/>
+
+The core of `MultiheadDiffAttn.forward` in `unilm/Diff-Transformer/multihead_diffattn.py`,
+the naive version that materialises both maps:
+
+```python
+lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(q)
+lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(q)
+lambda_full = lambda_1 - lambda_2 + self.lambda_init
+attn_weights = attn_weights.view(bsz, self.num_heads, 2, tgt_len, src_len)
+attn_weights = attn_weights[:, :, 0] - lambda_full * attn_weights[:, :, 1]
+
+attn = torch.matmul(attn_weights, v)
+attn = self.subln(attn)
+attn = attn * (1 - self.lambda_init)
+```
+
+### λ, re-parameterised
+
+λ is built from four learnable vectors, "to synchronize the learning dynamics":
+
+$$
+\lambda = \exp(\lambda_{q_1}\!\cdot\lambda_{k_1}) - \exp(\lambda_{q_2}\!\cdot\lambda_{k_2}) + \lambda_{\text{init}},
+\qquad
+\lambda_{\text{init}} = 0.8 - 0.6\,e^{-0.3(l-1)}
+$$
+
+| layer $l$ | 1 | 2 | 4 | 8 | 16 | 28 |
+|---|---|---|---|---|---|---|
+| $\lambda_{\text{init}}$ | 0.20 | 0.36 | 0.56 | 0.73 | 0.79 | 0.80 |
+| $1-\lambda_{\text{init}}$ | 0.80 | 0.64 | 0.44 | 0.27 | 0.21 | 0.20 |
+
+*(Reasoned.)* The code adds three facts. There is **one λ per layer**, shared by
+every head: each vector is `head_dim` long and sums to a scalar per module.
+**Layers count from zero**: `lambda_init_fn(depth)` computes
+`0.8 - 0.6 * math.exp(-0.3 * depth)` and `example.py` passes `depth=0`, matching
+$l-1$. And **λ does not start at λ_init**: the vectors are drawn from
+$\mathcal N(0, 0.1^2)$, so at `head_dim` 128 each dot product has a standard
+deviation near 0.113 and λ starts at $\lambda_{\text{init}} \pm 0.16$.
+*(Measured: 200,000 sampled initialisations in numpy gave 0.1617.)* It barely
+matters: at 1.4B, constant $\lambda_{\text{init}}$ of 0.8 or 0.5 scores 3.065 or
+3.066 against the schedule's 3.062 *(reported, Table 6)*.
+
+### The row no longer sums to one
+
+A row of $A_1 - \lambda A_2$ sums to $1-\lambda$, which is 0.2 at λ = 0.8, and its
+entries can be negative. So each head's output goes through its own RMSNorm
+(`subln`, over the 256 channels of the doubled value; the code also gives it a
+learnable weight the equations omit), then a fixed multiply by
+$(1-\lambda_{\text{init}})$. Appendix G argues that constant makes gradients match
+a Transformer's, so its hyperparameters transfer.
+
+The norm is load-bearing. Without it DIFF scores 3.122, *worse* than the
+Transformer's 3.087; adding it to the Transformer gives 3.086, no change
+*(reported, Table 6)*. The reason matters below. A per-head norm discards the
+output's absolute scale, so what survives is the *ratio* of needle to background.
+Subtraction shrinks the background; the norm turns that into a louder needle.
+
+### Half the heads, same parameters
+
+Each DIFF head is $2d$ wide in queries, keys and values, so the paper sets
+$h = d_{\text{model}}/2d$, half the baseline. At 3B (hidden 3072, 28 layers,
+$d = 128$):
+
+| per layer | Transformer-3B | DIFF-3B |
+|---|---|---|
+| heads | 24 | 12 |
+| Q and K width per head | 128 | 2 × 128 |
+| V width per head | 128 | 256 |
+| $W^Q, W^K, W^V, W^O$ | 3072 × 3072 each | 3072 × 3072 each |
+| extra parameters | none | 768 (λ vectors, norm weight) |
+| KV cache per token | 2 × 3072 | 2 × 3072 |
+
+*(Reasoned from the code.)* Halving heads alone changes nothing: 8 heads of 256
+score 3.088 against 3.087 for 16 of 128 *(reported, Table 6)*. The README still
+advises more than 8 heads, the fewest the paper used.
+
+## The analogy, and where it breaks
+
+The paper borrows the differential amplifier and noise-cancelling headphones:
+take the difference of two signals and the common-mode noise cancels. In an
+amplifier the two inputs carry the same interference because the wires run side
+by side. Common mode is a property of the wiring. In DIFF nothing ties $A_2$'s
+noise to $A_1$'s; they agree on irrelevant tokens only if training makes them. The
+playground makes that correlation, $\rho$, a control. Map 1 knows where the needle
+is; map 2 does not.
+
+<AttentionPlayground />
+
+The same toy in numpy, averaged over 1,000 draws per setting:
+
+```python
+# diff_toy.py -- one query row: a needle at index 0, n-1 distractors.
+import numpy as np
+
+def softmax(z):
+    e = np.exp(z - z.max())
+    return e / e.sum()
+
+def row(n, gap=3.0, sigma=1.0, rho=0.9, lam=0.8, seed=0):
+    rng = np.random.default_rng(seed)
+    c, e = rng.standard_normal((2, n))
+    z1 = sigma * c                                    # map 1: noise ...
+    z1[0] += gap                                      # ... plus the needle
+    z2 = sigma * (rho * c + np.sqrt(1 - rho**2) * e)  # map 2: noise only, corr(z1, z2) = rho
+    a1, a2 = softmax(z1), softmax(z2)
+    return a1, a1 - lam * a2
+
+def share(w):                                         # |weight on needle| / total |weight|
+    return abs(w[0]) / np.abs(w).sum()
+
+def trial(n, rho, lam=0.8, seeds=1000):
+    rows = [row(n, rho=rho, lam=lam, seed=s) for s in range(seeds)]
+    return (np.mean([share(a1) for a1, _ in rows]), np.mean([share(d) for _, d in rows]),
+            np.mean([a1[0] for a1, _ in rows]), np.mean([d[0] for _, d in rows]))
+
+for rho in (0.0, 0.5, 0.9, 0.99):
+    s1, sd, w1, wd = trial(32, rho)
+    print(f"n=32    rho={rho:<4}  share: single {s1:.3f}  diff {sd:.3f}  "
+          f"needle weight {w1:.3f} -> {wd:.3f}")
+for n in (128, 512, 2048, 8192):
+    s1, sd, _, _ = trial(n, 0.9)
+    print(f"n={n:<5}  rho=0.9   share: single {s1:.3f}  diff {sd:.3f}")
+```
+
+```text
+n=32    rho=0.0   share: single 0.324  diff 0.274  needle weight 0.324 -> 0.300
+n=32    rho=0.5   share: single 0.324  diff 0.329  needle weight 0.324 -> 0.299
+n=32    rho=0.9   share: single 0.324  diff 0.468  needle weight 0.324 -> 0.299
+n=32    rho=0.99  share: single 0.324  diff 0.620  needle weight 0.324 -> 0.299
+n=128    rho=0.9   share: single 0.121  diff 0.246
+n=512    rho=0.9   share: single 0.036  diff 0.087
+n=2048   rho=0.9   share: single 0.010  diff 0.025
+n=8192   rho=0.9   share: single 0.002  diff 0.007
+```
+
+*(Measured, on a toy with hand-set logits.)*
+
+1. **The win depends on correlation.** At $\rho = 0.9$ the needle's share of total
+   weight rises from 0.324 to 0.468. At 0.5 it breaks even. At 0 it gets worse:
+   independent noise patterns add, they do not cancel.
+2. **Subtraction never raises the needle.** Its weight drops from 0.324 to 0.299.
+   The gain is all background removed, which the per-head norm then converts.
+3. **It does not stop dilution.** From 128 to 8,192 keys subtraction buys a factor
+   of two to three while the $1/n$ slide continues. Whatever DIFF does at 64K comes
+   from what training does with the extra freedom, not from subtraction alone.
+4. **One λ cannot fit every row.** The background nets to zero only at
+   $\lambda^* = (1-A_{1,\text{needle}})/(1-A_{2,\text{needle}})$, which moves with
+   the needle's weight. V1 has one λ per layer. Drag $n$ in the playground and
+   watch the tick on the λ rail move.
+
+In trained models the correlation does appear to be learned.
+[Kong, Jang and Kwak](https://arxiv.org/abs/2505.16333) (NeurIPS 2025) trained
+their own 0.4B DIFF on about 30B tokens, since the original weights were not
+public. Its two maps agree closely overall and much less on the top 5% of tokens:
+selective cancellation, as advertised. But DIFF attention "often exhibits lower
+sparsity ratios" and "higher entropy values" than softmax, and "assigns negative
+scores to a substantial fraction of context tokens". It is not sparse attention.
+It is *signed* attention: a head can say a token counts against the answer.
+
+## The evidence, at its denominators
+
+Most comparisons are matched: LLaMA-style models, same data, same
+hyperparameters, double the heads for the baseline. The exceptions are Table 1 and
+anything read off a fitted curve.
+
+### Scaling: "65%" is a steady 0.025-nat gap
+
+<Figure
+  src="/articles/differential-transformer/fig3.png"
+  alt="Two loss curves, DIFF in orange below the Transformer in black. Left: loss against parameters, 830M to 13.1B, arrow labelled 38% fewer params. Right: loss against training tokens for 3B models, arrow labelled 36% fewer tokens."
+  caption="Model size (left) and training tokens (right). The arrows are horizontal readings between two fitted curves (DIFF Transformer paper, Figure 3)."
+/>
+
+The claims: a 6.8B DIFF matches an 11B Transformer (62.2% of the parameters), a
+7.8B DIFF matches 13.1B (59.5%), and 160B tokens match 251B (63.7%)
+*(reported)*. Three things about them:
+
+- **Two endpoints were never trained.** The 11B Transformer and the 7.8B DIFF are
+  points on fitted curves.
+- **The size sweep is short.** Every model ran 40K steps of 0.25M tokens: 10B
+  tokens. The 13.1B model saw 0.76 tokens per parameter, where the usual
+  compute-optimal rule of about 20 would want 262B *(reasoned)*.
+- **The gap is small and roughly constant.** At 1.4B it is 3.087 against 3.062
+  (Table 6): 0.025 nats, about 2.5% lower perplexity ($e^{0.025} \approx 1.025$).
+  On curves this flat, a small vertical gap reads as a large horizontal one.
+
+That does not make it wrong. A gap holding from 830M to 13.1B and from 40B to 360B
+tokens is real evidence, and V2 reports a similar 0.02 to 0.03 at 1T tokens. It
+does make "38% fewer parameters" a stronger sentence than its data.
+
+### Downstream at 3B
+
+Table 1 sets a DIFF-3B trained on 1T tokens (60.6 average) against OpenLLaMA-3B-v2
+(57.5) and StableLM-base-alpha-3B-v2 (56.8): other groups' models on other data.
+The matched comparison is Appendix B, both at 350B tokens: zero-shot average 55.4
+to 56.2, 5-shot 56.4 to 58.0 *(reported)*. DIFF loses zero-shot BoolQ, 62.9 to
+60.1.
+
+### Retrieval
+
+At 4K (Table 2) both models score 1.00 with one needle; with six needles and two
+queries the Transformer drops to 0.55 and DIFF holds 0.85 *(reported)*. At 64K,
+after 1.5B tokens of length extension:
+
+<Figure
+  src="/articles/differential-transformer/fig5.png"
+  alt="Two heatmaps of retrieval accuracy by answer depth and context length, 8K to 64K. Transformer averages: 0.95, 0.84, 0.78, 0.64, 0.50, 0.75, 0.78, 0.52, with 0.12 at 25% depth and 64K. DIFF averages: 1.00, 0.94, 0.87, 0.83, 0.83, 0.92, 0.84, 0.86."
+  caption="Multi-needle retrieval to 64K, 8 needles, 1 query, 50 samples per cell. Panel labels added (DIFF Transformer paper, Figure 5)."
+/>
+
+The paper's "76% accuracy improvement" at 25% depth and 64K is 76 *points*: 0.12
+against 0.88, or 6 of 50 against 44 of 50, which no sampling noise explains
+*(reasoned)*. The 64K average is 0.52 against 0.86. Single cells are noisy,
+though: the Transformer scores 0.50 at 40K and 0.75 at 48K, and DIFF has a 0.44
+cell at 32K. The averages and the Transformer's early-depth collapse are the
+finding.
+
+### In-context learning
+
+Many-shot classification up to 64K tokens gains 5.2% to 21.6% in average accuracy
+across four datasets *(reported)*. On TREC, the best-to-worst spread over 10
+random demonstration orders is 19.0 points for the Transformer and 4.0 for DIFF;
+over 30 class-alternating orders, 56.7 against 13.4. Two caveats. DIFF runs near
+the ceiling: I read its 10 plotted runs as averaging about 90.6% against 74.6%,
+and a model right more often has less room to vary. And a best-minus-worst margin
+is set by single runs; the Transformer's 19.0 hangs on one 63% run.
+
+### Hallucination
+
+Here the answer is in the context and the model still gets it wrong. GPT-4o judges
+each output against the reference, on 100 samples per dataset:
+
+<Receipts src="/articles/differential-transformer/data/hallucination.json" />
+
+Only MultiNews clears two standard errors on its own (z = 2.74). Six wins out of
+six has a one-sided sign-test probability of 1/64. Read it as "consistently less",
+not "without", from 3B base models scoring 0.28 to 0.61.
+
+### Outliers, and the low-bit claim
+
+| largest activations (0.4M tokens) | top-1 | top-100 | median |
+|---|---|---|---|
+| attention logits, Transformer | 318.0 | 251.5 | 5.4 |
+| attention logits, DIFF | 38.8 | 27.4 | 3.3 |
+| hidden states, Transformer | 3608.6 | 2448.2 | 0.6 |
+| hidden states, DIFF | 1688.2 | 740.9 | 1.2 |
+
+*(Reported, Table 5.)* The top attention logit is 8.2 times smaller. The top
+hidden state is only 2.1 times smaller, and DIFF's median hidden state is double
+the Transformer's. As top-1 over median, which is what an absmax quantizer pays
+for, DIFF is 5.0 times better on logits and 4.3 times on hidden states
+*(reasoned)*.
+
+<Figure
+  src="/articles/differential-transformer/fig8.png"
+  alt="HellaSwag accuracy against quantized attention-logit bit width 16, 8, 6, 4. DIFF stays near 66% through 6 bits and falls to about 59% at 4. The Transformer starts near 63%, reaches about 59% at 6 bits and about 34% at 4."
+  caption="HellaSwag accuracy with only the attention logits quantized, dynamic absmax post-training quantization (DIFF Transformer paper, Figure 8)."
+/>
+
+What was quantized is the attention logits, the pre-softmax $QK^\top$ scores: not
+weights, not the KV cache, not hidden states. The 4-bit Transformer lands near 34%
+(my reading of the plot) on a four-way task with 25% chance; DIFF at 4 bits
+matches the Transformer at 6. If one absmax scale spanned the largest logit, a
+4-bit step would be 318/7 ≈ 45 for the Transformer, rounding its median logit of
+5.4 to zero, and 38.8/7 ≈ 5.5 for DIFF *(reasoned; the paper does not state its
+scale granularity)*. This is a result for low-bit attention kernels, not yet for
+[weight or KV-cache quantization](/articles/turboquant-kv-cache).
+
+Why are the logits smaller? Softmax's only way to put almost nothing on a token is
+a huge logit gap, or dumping weight on a sink token: the
+[attention-sink story](/articles/goat-optimal-transport-attention), which is why
+sinks and outliers travel together. A DIFF head has a third option, making $A_1$
+and $\lambda A_2$ agree. The 8.2 times smaller top logit fits that reading; the
+paper does not test it directly.
+
+### What it costs
+
+<Receipts src="/articles/differential-transformer/data/throughput.json" />
+
+The kernel is where the cost hides. FlashAttention never materialises $A_1$ or
+$A_2$, so it cannot subtract before multiplying by $V$; it computes $A_1V$ and
+$A_2V$ separately. Attention-core multiply-adds per query-key pair, against a
+baseline of $h$ heads of width $d$:
+
+| implementation | $QK^\top$ | $AV$ | vs baseline |
+|---|---|---|---|
+| naive, maps materialised | $h\,d$ | $h\,d$ | 1.0× |
+| `multihead_flashdiff_1.py` (Q/K 128, V 256) | $h\,d$ | $2h\,d$ | 1.5× |
+| `multihead_flashdiff_2.py` (stock flash-attn, 4 calls) | $2h\,d$ | $2h\,d$ | 2.0× |
+
+*(Reasoned from the three files.)* The first needs different Q/K and V widths,
+which stock FlashAttention-2 does not support, hence the authors' fork. Most
+FLOPs at 2K to 4K tokens sit in the projections and MLP, which is why the measured
+penalty is 5 to 10% rather than 50%. Decoding is not measured, and V2's write-up
+says V1's "value cache must be loaded twice". The site's
+[field guide](/articles/attention-mechanisms#a-quality-move-not-an-efficiency-one-differential-attention)
+lists DIFF at about twice the attention compute: the stock-FlashAttention row.
+
+## What other people found
+
+I found no independent rerun of the 3B experiments, and Microsoft's Hugging Face
+account lists no DIFF checkpoints, so each result below is its own training run.
+
+- **Mechanism.** Beyond signed attention, [Kong et al.](https://arxiv.org/abs/2505.16333)
+  find less redundancy between heads and fewer negative Hessian eigenvalues, a
+  benefit "largely lost when the learnable λ is removed". Their DEX retrofits the
+  idea onto pretrained Llama and Qwen with under 1B tokens.
+- **The shipped model.** [Motif 2.6B](/articles/motif-2-6b) uses differential
+  attention through 2.5T tokens, chosen after ablations at 0.6B, 1.8B and 4.6B
+  under a 3e20-FLOP budget whose numbers the report does not publish. The same
+  team's [Grouped Differential Attention](https://arxiv.org/abs/2510.06949) notes
+  "limited widespread adoption in the large-scale training environment, apart from
+  a few isolated successes such as in the Motif 2.6B model", and finds 3 or 4
+  signal heads per noise head beat 1:1. That compares DIFF variants, not DIFF
+  against a Transformer.
+- **Vision.** [DiffCLIP](https://arxiv.org/abs/2503.06626), trained on CC3M, gains
+  0.8 points of zero-shot ImageNet and 1.2 and 1.8 points of image and text
+  retrieval over CLIP *(reported)*.
+- **Robustness.** [Takahashi et al.](https://arxiv.org/abs/2510.00517) find that
+  subtraction pushes the two maps' gradients against each other, raising local
+  Lipschitz constants: DiffViT and DiffCLIP fall to adversarial attacks more often
+  than their softmax twins.
+
+## DIFF V2: what the authors changed
+
+In January 2026 the same group published
+[Differential Transformer V2](https://huggingface.co/blog/microsoft/diff-attn-v2),
+code in `unilm/Diff-Transformer/Diff-Transformer-V2/`. The core is four lines:
+
+```python
+attn = flash_attn_func(q, k, v)            # q: (N, 2h, d); k, v: (N, h_kv, d)
+attn1, attn2 = (attn[:, 0::2],
+                attn[:, 1::2])
+lam_val = sigmoid(lam)                      # lam: (N, h, 1), projected from x
+attn = attn1 - lam_val * attn2
+```
+
+Every V1 choice above changed.
+
+- **$Q_2$ gets its own parameters.** Query heads double, KV heads do not, and the
+  subtracted pair sits in one GQA group, so the maps now share keys as well as
+  values. Stock FlashAttention works, and decoding matches the baseline because it
+  is memory-bound and the KV reads are unchanged.
+- **The per-head RMSNorm is gone.** Uniform attention over $n$ tokens gives an
+  output RMS near $1/\sqrt n$, so the norm multiplies by $\sqrt n$, about 90.5 at
+  8,192 tokens. The authors saw "massive gradients and numerical instability" late
+  in large-scale pretraining. It is the same norm V1 could not train well without.
+- **λ is per token and per head,** $\operatorname{sigmoid}(W_\lambda x)$, with no
+  exponential re-parameterisation and no $\lambda_{\text{init}}$. That answers the
+  one-λ-per-layer problem from the toy.
+
+Results so far: a loss gap of "0.02 to 0.03 at 1T training tokens", fewer spikes
+at learning rates of 6e-4 to 1e-3, smaller outliers, and no downstream or
+long-context numbers: "The experiments are still running." The write-up also
+concedes that a $2h$-head Transformer could learn the operation itself, with
+paired output projections that are exact negatives, and argues optimisation rarely
+finds that. So DIFF is an inductive bias, not new expressiveness, and whether it
+pays at scale is exactly what V2 is still measuring.
+
+## So what is it
+
+DIFF lets a head subtract, which gives it zero and negative weights. Training uses
+them to cancel what two maps agree on, and the per-head norm turns a quieter
+background into a louder answer. The wins are consistent against matched
+baselines, and modest where people quote them: 0.025 nats, 100 samples per
+hallucination set, logits-only quantization, nothing trained to convergence above
+3B. For a new pretraining recipe, V2's shape is the one to try. As an explanation
+of why your long-context model fails, attention noise is a good hypothesis that no
+published work outside Microsoft has tested head-to-head at scale. For the wider map, see the
+[field guide](/articles/attention-mechanisms); for another explainer from the same
+source, [ORPO](/articles/orpo).
+
+<ChangeMyMind>
+
+<Falsifier claim="The scaling advantage is a roughly constant 0.025-nat gap, not yet shown at compute-optimal token counts.">
+The size sweep used 10B tokens for every model. Train a matched pair at 1B to 7B on at least 20 tokens per parameter. If the gap holds or grows, the "38% fewer parameters" reading stands; if it shrinks toward zero, the benefit was mostly early-training.
+</Falsifier>
+
+<Falsifier claim="Differential attention works through signed weights and the per-head norm, not sparsity.">
+This rests on one independent 0.4B model and my toy. Clamp the negative entries of A1 − λA2 to zero in a trained DIFF model; if the loss barely moves, the negative weights were not doing the work.
+</Falsifier>
+
+<Falsifier claim="The noise cancellation is learned, and without correlated noise subtraction hurts.">
+My toy breaks even near a correlation of 0.5. Measure the correlation between A1 and A2 over non-salient keys, layer by layer, in a trained model. If DIFF still wins where it is near zero, noise cancelling is not the mechanism.
+</Falsifier>
+
+<Falsifier claim="The low-bit result applies to attention logits, not to the quantization people deploy.">
+Quantize a matched pair to 4-bit weights with 8-bit activations, or to a 4-bit KV cache. If DIFF degrades measurably less there too, the outlier result reaches further than the paper tested.
+</Falsifier>
+
+</ChangeMyMind>
+
+---
+
+*Sources: [Differential Transformer](https://arxiv.org/abs/2410.05258) (arXiv
+2410.05258v2) and its code in
+[microsoft/unilm](https://github.com/microsoft/unilm/tree/master/Diff-Transformer);
+the [DIFF V2 write-up](https://huggingface.co/blog/microsoft/diff-attn-v2) (January
+2026); [Kong, Jang and Kwak](https://arxiv.org/abs/2505.16333);
+[Motif 2.6B](https://arxiv.org/abs/2508.09148);
+[Grouped Differential Attention](https://arxiv.org/abs/2510.06949);
+[DiffCLIP](https://arxiv.org/abs/2503.06626);
+[Takahashi et al.](https://arxiv.org/abs/2510.00517). Figures are the paper's,
+flattened onto white; the heatmap panel labels, interactives, numpy toy and every
+number marked "reasoned" are mine. I did not run the authors' code.*

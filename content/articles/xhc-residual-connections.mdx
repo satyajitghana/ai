@@ -1,0 +1,264 @@
+---
+title: "xHC: sixteen residual streams, four written at a time"
+description: "Hyper-connections widen a Transformer's residual stream into parallel streams; DeepSeek's mHC keeps their mixing doubly stochastic so it cannot blow up with depth, and stops at four. xHC reads all sixteen streams, mixes and writes only four per sublayer, and feeds those writes a causal convolution over neighbouring tokens. The Sinkhorn guarantee survives intact, the paper reports +4.0 points over mHC at 18B and +3.1 at 28B, and its FLOPs overhead is small. Checked against its own formulas: the 28B cost column reproduces and the 18B one cannot; the wall-clock bill is several times the FLOPs bill; at 10B the convolution does two-thirds of the loss work; token budgets are unreported; and there is no code yet."
+date: 2026-09-26
+interest: 4
+helpful: 4
+tags:
+  - explainer
+  - llm
+  - architecture
+  - transformers
+  - pretraining
+  - scaling-laws
+  - mixture-of-experts
+draft: false
+---
+
+import { StreamMixer } from "@/components/articles/xhc-residual-connections/stream-mixer"
+import { CostExplorer } from "@/components/articles/xhc-residual-connections/cost-explorer"
+
+Every Transformer carries one vector per token from layer to layer, and every layer adds its output to it. Hyper-connections replaced that single vector with several. DeepSeek's mHC made the several stable at 27B by forcing the matrix that mixes them to be doubly stochastic. Every shipped model whose config this site has read, from [GLM-5.3-Flash](/articles/glm-5-3-flash) to [Magi-2](/articles/magi-2-preview), uses four streams. [xHC](https://arxiv.org/abs/2607.14530) asks why four, finds two reasons, and goes to sixteen.
+
+The paper is from Junchi Yan's group at Shanghai Jiao Tong's School of AI with Xiaohongshu's Dots Studio. First author Xiangdong Zhang ([@aHapBean](https://x.com/aHapBean/status/2103310868876579121)) announced its NeurIPS 2026 acceptance on 25 September, with an accurate summary: "16 residual streams, reading all but updating only 4 at a time."
+
+I read the paper, its tech report and the two papers it builds on, checked its formulas and tables in numpy, and built a toy of the mixing. Numbers are labelled **Reported** (the paper says it), **Measured** (I ran it) or **Reasoned** (I derived it).
+
+| | |
+|---|---|
+| What it is | 16 residual streams, 4 mixed and written per sublayer, with a causal-conv-enriched write |
+| Models | DeepSeekMoE-style, 144 experts, top-8: 18B total / 1.7B active and 28B / 2.7B for the main results; 2.5B for the N-sweep, 10B for ablations |
+| Baselines | a plain residual, and mHC at N = 4. HC itself is not run |
+| Benchmarks | 12 (MMLU, MMLU-Pro, MMLU-Redux, BBH, CommonsenseQA, ARC-C, GSM8K, HumanEval, LCBench, CMMLU, CEval, C3) via OpenCompass |
+| Headline | average 48.8 against mHC's 44.8 at 18B, 53.6 against 50.5 at 28B |
+| Training tokens | not reported, for any model |
+| Code | none yet: [`aHapBean/xHC`](https://github.com/aHapBean/xHC) holds a README, seven images and the tech report PDF |
+
+## One stream: x + F(x)
+
+A residual block computes $x_{l+1} = x_l + F(x_l)$. Unroll it and the top of the network is the input plus a sum of every layer's contribution:
+
+$$
+x_L = x_0 + \sum_{l=0}^{L-1} F(x_l), \qquad
+\frac{\partial x_L}{\partial x_l} = I + \frac{\partial}{\partial x_l}\sum_{i=l}^{L-1} F(x_i).
+$$
+
+The identity in that Jacobian is the whole trick. However badly the layers behave, the gradient reaching layer $l$ has a path that multiplies by exactly 1, so depth does not by itself make signals explode or vanish. That is why a deep stack trains at all.
+
+The cost is width. One $C$-dimensional vector carries everything, and every layer writes into the same $C$ numbers.
+
+## Hyper-connections: N streams, three small maps
+
+[Hyper-Connections](https://arxiv.org/abs/2409.19606) (Zhu et al., ByteDance) copy the embedding into $N$ streams, so the state is a matrix $X_l \in \mathbb{R}^{N\times C}$. The layer still sees one $C$-vector, so its cost does not change. Three small learned maps sit around it:
+
+$$
+X_{l+1} = \mathcal{H}^{\mathrm{res}}_l\, X_l \;+\; \mathcal{H}^{\mathrm{post}}_l\, F\!\left(\mathcal{H}^{\mathrm{pre}}_l X_l\right),
+\qquad
+\mathcal{H}^{\mathrm{pre}} \in \mathbb{R}^{1\times N},\;
+\mathcal{H}^{\mathrm{post}} \in \mathbb{R}^{N\times 1},\;
+\mathcal{H}^{\mathrm{res}} \in \mathbb{R}^{N\times N}.
+$$
+
+$\mathcal{H}^{\mathrm{pre}}$ reads the layer's input as a weighted sum of streams. $\mathcal{H}^{\mathrm{post}}$ writes the output back with one weight per stream. $\mathcal{H}^{\mathrm{res}}$ mixes the streams with each other. HC calls these width and depth connections; I use mHC's names. In the dynamic variant each map is predicted from the current state. With $N = 1$ and all three maps fixed at 1, this is the plain residual again.
+
+**Reported** by HC, on OLMo-1B trained for 500B tokens (its no-tanh variant): $N = 1$ is worse than the baseline, $N = 2$ and $N = 4$ are better, and $N = 8$ reaches a validation loss of 2.777 against 2.779 at $N = 4$, with 63.8 average downstream accuracy against 64.4. The saturation xHC sets out to fix was visible in the first paper.
+
+The problem is that $\mathcal{H}^{\mathrm{res}}$ is unconstrained, and a signal crossing many layers is multiplied by $\prod_l \mathcal{H}^{\mathrm{res}}_l$. Nothing stops that product growing or shrinking geometrically: the identity path is gone. **Reported** by the [mHC paper](https://arxiv.org/abs/2512.24880): in a 27B model, HC's loss surges around step 12k, in step with its gradient norm, and the gain of the composite mapping, its largest absolute row or column sum, reaches nearly 3000.
+
+## mHC: keep the mixing doubly stochastic
+
+mHC (Xie et al., DeepSeek) constrains $\mathcal{H}^{\mathrm{res}}$ to the Birkhoff polytope: non-negative matrices whose rows and columns each sum to 1. It gets there with Sinkhorn-Knopp. Exponentiate the predicted logits, then alternately rescale columns and rows, 20 times:
+
+$$
+M^{(0)} = \exp\!\big(\alpha\,\mathrm{mat}(\tilde x_l W^{\mathrm{res}}) + b\big), \qquad
+M^{(t)} = \mathcal{T}_{\mathrm{row}}\big(\mathcal{T}_{\mathrm{col}}(M^{(t-1)})\big), \qquad
+\mathcal{H}^{\mathrm{res}}_l = M^{(20)}.
+$$
+
+Three properties follow. Each output stream is a convex combination of input streams, so nothing is amplified and the mean across streams is conserved. The spectral norm is at most 1. And doubly stochastic matrices are closed under multiplication, so the product across any depth is doubly stochastic too: whatever the network learns, the composite mixing cannot amplify. mHC also bounds the other two maps, a sigmoid on $\mathcal{H}^{\mathrm{pre}}$ and $2\sigma$ on $\mathcal{H}^{\mathrm{post}}$.
+
+**Reported** by mHC: at 20 iterations the constraint is approximate, and the composite backward gain peaks around 1.6 against HC's nearly 3000. Training overhead at $N = 4$ is 6.7%. This is the operator [GLM-5.3-Flash ships](/articles/glm-5-3-flash) as `hc_mult: 4, hc_sinkhorn_iters: 20`, the one [Magi-2 runs in Triton](/articles/magi-2-preview) and the one [Qwen's Gated Residual deleted](/articles/qwen3-8-flash-next); [Chimera](/articles/chimera-diffusion) and [Hy4](/articles/hy4-preview) fix it to the identity. The [GOAT article](/articles/goat-optimal-transport-attention) steps through Sinkhorn one half-step at a time.
+
+One detail matters later. mHC's Eq. 9 normalizes rows last, so every row sums to exactly 1 and the approximation error lands on the columns. That is why mHC measures the backward gain drifting, not the forward one.
+
+<StreamMixer />
+
+The widget keeps only the mixing. Each sublayer draws one random matrix $H = (1+b)I + \sigma G$. HC uses it as is, mHC uses Sinkhorn of $\exp(4H)$, and xHC applies that Sinkhorn to a routed $k \times k$ block and leaves the other streams alone. The chart tracks the product's gain the way mHC measures it: largest absolute row sum (forward) and column sum (backward).
+
+**Measured**, on the widget's default draw at 64 sublayers and drift 0.15: HC's forward gain reaches 4.05 with four streams and about 54,000 with sixteen. mHC and xHC sit at exactly 1.000 forward. Backward they come out at 1.012 and 1.014 with four streams and 20 iterations. Cut Sinkhorn to one iteration and sixteen streams give 1.143 and 1.148. With four streams, bias -0.05 and drift 0.1, HC vanishes to 0.157 and the Sinkhorn rules do not move. That is the argument for mHC in one picture, on random matrices, not a trained model.
+
+The widget also shows something the stability argument leaves out. A product of doubly stochastic matrices with positive entries converges to the matrix whose every entry is $1/N$: every stream becomes the average of all of them. **Measured** in the toy: after 64 sublayers, dense mHC's self-share, the average diagonal of the product, is 0.252 with four streams and 0.063 with sixteen, which is $1/N$ in both cases. **Reasoned**: under this constraint, mixing only ever pulls streams together, and the only thing that keeps them apart is what each layer writes.
+
+## Why mHC stops at four
+
+<Figure
+  src="/articles/xhc-residual-connections/fig2.png"
+  alt="Loss against training FLOPs on a 2.5B MoE model. A vanilla star sits at loss 2.3071 near 4.5e19 FLOPs. The blue mHC curve drops steeply from N=2 to N=4, then flattens through N=8 and N=16 near 6e19 FLOPs, with a faint extension to N=32 near 1.5e20 FLOPs. The red xHC curve falls steeply from N=2 to N=16 while staying near 4.7e19 FLOPs, ending at the lowest loss. Annotations read FLOPs x1.33 and loss -2.0% for mHC N=16, FLOPs x1.05 and loss -2.8% for xHC N=16."
+  caption="Expansion efficiency on the 2.5B MoE model: mHC flattens after N = 4 while its FLOPs run right; xHC keeps falling at nearly constant cost. The multipliers and percentages are against the vanilla point (xHC paper, Figure 1)."
+/>
+
+**Reported**, on the 2.5B model: taking mHC from 4 streams to 16 lowers loss by 0.006 and raises training FLOPs by 32%. xHC over the same range lowers it by 0.012 for 4%. The paper names two bottlenecks.
+
+**Information.** mHC's write to stream $i$ is $\Delta x_{l,i} = h^{\mathrm{post}}_{l,i}\cdot \mathrm{out}$: a scalar times the one output vector. Across all streams the update is an outer product $h^{\mathrm{post}}\,\mathrm{out}^\top$, rank one. Sixteen streams can weight each layer's single vector sixteen ways, but they cannot receive sixteen different things. The paper's word for the result is redundant, and the averaging above is one reason why (**Reasoned**).
+
+**Cost.** $\mathcal{H}^{\mathrm{res}}$ is predicted from the flattened $NC$-dimensional state by $W^{\mathrm{res}} \in \mathbb{R}^{NC \times N^2}$. That is $N^3C$ weights per sublayer. At $N = 4$ it is $64C$, at $N = 16$ it is $4096C$. The layer itself does not get more expensive; the generator of its mixing matrix does.
+
+## What xHC changes
+
+<Figure
+  src="/articles/xhc-residual-connections/fig1.png"
+  alt="Three panels. (a) A standard residual connection: x_l goes through Layer F and is added back to x_l. (b) mHC: four streams feed a Res Mixing block H_res in R^{NxN} and a Pre Mapping H_pre in R^{1xN}; the layer output goes through Post Mapping H_post in R^{Nx1} and is added to the mixed streams. (c) xHC: sixteen streams, two blue fixed and two orange routed. A Router picks top-k active streams, which go through Sparse Res Mixing H_res in R^{kxk}; a Dense Read H_pre in R^{1xN} reads all N streams into Layer F, whose output passes Temporal Feature Aug before Post Mapping H_post in R^{kxK_r}; a Sparse Write Back updates only k=4 of N=16 streams."
+  caption="(a) one residual stream; (b) mHC's four streams with dense mixing and write-back; (c) xHC reads all sixteen streams, routes four of them (two fixed, two chosen) through a 4x4 Sinkhorn mix, and writes back a convolution-augmented output to those four only (xHC paper, Figure 3)."
+/>
+
+xHC makes three changes to one sublayer.
+
+**Dense read.** $\mathcal{H}^{\mathrm{pre}} = \sigma(\cdot) \in \mathbb{R}^{1\times 16}$ still reads every stream, so every layer can see all sixteen.
+
+**Sparse mix and write.** A router scores all 16 streams per token, $s = \sigma(\mathrm{LN}(\mathrm{vec}\,X)\,W_r)$. Streams 0 and 1 are always active; the top 2 of the other 14 by score join them, $k = 4$ in all. The mixing matrix is generated from those four streams only, $\mathcal{H}^{\mathrm{res}} = \mathrm{SK}(\cdot) \in \mathbb{R}^{4\times 4}$, and the four are updated:
+
+$$
+X^{\mathrm{new}}_{\mathrm{act}} = \mathcal{H}^{\mathrm{res}} X_{\mathrm{act}} + p \odot \big(\mathcal{H}^{\mathrm{post}}\, \mathrm{out}_{\mathrm{aug}}\big),
+\qquad \mathcal{H}^{\mathrm{post}} \in [0,2]^{4\times K_r}.
+$$
+
+The other 12 streams pass through untouched. Routing is per token, like MoE: two tokens in the same sequence can write different streams. The router weights $p$ (1 for the fixed streams, the sigmoid score for the routed ones) scale only the write. The paper is explicit that mixing stays ungated.
+
+**A richer write.** After MLP sublayers only, the output is convolved causally along the sequence with three depthwise kernels of width 4, 8 and 12. The three results are Gram-Schmidt-orthogonalized against the output and each other, giving $K_r = 4$ components $[v_1;\dots;v_4]$. That costs $24C$ parameters per MLP sublayer, and the tech report adds that the kernels start at zero, so training begins with mHC's single write.
+
+Here is the whole sublayer as runnable numpy, with the learnable scale $\alpha$ and biases left out. On random weights it touches exactly four streams per token, and with the write zeroed the sum over streams is conserved to 3.6e-15 (**Measured**).
+
+```python title="xhc_sublayer.py"
+import numpy as np
+
+sig = lambda z: 1 / (1 + np.exp(-z))
+rms = lambda x: x / np.sqrt((x * x).mean(-1, keepdims=True) + 1e-6)
+
+def sinkhorn(logits, iters=20):              # mHC Eq. 9: columns, then rows
+    M = np.exp(logits - logits.max((-2, -1), keepdims=True))
+    for _ in range(iters):
+        M = M / M.sum(-2, keepdims=True)
+        M = M / M.sum(-1, keepdims=True)
+    return M
+
+def xhc_sublayer(X, F, W, k=4, m=2, convs=()):
+    """X: (S, N, C) state for S tokens. F: attention or MLP, (S, C) -> (S, C).
+    convs: causal depthwise kernels, each (kappa, C); empty for attention."""
+    S, N, C = X.shape
+    flat = X.reshape(S, N * C)
+    # route, per token: m fixed streams + top (k - m) of the rest
+    ln = (flat - flat.mean(-1, keepdims=True)) / (flat.std(-1, keepdims=True) + 1e-6)
+    s = sig(ln @ W["router"])
+    top = np.argsort(-s[:, m:], -1)[:, : k - m] + m
+    idx = np.concatenate([np.tile(np.arange(m), (S, 1)), top], -1)
+    p = np.concatenate([np.ones((S, m)), np.take_along_axis(s, top, -1)], -1)
+    # dense read over all N streams
+    out = F(np.einsum("sn,snc->sc", sig(rms(flat) @ W["pre"]), X))
+    # temporal augmentation: causal convs, then Gram-Schmidt
+    comps = [out]
+    for w in convs:
+        pad = np.concatenate([np.zeros((len(w) - 1, C)), out])
+        g = sum(w[i] * pad[len(w) - 1 - i : len(w) - 1 - i + S] for i in range(len(w)))
+        for v in comps:
+            g = g - (g * v).sum(-1, keepdims=True) / ((v * v).sum(-1, keepdims=True) + 1e-6) * v
+        comps.append(g)
+    aug = np.stack(comps, 1)                                   # (S, K_r, C)
+    # mixing and write maps from the k active streams only
+    Xa = np.take_along_axis(X, idx[..., None], 1)              # (S, k, C)
+    xa = rms(Xa.reshape(S, k * C))
+    H_res = sinkhorn((xa @ W["res"]).reshape(S, k, k))
+    H_post = 2 * sig((xa @ W["post"][len(comps)]).reshape(S, k, len(comps)))
+    Xa = H_res @ Xa + p[..., None] * (H_post @ aug)            # mix, then gated write
+    X = X.copy()
+    np.put_along_axis(X, idx[..., None], Xa, 1)                # 12 streams untouched
+    return X
+```
+
+### What "more expressive" and "greater capacity" mean
+
+**Capacity** is the persistent state: $16C$ numbers per token instead of mHC's $4C$, and a stream that routing skips keeps its contents for later layers to read.
+
+**Expressiveness** is the rank of the write. mHC adds a rank-one matrix to the state per sublayer. xHC's MLP sublayers add $\mathrm{diag}(p)\,\mathcal{H}^{\mathrm{post}}[v_1;\dots;v_4]$, which has rank up to 4, and three of those four directions carry information from the previous 3, 7 and 11 tokens. Attention sublayers still write rank one. The mixing per sublayer is not more expressive: a $4\times 4$ doubly stochastic block has the same freedom as mHC's at $N = 4$, applied to a routed subset.
+
+### Which constraint survives
+
+All of it, and this is the part I like best. **Reasoned**: one sublayer's effective $16\times 16$ map is the $4\times 4$ Sinkhorn block on the active streams and the identity on the other 12, conjugated by a permutation. A block-diagonal of doubly stochastic blocks is doubly stochastic, and permuting rows and columns together preserves both sums. So every sublayer's full mixing matrix is doubly stochastic, and so is the product over depth: mHC's guarantee carries over to sixteen streams without a $16\times 16$ Sinkhorn. The toy agrees: xHC's forward gain stays at 1.000 at every setting. It also keeps more of each stream apart, with a self-share of 0.518 at sixteen streams against dense mHC's 0.063 on the same draw (**Measured**, toy only).
+
+What xHC relaxes is density: in any one sublayer, 12 streams take no part in mixing. It adds one patch. **Reported** in Appendix A: "rare extreme activations can hinder the convergence of Sinkhorn normalization, leaving some row sums greater than one," so rows are rescaled by $\max(\sum_j H_{ij}, 1)$ after Sinkhorn. **Reasoned**: with mHC's column-then-row order, rows come out exactly 1 and this clamp could never fire. Either xHC's kernel normalizes in the other order, or the failure is numerical. The paper does not say which.
+
+## What it costs
+
+<CostExplorer />
+
+**Parameters**, from Appendix C, per layer in units of $C$: mHC at $N = 4$ is $192C$, mHC at $N = 16$ is $9216C$, xHC at $N = 16, k = 4$ is $1256C$. I reproduce all three. xHC has 7.3x fewer than dense mHC at the same $N$ and 6.5x more than the mHC anyone ships. **Reasoned**: $1024C$ of xHC's $1256C$, or 82%, is the router and the read map, both of which still read the full $16C$ state and grow as $N^2$. The cubic term is solved; the quadratic one is next.
+
+**FLOPs.** **Reported**: xHC adds 4.1% training FLOPs at 18B and 3.0% at 28B, against 0.7% and 0.5% for mHC at $N = 4$. **Reasoned**, applying Appendix C's own recipe to Table 6's configurations: it reproduces the 28B column (my 0.46%, 22.2% and 3.0% for mHC-4, mHC-16 and xHC, against their 0.5%, 22.3% and 3.0%) and the 2.5B sweep (+30% for mHC from 4 to 16 streams against their 32%, +3.7% for xHC against their 4%). It cannot reproduce the 18B column, and nothing can: mHC-16's and xHC's overheads are both $6PL$ over the same backbone, so their ratio must be $9216/1256 = 7.34$, and the table has $18.9/4.1 = 4.6$. The recipe gives 3.3% for xHC and 24% for mHC-16 at 18B. Both errors run against xHC, so the slip is not self-serving, and the real overhead is small either way.
+
+**Memory traffic** is what the step time pays for. **Reported** (Table 4), per token per sublayer: a plain residual moves $3C$, mHC at $N = 4$ moves $34C$, xHC $73.5C$, dense mHC at $N = 16$ would move $130C$. I re-derived all four from the table's rows. xHC reads the full $16C$ state twice per sublayer, to generate maps and for the dense read. **xHC-Flash** shares routing and both reads across an attention-plus-MLP block, drops the attention-side mixing, and corrects the MLP's input exactly with one scalar, $\alpha = \sum_j \mathcal{H}^{\mathrm{pre,MLP}}_{\mathcal{I}_j} p_j \mathcal{H}^{\mathrm{post,Attn}}_j$: $51C$. **xHC-Flash-4sub** shares across two blocks: $40C$. At 10B the three reach validation losses of 1.983, 1.983 and 1.984.
+
+**Residual memory.** **Reasoned**: the state is $N \times C$ per token. In bf16 at the 18B model's $C = 2112$ that is 67,584 bytes per token for sixteen streams, against 16,896 for four and 4,224 for one: four times mHC's, at every layer boundary a framework keeps for backward. The paper reports traffic, not peak memory.
+
+**Wall clock.** **Reported**, on the 18B model with pipeline overlap off: the authors' fused mHC adds about 15% over vanilla (DeepSeek reported 6.7%; the paper says the setups differ), and xHC-Flash-4sub about 11% on top of mHC. Prefill at 2K tokens costs 11.4% over vanilla for mHC and 12.9% for xHC-Flash-4sub. Full xHC, the model behind every downstream score, is never timed; xHC-Flash-4sub, the one that is, has one validation loss at 10B and no benchmarks.
+
+**Reasoned**, roughly: xHC-Flash-4sub's step costs 1.26x to 1.28x vanilla's (15% and 11% may add or compound) for about 1.04x the FLOPs. Charge the scaling-law multipliers below at that rate and 1.50x over vanilla becomes about 1.2x, and 1.19x over mHC about 1.1x: still a win, smaller than the FLOPs axis shows, assuming full xHC's fits carry over to Flash-4sub.
+
+## What the results say
+
+**Setup, reported.** AdamW, 8,192 context, a mix of English, Chinese, code, maths and reasoning data, matched recipes per scale. Table 6 lists "Training Tokens" as a dash for every model, and the 18B global batch too; its loss curve runs to about 46,000 iterations. **Reasoned**: the 2.5B sweep's vanilla point sits at 4.5e19 FLOPs in Figure 1, and Appendix C's recipe gives about 2.8 GFLOPs per token for that model, so roughly 16B tokens. The same recipe puts mHC at 32 streams at 3.3x vanilla's FLOPs, where Figure 1 draws it. For 18B and 28B I cannot estimate.
+
+**Downstream, reported (Table 1).** Single runs, no error bars.
+
+| | Vanilla | mHC (N = 4) | xHC (16, 4) | xHC − mHC |
+|---|---|---|---|---|
+| 18B average | 40.6 | 44.8 | 48.8 | +4.0, wins 12 of 12 |
+| 28B average | 47.8 | 50.5 | 53.6 | +3.1, wins 11 of 12 |
+| 18B final training loss | 1.799 | 1.776 | 1.758 | −0.018 |
+
+At 28B the one loss is BBH, 43.4 against 43.6. The largest gains at 18B are HumanEval (+6.1), ARC-Challenge (+5.9) and BBH (+5.8). At 28B they are CommonsenseQA (+5.7), HumanEval (+4.3) and C3 (+3.8). mHC itself scores below vanilla on HumanEval at both scales (23.2 against 25.6, and 26.8 against 27.4) and on LCBench at 28B.
+
+Does the gain hold at the largest scale? It holds, and it shrinks. Over mHC it goes from 4.0 points to 3.1, and over vanilla from 8.2 to 5.8 (**Reasoned** from the table). mHC's own lead over vanilla shrinks too, from 4.2 to 2.7. Two points on a curve cannot say whether that trend continues.
+
+<Figure
+  src="/articles/xhc-residual-connections/fig3.png"
+  alt="Log-log plot of loss against training FLOPs from 1.8e19 to about 4e20. Three nearly parallel fitted lines: vanilla highest, mHC in the middle, xHC lowest, each with four measured points. Arrows at the right mark 1.50x from the largest vanilla point and 1.19x from the largest mHC point back to the xHC line."
+  caption="Scaling-law fits, four models per method from 1.7e19 to 4.0e20 FLOPs; the arrows read the largest vanilla and mHC losses against the fitted xHC line (xHC paper, Figure 4)."
+/>
+
+**Scaling law, reported.** Four models per method, 1.7e19 to 4.0e20 FLOPs, the largest 1.10B active and 9.46B total. Fits of $\mathcal{L} = AC^{-\alpha} + 0.72$ give exponents of 0.0936 (vanilla), 0.0920 (mHC) and 0.0919 (xHC). The largest measured vanilla and mHC losses, read against the fitted xHC line, give the headline 1.50x and 1.19x.
+
+**Reasoned**, from Table 9's own parameters: the three exponents agree within 0.0017, and mHC's and xHC's within 0.0001, so xHC shifts the curve down and does not make it steeper. It is a constant-factor saving. Fit against fit at 4.0e20 FLOPs the multipliers are 1.41x and 1.11x, a little under the headline, because the largest baseline points sit slightly above their own lines. Across the measured range the vanilla multiplier narrows from 1.49x to 1.41x; the mHC one holds near 1.11x. Four points per fit cannot resolve a 0.0017 exponent gap, so I would not extrapolate.
+
+**Muon, reported.** On the 18B model with Muon on the backbone, xHC lifts the average from 43.1 to 49.9 (without Gram-Schmidt, which the authors found unnecessary under [Muon](/articles/muon-optimizer)). There is no Muon-plus-mHC run, so this shows xHC works with Muon, not its margin over mHC there.
+
+### Where the loss actually comes from
+
+**Reported**, Table 2, at 10B on the Pile test set: vanilla 2.029, mHC at $N = 4$ 2.004, mHC at $N = 16$ 1.998, mHC-16 with temporal augmentation 1.984, full xHC 1.983. Sparse routing costs nothing in loss and cuts the FLOPs overhead from 20.1% to 3.3%. Keeping two fixed streams and the dense read matters: drop both and loss rises to 1.997. $k = 2$ gives 1.991, $k = 8$ gives 1.982, a softmax router 1.988.
+
+**Reasoned**: of the 0.021 that separates mHC at four streams from xHC, 0.006 comes from widening to sixteen and 0.014, two-thirds, from the causal convolutions.
+
+<Figure
+  src="/articles/xhc-residual-connections/fig4.png"
+  alt="Line plot of loss gap versus mHC against expansion rate N at 4, 8 and 16. The mHC line is flat at zero. The plus-temporal-augmentation line sits at about -0.007 at N=4, about -0.011 at N=8 and about -0.0125 at N=16."
+  caption="Temporal augmentation added to dense mHC: its gain grows with N, and is already about 0.007 at N = 4. The paper does not state which model size this is (xHC paper, Figure 5)."
+/>
+
+The paper reads Figure 5 as the convolution's gain growing with $N$, which supports the information-bottleneck diagnosis. It does, from about 0.007 at four streams to about 0.0125 at sixteen (read off the plot). The other reading is that more than half of it is available at four streams, with no expansion at all. The 18B and 28B comparisons never include mHC-4 with the convolution, or a plain residual with one. So the 4.0 points bundle two ideas: more streams, and a short causal conv on the MLP output, a token-mixing change in its own right. The ablation says both are real at 10B, not how the downstream points split.
+
+## Stability, read closely
+
+xHC inherits mHC's structural bound, but not mHC's evidence: no gradient-norm curves and no composite-gain plots. The 18B loss curves in Figure 2(a) are smooth, but the plot starts around iteration 5,000. The stability story is told instead by the fixes it needed:
+
+- **Row-sum clamping** after Sinkhorn (Appendix A, above).
+- **Gram-Schmidt is load-bearing at scale.** At 10B, removing it barely moves the loss (1.984 against 1.983). At 18B, "the cosine similarity between convolutional branches and the main branch can exceed 0.7, and removing Gram–Schmidt orthogonalization leads to training instability."
+- **No convolution after attention.** Section 3.3.1 says it "empirically destabilizes training." Appendix D's 10B ablation reports "a similar validation loss," 1.985 against 1.983, slightly worse. Both can be true at different scales, but the paper shows only the mild one.
+- **Two fixed streams**, described as providing "guaranteed write targets" for stability.
+
+None of this is alarming, and the paper is candid about each fix. It means reproducing xHC takes those four fixes, not just the equations.
+
+## What I could not check
+
+No code. The repository at commit `7890266` (21 July) holds a README, figures and `paper/xHC_tech_report.pdf`; the README links `xHC_technical_report.pdf`, which does not exist. The author's post promises code "within two months." Until then the fused kernels, the Sinkhorn order, the clamp and the Gram-Schmidt epsilon are unverified. That epsilon matters: with zero-initialized kernels, Eq. 5 divides zero by zero at the first step.
+
+Token budgets, seeds and the throughput of full xHC are not reported. The 18B FLOPs column does not add up, though both errors run against xHC, not for it.
+
+What holds: the mechanism is clean. It keeps mHC's doubly-stochastic guarantee over all sixteen streams while paying for a $4\times 4$ Sinkhorn, and it attacks a real limit of mHC, a rank-one write per layer, not only its cost. Against mHC at matched recipes it is ahead at both scales and across the fitted compute range. I read that lead as a constant-factor gain, partly from a causal convolution, that costs more wall clock than FLOPs. I would want the mHC-plus-conv baseline before crediting all of it to sixteen streams.

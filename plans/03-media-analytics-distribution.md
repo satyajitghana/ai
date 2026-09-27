@@ -51,6 +51,41 @@ meant for attachments), `raw.githubusercontent.com` (`text/plain` with
 `nosniff`, so video may not play), jsDelivr's GitHub CDN (fair-use policy is
 for code, 20 MB file cap).
 
+**Status, 2026-09-27:** `thesatyajit.com` is on Cloudflare DNS, and
+`ai.thesatyajit.com` is a DNS-only CNAME to Vercel (answers carry
+`server: Vercel`), so nothing about the site's own serving changes. Built:
+`.github/workflows/media-sync.yml` (sparse checkout, `rclone sync --checksum`
+of `public/films` and `public/thumbs` to R2, a year of immutable caching) and
+version-stamped media URLs (`mediaUrl(path, sha)` appends `?v=<render hash>`
+when `NEXT_PUBLIC_MEDIA_BASE` is set (to `https://media.thesatyajit.com/ai`), because a re-rendered film keeps its
+filename). The files stay in git: `validate:films` checks them and the OG
+images read the thumbnails at build. Left for the owner: the R2 bucket, its
+custom domain, the three secrets, one workflow run, then the env var on
+Vercel's **Production** environment only. Previews stay same-origin, because
+media-sync only uploads what reached `master`.
+
+### The shared bucket
+
+`ai-thesatyajit-media` sits behind `media.thesatyajit.com`, and more than one
+site can serve from it, so it is laid out by site, one top-level prefix each,
+and each repository writes only under its own:
+
+```
+ai-thesatyajit-media/                  https://media.thesatyajit.com/…
+  ai/                                  ai.thesatyajit.com (this repo, media-sync)
+    films/<slug>.mp4 | -poster.webp | .vtt
+    films/architectures/<slug>.*
+    thumbs/<slug>.jpg
+    thumbs/architectures/<slug>.jpg
+    articles/<slug>/…                  (later: article figures)
+  <site>/                              another subdomain's own prefix
+  shared/                              anything two sites both link to
+```
+
+`rclone sync` deletes remote files that are gone locally, so a sync must only
+ever target its own prefix. media-sync refuses to run with an empty or nested
+prefix. This site's `NEXT_PUBLIC_MEDIA_BASE` is `https://media.thesatyajit.com/ai`.
+
 ## 2. Analytics
 
 **Done:** Cloudflare Web Analytics — the beacon in `app/layout.tsx`, rendered
@@ -140,11 +175,22 @@ push to master → GitHub Action social-publish
 
 ## Decisions needed
 
-- **Media:** move `thesatyajit.com`'s DNS to Cloudflare (free), create an R2
-  bucket with the custom domain `media.thesatyajit.com`, and add R2 API keys as
-  GitHub secrets; the sync Action and the switch are then one PR.
-- **Analytics:** create the Cloudflare Web Analytics site and set
-  `NEXT_PUBLIC_CF_ANALYTICS_TOKEN` in Vercel. Decide whether film engagement
+- **Media:** DNS is already on Cloudflare. Create an R2 bucket (default name in
+  the workflow: `ai-thesatyajit-media`, or set the `R2_BUCKET` repository
+  variable), attach the custom domain `media.thesatyajit.com`, add the
+  secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT` (the S3
+  endpoint shown with the token, the jurisdiction one if the bucket has one;
+  the token's "token value" is not needed), run
+  media-sync once (Actions → media-sync → Run workflow), then set
+  `NEXT_PUBLIC_MEDIA_BASE=https://media.thesatyajit.com/ai` on Vercel Production
+  and redeploy. **Done, 2026-09-27:** bucket, domain and the three secrets.
+- **Analytics (done, 2026-09-27):** the site token is the default in
+  `app/layout.tsx`, used on Vercel production only. Kept for reference:
+  `ai.` is DNS-only, so Cloudflare's automatic setup (which
+  injects the beacon at its edge) cannot apply; add the site with the manual
+  JavaScript snippet, take the token from it, and set
+  `NEXT_PUBLIC_CF_ANALYTICS_TOKEN` in Vercel (or commit it as the default: it
+  is public in every page). Decide whether film engagement
   is worth adding PostHog or Umami.
 - **Social:** create the X and LinkedIn developer apps, add their secrets, and
   confirm approval-by-commit for the social-poster.

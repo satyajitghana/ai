@@ -9,6 +9,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react/dist/ssr"
 
+import { FAMILY_LABEL } from "@/components/architectures/families"
 import { ArchDiagram } from "@/components/architectures/registry"
 import { useUrlState } from "@/lib/use-url-state"
 import { cn } from "@/lib/utils"
@@ -17,7 +18,9 @@ import { cn } from "@/lib/utils"
 // render inline by default; cards lift on hover and expand into a full-size
 // modal on click. Filter by family (and "has diagram"), sort by uniqueness /
 // interest / signal / newest / name — persisted to the URL. Each card carries a
-// 1–5 signal badge derived from the entry's own interest + uniqueness.
+// 1–5 signal badge derived from the entry's own interest + uniqueness. An
+// architecture with a full explainer page (/architectures/<slug>) links its
+// name there and shows a small thumbnail of its explainer film.
 type ArchCard = {
   slug: string
   name: string
@@ -33,6 +36,12 @@ type ArchCard = {
   signalLabel: string
   score: number
   hasDiagram: boolean
+  /** has a full explainer at /architectures/<slug> */
+  doc: boolean
+  /** that explainer's thumbnail, from its film storyboard */
+  thumb: string | null
+  /** that explainer has a narrated film */
+  film: boolean
 }
 
 // signal level → color for the filled bars (green = high, fading down)
@@ -42,17 +51,6 @@ const SIGNAL_COLOR: Record<number, string> = {
   3: "oklch(0.66 0.12 230)",
   2: "oklch(0.7 0.06 250)",
   1: "oklch(0.6 0.03 260)",
-}
-
-const FAMILY_LABEL: Record<string, string> = {
-  transformer: "Transformer",
-  attention: "Attention",
-  moe: "MoE",
-  ssm: "SSM / RNN",
-  positional: "Positional",
-  diffusion: "Diffusion",
-  training: "Training",
-  other: "Other",
 }
 
 const FAMILY_ORDER = [
@@ -132,6 +130,37 @@ function SourceLink({ a }: { a: ArchCard }) {
     )
   }
   return null
+}
+
+// The way into an architecture's own page: its thumbnail and what the page
+// holds. Stops propagation so it navigates instead of expanding the card.
+function DocLink({ a }: { a: ArchCard }) {
+  if (!a.doc) return null
+  return (
+    <Link
+      href={`/architectures/${a.slug}`}
+      onClick={(e) => e.stopPropagation()}
+      className="mt-3 flex items-center gap-3 rounded-lg border p-2 transition-colors hover:border-foreground/25 hover:bg-muted/30"
+    >
+      {a.thumb ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={a.thumb}
+          alt=""
+          width={1200}
+          height={630}
+          loading="lazy"
+          decoding="async"
+          className="block h-auto w-24 shrink-0 rounded border sm:w-32"
+        />
+      ) : null}
+      <span className="min-w-0 font-mono text-xs text-muted-foreground">
+        <span className="text-foreground">The full explainer</span>
+        {a.film ? ", with a narrated film" : ""}
+        <ArrowUpRightIcon size={12} weight="bold" className="ml-1 inline align-[-1px]" aria-hidden="true" />
+      </span>
+    </Link>
+  )
 }
 
 type Sort = "unique" | "interest" | "signal" | "new" | "name"
@@ -271,7 +300,19 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
             </button>
 
             <div className="flex items-baseline justify-between gap-4 pr-6">
-              <h2 className="font-heading text-lg font-semibold group-hover:text-foreground">{a.name}</h2>
+              <h2 className="font-heading text-lg font-semibold group-hover:text-foreground">
+                {a.doc ? (
+                  <Link
+                    href={`/architectures/${a.slug}`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="underline decoration-foreground/25 underline-offset-4 hover:decoration-foreground"
+                  >
+                    {a.name}
+                  </Link>
+                ) : (
+                  a.name
+                )}
+              </h2>
               <span className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">{a.year}</span>
             </div>
 
@@ -280,6 +321,8 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
             </div>
 
             <p className="mt-3 leading-7 text-muted-foreground">{a.summary}</p>
+
+            <DocLink a={a} />
 
             {a.hasDiagram ? (
               <div className="mt-4 overflow-hidden rounded-lg border transition-shadow [&>figure]:my-0 [&>figure]:rounded-none [&>figure]:border-0 [&>figure]:bg-transparent">
@@ -333,6 +376,8 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
             </div>
 
             <p className="mt-4 leading-7 text-muted-foreground">{expanded.summary}</p>
+
+            <DocLink a={expanded} />
 
             {expanded.hasDiagram ? <ArchDiagram slug={expanded.slug} /> : null}
 

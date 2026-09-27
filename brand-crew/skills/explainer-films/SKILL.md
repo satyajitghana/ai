@@ -12,7 +12,9 @@ description: >-
   with no film and as the card in its OG image. Use when an article needs its film or thumbnail, when an
   article's facts change, or when asked for a video explanation of a piece. The
   storyboard is data/films/<slug>.json; every number and quote in it must appear
-  in the article, and pnpm validate fails if one does not.
+  in the article, and pnpm validate fails if one does not. Architecture explainers
+  (content/architectures/<slug>.mdx) get films the same way, in their own
+  namespace: data/films/architectures/<slug>.json, keyed architectures/<slug>.
 ---
 
 # Explainer films
@@ -35,6 +37,32 @@ public/films/<slug>-poster.webp   the title card
 data/.generated/films.json        manifests with a hash that goes stale when the
 data/.generated/thumbs.json       storyboard, the article date or the engine changes
 ```
+
+### Namespaces: films for other kinds
+
+Articles are keyed by their bare slug. Architecture explainers
+(`content/architectures/<slug>.mdx`, one per `data/architectures.ts` entry that
+has one) get films too, keyed `architectures/<slug>`. The key is the path
+everywhere, so nothing else about a film changes:
+
+```
+data/films/architectures/<slug>.json              the storyboard; its "slug" field is "architectures/<slug>"
+content/architectures/<slug>.mdx                  "the article": every digit, quote and label is checked against it
+public/thumbs/architectures/<slug>.jpg            thumbnail, every doc that exists
+public/films/architectures/<slug>.mp4 .vtt        the film, captions and -poster.webp, when rendered
+"architectures/<slug>"                            its key in films.json and thumbs.json
+```
+
+Every rule on this page applies unchanged. Hosts are unique across both
+namespaces, so check a name against `data/films/*.json` and
+`data/films/architectures/*.json`. A `figure` may use a picture under
+`/architectures/` if the doc shows it. Pass the key wherever a slug goes:
+`pnpm validate:films --storyboards --only=architectures/<slug>`,
+`build.mjs --thumbs architectures/<slug>`, `build.mjs architectures/<slug>`,
+and `python3 audio.py words --films data/films/architectures` for the
+pronunciation check. For the pipeline, a new namespace is its content
+directory plus one entry in `hash.mjs`'s `NAMESPACES`, which sits outside the
+engine hash, so adding one stales nothing.
 
 ## Workflow
 
@@ -169,6 +197,11 @@ unsure, leave it off.
   `light` overrides the colour.
 - `edges` appear once both ends are shown. `label` ≤ 3 words; `dashed` for
   optional or feedback paths; `bend` (-1..1) curves one that would cross.
+  An edge is drawn from just outside one box to just outside the other, so
+  two connected nodes set too close (wide boxes a column apart, say) put
+  those points past each other and the arrow points back at its source. The
+  checker refuses it; give the pair more room along the edge, or drop a
+  sub-label to narrow the boxes.
 - `groups` draw a dashed frame with a label around nodes ("GPU 0", "Prefill").
 - Steps build it: `show` names what appears, `flow` sends packets along edges
   in order (`"a>b"`), `highlight` rings nodes and dims the rest, `focus` zooms

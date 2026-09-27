@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
+import { architectures } from "@/data/architectures"
 import { profile } from "@/data/profile"
 import {
+  getArchitectureDoc,
   getArticle,
   getArxivDigest,
   getBlogPost,
@@ -24,6 +26,9 @@ function header(title: string, canonical: string, meta: string[] = []): string {
     `> ${profile.name} — ${profile.title} @ ${profile.company.name}`,
     `> canonical: ${absoluteUrl(canonical)}`,
     ...meta.map((m) => `> ${m}`),
+    // A blank line ends the blockquote. Without it, a body that starts on the
+    // next line (a tagline, a paragraph) is a lazy continuation of the quote.
+    "",
     "",
   ].join("\n")
 }
@@ -124,6 +129,19 @@ export function contentMarkdown(
             ? [`tags: ${article.tags.join(", ")}`]
             : []),
         ]) + expandReceipts(article.body)
+      )
+    }
+    case "architectures": {
+      const doc = getArchitectureDoc(slug)
+      const arch = architectures.find((a) => a.slug === slug)
+      if (!doc || !arch) return undefined
+      return (
+        header(doc.title, `/architectures/${slug}`, [
+          `architecture: ${arch.name} (${arch.family}, ${arch.year})`,
+          `date: ${doc.date}`,
+          ...(doc.tags.length ? [`tags: ${doc.tags.join(", ")}`] : []),
+          ...(arch.paper ? [`paper: ${arch.paper}`] : []),
+        ]) + doc.body
       )
     }
     case "logs": {
