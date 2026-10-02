@@ -45,6 +45,13 @@ TODAY is <TODAY>. Use `date: <TODAY>`.
    - Run `nice -n 19 python3 brand-crew/skills/explainer-films/audio.py words --films data/films`. If a word of yours is flagged, reword the narration rather than editing `pronounce.json`.
    - Do NOT run `build.mjs`; the lead renders the thumbnail.
 
+## Read the post's thread for sources
+The X post your article is based on often keeps its real source and extra explanation in the **thread** (the author's follow-up posts) and the **replies** — "repo in the post below 👇", a 🧵 whose later posts carry the paper, or "source in the replies". Read them through the fxtwitter mirror (no auth):
+- author's continuation posts: `curl -s "https://api.fxtwitter.com/2/thread/<POST_ID>"` → its `thread` array
+- first page of replies: `curl -s "https://api.fxtwitter.com/2/conversation/<POST_ID>"` → its `replies` array
+
+Each post object has `text`, `raw_text.facets` (t.co links expanded to `replacement`), and `quote`. Pull paper/repo links (arxiv.org, github.com, huggingface.co, `*.github.io`, openreview, modelscope) from there. A link someone **else** replied with is a lead to confirm, not a source to trust. Your task message already lists the sources the lead found this way; read the thread yourself if any is thin.
+
 ## Rules
 - Verify every number against the paper, code, config or card. Never invent one.
 - If a claim cannot be checked, say so in the article.
