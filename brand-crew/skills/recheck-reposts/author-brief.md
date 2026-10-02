@@ -76,7 +76,7 @@ Do not run `pnpm build` or `pnpm dev`.
 
 ## Commit
 Commit on `art/<slug>` with a message ending in:
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01LhELW9PoZpU2rQ7AcDGuQV
 
 Do not push.
