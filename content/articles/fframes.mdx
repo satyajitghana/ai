@@ -1,0 +1,234 @@
+---
+title: "fframes: a frame is a function, and the benchmark is one scene"
+description: "fframes writes each video frame as an SVG tree returned by a Rust function, rasters it with Skia on the GPU, and links libav directly instead of shelling out. I cloned it and read the svgr! macro, the Skia render cache and the vs-remotion benchmark. The compile-time static caching and the agent-facing CLI are the real design; the README's 31.16× over Remotion is one synthetic scene, measured CPU-versus-CPU with the GPU skipped and the Remotion side carrying 12 chained effect passes per element."
+date: 2026-10-02
+tags:
+  - explainer
+  - rust
+  - agents
+  - gpu
+  - systems
+  - open-source
+draft: false
+---
+
+import { FrameScrubber } from "@/components/articles/fframes/frame-scrubber"
+import { RenderCostBar } from "@/components/articles/fframes/render-cost-bar"
+
+Dmitriy Kovalenko ([@neogoose_btw](https://x.com/neogoose_btw), who lists himself at OpenAI) released
+[`fframes`](https://github.com/dmtrKovalenko/fframes) last week with a line that is easy to misread:
+a 128-second launch video "vibed in 48 minutes and rendered in 36 seconds." The framework is five years
+old and had never shipped, he says, because its API was "so complicated and verbose that noone will ever
+learn it" — and the thing that changed is that an agent, handed a skill, does not mind verbose. The
+motivating complaint is concrete: people wait 12 hours for a render, and he had something faster sitting
+unreleased.
+
+I cloned it at `7bbec12` and read the parts that make the claims true: the `svgr!` macro, the Skia render
+cache, the libav linkage, and the benchmark against Remotion. Every number below is labelled **measured**
+(I read it out of the code or counted it), **reported** (the repo or author says so and I did not re-run
+it), or **reasoned** (my arithmetic on the other two). It is MIT, written in Rust, and had 1,831 stars
+when I pulled the repo metadata (measured, GitHub API, 2 October 2026).
+
+<RepoCard repo="dmtrKovalenko/fframes" />
+
+## A video is a function of the frame index
+
+Programmatic video starts from one idea: a video is a pure function from a frame index to a frame. Give me
+`i`, I give you the picture at `i`, and nothing about frame `i` depends on frame `i − 1`. Remotion builds
+that frame as a React tree in a headless browser. [Motion Canvas](https://motioncanvas.io) builds it with
+a canvas generator. fframes builds it as an SVG tree returned by a Rust function.
+
+The contract is a trait. You implement `Video` — frame rate, dimensions, duration, an audio map, and the
+one method that matters:
+
+```rust
+impl Video for HelloWorldVideo<'_> {
+    const FPS: usize = 30;
+    const WIDTH: usize = 1920;
+    const HEIGHT: usize = 1080;
+
+    fn render_frame(&self, frame: Frame, ctx: &FFramesContext) -> fframes::Svgr<'_> {
+        fframes::svgr!(
+            <svg viewBox="0 0 1920 1080" width={ctx.current_video_size.width} height={ctx.current_video_size.height}>
+                <rect x="400" y="400" width="200" height="200" fill="blue"
+                    transform={frame.animate(fframes::timeline!(
+                        at 0., animate Transform::translate(0, 0) => Transform::translate(200, 480), Easing::Linear,
+                    ))} />
+                <text x="100" y="440" font-size="74">
+                    {format!("This frame index: {}, second: {:.2}", frame.index, frame.seconds())}
+                </text>
+            </svg>
+        )
+    }
+}
+```
+
+That is the whole model. `svgr!` is a JSX-like macro that produces an `Svgr` — an SVG document — and
+`frame.animate(timeline!(…))` is just a function of `frame.index` that returns the interpolated transform
+for this frame. There is no retained scene graph, no mutable state threaded between frames, no diff against
+the previous frame. Ask for frame 850, you get frame 850.
+
+Scrub the index below. The square's `x` and the dot's `cy` are functions of `i`; the fill, the geometry and
+the viewBox are constants. That split is the whole performance story, and I will come back to it.
+
+<FrameScrubber />
+
+The reason this shape suits an agent is not that Rust is fashionable. It is that a pure function of `i` is
+**deterministic, diffable and snapshot-testable**. The same index always paints the same bytes, so a frame
+can be compared to an approved PNG and a one-pixel regression fails a check. This is the same property I
+leaned on reading [Voxel Musou](/articles/voxel-musou), whose "deterministic fixed 60 Hz" let me reason about
+a 9,254-line game without running it, and the same one that makes the pipelines in
+[one-shot launch videos](/articles/one-shot-launch-videos) legible: when a frame is computed from a clock and
+nothing else, the behaviour lives in data you can read, not in a render you have to watch.
+
+## What makes it fast
+
+Three things, and they are independent. A honest reading keeps them apart, because the benchmark exercises
+only one of them.
+
+**Static markup is hashed at compile time.** This is the clever part and it is easy to miss. When `svgr!`
+expands your markup, it walks the tree and assigns a `static_hash` to every node whose lexical content is
+fully known at compile time — a node with no `{expression}` in it or its children. A node that reads the
+frame gets `None`. From `svgr-macro/src/nodes_to_svgtree.rs` (measured): the hash mixes the tag, the static
+attributes and the static children, and the macro is careful about inheritance — a dynamic `fill` on a
+parent poisons its descendants, because `fill` is inherited and changes how they render, so they cannot be
+static either.
+
+At render time the Skia backend keeps a `RenderCache` keyed by that hash (measured,
+`fframes-skia-renderer/src/render/mod.rs`). It caches converted `skia_safe::Path`s, fill and stroke
+`Paint`s, and — the big one — a recorded `skia_safe::Picture` of an entire static subtree. The comment in
+the source is blunt about why: "Replaying a picture is dramatically cheaper than re-traversing the subtree
+and re-issuing every draw call." A background, a logo, a grid that never moves: painted once, replayed for
+every remaining frame.
+
+There is a subtlety the code handles that a lazier cache would get wrong. A node's `static_hash` is stable,
+but its *final* appearance can still change between frames — it might inherit a colour from a dynamic parent
+produced by a different `svgr!` call, or reference a gradient that is itself animated. So before any cached
+entry is reused, the renderer compares a cheap runtime **fingerprint** of the resolved node against the one
+it cached, and rebuilds instead of replaying if they differ (measured, `render/fingerprint.rs`). The
+compile-time hash is the fast key; the fingerprint is the correctness check. This is the kind of detail that
+separates a benchmark toy from something you would trust on a real timeline.
+
+**The GPU rasters.** The Skia backend draws on Metal on macOS and Vulkan elsewhere, and the README reports
+it is "about 10× faster than the built-in CPU backend" (reported — I did not measure the GPU path, and as
+you will see, neither did the benchmark). Note what fframes does *not* do: it does not write GPU kernels,
+the way the Rust-on-GPU work in [CUDA Rust](/articles/cuda-rust) does. It hands an SVG tree to Skia and lets
+a mature rasterizer use the device. A recent commit, "hand frames to the encoder on the GPU," keeps the
+rastered frame on the device and feeds it to the encoder without a round trip back to main memory (reported).
+
+**libav is linked, not shelled out.** fframes links ffmpeg's libav libraries statically through
+`ffmpeg-sys-fframes` (measured, `fframes-media/Cargo.toml`) rather than spawning an `ffmpeg` process and
+piping frames to its stdin. No per-frame process boundary, no PNG-encode-then-decode just to hand a picture
+across. This is the unglamorous half of "fast" and the half most tools get wrong.
+
+Here is the pipeline end to end, and where the cache sits:
+
+```
+frame.index ─▶ svgr!  ─▶ Skia raster ─▶ libav encode ─▶ .mp4
+   (i)          SVG tree   (GPU)           (linked)
+                   │
+            static_hash ──▶ RenderCache (paths, paints, pictures)
+                            replayed, not rebuilt
+```
+
+## Built for an author that cannot watch
+
+The framing that makes fframes interesting is not the speed, it is who it is for. An agent cannot watch a
+video or hear a soundtrack, so fframes ships a command line that turns a video into things an agent can
+read: PNGs, text and numbers. The commands I found in the README and the project skill (reported):
+
+- `inspect` walks a frame every 0.25 s and the first and last frame of every scene, and reports missing
+  fonts, text clipped by the canvas, invalid SVG and panics — each with its time and scene, exit code 2 on
+  errors. An agent runs this instead of looking.
+- `strip` lays evenly spaced frames on one contact sheet; `onion` blends frames to show a motion's path and
+  easing; `frame` writes full-size PNGs. Three ways to see motion without a video player.
+- `audio analyze` reports loudness in LUFS, true peak, clipping and silence, per scene.
+- `snapshot` compares the current frames to approved PNGs and marks what changed in a `.diff.png`. This is
+  the determinism cashed out: a visual regression test for video.
+- `render --draft` encodes one scene at half size in about a second (reported), so the loop between "change
+  a number" and "look at the result" is short.
+
+Read that list as a design, not a feature table. Every item exists because the author is an LLM that reads
+rather than watches. It is the same instinct behind the skills I pulled apart in
+[one-shot launch videos](/articles/one-shot-launch-videos): the interesting engineering is in the harness that
+lets a model check its own output, not in the one-shot generation everyone screenshots.
+
+## The 31× number, traced
+
+The README leads with "render it on the GPU" and "31.16× faster than Remotion." Those are two different
+claims, and the benchmark supports only part of one of them.
+
+I read `render-bench/vs-remotion` rather than running it (I do not execute third-party repos). The scene is
+fixed and synthetic (measured): 99,000 one-pixel rectangles and 1,000 changing text digits on a 1000×1000
+canvas, 30 frames, both renderers running serially with no video encoder instantiated. Both load the same DM
+Sans font. The fframes side computes the content directly and rasters it with Skia; the Remotion side builds
+it as a React tree in headless Chrome. The published result (reported, the repo's `results.md`, measured on
+Linux ARM64 in Docker against Remotion 4.0.529):
+
+| Renderer | Median for 30 frames |
+| --- | --: |
+| fframes + Skia CPU | 3.877 s |
+| fframes + Skia GPU | skipped: no hardware GPU |
+| Remotion | 120.801 s |
+
+<RenderCostBar />
+
+The division checks: Remotion's 120.801 s over fframes' 3.877 s is 31.16× faster (reasoned), exactly the
+README's figure. So the number is real and the harness is reproducible — `run.sh` is in the repo. But three things keep it from meaning "31×
+faster than Remotion" in general.
+
+First, **the GPU was never exercised.** The benchmark box had no hardware device, so the GPU run printed
+`skipped` and the 31.16× is fframes-on-the-CPU versus Remotion. The headline feature — Skia on Metal or
+Vulkan — contributed nothing to the headline number. The GPU bar in the chart above is a dashed placeholder
+for exactly this reason; the roughly 0.39 s it shows is my arithmetic on the README's "about 10×" claim
+(reasoned), not a measurement.
+
+Second, **the Remotion side is doing a lot of self-inflicted work.** Reading `browser.jsx` (measured), every
+one of the 100,000 elements is wrapped in a component with 12 chained `useDerivedFrame` hooks — twelve
+dependent effect-and-commit passes before the element reaches its final value. That is 1.2 million effect
+passes per frame, a pattern that stresses React's reconciliation and commit model about as hard as anything
+could. The README is honest that "results apply to this React workload with many effects," but the headline
+is not, and most readers will only see the headline.
+
+Third, **it is one scene, chosen by the author of the tool it flatters.** A wall of one-pixel rects is close
+to the best case for a cache-and-raster pipeline and close to the worst case for a retained virtual-DOM
+diff. Change the workload to a few animated SVG paths with gradients and real text layout and the ratio will
+move; nothing in the repo tells you where. This is the same failure mode I found in
+[lexing on the GPU](/articles/lexing-on-the-gpu), where a real 3.03× win shrank to 1.86× once the host-to-device
+transfer the headline quietly excluded was added back. A benchmark is a claim about a workload, and the
+workload is always the fine print.
+
+None of this makes fframes slow. 3.877 s for 30 frames of a 100,000-node scene on a CPU is a good number,
+and the architecture — compile-time static caching, direct libav — is sound engineering that would hold up
+on workloads the benchmark does not cover. The honest summary is narrower than the tweet: fframes is fast
+for structural reasons, and the one published comparison is a floor for one synthetic scene, measured CPU
+versus CPU.
+
+## The mirror
+
+I have a specific reason to care, and it is worth stating plainly rather than pretending to neutrality. The
+explainer films on this site — including the one for this article — are painted frame by frame in headless
+Chromium with a Canvas2D engine. A film is, in that engine, a pure function of time: ask for the frame at
+`t`, it paints it. That is the same contract as `render_frame(frame)`, and the resemblance runs deeper than
+the signature.
+
+The site's painter cannot afford to re-run p5.brush on the GPU every frame, so it does what fframes does by
+another route: it paints each brush stroke and shape once, keyed by its geometry, and lays the kept painting
+down with a `multiply` blend on later frames. A static logo is painted once and composited; only what moves
+is repainted. That is, almost exactly, fframes' compile-time `static_hash` cache — the same observation
+(most of a frame does not change, so do not redraw it) reached independently by a drawing engine and a video
+framework.
+
+So fframes is the kind of pipeline that could, in principle, replace a Canvas2D painter: a Rust frontend
+over Skia on a real GPU, encoding through linked libav, is strictly more machine than headless Chromium
+drawing to a 2D context. I am stating that as an observation, not a plan. The site's look is not an SVG-tree
+workload — it is boiling hand-inked linework, motion-blurred washes and per-stroke paper texture, none of
+which falls out of `svgr!` for free. Porting the *style* would be most of the work, and the raster backend
+the easy part. But the shape is right, and the convergence is the interesting thing: when you treat a frame
+as a deterministic function of its index, the same cache falls out whether you write it in Rust and hand it
+to Skia, or in a `"use client"` component and hand it to Canvas2D.
+
+That is the quiet thesis under the launch video. Programmatic video that an agent can drive, check and ship
+is a better fit for the way these tools actually get made than any timeline UI — not because the renderer is
+Rust, but because a frame that is a pure function of `i` is a frame a machine can reason about. The 31× is
+marketing. The function is the point.
