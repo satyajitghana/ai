@@ -69,6 +69,14 @@ posters, thumbnails and every article figure and clip are served from R2:
   stays same-origin, including a figure a pull request adds before it reaches
   the bucket, and everything if the index cannot be fetched. That is why
   `NEXT_PUBLIC_MEDIA_BASE` is safe on **Preview** as well as Production.
+- A merge to `master` starts Vercel's production build and media-sync at the
+  same moment, and the build reads the index in its first minute, before the
+  sync has published it. The first merge with article media lost that race
+  and served everything same-origin until a redeploy. So a production build
+  that finds media here the index does not match yet polls for the index of
+  its own commit (`VERCEL_GIT_COMMIT_SHA`) for up to `MEDIA_WAIT` seconds
+  (default 300; the full first sync took two minutes). A build whose media
+  all match, which is most of them, does not wait.
 - On Vercel the same script deletes the served-from-R2 files from the build's
   copy of `public/` (~409 MB of 420), so a deployment no longer carries them.
   It keeps thumbnails (the OG image routes read them at build), any path a
