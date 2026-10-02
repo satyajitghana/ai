@@ -1,0 +1,298 @@
+---
+title: "OREN: real-time Euclidean SDF, because the octree carries the prior"
+description: "OREN (UCSD Existential Robotics Lab, arXiv 2510.18999, IROS 2026) reconstructs a continuous, non-truncated signed distance field online from streaming point clouds. The trick is division of labour: a semi-sparse octree stores an SDF value and a gradient at every vertex and gradient-augmented interpolation turns those into an accurate explicit prior, so a two-layer MLP only has to learn the residual. I read the paper and the MIT code against the claims. The prior is what makes it fast and global: 13.96 FPS and 1.33 GB of GPU memory on Replica room0, fastest and lightest of five methods, 2.15 cm SDF MAE where HIO-SDF gets 3.27 and Voxblox 3.13, and a full Euclidean field where H2-Mapping and PIN-SLAM only store a truncated band. It uses ground-truth poses, it is only second-best on the surface-fit metrics, and the follow-up OREN-X puts geometry, colour and language in one shared octree."
+date: 2026-10-02
+tags:
+  - 3d
+  - slam
+  - robotics
+  - point-cloud
+  - lidar
+  - benchmarks
+  - explainer
+draft: false
+---
+
+import { TruncationSlice } from "@/components/articles/oren-sdf/truncation-slice"
+import { GradInterp } from "@/components/articles/oren-sdf/grad-interp"
+
+A planner does not ask a map "where is the wall?". It asks "how much room do I
+have *here*, and which way is more?". A signed distance function (SDF) answers
+both in constant time: at any query point it returns the signed distance to the
+nearest surface — positive in free space, negative inside an obstacle — and its
+gradient points straight away from that surface. Collision checks become a sign
+test. Clearance becomes a lookup. Trajectory optimisers love it because the
+gradient tells them which way to push.
+
+The catch is that the SDF most online mappers actually build is not that
+function. It is a **truncated** SDF: distances are only stored in a thin band
+around the surface, and everywhere else the map says "unknown" or clamps to the
+truncation limit. That is fine for carving a mesh, where only the zero-crossing
+matters, and it is why TSDF fusion is fast. But it is the wrong object for a
+planner standing in the middle of an open room, which is exactly where you want
+the distance to be large and trustworthy.
+
+[OREN](https://arxiv.org/abs/2510.18999) (Zhirui Dai, Qihao Qian, Tianxing Fan,
+Nikolay Atanasov, UCSD Existential Robotics Lab; arXiv 2510.18999, accepted to
+IROS 2026) reconstructs the untruncated thing — a continuous, differentiable,
+**Euclidean** SDF — online, from streaming point clouds, on a single GPU. It
+does so by splitting the problem in two: an explicit octree prior does the
+heavy lifting, and a small neural network cleans up what the prior cannot
+resolve. The code is MIT and I read it against the paper; the division of labour
+is the whole story, so that is where I will start.
+
+## Truncated vs Euclidean, and why the difference is load-bearing
+
+Drag the dot below. The two modes share the same floor plan and the same
+analytic distance field; the only difference is what the map is allowed to store.
+
+<TruncationSlice />
+
+In Euclidean mode the field is meaningful everywhere. Stand in the centre of the
+room and the map still knows you are, say, 1.3 m from the nearest wall, and the
+arrow — the SDF gradient — points away from that surface, the direction clearance
+grows. In truncated mode, every
+cell past the band `|d| < τ` collapses to one grey "unknown": the map cannot
+distinguish a wide-open centre from a tight corner, because it threw that number
+away to save memory. H2-Mapping and PIN-SLAM only ever store the band near the
+surface. Voxblox can propagate further but pays for it. OREN keeps the whole
+field.
+
+This is not a free lunch — a global Euclidean field is more to compute and more
+to store than a truncation band. OREN's bet is that you can get it cheaply *if*
+the explicit part of the model is accurate enough that the expensive part (the
+network) barely has to work.
+
+## Three families, three compromises
+
+SDF reconstruction has historically forced a choice:
+
+| family | example | continuous / differentiable | Euclidean | online + large-scale | memory |
+|---|---|---|---|---|---|
+| volumetric | Voxblox | no (grid-limited) | ESDF, slowly | yes | grows with resolution |
+| Gaussian process | Log-GPIS | yes | partial | poor (cubic in points) | large Gram matrix |
+| neural | iSDF, DeepSDF | yes | rarely | catastrophic forgetting | compact |
+
+Volumetric methods hash voxels and run in real time, but a discrete grid is not
+differentiable and its accuracy is capped by voxel size. Gaussian-process SDFs
+are continuous and come with uncertainty, but the matrix inverse is cubic and
+does not scale. Neural SDFs are compact and smooth, but training one online means
+it forgets what it saw a hundred frames ago, and most of them only ever learned
+the truncated, near-surface part. OREN is a **hybrid**: keep the octree for speed
+and scale, add a network for the fine detail, and design the interface between
+them so neither has to do the other's job.
+
+## The explicit prior: a semi-sparse octree with gradients
+
+An octree subdivides space adaptively — big cells in empty regions, small cells
+near surfaces. OREN stores, at **every octant vertex**, two learnable things: an
+SDF value $d_k$ and an SDF gradient $\mathbf{g}_k \in \mathbb{R}^3$. To predict
+the SDF at an arbitrary query $\mathbf{x}$, it finds the smallest octant
+containing $\mathbf{x}$ and interpolates from its eight corners.
+
+The first design choice is the tree's sparsity. A fully **sparse** octree only
+creates the small child octants that actually contain surface points. That is
+maximally memory-efficient, but it leaves ragged boundaries: a query just outside
+a surface cell may have to fall back to a much coarser parent, and the
+interpolation jumps discontinuously across octant borders. OREN instead makes the
+first $M$ (coarse) layers **semi-sparse**: when a child octant is created, *all
+its siblings* are created too, even the empty ones. That costs memory but
+guarantees that a query near a surface always finds nearby vertices, so the field
+stays continuous. The finest layers stay sparse, because near the surface the
+prior is already accurate and the eight-fold-per-layer octant growth would be
+ruinous. In the shipped config this is `tree_depth: 8`, `semi_sparse_depth: 5`,
+`resolution: 0.1` — eight levels from a 25.6 m root (0.1 × 2⁸) down to 10 cm
+leaves, the coarsest five semi-sparse (measured, from `configs/trainer-replica.yaml`).
+
+<Figure src="/articles/oren-sdf/fig3.png" alt="Two 2D SDF interpolations of the same obstacle corner. The sparse octree on the left shows contour lines that kink and jump at octant boundaries; the semi-sparse octree on the right, with sibling cells filled in, produces smooth continuous contours." caption="Trilinear interpolation of the same corner in a sparse (left) vs semi-sparse (right) octree. Filling in the sibling octants removes the discontinuities at cell boundaries (OREN, Figure 3)." />
+
+The second, more interesting choice is **gradient-augmented interpolation**.
+Ordinary trilinear interpolation blends the eight vertex *values* $d_k$. OREN
+first extrapolates each vertex using its stored gradient,
+
+$$ d_k(\mathbf{x}) = d_k + \mathbf{g}_k^\top (\mathbf{x} - \mathbf{x}_k), $$
+
+and then blends those eight first-order estimates. The reason this matters is a
+clean error bound. For an octant of size $L$ whose SDF has Hessian spectral norm
+bounded by $M$, the paper proves (Proposition 1):
+
+$$ e_{ga} \le \frac{3 M L^2}{8}, \qquad e_{tl} \le \frac{\sqrt{3}\,L}{2}. $$
+
+Plain trilinear error is **linear** in the cell size; gradient-augmented error is
+**quadratic**. Since the gradient makes the first-order term of the Taylor
+expansion exact, only the curvature is left over. On real SDFs the curvature $M$
+is small almost everywhere (surfaces are mostly locally flat), so the quadratic
+bound wins by a wide margin — and it wins most in the one place plain
+interpolation is worst: an octant wedged between two obstacles, where every
+vertex stores a small distance and the naive average sinks far below the true
+clearance in the middle.
+
+<GradInterp />
+
+That widget is the mechanism in one dimension. The vertices carry small
+distances and the right slopes; plain interpolation (red) averages the values and
+underestimates the valley, while gradient augmentation (teal) climbs toward it
+and tracks the curve. Drag `L`: both errors shrink as the cell shrinks, but the
+plain error shrinks linearly and the augmented error quadratically, so the gap
+widens with cell size. This is why OREN can afford a coarse 10 cm octree and
+still hand the network an accurate prior.
+
+## The implicit residual: a two-layer MLP, and nothing more
+
+The prior is good but resolution-limited; it cannot represent geometry finer than
+its cells. So OREN stores a second learnable thing at each vertex — an implicit
+feature $\mathbf{f}_k \in \mathbb{R}^F$ with $F = 3$ — interpolates it with the
+*same* weights, and feeds the interpolated feature together with the prior
+$d_{ga}(\mathbf{x})$ into a small decoder:
+
+$$ \hat{d}(\mathbf{x}) = d_{ga}(\mathbf{x}) + \delta_d(\mathbf{x}), \qquad \delta_d(\mathbf{x}) = D\big(d_{ga}(\mathbf{x}), \mathbf{f}(\mathbf{x}); \beta\big). $$
+
+The decoder is deliberately tiny: two 32-dimensional hidden layers with LeakyReLU
+(measured, `residual_net.py` and the config). And the output is scaled by
+`output_sdf_scale: 0.1`, so the network only ever nudges the prior by a small
+correction rather than predicting the distance from scratch. Because the prior
+is already globally accurate, the residual is a near-surface detail term — which
+is why the whole thing stays fast and, crucially, does not catastrophically
+forget: the global structure lives in the explicit octree, which grows as the
+scene grows, not in the fixed-size network.
+
+<Figure src="/articles/oren-sdf/fig1.png" alt="OREN's five-stage pipeline: (a) key-frame selection keeping frames with small overlap, (b) sampling surface, perturbed and free-space points, (c) the gradient-augmented octree prior storing an SDF value and gradient at each vertex, (d) implicit features at vertices decoded by an MLP into a residual, (e) the prior plus residual trained with reconstruction, Eikonal and projection losses." caption="The full pipeline: the explicit gradient-augmented octree prior (c) plus the implicit neural residual (d) sum to the final SDF, trained with three losses (OREN, Figure 2)." />
+
+Training is online. OREN keeps a set of $W = 8$ key frames chosen to cover the
+observed surface with little overlap (the H2-Mapping selection rule), draws
+20,480 rays per step, and samples three kinds of points along them: surface,
+perturbed (near-surface), and free-space. Three losses supervise the sum: an L1
+**reconstruction** loss on surface and perturbed points, an **Eikonal** loss
+pushing $\lVert \nabla \hat d \rVert \to 1$ (computed by numerical differentiation,
+not autograd, which the authors found more stable where the gradient is
+ill-defined), and a **projection** loss on free-space points that supplies the
+one thing the other two miss — gradient direction and scale far from any surface.
+The ablation confirms the projection loss is load-bearing: removing it drops
+Replica room1 F1 from 93.33% to 89.22% and multiplies the far-region SDF error
+more than tenfold (reported, Table IV).
+
+## What the numbers actually say
+
+I checked the headline claims against Tables I–III. Hardware is an Intel
+i9-14900K with an NVIDIA RTX 3090; the datasets are the eight synthetic Replica
+scenes and the real-LiDAR Newer College sequence; all methods use ground-truth
+poses (PIN-SLAM with its localiser disabled). That last point matters and I will
+come back to it: **OREN is a mapper, not a SLAM system** — it is not estimating
+where the sensor is.
+
+**SDF accuracy.** Mean absolute error of the SDF over the whole scene, against a
+ground-truth grid (reported, Table II):
+
+| SDF MAE, all regions [cm] | Replica room0 | Newer College |
+|---|---|---|
+| OREN | **2.15** | **56.00** |
+| HIO-SDF | 3.27 | 301.56 |
+| Voxblox | 3.13 | 62.92 |
+
+OREN is best in both. H2-Mapping and PIN-SLAM are missing from this table on
+purpose: they only predict near the surface, so their "SDF valid ratio" — the
+fraction of the grid where they return a value at all — is small, often under a
+fifth of the scene on Replica (reported, Table II), and a whole-scene MAE would
+be meaningless. The 56 cm on
+Newer College looks alarming until you remember the scene: an outdoor-scale
+college quad evaluated on a 20 cm grid, where points far from any surface
+genuinely sit metres away. OREN's near-surface error there is 16.96 cm and its
+far-region error 59.62 cm (reported); HIO-SDF's 301.56 cm whole-scene number is a
+training that fell over, which the authors say happens when its underlying
+volumetric prior is poor. Even against the solid baseline, Voxblox, OREN is about
+11% lower on Newer College and roughly 5× lower than HIO-SDF (reasoned, from the
+table).
+
+**Speed and memory.** This is where the explicit prior pays off (reported, Table III):
+
+| Replica room0 | OREN | H2-Mapping | PIN-SLAM | HIO-SDF | Voxblox |
+|---|---|---|---|---|---|
+| FPS | **13.96** | 12.36 | 8.43 | 1.99 | 0.87 |
+| GPU memory [GB] | **1.33** | 13.96 | 6.12 | 2.14 | N/A |
+
+OREN is the fastest *and* the lightest. On Newer College it runs at 14.28 FPS,
+the fastest of the five, on 1.59 GB of GPU memory, again the lowest. The GPU
+figure is the striking one: H2-Mapping needs 13.96 GB on Replica to OREN's 1.33,
+about a 10× difference, and PIN-SLAM 6.12 GB, about 4.6× (reasoned). Voxblox's
+ESDF is so slow that on Newer College OREN is roughly 71× its 0.20 FPS
+(reasoned). The authors also report 7 FPS on an NVIDIA Jetson Orin with 16 GB,
+which is the number that decides whether this runs on a robot rather than a
+workstation.
+
+**Mesh completeness.** Extract a mesh from the field and OREN wins on completion
+and recall. On Newer College the completion ratio (fraction of ground-truth
+surface within δ = 20 cm) is 94.20% for OREN against 72.83% for PIN-SLAM and
+61.58% for H2-Mapping (reported, Table I) — a 21-point lead over the nearest
+baseline (reasoned).
+
+<Figure src="/articles/oren-sdf/fig2.png" alt="Six z-plane slices of the reconstructed SDF on Replica room0. Ground truth and OREN both show a full continuous field coloured everywhere with a clean zero-level contour around the furniture; H2-Mapping and PIN-SLAM show only a thin coloured band near surfaces with everything else blank, on a ±0.1 colour scale; HIO-SDF is over-smoothed with spurious blue regions; Voxblox under-estimates the distances." caption="z-plane SDF slices on Replica room0. OREN matches the ground truth across the whole scene; H2-Mapping and PIN-SLAM store only a truncated band (note their ±0.1 m colour scale); HIO-SDF over-smooths and Voxblox under-estimates (OREN, Figure 5)." />
+
+That figure is the thesis in one picture. OREN and the ground truth are coloured
+everywhere; H2-Mapping and PIN-SLAM are blank except for a hairline around each
+object, on a colour scale ten times narrower.
+
+### Where it is honest about losing
+
+OREN is not best at everything, and the paper says so. On the surface-fit metrics
+— F1 score, precision, Chamfer-L1, accuracy — H2-Mapping and PIN-SLAM edge it out
+on Replica, because they are specialised surface reconstructors and, as the
+authors note, meshes with holes can *inflate* precision (you are only scored on
+the points you did commit to). OREN is "mostly the second best" there (reported).
+Its CPU memory is also higher than the lightest baselines — 3.81 GB on Replica —
+because the semi-sparse octree allocates those extra sibling vertices; the
+ablation measures the cost directly: making every layer semi-sparse nearly
+doubles the octants (21,418 → 41,073, +92%) for no real accuracy gain (reported,
+Table IV), which is the empirical justification for keeping only the coarse
+layers dense. And the whole evaluation assumes ground-truth poses, so the hard
+part of a deployed system — staying localised while you map — is out of scope
+here.
+
+## OREN-X: one octree, three modalities
+
+The follow-up, [OREN-X](https://arxiv.org/abs/2609.29157) ("Octree Residual
+Network for Real-Time Multi-Modal Mapping", arXiv 2609.29157, 24 September 2026,
+same lead authors plus a larger team), keeps the explicit-prior-plus-residual
+recipe and asks it to carry more than geometry. One **shared** octree now stores
+geometric, radiance *and* vision-language information at its vertices, so a robot
+gets a distance field, a renderable colour field, and an open-vocabulary semantic
+field out of a single structure — query "how far is the nearest chair" and "point
+me at a mug" against the same map.
+
+The reported numbers (from the abstract; there is no OREN-X repository in the
+lab's GitHub org yet, so I could not check these against code): **80+ FPS** for
+SDF alone and **30+ FPS** for all four modalities together, a **33%** gain in
+near-surface SDF accuracy over single-modality baselines, vision-language
+features compressed **3.7×** below full per-vertex storage, and a **71%**
+improvement in mean open-vocabulary 3D mIoU. If those hold, the interesting claim
+is architectural: the same insight — let an accurate explicit structure carry the
+load so the network stays small — generalises from distance to colour to
+language. Treat the OREN-X figures as the publisher's until the code lands.
+
+## The code
+
+<RepoCard repo="ExistentialRobotics/oren" />
+
+The OREN release (MIT) is a working system, not a figure-reproduction dump: a
+trainer for Replica and Newer College, a ROS 2 mapping node for live rosbags and
+sensor streams, an interactive GUI that shows the SDF slice, the octree structure
+and the camera poses as training proceeds, and a Docker setup. The config I quoted
+numbers from (`configs/trainer-replica.yaml`) exposes every hyperparameter the
+paper names — the octree depth and semi-sparse depth, the feature dimension, the
+loss weights — so the division of labour between prior and residual is right there
+to tune.
+
+The lesson I take from OREN is one that keeps recurring in 3D perception: the
+network is rarely the whole answer. Put the geometry in a structure that is cheap,
+accurate and grows with the scene — here, a semi-sparse octree with gradients —
+and the learned part collapses to a two-layer residual. That is what buys the
+Euclidean field, the 1.33 GB, and the 14 FPS at once. It is the same bet as
+feeding a frozen depth backbone into a bounded-memory
+[streaming reconstructor](/articles/da3-streaming-reconstruction), or moving the
+registration geometry onto the GPU in [FAR-LIO](/articles/far-lio): decide what
+the explicit part should carry, and the model gets small. The piece OREN leaves
+for someone else is localisation — and as
+[SurfSLAM](/articles/surfslam) shows, once the poses are not given, the pose
+estimate, not the geometry, becomes the hard part. When that live map is finally
+published off a robot, there is still the question
+[Depth Anything 3 in ROS 2](/articles/depth-anything-3-ros2) runs into: who
+supplied the metres, and under what assumption.
