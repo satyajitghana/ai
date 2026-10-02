@@ -18,8 +18,8 @@ import { cn } from "@/lib/utils"
 // This widget is a SCHEMATIC of exactly that contrast, not a measurement.
 // Only the 48 GiB line is the paper's (R3's long-sequence budget); the two
 // curves are illustrative, calibrated to one real anchor -- StreamVGGT, a
-// 1.26B per-frame model, runs out of that 48 GiB budget past 500 frames
-// (R3, Table 4), so the naive line is drawn to cross 48 GiB at 500 frames.
+// 1.26B per-frame model, runs at 200 frames but is out of that 48 GiB budget
+// by 500 (R3, Table 4), so the naive line is drawn to cross 48 GiB at 500 frames.
 // The measured numbers are in the tables in the prose.
 //
 // SSR-safe: deterministic initial state, no window/Date at module scope, and
