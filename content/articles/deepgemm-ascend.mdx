@@ -1,0 +1,98 @@
+---
+title: "DeepGEMM-Ascend: DeepSeek's kernels off NVIDIA, and what 99.8% and 98% actually measure"
+description: "DeepSeek open-sourced DeepGEMM-Ascend and DeepEP-Ascend, its GEMM and expert-parallel communication kernels ported from CUDA to Huawei Ascend 950 NPUs. I cloned both repos and read the kernels and the perf tables. The two numbers in the launch tweet are real but they are different ops: 99.8% of the hardware limit is one dense BF16 matrix multiply (431 of 432 TFLOPS), and 98% is the fused MegaMoE op (846 of 865 FP8 TFLOPS) that also carries the expert dispatch and combine. The ports are API-compatible with the CUDA originals but written against Ascend's MAD matrix engine in C++ headers, JIT-compiled by Huawei's Bisheng, not nvcc. Two caveats the tables do not hide: DeepEP-Ascend ships no LICENSE file, and its full dispatch bandwidth needs a Huawei firmware release that is not public yet."
+date: 2026-10-02
+tags:
+  - kernels
+  - mixture-of-experts
+  - inference-optimization
+  - systems
+  - quantization
+  - open-source
+  - benchmarks
+  - explainer
+interest: 5
+helpful: 4
+draft: false
+---
+
+import { PeakBars } from "@/components/articles/deepgemm-ascend/peak-bars"
+import { MegaMoeFusion } from "@/components/articles/deepgemm-ascend/megamoe-fusion"
+
+On 30 September 2026, Zhean Xu, who works on AI infra at DeepSeek, posted one line: "DeepGEMM Ascend is now open source. We achieved 99.8% of the hardware limit on GEMM and 98% on MegaMoE." A day later a second repo, `DeepEP-Ascend`, surfaced under the same GitHub org. Together they are the two kernels that decide how fast you can serve a large mixture-of-experts model, ported off NVIDIA and onto Huawei's Ascend 950 NPU.
+
+That is the story worth telling carefully, because the easy read of the tweet is wrong. `99.8%` and `98%` sound like the same measurement on two workloads. They are not. Both come from DeepGEMM-Ascend, both are a share of a theoretical peak, but they measure different operations at different numeric precisions, and the `98%` number carries work the `99.8%` number never touches. A third figure floating around the same launch, DeepEP-Ascend's `90-95%`, is not even the same kind of quantity.
+
+I cloned both repositories, read the kernel sources and the benchmark tables, and checked the licenses. Here is what each number means, how these kernels are built without CUDA, and where the claims hold.
+
+## Two kernels, because an MoE forward pass is two problems
+
+Start from what you are actually computing when you serve a token through a large MoE model.
+
+A dense transformer's arithmetic is dominated by matrix multiplies: the attention projections and the feed-forward layers are all GEMMs (general matrix-matrix multiply, `C = A·B`). A mixture-of-experts model replaces the single feed-forward block with many expert MLPs and a router that sends each token to only a few of them. DeepSeek's models route each token to the top-6 experts plus one shared expert that every token uses. So per token you still pay for the attention GEMMs plus a handful of expert GEMMs — the compute is still matrix multiply.
+
+But the experts do not fit on one device. With hundreds of experts, you shard them across many NPUs; this is expert parallelism (EP). Now a token routed to expert 173 has to physically travel to whichever device holds expert 173, get multiplied there, and travel back. Every token, every layer, in both directions. That movement is an all-to-all collective: **dispatch** scatters each token to its chosen experts, **combine** gathers the weighted results back to the token's origin. It is not compute; it is communication, and at scale it is the thing that stalls.
+
+So serving a big MoE is two kernels. GEMM is the compute half. Dispatch/combine is the communication half. DeepGEMM-Ascend is DeepSeek's matrix-multiply library; DeepEP-Ascend is its expert-parallel communication library. One is bound by how fast the chip can multiply; the other by how fast bytes move between chips. Reading the two headline numbers as one quantity flattens exactly this distinction.
+
+## What "porting to Ascend" means, when there is no CUDA
+
+Both libraries are described as API-compatible ports: install the Ascend package and you get the same `deep_gemm` and `deep_ep` Python APIs as the NVIDIA originals. The compatibility is at the API surface. Underneath, almost nothing carries over, because an Ascend NPU is not a GPU and the programming model is different.
+
+On NVIDIA you write CUDA C++, lean on CUTLASS for the matrix-multiply machinery, and compile with `nvcc`. On Ascend there is no CUDA. DeepGEMM-Ascend's kernels are plain C++ headers — I counted 24 `.hpp` files and two `.cpp` files under `csrc/`, with the real kernel bodies in `deep_gemm/include/deep_gemm/*.hpp` — written against Ascend's own matrix primitives and compiled at runtime by Huawei's **Bisheng** compiler from the CANN 9.20 toolkit. The just-in-time machinery is DeepSeek's **DeepJIT**; a kernel is specialised for a shape by formatting its template arguments into a C++ source string and handing it to Bisheng, the same trick DeepGEMM plays with NVRTC on CUDA, with a different compiler behind it.
+
+The matrix engine itself is the **MAD** (multiply-add) unit, Ascend's analogue of a tensor core. DeepGEMM-Ascend wraps it: the `mad()` helper emits `asc_mmad` for 16-bit operands and `asc_mmad_mx` for 8-bit and 4-bit ones (the `mx` variant is microscaling — it consumes per-block scale factors alongside the low-precision operands). Feeding that engine is the real work, and it is explicit in a way CUDA hides. The data path is a memory hierarchy the kernel drives by hand: global memory (`GM`) to on-chip `L1`, `L1` to the `L0A`/`L0B` operand buffers, `MAD` into the `L0C` accumulator, then out through a vector unit. Operands must be laid out in a fractal "NZ" format — the code's `FRAC_MN = 16` says the fractal is 16 rows wide — and the kernel moves tiles between levels with an explicit software pipeline, double-buffering `L0` and signalling across hardware pipes (`PIPE_MTE2` for loads, `PIPE_MTE1` for `L1`-to-`L0`, `PIPE_M` for the matrix unit) with `wait`/`notify` flags. This is what the README means by hiding "fractal layouts, alignment constraints, address calculations" behind a lightweight abstraction: the abstraction is a thin C++ layer over primitives that have no CUDA equivalent.
+
+DeepEP-Ascend is the same idea on the communication side. Its kernels are written in **Ascend C** and move bytes over Huawei's comm stack — HCCL/HCOMM for collectives, and UBMEM and URMA for the low-level remote memory access between NPUs — again JIT-compiled through DeepJIT and Bisheng. The point of both ports is that the hard, chip-specific engineering — the matrix pipeline, the all-to-all over Huawei's interconnect — got rewritten, while the Python code above stays the same.
+
+One more Ascend-specific wrinkle worth noting, because it is the kind of detail that breaks a naive port: the FP8 scale factors use a different layout than NVIDIA's. The README states that each pair of UE8M0 scales along the K dimension is packed into an `int16` and stored MN-major, "for optimal hardware efficiency." That is not cosmetic; it is chosen to match how the MAD unit reads them.
+
+## What "% of the hardware limit" means
+
+A utilization percentage is achieved performance over a theoretical peak. For a compute kernel that is achieved TFLOPS divided by the chip's peak TFLOPS *for that datatype*. The datatype qualifier is load-bearing: on the Ascend 950DT the dense table reports a BF16 peak of 432 TFLOPS, an FP8 peak of 865 TFLOPS, and an FP4×FP4 peak of 1730 TFLOPS. Lower precision, higher peak, because you push more numbers through the same silicon per cycle. A percentage is meaningless until you say which peak.
+
+The second thing to pin down is which operation and which shape. DeepGEMM-Ascend's numbers come from `bench_msprof` with a cold L2 cache on an Ascend 950DT, at shapes drawn from the DeepSeek model series. The famous `99.8%` is one row: a dense GEMM at M=4096, N=7168, K=16384 in BF16, hitting 431 of 432 TFLOPS. The FP8 and FP4 variants of that same dense shape land at 99.5% (861 of 865) and 98.3% (1701 of 1730). Those are genuinely near the ceiling — for large, compute-bound shapes. The same README's FP8 inference table includes a shape like M=128, N=576, K=7168 at 105 TFLOPS, nowhere near 865, because at that size the kernel is memory-bound and the honest number to report is bandwidth, not a fraction of the FLOPS peak. "Near the hardware limit" is a claim about the compute-bound regime, and the tables are upfront about the shapes where it does not apply.
+
+Here is the full compute picture, and the one bandwidth figure next to it, with the toggle making clear that the two are not the same kind of number:
+
+<PeakBars />
+
+## The 98% is a different, harder number
+
+Now the `98%`. It maps to DeepGEMM-Ascend's **MegaMoE** op, and MegaMoE is not a matrix multiply — it is the entire expert layer fused into one kernel. The README describes it as fusing EP dispatch, two grouped GEMMs, SwiGLU, and combine; it is benchmarked at EP8 with top-6 routing and one shared expert, averaged across 8 ranks.
+
+Grouped GEMM is the batched expert matmul: instead of one `A·B`, you do many, one per expert, over whatever tokens the router sent to each. On its own, DeepGEMM-Ascend's grouped GEMM is as fast as the dense one — up to 862 of 865 FP8 TFLOPS, about 99.6% of peak. If the grouped GEMM alone is within a rounding point of the ceiling, why does the fused MegaMoE op land at 98%? Because MegaMoE also pays for the communication. The measured peak for the fused op is 846.3 TFLOPS at the largest shape (384 experts, hidden 7168, 16384 tokens); 846.3 over the 865 FP8 peak is 97.8%, which rounds to the advertised 98%. The roughly two-point gap between 99.8% and 98% is the cost of turning a matrix multiply into a distributed MoE layer.
+
+What the fusion buys is why that gap is only two points and not twenty:
+
+<MegaMoeFusion />
+
+Done naively, the expert layer is five kernels in a row — dispatch, up-projection GEMM, SwiGLU, down-projection GEMM, combine — each writing its output to HBM and the next reading it back, with the all-to-all sitting on the critical path between them. Fused, the intermediate activations never leave on-chip memory (`L0C`/`UB`): in the kernel the two grouped GEMMs "share the same epilogue credits" (`mega_moe.hpp`), so SwiGLU and the combine reduction happen in that epilogue rather than as separate passes, and the dispatch and combine communication overlaps the matmuls instead of blocking on them. The shared expert runs locally, with no dispatch, and is reduced in at combine. That overlap is the whole game: it is how you keep a communication-bearing op within two points of a pure compute op.
+
+So the honest one-line reading: `99.8%` is the easy win — a single dense BF16 matmul at its best shape. `98%` is the hard win — a whole expert layer, communication included, kept near the compute ceiling by fusion. The second number is the more impressive one, and it is the one that actually predicts MoE serving throughput.
+
+## DeepEP-Ascend: the communication half, and its asterisk
+
+DeepEP-Ascend is the standalone expert-parallel communication library — the general-purpose dispatch/combine that MegaMoE's fused path specialises. Its API matches NVIDIA DeepEP's `EPBuffer`: you create one long-lived buffer per EP group, call `dispatch` to scatter tokens (FP8 or BF16) and `combine` to gather results (BF16), overlapping each with independent compute via `defer_epilogue` and an async compute stream.
+
+Its numbers are a different quantity from DeepGEMM's: bandwidth, in GB/s, not TFLOPS. Benchmarked at 16,384 tokens per rank, hidden size 7168, top-6 routing over 256 experts, dispatch runs 373-375 GB/s at EP8 and falls to 313-320 GB/s at EP128; combine runs 345-347 GB/s at EP8 down to 272-278 GB/s at EP128. The README frames the quality of that as "roughly 90-95% of the physical payload bandwidth limit" — but only for dispatch, and only for EP sizes up to 32. It says plainly that combine and larger EP sizes "remain under optimization," with extra local-reduction overhead and HBM contention. So the `90-95%` is a best case for one direction at modest scale, not a blanket claim, and it belongs to DeepEP, not to the `98%` MegaMoE figure.
+
+<Callout type="warning">
+There are two asterisks on DeepEP-Ascend that a reader should not miss.
+
+First, the bandwidth numbers were collected on a **pre-release (PoC) HDK** supplied to DeepSeek, with manual configuration that is "not a publicly distributed release." The README says full-bandwidth operation needs Huawei's Q3 commercial HDK for the Atlas 850E, which it expects to be public around mid-October 2026. These results are not from that unreleased firmware, and users on earlier PoC versions "may observe lower bandwidth." The kernels are real and open; the bandwidth they reach today depends on firmware most people cannot get yet.
+
+Second, I checked the repository for a license file and there is none — no `LICENSE`, `COPYING`, or `NOTICE` in the root of the shallow clone. DeepGEMM-Ascend ships an explicit MIT license (Copyright 2026 DeepSeek); DeepEP-Ascend ships no license at all. Absent a license, default copyright applies and "open source" is an overstatement — the code is public to read, but the terms to use it are, as of this writing, unstated.
+</Callout>
+
+## The rest of the surface, briefly
+
+DeepGEMM-Ascend covers more than dense and MoE GEMMs. It includes an **MQA logits** kernel for DeepSeek's Lightning Indexer, which the README notes is bound by the FIX pipe rather than compute and saturates it at 99% (an FP4 prefill case reaches 743 TFLOPS). It includes an **HC prenorm** GEMM for the mHC (Manifold-Constrained Hyper-Connections) module that nearly saturates HBM write bandwidth, up to 3463 GB/s — and, unlike the other kernels, this one is implemented in Python via Tilelang rather than as a hand-written C++ header, which the dependency list confirms. The breadth matters: this is not one hero kernel but the set of ops a DeepSeek model actually needs, which is what makes "API-compatible port" a real claim rather than a demo.
+
+## What holds, and what to watch
+
+The headline claims check out, with the precision the tweet omits. DeepGEMM-Ascend's dense BF16 GEMM reaches 99.8% of the Ascend 950DT's BF16 peak at its best shape (431/432, reported). The fused MegaMoE op reaches 846.3 of the 865 FP8 TFLOPS peak, which is 97.8% and rounds to the advertised 98% (reported numbers, my division). The two are different ops at different precisions, and the second includes communication — so the second is the more meaningful one for MoE serving, and reading them as a single "99-ish percent" misses the engineering. DeepEP-Ascend's dispatch hits 90-95% of payload bandwidth for EP up to 32 (reported, one direction, best case), on firmware that is not yet public.
+
+The thing to watch is the gap between a kernel microbenchmark and a served model. `bench_msprof` with a cold L2 on hand-picked shapes tells you the kernels are excellent; it does not tell you end-to-end tokens per second on a real deployment, which also depends on attention, scheduling, and the interconnect under load. And the most consequential detail is the quietest: a top lab's full inference kernel stack — GEMM, grouped GEMM, MoE fusion, expert-parallel comm — now exists, in the open, for a non-NVIDIA accelerator, written against that accelerator's own matrix and communication primitives. For anyone whose constraint is supply rather than software, that is the number that matters, and it does not have a percent sign.
+
+If you want the mechanisms these kernels implement from first principles, the companion pieces are [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch), [auto-gpu-kernel: an agent won the DSA kernel track unattended](/articles/auto-gpu-kernel) on the DeepSeek Sparse Attention kernels, [GLM built its own inference stack](/articles/glm-built-its-own-inference-infra), which cloned the NVIDIA DeepEP to find a GIL bug, and [CUDA Rust: writing the kernel, not just launching it](/articles/cuda-rust) for the compiler side of writing matrix kernels off the beaten path.
