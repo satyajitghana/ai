@@ -1,0 +1,113 @@
+---
+title: "GLM-5.3-Flash on four mining cards: the hard part is an Ampere kernel"
+description: "A 320B hybrid-attention MoE with a 262K context, served on four NVIDIA CMP 170HX mining cards. The headline is the cheap hardware; the actual engineering is a vLLM fork that writes the sparse-attention kernels GLM-5.3 needs for Ampere, which upstream only ships for Hopper. I read the fork and the model, verified what I could, and labelled the rest: every throughput and quality number is one person's self-run, the 64 GiB cards are a hardware mod, and the sparse-MLA kernel is real sm_80 Triton I could read line by line."
+date: 2026-10-02
+tags:
+  - inference-optimization
+  - kernels
+  - sparse-attention
+  - mixture-of-experts
+  - long-context
+  - quantization
+  - speculative-decoding
+  - gpu
+---
+
+import { VramFit } from "@/components/articles/glm-5-3-cmp170hx/vram-fit"
+import { CardLayout } from "@/components/articles/glm-5-3-cmp170hx/card-layout"
+
+Someone is running a 320-billion-parameter model with a 262,144-token context on four graphics cards that were built to mine Ethereum and then banned from doing anything else. No offload, no disk, full-precision KV cache. The recipe is public, the engine is public, and the whole thing fits behind an OpenAI-compatible API on one machine.
+
+That is the headline, and the headline is the least interesting part. Cheap cards with enough VRAM are a purchasing decision. The engineering — the part that took work and the part worth reading — is a fork of vLLM that writes the attention kernels GLM-5.3-Flash needs for the Ampere architecture, because upstream vLLM only ships those kernels for Hopper. Without them the model does not run on these cards at all. With them it runs at a few hundred tokens a second.
+
+I cloned both repositories and read them. This is a systems story with one author and no second party, so I will be strict about provenance throughout: I label each number **measured** (I computed it from a file), **reported** (the author's figure, which I did not re-run), or **reasoned** (my arithmetic on the other two). The short version: I verified the architecture, the quantisation and the kernels from code and model cards. Every throughput and quality number is reported — one person, one set of four cards — and I say so each time.
+
+<RepoCard repo="Morrowmake/glm53-flash-cmp170hx-recipe" />
+
+## What a CMP 170HX actually is
+
+The NVIDIA CMP 170HX is a mining card from 2021, built on the **GA100** die — the same Ampere silicon as the A100, compute capability **sm_80**. NVIDIA cut it down for crypto and crippled everything a general-compute buyer would want: the retail card has **8 GiB** of HBM2e on a 4096-bit bus (about 1500 GB/s of bandwidth, which is the one good number), a **PCIe 1.0 x4** link, no NVLink, and a 250 W board. The narrow PCIe is deliberate — it makes the card nearly useless for anything that has to move data on and off it, which was the point.
+
+So the first thing to be honest about is the "64 GiB each" in the recipe. The retail CMP 170HX is 8 GiB; you cannot conjure 56 more. What the recipe assumes is a **modified** card — ex-mining GA100 boards that grey-market shops re-populate to 64 GiB of HBM2e and re-flash, and that the recipe calls the "x16 capacitor modification" when it unlocks the PCIe lanes too. These exist and are sold as "CMP 170HX 64 GB"; I could not get one on a bench, so I treat the 64 GiB and the x16 link as the author's hardware claim, not a stock spec. Everything below is conditional on it. On a stock 8 GiB x4 card, none of this runs.
+
+That single fact is load-bearing, so it is worth seeing why.
+
+## Why a 320B model does not fit on normal cards
+
+GLM-5.3-Flash is 320B total parameters with 18B active per token (reported, from the [base model card](/articles/glm-5-3-flash) — I confirmed the architecture below against the config). It is a mixture-of-experts: 288 routed experts, 8 of them firing on any given token, plus one shared expert. The "18B active" is what makes it cheap to *compute*. It does nothing for what it costs to *store*, because every expert has to be resident in VRAM — you do not know which eight a token will want until you route it.
+
+The weights are shipped as **W4A16**: 4-bit integer weights, 16-bit activations. I confirmed the quantisation from the config of `canada-quant/GLM-5.3-Flash-W4A16-MTP` — `num_bits: 4`, `group_size: 128`, symmetric int, pack-quantized (measured, from the model's `config.json`). Four bits per weight, plus one FP16 scale for every group of 128 weights, is about 4.125 effective bits. For 320B parameters that is roughly 154 GiB of weights sitting on the GPUs before a single token of context (reasoned).
+
+Divide that across cards and the mod stops looking like a vanity spec:
+
+<VramFit />
+
+Four retail 8 GiB cards give you 30 GiB of usable VRAM. The weights are 154 GiB. You would need more than twenty of those cards just to *hold* the model, before any KV cache, and then you would be moving activations across twenty PCIe 1.0 x4 links, which is its own catastrophe. Four 64 GiB cards give you ~243 GiB usable at the recipe's `--gpu-memory-utilization 0.95`, which holds the 154 GiB of weights with about 89 GiB left for the KV pool and scratch. That is the whole reason the card count is four and the VRAM is 64. For a different take on squeezing a 320B model onto hardware that should not hold it, see [the TPU piece](/articles/kaggle-tpu-320b); for the small-card end of the same problem, [Qwen3.8-27B on a 12 GB card](/articles/qwen3-8-27b-on-12gb).
+
+But VRAM was never the hard part. The hard part is that the model would not run on Ampere even if it fit.
+
+## The real blocker: sparse attention wants Hopper
+
+GLM-5.3-Flash has a hybrid attention stack. Of its 45 layers, most use a **linear attention** variant (a gated-delta recurrence the config calls KDA), and only eleven keep a real KV cache and run **DeepSeek-style sparse attention** (DSA). I walked through that design in detail in [GLM-5.3-Flash: 45 layers, 11 of them expensive](/articles/glm-5-3-flash); the one-paragraph version is what matters here.
+
+Sparse attention is how you afford a 262K context. A dense attention layer compares every query against every key — quadratic, and ruinous at a quarter-million tokens. DSA instead runs a cheap **indexer** that scores all the keys and keeps only the top few thousand per query, so the expensive attention only ever looks at a small, learned subset. To make even the indexer cheap, GLM pools the key cache: the config's `index_kpool: 4` stores one entry per four tokens and selects at pool granularity, and the indexer's key store is FP8. It is an elegant pile of tricks, and every one of them is a custom kernel.
+
+Here is the problem. In upstream vLLM those kernels are written for Hopper. The sparse-MLA backend gates itself on compute capability:
+
+```python
+# vllm/v1/attention/backends/mla/flashmla_sparse.py (upstream)
+@classmethod
+def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+    return capability.major in [9, 10]   # Hopper, Blackwell
+```
+
+Ampere is compute capability major **8**. It is not on the list. The FP8 stores the indexer wants are worse than merely unsupported — Triton rejects the native `float8_e4m3` type below sm_89, so even the fallback path cannot write the cache the way the Hopper kernel does. On a CMP 170HX, upstream vLLM does not have a sparse-attention path to offer. The model loads and then has nowhere to run its attention.
+
+## What the fork actually does
+
+The engine, [`Morrowmake/vllm-cmp170hx`](/articles/vllm) on branch `ampere-glm53`, exists to fill exactly that hole. It is a real fork of vLLM with new kernels, not a config. I read the source; here is what it adds, and what I could verify.
+
+**An Ampere sparse-MLA kernel.** `vllm/ampere_prefill/sparse_prefill_mla.py` is a Triton kernel for the sparse attention forward, written for sm_80 and GA100's 70 SMs. Its own docstring is unusually candid about why the upstream kernel is wrong on this hardware, and the reasons are worth repeating because they are specific and checkable (I read them in the source; the speedups are the author's bench numbers, so reported):
+
+- Upstream's config picker hard-codes a head block of 32 and estimates its grid from **64 heads**. Under tensor-parallel 4 there are only **16** heads per card, so half of every query-key and value `tl.dot` was being masked off — doing arithmetic on padding. The fork sizes the block to the 16 heads it actually has.
+- The gather over selected keys was masked per element. The fork clamps an invalid index to row 0 and lets the existing `-1e30` score mask kill it instead — exact, because `exp2(-1e30 - max)` is zero, and it turns a predicated gather into a plain vectorised load.
+- Two warps instead of four (a 16-row MMA plus a 512-wide accumulator is 32 KB of registers; 128 threads spill it), the index tile prefetched one loop iteration ahead, and each query rotated to start at its own offset in the top-k list.
+
+Together those take the kernel to about **1.32x** the throughput of the incumbent on the long-context shapes that matter, by the author's family benchmark (reported). It loses on exactly one shape — a context barely larger than the top-k window — and the docstring says so, which is the kind of honesty that makes me trust the rest of it.
+
+**An Ampere path for the indexer and its FP8 stores.** Since GA100 cannot convert to `float8_e4m3` in hardware, the fork writes the pooled key cache through a `uint8` byte view of the same tensor and does the conversion in software (I read this in `kpool_compress.py`). It also supplies the pool-granular compress-write kernel that replaces upstream's `indexer_k_quant_and_cache`, and the top-k helpers that select pools and expand them back to tokens. This is the "key-pool compression" the recipe lists, in code.
+
+**Fused decode kernels and thin-batch GEMMs.** Decode on these cards is tiny-batch and latency-bound, so the fork fuses the MoE gate / top-k / alignment into one launch, fuses the KDA linear-attention decode with its gate projections, and adds a GEMM tuned for the few BF16 layers W4A16 leaves un-quantised at up to 32 rows. Each custom kernel on the default path, the docs say, is replayed against a 64-bit reference on real captured inputs and has to be at least as accurate as the code it replaces. I could read the kernels; I could not replay them, so "at least as accurate" is reported.
+
+<CardLayout />
+
+## TP4 or PP4: the bus decides
+
+Four cards, one model, two ways to cut it — and the choice is made entirely by the PCIe link, which is the whole reason this is a CMP 170HX story and not a generic one.
+
+**Tensor-parallel 4** splits every layer across the four cards. Each card holds a quarter of every weight matrix and computes a quarter of every layer, which means after almost every layer the four cards have to sum their partial results — an all-reduce. The recipe measures about 9.4 MB per layer during prefill and roughly a hundred small collectives per decode step. On a wide x16 link that is fine; on the stock x4 bus it is a disaster, and the recipe says plainly that TP4 is "bus-bound and much slower" there.
+
+**Pipeline-parallel 4** gives each card a quarter of the *layers* and passes only the activations from one stage to the next — one hand-off per stage, not a collective per layer. It needs far less bandwidth, which is why it is the layout built for stock x4 cards, and it holds nearly twice the KV because each card reserves cache for only its own layers.
+
+The reported release-1.6.0 numbers (one author, structured workload, 180 W per card, x16 links — not re-run by me) are in the toggle above. Single-user decode is 394 tok/s on TP4 and 235 on PP4; eight concurrent users aggregate to 798 and 623; cold prefill is 2,669 tok/s on TP4 and 6,580 on PP4; and the KV pool at full 262,144 context is 1,072,150 tokens on TP4 against 1,914,216 on PP4. So TP4 answers one person fastest, and PP4 reads long prompts 2.5x faster and holds 1.8x the context across many users. The honest caveat, which the recipe states and I will repeat: every PP4 number was taken on x16 cards too. The x4 case — the case PP4 exists for — is still unmeasured.
+
+One more Ampere-specific detail sits underneath TP4. Stock CMP 170HX cards refuse GPU peer access, so a tensor-parallel all-reduce would otherwise take NCCL's slow multi-hop path through the host. The fork stages each small all-reduce through shared host memory in a single round trip instead — reported at −7.7% step time at one user when it landed. There is an optional device-memory peer-to-peer path for cards whose driver does allow it. No NVLink, so everything is the PCIe bus one way or another.
+
+## W4A16 weights, full-precision KV, and a drafter
+
+Two choices keep quality honest. The weights are 4-bit, but the **KV cache is full precision** — not quantised, no FP8 anywhere, nothing offloaded. That is unusual for a setup this VRAM-constrained; the easy win would have been an 8-bit cache to double the context. They did not take it, and the KV-pool numbers are what full precision costs.
+
+Speed instead comes from **DFlash2 speculative decoding**. A small drafter proposes several tokens, the big model verifies them in one pass, and accepted guesses are free. The fork makes the draft depth adaptive: up to **7** tokens ahead when one request is running, up to 5 at two, and 3 under load, with each request's depth following its own recent acceptance. Code and structured output draft well, so they verify deep and decode fastest; prose drafts poorly and stays shallow, which is exactly the ordering in the throughput table. The drafter is where the real speed comes from, and if you want the general version of "the published speedup was speculative decoding all along," I wrote [that story about an Apple-silicon engine](/articles/husky-msi). The deeper drafts cost KV-pool scratch, which is the trade the 1.6.0 notes own up to: the TP4 pool dropped 8.9% and PP4 18.0% versus the previous release to pay for it.
+
+## The receipts, and what I did not check
+
+The recipe publishes quality numbers, self-run on the release build (reported, TP4): HumanEval pass@1 of **162/164**, and GSM8K of **1,285/1,319**, which is 97.42%. Under PP4 on the 1.6.0 decode kernels it reports 162/164 and 1,280/1,319 (97.04%). These are fixed-batch runs with a corrected HumanEval scorer, repeated, with the author noting individual answers flip both ways when the decoded text changes and no suite shows a significant net loss. I did not run the harness. I cannot — I have no cards and I do not execute code from a repository I am reviewing. So the quality figures are reported, full stop, and should be read as one person's self-report until someone with four modified GA100 boards reproduces them.
+
+What I *can* stand behind, because it is in files I read:
+
+- The model is what it says: 320B MoE, 45 layers, 288 experts with 8 active plus a shared one, hybrid linear-plus-sparse attention, mHC residual streams, 262,144-token context — all from the config (measured).
+- The quantisation is W4A16, 4-bit, group size 128, symmetric — from the weights repo's own config (measured).
+- Upstream vLLM gates its sparse-MLA backend on compute capability 9 or 10 and genuinely excludes Ampere (measured, from the source).
+- The fork adds real sm_80 kernels for the sparse-attention prefill, the indexer's FP8 stores and the key-pool compression, with a specific, checkable rationale for why the upstream kernel is wrong on 16-head tensor-parallel shapes (measured that the code exists and reads correctly; its speedups and accuracy claims are reported).
+
+The triage that nearly skipped this as "no new method" had it backwards. The model is not new here and the cards are a shopping list. The method is the kernel — someone sat down and wrote the Ampere sparse-attention path that a major inference engine does not provide, and documented exactly why the obvious port is slow. That it happens to resurrect a banned mining card into a 320B inference node is the fun part, but the fork is the work. If you want the same model on entirely different silicon, there is [a GLM-5.3-Flash MLX build for Apple hardware](/articles/glm-5-3-flash-mlx) too; the common thread is that the interesting engineering is always in the kernels, never the spec sheet.
