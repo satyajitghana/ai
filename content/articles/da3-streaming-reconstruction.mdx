@@ -1,0 +1,394 @@
+---
+title: "Streaming 3D from unposed video: R³, AMB3R-SLAM, and the move to bounded memory"
+description: "Two systems from this year build streaming 3D reconstruction on top of Depth-Anything-3 as a frozen backbone, and both turn per-frame pointmaps into an estimate whose memory stays flat as the video grows. R³ (Westlake/UMich/NVIDIA) regresses confidence-weighted relative poses with a 372M-parameter model and a novelty-gated keyframe bank; its streaming ATE beats 1.26B baselines, and its memory holds flat to 1000 frames under the 48 GiB budget that OOMs StreamVGGT past 500. AMB3R-SLAM (UCL) is training-free: a DA3-Small front-end feeds a hierarchical Sim(3) pose graph with span-2, long-context and DBoW2 loop-closure edges, no bundle adjustment, 10-14 GB flat to 10k frames, and cuts KITTI-01 ATE from 55.91 m to 2.95 m with LiDAR. I checked the numbers against the papers and code: the tables hold, AMB3R's repo is still an empty placeholder, and R³ quotes three different frame rates across its own four surfaces."
+date: 2026-10-02
+tags:
+  - 3d
+  - slam
+  - robotics
+  - point-cloud
+  - state-estimation
+  - benchmarks
+  - paper
+  - explainer
+draft: false
+cover: /articles/da3-streaming-reconstruction/fig1.png
+---
+
+import { MemoryStream } from "@/components/articles/da3-streaming-reconstruction/memory-stream"
+
+3D perception is my day job, so two papers from this year landed on the same
+nerve. [R³](https://arxiv.org/abs/2605.26519) (Westlake, Michigan, NVIDIA) and
+[AMB3R-SLAM](https://arxiv.org/abs/2609.19518) (UCL) look unrelated — one is a
+feed-forward reconstructor, the other a kilometre-scale SLAM system — but they
+make the same two bets. They take [Depth Anything 3](/articles/depth-anything-3-ros2)
+as a **frozen (or almost-frozen) geometry backbone** rather than training a
+geometry network from scratch, and they both replace the per-frame pointmap —
+the thing that makes a naive feed-forward reconstructor's memory grow without
+bound — with a **streaming estimate whose memory is flat in the number of
+frames**. That second bet is the whole game for video. This piece explains both
+mechanisms from first principles, then checks the headline numbers against the
+papers and the released code.
+
+<Callout type="note">
+**Labels.** A number is *reported* when it is the authors' own figure, copied
+not re-run; *measured* when I computed it from a file, a repo or the running
+toy below; *reasoned* when it is my arithmetic on their numbers. I executed
+none of the released code — I read it and cloned it.
+</Callout>
+
+## What "streaming, feed-forward 3D from unposed video" means
+
+Classical structure-from-motion and visual SLAM start from matched features
+and solve a geometric optimisation: bundle adjustment jointly refines camera
+poses and 3D points so that every point reprojects into every view that saw
+it. It is accurate and it is slow, and it assumes the world holds still while
+you look at it. The feed-forward line — DUSt3R, VGGT, CUT3R, and now DA3 —
+throws that out. A transformer looks at the images and *regresses* geometry in
+one pass: for each pixel a 3D point (a "pointmap"), and for each frame a camera
+pose. No correspondences, no iterative solve. "Unposed" means you hand it raw
+video with no camera poses and no calibration; the model produces the poses as
+output.
+
+That works beautifully for a handful of frames and breaks for a video. Two
+reasons, and both matter for anything that runs on a robot:
+
+1. **The global-frame assumption.** Most feed-forward models express every
+   point and pose in one global coordinate frame, anchored to the first camera.
+   Over a long sequence the camera's translation relative to that fixed origin
+   grows without bound, and the network has to represent ever-larger numbers it
+   never saw at training time. Accuracy drifts.
+2. **Memory grows with the video.** If the model attends over all frames, or
+   keeps a pointmap per frame, its state is $O(N)$ in the frame count $N$. A
+   30-second clip at 30 fps is 900 frames; a drive is tens of thousands. At
+   some point you run out of GPU, and the run dies mid-sequence.
+
+"Streaming" (or causal) means the model consumes frames one at a time and
+commits to an estimate for frame $t$ using only frames up to $t$, the way a
+robot has to. "Bounded memory" means the state it carries forward does **not**
+grow with $N$: it keeps a fixed working set. That is the property that turns a
+nice demo on 20 frames into something you can leave running. Both papers are,
+underneath, answers to the same question — *what is the smallest thing you can
+carry between frames and still stay globally consistent?*
+
+### What DA3 gives them
+
+[Depth Anything 3](https://arxiv.org/abs/2511.10647) (ByteDance Seed,
+November 2025) is the shared foundation. It is a geometry foundation model: one
+plain DINOv2 transformer with interleaved within-view and cross-view
+self-attention, and a dual-DPT head that emits a depth map and a ray map, from
+which 3D points fall out. Given one or many images it returns depth, points and
+camera geometry in a single forward pass. It ships in sizes from Small (80M
+parameters) to Giant, and the Large checkpoint is 385M (*reported*, R³'s
+Table 2). [TencentARC's GAE](/articles/gae-geometry-native) builds a generative
+model on the same backbone; [the ROS 2 wrapper I took apart
+earlier](/articles/depth-anything-3-ros2) runs its metric-depth checkpoint on a
+robot. Here it is used differently again: as a frozen feature extractor whose
+per-frame tokens are the raw material for a *pose* estimate, with the expensive
+geometry knowledge inherited rather than relearned.
+
+## R³: regress relative poses, weight them by confidence
+
+R³ ("3D Reconstruction via Relative Regression", Congrong Xu et al., arXiv
+2605.26519v2) attacks the global-frame problem head-on. Its thesis: do not
+regress an absolute pose in a global frame at all. Regress **relative** poses
+between pairs of frames, and let a confidence score say which pairs to trust.
+
+<Figure
+  src="/articles/da3-streaming-reconstruction/fig2.png"
+  alt="Three feed-forward pose paradigms drawn as pose graphs over three cameras on a dashed arc. (a) VGGT: one camera is the blue world frame, with black arrows pointing from it to the two other cameras. (b) Pi3: all three cameras carry absolute poses and every pair is joined by a double-headed yellow arrow of uniform weight. (c) Ours: the cameras have no absolute pose, and every directed pair carries an arrow coloured by confidence, green for high and yellow for low."
+  caption="Three feed-forward pose paradigms as pose graphs: VGGT anchors the world to the first camera and supervises only edges from it; Pi3 regresses absolute poses and supervises every pair with uniform weight; R³ drops the global-pose head and supervises every directed pair with a learned per-edge confidence (R³, Figure 2)."
+/>
+
+The picture is the argument. VGGT (panel a) pins the world frame to camera one
+and supervises only the edges out of that anchor — so the anchor's errors
+poison everything, and far-from-origin translations blow up. π³ (panel b)
+regresses absolute poses in a model-chosen frame and treats every pairwise
+constraint as equally reliable. R³ (panel c) keeps no absolute pose: it
+predicts a *directed* relative pose for every ordered pair, each tagged with how
+much to believe it. The world frame becomes a choice made at aggregation time,
+not a bias baked into the architecture.
+
+### The mechanism
+
+<Figure
+  src="/articles/da3-streaming-reconstruction/fig1.png"
+  alt="R³'s pipeline. Input frames go into a causal multi-view transformer that emits one camera token per frame. A relative-pose MLP takes pairs of tokens and outputs, for each pair, a relative rotation and translation plus a confidence bar; a depth head emits per-frame depth maps. The confidence-weighted directed edges are aggregated into a global trajectory. On the right, a keyframe bank decides whether each new frame is novel enough to admit."
+  caption="A causal multi-view transformer turns each frame into one camera token; a lightweight relative-pose MLP predicts directed pairwise poses with separate rotation and translation confidences, aggregated into a trajectory; a novelty-gated keyframe bank bounds the streaming context (R³, Figure 3)."
+/>
+
+Concretely: the DA3 backbone, made causal and kept **mostly frozen** ("we keep
+most of the 3D backbone frozen and use a relative-pose head as a lightweight
+front-end", *reported*), produces one camera token per frame. A lightweight MLP
+reads a pair of tokens and predicts a relative rotation, a relative
+translation, and — the load-bearing bit — **separate confidence scalars for
+rotation and for translation**. Rotation and translation fail in different
+ways (pure rotation is observable with no translation; translation scale is
+not), so one confidence number cannot describe both.
+
+That confidence does two jobs. In training it weights the loss: a confident
+pair that is wrong is penalised hard, an uncertain pair is allowed slack, with
+a $-\alpha \log c$ regulariser so the model cannot just declare everything
+uncertain. At inference it steers aggregation: to place a new frame, the system
+picks the most confident already-registered frames as references and fuses their
+relative predictions, top-$k$ confidence-weighted. The whole collection of
+directed, confidence-weighted edges is a pose graph, and the trajectory is read
+off it. No bundle adjustment; the confidences do the arbitration an optimiser
+would otherwise do.
+
+### The keyframe bank is what bounds the memory
+
+Streaming needs a bounded context. R³ keeps an active set $\mathcal{C}_t =
+\{1\} \cup \mathcal{B}_t$: the first frame plus a **keyframe bank**
+$\mathcal{B}_t$ of capacity $K$. A new frame is admitted only if it is *novel*
+— if its encoder token is far enough from every token already in the bank
+(`max cos(tok_i, tok_j) < τ`). When the bank is full, the least useful keyframe
+is evicted, ranked by a utility $u_j = d_j \, c_j$ that trades off how
+distinctive a keyframe is against how confidently it connects to the rest. The
+bank never exceeds $K$, so the state carried between frames is $O(K)$, not
+$O(N)$. This is the mechanism behind the flat memory curve.
+
+<MemoryStream />
+
+The widget is that contrast made draggable, and it is a schematic — only the
+48 GiB line is the paper's. Drag the frame count: the naive per-frame store
+climbs a straight line and, past the point where it crosses the budget, the run
+is dead. The bounded bank is flat; it never depends on how long the video is.
+Drag the bank cap $K$ and the flat line moves up or down — memory is set by the
+cap, never by the sequence — which is the entire point.
+
+### Does the streaming ATE hold?
+
+Yes. On camera pose estimation in the online (streaming) setting, absolute
+trajectory error (*reported*, R³ Table 2, lower is better):
+
+| Streaming method | #Params | Sintel ATE | TUM-dyn ATE | ScanNet ATE |
+|---|---|---|---|---|
+| CUT3R | 793M | 0.213 | 0.046 | 0.099 |
+| StreamVGGT | 1.26B | 0.251 | 0.061 | 0.161 |
+| STream3R | 1.26B | 0.213 | 0.026 | 0.052 |
+| TTT3R | 793M | 0.201 | 0.028 | 0.064 |
+| **R³** | **372M** | **0.115** | **0.018** | **0.038** |
+
+R³ has the lowest ATE on all three while being the smallest model on the board
+— 372M against the 1.26B of StreamVGGT and STream3R, about 30% their size
+(*reasoned*: 372 / 1260 ≈ 0.30, which is the paper's "≈⅓ of recent 1B-class
+models"). On Sintel its ATE is 0.115 against STream3R's 0.213, a 46% reduction
+(*reasoned*). The offline, full-context variant is also competitive: 0.130 ATE
+on Sintel against VGGT's 0.172 and DA3-Large's 0.140 (*reported*, Table 2 top).
+
+And the memory claim — the reason any of this matters for long video:
+
+<Figure
+  src="/articles/da3-streaming-reconstruction/fig3.png"
+  alt="R³'s streaming-efficiency teaser. Left, a point-cloud comparison of TTT3R versus R³ and an ultra-long town reconstruction. Right, two plots against frame count. The top plot is camera-pose ATE: R³ stays low and flat, CUT3R and Point3R climb, and StreamVGGT and VGGT stop early marked OOM. The bottom plot is GPU memory with a dashed 48 GB bound: R³ and CUT3R are flat, Point3R rises to about 46 GB, and StreamVGGT and VGGT shoot up and hit the bound. A caption panel reads 372M parameters, 30+ FPS, scales to thousands of frames."
+  caption="Streaming efficiency: R³'s pose error and GPU memory both stay flat as frames grow, while StreamVGGT and VGGT climb into the 48 GB bound and OOM. The panel reads 30+ FPS, while this figure's own caption reads 20+ FPS — the frame-rate claim is not stable across the paper's own surfaces; the measured curves, not the FPS, are the point (R³, Figure 1)."
+/>
+
+On 7-Scenes, run to 1000 frames under a 48 GiB budget, R³'s reconstruction
+accuracy is flat — Acc 0.021 / 0.022 / 0.022 at 200 / 500 / 1000 frames, Comp
+0.018 / 0.017 / 0.017 (*reported*, Table 4). CUT3R drifts over the same span
+(Acc 0.087 → 0.194 → 0.240) and StreamVGGT, a 1.26B per-frame model, **exceeds
+the 48 GiB budget and OOMs past 500 frames**. That one real data point — a
+1.26B model dies at the budget somewhere past 500 — is what the widget above is
+calibrated to. R³ was trained on six 48 GB GPUs (*reported*).
+
+### The frame rate is the one number that will not sit still
+
+R³'s throughput claim is a cautionary tale about reading a single headline
+number. Across the project's four surfaces I found three different frame rates
+(*measured*, by reading each source):
+
+- The arXiv Figure 1 **caption** and the GitHub README: "**20+ FPS**".
+- The arXiv Figure 1 **image panel** (same figure, above): "**30+ FPS**".
+- The [project page](https://kevinxu02.github.io/r3-site/): "**40 FPS**", with a
+  footnote, "Measured on a single NVIDIA RTX PRO 6000".
+- The [launch post](https://x.com/CongrongX/status/2059718319691714992): "Runs
+  at **30+ FPS**".
+
+The paper disagrees with itself inside one figure — caption 20+, panel 30+ —
+and only the project page's 40 names hardware. None appears in a table with a
+resolution and a batch size. The numbers are all plausible for a 372M model and
+the hardware spread (an RTX PRO 6000 is far faster than whatever the 20+ was
+measured on), but "20+ / 30+ / 40 FPS" is a throughput range without a fixed
+denominator. The claim that *is* pinned, in a table and a figure, is the one
+that matters: memory stays flat. Trust that one.
+
+## AMB3R-SLAM: a hierarchical Sim(3) backend, no bundle adjustment
+
+AMB3R-SLAM ("Kilometer-scale SLAM with Hierarchical Backend", Hengyi Wang &
+Lourdes Agapito, arXiv 2609.19518v1) takes the other road. It is
+**training-free**: it does not fine-tune anything, it *orchestrates* frozen
+foundation models inside a classical-feeling SLAM frame. The design principle,
+in the authors' words, is "to rely on the feed-forward predictions of geometric
+foundation models and avoid optimization that relies on post-hoc estimation".
+
+<Figure
+  src="/articles/da3-streaming-reconstruction/fig4.png"
+  alt="AMB3R-SLAM's architecture. Top, the front-end: three overlapping street frames go into a block that emits red camera frustums, with a Re-anchor arrow feeding back from the backend. Bottom, the hierarchical backend: a strip of submap reconstructions is connected by three kinds of bracket — blue span-2 edges between neighbours, orange long-context edges spanning further, and a red loop-closure edge across the whole strip — which assemble into a ring-shaped pose graph with blue, orange and dashed-red edges."
+  caption="A lightweight DA3-Small front-end tracks camera pose and re-anchors per submap; the hierarchical backend wires submaps into one Sim(3) pose graph with span-2, long-context and loop-closure edges, progressively enforcing local, mid-level and global consistency with no bundle adjustment (AMB3R-SLAM, Figure 2)."
+/>
+
+**The front-end** is where DA3 earns its keep cheaply. To hold a high frame
+rate it uses DA3-Small (80M parameters). For each new frame it builds a compact
+memory — the submap's anchor keyframe plus the two most recent frames — and
+estimates the new pose against that, re-anchoring when it starts a fresh submap.
+The heavy lifting (dense mapping for the backend's constraints) uses a **giant**
+DA3 model; the authors also swap in VGGT-Ω to show the pipeline is
+model-agnostic ("Ours (Ω)"). The front-end is light and fast; the backend is
+where global consistency is bought.
+
+**The backend** is a single **Sim(3) pose graph** — Sim(3) because a monocular
+system has no metric scale, so each node carries a 7-DoF similarity transform
+(rotation, translation, and a scale) rather than a rigid SE(3) pose. Three kinds
+of edge, three scales of consistency:
+
+- **Span-2 edges** between overlapping neighbouring submaps, from dense local
+  submapping — local consistency.
+- **Sparse long-context edges** reaching further back — mid-level consistency,
+  the part that keeps a long corridor straight.
+- **Loop-closure edges** — global consistency. DBoW2 proposes candidate loops
+  between a historical submap and the current one; each candidate is *verified
+  geometrically* by sampling views from both submaps, jointly reconstructing
+  them with the foundation model, and checking their **3D voxel-occupancy
+  overlap**. Loops whose implied rotation and translation correction is
+  implausible are filtered out, which is what stops a perceptual aliasing
+  (two identical-looking corridors) from folding the map.
+
+The thing it deliberately does *not* do is bundle adjustment. BA ties points
+to poses under a **static-world assumption**; drop it, and moving cars and
+pedestrians stop corrupting the solve, so "dynamic scenes work out of the box".
+The backend's memory is the pose graph plus a bounded window of submaps, so —
+like R³ — it is flat in sequence length: peak **10.3 to 14.1 GB** across its
+runs, holding steady out to 10k frames (*reported*, Table 9).
+
+### The numbers, checked
+
+Throughput and memory on one RTX 4090 (*reported*, Table 9):
+
+| Input | Dataset | FPS | Peak mem |
+|---|---|---|---|
+| Monocular | KITTI | 17.6 | 10.3 GB |
+| Monocular | VBR | 10.2 | 14.0 GB |
+| LiDAR | KITTI | 47.8 | 10.5 GB |
+| LiDAR | VBR | 31.3 | 14.1 GB |
+
+So 10.2-17.6 FPS monocular, 31.3-47.8 FPS with LiDAR — LiDAR is faster because
+it hands the system metric geometry directly and shortens the dense-mapping
+work. Memory sits at 10-14 GB regardless of which of the kilometre-scale
+sequences is running.
+
+On accuracy, the headline is the VBR and Oxford Spires result: "reducing the
+ATE of previous state-of-the-art methods on VBR and Oxford Spires by over 70%"
+(*reported*). On VBR, monocular, AMB3R-SLAM averages **7.42 m** ATE against the
+best prior online method's 26.65 m (LingBot-Map); that is a **72% reduction**
+(*reasoned*: (26.65 − 7.42) / 26.65 = 0.72), matching the claim. With LiDAR the
+VBR average drops to **0.36 m** — sub-metre on kilometre-scale drives.
+
+<Figure
+  src="/articles/da3-streaming-reconstruction/fig5.png"
+  alt="Oxford Spires qualitative comparison, three columns, two rows of top-down maps with coloured camera trajectories. Left, the ground-truth LiDAR scan in blue with a red trajectory. Middle, AMB3R-SLAM: its point-cloud map and rainbow trajectory close cleanly and match the ground-truth layout. Right, LingBot-Map: the map is smeared and warped and the trajectory does not line up with the building walls."
+  caption="Oxford Spires: AMB3R-SLAM's map and trajectory track the ground-truth LiDAR scan, where the prior method LingBot-Map drifts and warps the building layout (AMB3R-SLAM, Figure 4)."
+/>
+
+The KITTI table is the most striking single row. KITTI sequence 01 — the
+highway stretch that breaks most visual systems, because the scene is
+featureless and fast — goes from **55.91 m** ATE monocular to **2.95 m** with
+LiDAR (*reported*, Table 2), a 95% cut (*reasoned*). Even the monocular 55.91 m
+is not an outlier of weakness: on that sequence DROID-SLAM scores 344.60 m and
+the DA3-SLAM baseline 263.25 m, so 55.91 m is already an order of magnitude
+better than other online methods, and LiDAR then fixes the residual scale
+drift. Averaged over KITTI, AMB3R-SLAM is 13.11 m monocular and 0.95 m with
+LiDAR, which beats the LiDAR-native PIN-SLAM's 1.22 m average (*reported*).
+
+<Callout type="warning">
+**The code is not out.** The repository linked from the project page,
+`HengyiWang/amb3r-slam`, is an **empty placeholder** — at clone time it held a
+12-byte README and a `.gitignore`, no source and no licence file (*measured*, I
+cloned it). Everything above is read from the paper. Treat the numbers as
+*reported* and unverifiable against a run until the code ships.
+</Callout>
+
+## The shared trend
+
+Lay the two side by side and the pattern is clear.
+
+| | R³ | AMB3R-SLAM |
+|---|---|---|
+| Problem | Feed-forward streaming reconstruction | Kilometre-scale SLAM |
+| DA3 role | Backbone, kept mostly frozen | Backbone, fully frozen (training-free) |
+| DA3 size | 372M (DA3-derived) | Small (80M) front-end + giant backend |
+| Bounds memory via | Novelty-gated keyframe bank, cap K | Windowed submaps + Sim(3) pose graph |
+| Global consistency | Confidence-weighted relative edges | Span-2 + long-context + loop-closure edges |
+| Classical solver | None (confidences arbitrate) | None (no bundle adjustment) |
+| Released | Code (Apache-2.0 core) + weights (CC-BY-NC) | Placeholder repo only |
+
+Three things are converging. **First, the geometry network is now a frozen
+asset.** Neither system trains geometry from scratch; DA3 is the ImageNet moment
+for 3D, and the research has moved up a level, to what you *do* with a
+foundation model's per-frame predictions. **Second, the per-frame pointmap is
+the enemy of long video**, and both answers are the same shape: keep a bounded
+working set (a keyframe bank, a submap window) and a cheap global structure (a
+pose graph of relative constraints) instead of a growing pile of dense
+predictions. **Third, the iterative geometric solver is being retired.** R³
+replaces bundle adjustment with learned per-edge confidence; AMB3R-SLAM
+replaces it with a pose graph over foundation-model predictions and drops the
+static-world assumption with it. Thirty years of SLAM wisdom said the solver was
+the hard, essential part. These two say: if the per-frame predictions are good
+enough and you weight them honestly, you can bound the memory, skip the solve,
+and still close a kilometre-scale loop.
+
+## What you can run
+
+| | Code | Weights | Licence |
+|---|---|---|---|
+| R³ | [`KevinXu02/R3`](https://github.com/KevinXu02/R3) at `e345f11` | [`KevinXu02/R3`](https://huggingface.co/KevinXu02/R3) · `r3.safetensors` 1.49 GB | Core Apache-2.0; **`training/` non-commercial**; weights CC-BY-NC-4.0 |
+| AMB3R-SLAM | Placeholder only | None | None declared |
+
+R³'s licensing has a trap worth naming. The inference code is Apache-2.0, but
+the training pipeline under `R3/training/` is marked **"NON-COMMERCIAL RESEARCH
+USE ONLY"** (*measured*, from `R3/training/NOTICE`), because it adapts DUSt3R and
+CroCo (NAVER, CC-BY-NC-SA 4.0), CUT3R and VGGT. The released weights on Hugging
+Face are CC-BY-NC-4.0 and declare `Depth-Anything/Depth-Anything-3` as their
+base (*measured*, from the model card; the `r3.safetensors` header reports
+1,490,568,492 bytes). So you can read and run R³ freely; you cannot ship a
+product on its released checkpoint, and you cannot retrain it commercially on
+the given pipeline. AMB3R-SLAM you cannot run at all yet.
+
+Both are built on [the same DA3 backbone I traced through a ROS 2 node
+earlier](/articles/depth-anything-3-ros2), and both sit in the same lineage as
+the [classical LiDAR-inertial odometry](/articles/fast-lio2-lidar-inertial-odometry)
+and [stereo factor-graph SLAM](/articles/surfslam) I have written up — the
+difference is that the geometry now comes pre-trained, and the memory is the
+thing you engineer. For companion write-ups in this batch, see
+[SurfLO](/articles/surflo) and [FAR-LIO](/articles/far-lio).
+
+<ChangeMyMind>
+
+<Falsifier claim="R³ quotes three different frame rates across its own four surfaces, none in a table with a fixed resolution and batch size.">
+Read from the arXiv Figure 1 caption and panel (20+ vs 30+), the GitHub README
+(20+), the project page (40, on an RTX PRO 6000) and the launch post (30+). A
+single table pinning FPS to a resolution, batch size and GPU — consistent with
+one of these numbers — would resolve it.
+</Falsifier>
+
+<Falsifier claim="R³'s streaming memory is flat in frame count while a 1.26B per-frame baseline OOMs under the same 48 GiB budget past 500 frames.">
+Read from Table 4 and Figure 1: R³ holds Acc ≈ 0.022 to 1000 frames; StreamVGGT
+(1.26B) exceeds the 48 GiB budget past 500. A run of R³ whose memory grows with
+N, or of StreamVGGT staying within budget to 1000 frames, falsifies it.
+</Falsifier>
+
+<Falsifier claim="AMB3R-SLAM's code is not released; the headline numbers cannot be reproduced yet.">
+Measured by cloning `HengyiWang/amb3r-slam`: a 12-byte README and a `.gitignore`,
+no source, no licence. A commit that adds the runnable system falsifies it (and
+would let the KITTI-01 55.91→2.95 and VBR 7.42→0.36 numbers be checked).
+</Falsifier>
+
+</ChangeMyMind>
+
+---
+
+*Sources: arXiv 2605.26519v2 (R³) and 2609.19518v1 (AMB3R-SLAM) at the versions
+linked; the R³ repository at `e345f11` and its Hugging Face model card; the
+AMB3R-SLAM placeholder repository. Figures are the papers' own, used for
+commentary.*
