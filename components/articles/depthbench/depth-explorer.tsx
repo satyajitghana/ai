@@ -8,8 +8,8 @@ import { cn } from "@/lib/utils"
 // Validation loss vs width-depth aspect ratio, from DepthBench's Figure 1(a), for
 // five residual designs on the 400M benchmark (fixed ~400M params, 8B FineWeb-Edu
 // tokens, best learning rate per architecture). The slider moves a cursor across the
-// seven shapes; the readout ranks the designs at that shape and shows the systems
-// cost the paper charges for depth.
+// six plotted shapes; the readout ranks the designs at that shape and shows the
+// systems cost the paper charges for depth.
 //
 // Loss values are read off Figure 1(a). The endpoints match the numbers stated in
 // the paper's text exactly: Pre-LN 2.759 -> 2.782 (L16 -> L32), Full AttnRes
@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils"
 
 type Shape = { ar: number; L: number; d: number; dff: number; tflop: number; kv: number }
 
-// index 0 = deepest-narrowest (aspect 9.1), index 6 = shallowest-widest (aspect 76)
+// index 0 = deepest-narrowest (aspect 9.1), index 5 = shallowest-widest (aspect 76)
 const SHAPES: Shape[] = [
   { ar: 9.1, L: 70, d: 640, dff: 1712, tflop: 4.33, kv: 734 },
   { ar: 19.0, L: 42, d: 800, dff: 2144, tflop: 3.78, kv: 551 },
