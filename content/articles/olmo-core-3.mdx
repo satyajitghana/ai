@@ -1,0 +1,278 @@
+---
+title: "Olmo-core 3: an open training stack for trillion-parameter MoE"
+description: "Ai2's Olmo-core 3 is open infrastructure for training large Mixture-of-Experts models — the system behind the next Olmo, run from 12.9B to 1.2T parameters. Read alongside Aleph Alpha's recipe-only writeup, which takes a 30B-A3B MoE from 16 to 512 B200 GPUs at 35% MFU with near-linear scaling, it's a clean look at what an open MoE training stack has to get right: the parallelism axes (DP, FSDP, TP, EP, PP, CP), the all-to-all dispatch that makes experts resident, what MFU measures and why 35% is a real number, and the two very different meanings of 'open' — a 168-page report with code versus a blog with profiler traces."
+date: 2026-10-02
+tags:
+  - mixture-of-experts
+  - systems
+  - training
+  - pretraining
+  - open-source
+  - llm
+  - explainer
+interest: 5
+helpful: 4
+draft: false
+---
+
+import { ParallelismPlanner } from "@/components/articles/olmo-core-3/parallelism-planner"
+import { ExpertDispatch } from "@/components/articles/olmo-core-3/expert-dispatch"
+
+On the same day in October 2026, two groups published how they train large Mixture-of-Experts
+models. Ai2 released **Olmo-core 3** — the training system behind the next generation of Olmo, with
+[the code on GitHub](https://github.com/allenai/olmo-core) (Apache-2.0) and a
+[168-page technical report](https://allenai.org/papers/olmocore3). Aleph Alpha published
+[a blog post](https://aleph-alpha.com/en/blog/scaling-pre-training-in-practice-a-hierarchical-approach)
+walking through the parallelism choices they make as they scale a 30B-A3B MoE from 16 to 512 GPUs.
+Same problem, two very different answers — and two very different things handed to you to check.
+
+They make a good pair because the thing they are both wrestling with is not a modeling problem. It
+is a systems problem. A big MoE is cheap in arithmetic and expensive in everything else, and the
+gap between those two is where a training stack lives or dies. This is a walk through what that gap
+is, the knobs you have to close it, and how far each team's numbers actually go. Every figure below
+is labeled **measured** (I computed it from the repo), **reported** (the publisher's number, not
+re-run), or **reasoned** (my arithmetic on the other two).
+
+## Why a big MoE is a systems problem
+
+A Mixture-of-Experts layer replaces one feed-forward network with many — the *experts* — and a
+*router* that sends each token to only a few of them. The appeal is in the accounting: a model can
+carry a huge number of total parameters while each token only pays for the handful it activates. If
+you have not seen the mechanism built from first principles, my [Mixture of Experts, from
+scratch](/articles/mixture-of-experts-from-scratch) walks through the gating, dispatch, and
+load-balancing; [Switch Transformers](/articles/switch-transformer) is the top-1 simplification the
+modern MoE zoo descends from.
+
+Here is the catch, and it is the first sentence of the Olmo-core 3 report's abstract: training cost
+depends not only on active compute but on "bytes moved, memory held, and kernels launched — and many
+of those costs follow total parameter capacity rather than active compute" (reported). Your FLOPs
+scale with the active parameters. Your weight storage, your gradient synchronization, and your
+optimizer updates scale with the *total* parameters. An MoE is designed to make those two numbers
+diverge. So the moment you add experts at a fixed active size — exactly what you do to make a model
+better without making each token more expensive — most of your costs go up and your useful
+arithmetic does not.
+
+Ai2 calls this the **capacity tax**, and they measured it on the infrastructure they already had.
+Olmo-core 2 trained dense models with Fully Sharded Data Parallel (FSDP), which shards the model
+across GPUs and re-gathers each layer's weights just before it runs, then frees them. For a dense
+model that is a good trade. For an MoE it is a disaster: you re-gather the entire, growing expert
+pool around every microbatch, even though each token only touched a few experts.
+
+<Figure
+  src="/articles/olmo-core-3/fig1.png"
+  alt="Two line plots. Left: MFU rising with global batch size for DDP (25% to 41%) and FSDP (26% to 30%). Right: MFU versus total model size as the expert pool grows from 8 to 128 experts; MoE FSDP falls from 41% to 16%, MoE DDP without EP runs out of memory at 64 experts, and MoE DDP with EP8 stays flat near 42-44%."
+  caption="The capacity tax, measured on 8 B300 GPUs with a fixed ~3.2B active parameters. As the expert pool grows from 8 to 128 (4.6B to 47B total params), MoE-FSDP's useful-model MFU collapses from 40.9% to 15.7% even though the work per token is unchanged; DDP+EP8 stays near 42-44% (Olmo-core 3 report, Figure 8)."
+/>
+
+Read the right panel. The pink line is MoE under FSDP: as the expert pool grows from 8 to 128
+experts — total parameters from 4.6B to 47B — useful-model MFU falls from **40.9% to 15.7%**
+(reported), while the active compute per token never changes. That is a **61.6% relative drop in
+efficiency bought with nothing** (reasoned). The dense baselines (dashed, 49.8% for FSDP and 51.1%
+for DDP) sit far above it. The whole redesign exists to flatten that pink line.
+
+## The parallelism axes
+
+To see how, you need the vocabulary — the handful of ways you can split a model across GPUs. They
+compose, and picking which to turn on is most of the job.
+
+- **DP (data parallel).** Replicate the whole model on each GPU, split the batch, average the
+  gradients with an all-reduce once per step. Simple, communication-light, but every GPU must hold
+  the whole model.
+- **FSDP (fully sharded data parallel, a.k.a. ZeRO-3).** Shard the parameters, gradients, and
+  optimizer state across the DP group; all-gather each layer's weights just-in-time, use them, free
+  them. Trades memory for a weight all-gather on every microbatch.
+- **TP (tensor parallel).** Split the individual weight matrices across GPUs and all-reduce inside
+  each layer. Heavy, latency-sensitive communication; kept inside one node.
+- **EP (expert parallel).** The MoE-native axis. Put different experts on different GPUs and send
+  each token to the GPU that owns its expert — an all-to-all *dispatch*, then an all-to-all
+  *combine* to bring the results back.
+- **PP (pipeline parallel).** Split the layers into stages across GPUs and flow microbatches through
+  the pipeline. Needed once one GPU cannot hold its share of the layers; costs a pipeline "bubble".
+- **CP (context parallel).** Split the sequence dimension so a single long example spans GPUs. For
+  long context, not for capacity.
+
+The one that is new to MoE is **EP**, and it is the hinge of Olmo-core 3's design. Instead of moving
+the weights to the data (FSDP's re-gather), you keep the experts resident and move the *data* to the
+weights. Toggle between the two:
+
+<ExpertDispatch />
+
+That all-to-all dispatch is the new communication pattern an MoE stack has to be built around. It is
+also the thing that broke when Ai2 tried to retrofit it onto dense-model plumbing, and the thing
+Aleph Alpha deliberately avoided. Same mechanism, opposite decisions — which is the whole reason the
+two writeups are worth reading together.
+
+## Olmo-core 3's answer: experts resident, data routed
+
+Olmo-core 3 (`v3.0.0`, Apache-2.0 — measured, from the repo) throws out the full-reshard FSDP path
+and rebuilds on **DDP**. Each rank keeps its partition of the model resident for the whole gradient
+accumulation window and synchronizes gradients once per optimizer step. On top of that base it
+layers the axes that actually divide an MoE: **EP** to shard the routed experts, **PP** to split the
+layers when a rank cannot hold them, and a **distributed optimizer** that shards the FP32 main
+weights and optimizer moments. The thread's one-line version: Olmo-core 2 "repeatedly gathered model
+weights for each small batch"; Olmo-core 3 "keeps experts resident on GPUs and sends data to them"
+(reported).
+
+The memory accounting is the cleanest way to see why that composition is the point.
+
+<Figure
+  src="/articles/olmo-core-3/fig2.png"
+  alt="Three stacked-byte diagrams. DDP alone: 18 bytes per parameter (2 BF16 model, 4 FP32 gradient, 4 FP32 main param, 4+4 optimizer moments). DDP plus distributed optimizer: 6 plus 12 over DP bytes. DDP plus EP plus distributed optimizer: 6 over EP-model-parallel plus 12 over DP bytes."
+  caption="Each axis shaves a different part of the per-parameter memory bill. Naive DDP holds 18 bytes per parameter; sharding the FP32 main weights and optimizer states over D replica ranks drops it to 6 + 12/D; sharding the routed experts over the EP model-parallel degree takes their contribution to 6/M_E + 12/D (Olmo-core 3 report, Figure 9)."
+/>
+
+Under a BF16-compute, FP32-gradient, two-moment Adam policy, naive DDP costs **18 bytes per
+parameter** (reported): 2 for the BF16 weight, 4 for the FP32 gradient, 4 for the FP32 main weight,
+and 8 for the two optimizer moments. The distributed optimizer shards the FP32 state over `D` replica
+ranks, so the bill becomes `6 + 12/D` bytes — at `D = 8` that is **7.5 bytes, a 2.4x reduction**
+(reasoned). EP then shards the routed experts' contribution again, over the expert-parallel degree.
+Each axis divides a *different* part of the state, so what every GPU holds stays bounded as the global
+model grows. That is the sentence that makes trillion parameters feasible on 512 GPUs.
+
+The engineering under those axes is where the report earns its length, and it is all in the repo if
+you want to read it rather than take it on faith:
+
+- **NVSHMEM rowwise expert parallel.** The dispatch writes each token row directly into its
+  destination expert's buffer with GPU-initiated one-sided communication, avoiding the host-visible
+  split lists a block all-to-all needs (`src/olmo_core/nn/moe/v2/ep_no_sync_rowwise.py`,
+  `comm.py`, and the `olmo_symm_mem_all_to_all.cuh` kernel — measured).
+- **Synchronization-free execution.** The original MoE path copied routing counts to the CPU for
+  all-to-all split sizes and grouped-GEMM group sizes. Keeping that metadata on the device, and using
+  device-scheduled grouped GEMMs, removes two recurring host waits from the steady-state loop — the
+  `ep_no_sync_*` files are named for exactly this.
+- **Device-scheduled grouped GEMM** runs the uneven per-expert shapes routing produces without
+  padding every expert's batch to a common capacity.
+- **MXFP8** — an 8-bit format with shared block scales — cuts GEMM time, saved-activation memory, and
+  dispatch payloads, while one FP32 main weight stays authoritative.
+- **Topology-agnostic checkpoints** store the global FP32 tensors independently of the parallel
+  layout, so a run can resume on a different number of GPUs with a different EP/PP split.
+
+<RepoCard repo="allenai/olmo-core" />
+
+## The headline numbers, read with their conditions
+
+<Figure
+  src="/articles/olmo-core-3/fig3.png"
+  alt="A panel of five model scales named Tiny to Ultra, each showing active-at-total parameters, activation ratio, throughput in TFLOP/s per GPU, MFU percent, expert count, and the precision and EP/PP topology. From Tiny 1.59B at 12.9B (903 TFLOP/s, 40.1% MFU) to Ultra 58.4B at 1.2T (858 TFLOP/s, 38.1% MFU)."
+  caption="Selected achieved throughput on B300 NVL8, from Tiny (12.9B total) on 16 GPUs to Ultra (1.2T total) on 512 GPUs. MFU is normalized to the B300 dense BF16 peak of 2,250 TFLOP/s/GPU — a BF16 reference even for the MXFP8 row, not FP8-peak utilization (Olmo-core 3 report, Table 30)."
+/>
+
+The report's headline is a five-point matrix (all reported): **Tiny** (1.59B active at 12.9B total)
+hits 903 TFLOP/s/GPU and 40.1% MFU on 16 GPUs with plain DDP; **Ultra** (58.36B active at 1.2T total)
+reaches **858 TFLOP/s/GPU and 38.1% MFU** on 512 GPUs with MXFP8, EP8, PP8, and per-layer recompute.
+In between, throughput barely moves as total capacity grows by two orders of magnitude — which is the
+capacity tax being paid down. For the same model on the same GPUs, Olmo-core 3 delivers about
+**2.7x the throughput of Olmo-core 2** (reported, blog and thread); the blog pins one point of that
+to a 47B MoE going from 19,400 to 52,000 tokens per second per GPU on 8 B300 (reported).
+
+Two honesties are baked into how they present this, and they matter. First, every headline rate uses
+**random routing** as a systems reference — it removes a learned router's shifting expert loads to
+give a stable number — so these are not time-to-quality claims, and the report says the learned-router
+companions run about 1% slower at Tiny and 9% slower at Small (reported). Second, the five
+configurations differ in batch, precision, and recompute, so the matrix is a set of feasible operating
+points, "not a controlled scaling curve." An optional DeepEP v2 backend reaches a 2.38T-parameter
+configuration, but from a nine-step run "whose curve had not stabilized" — reachable capacity, not
+sustained throughput (reported). I appreciate a report that labels its own numbers more conservatively
+than its press would.
+
+## What MFU is, and why 35% is worth stating
+
+Both teams lead with **Model FLOPs Utilization**, so it is worth being precise about what it measures:
+
+$$
+\text{MFU} = \frac{\text{useful model FLOP/s delivered per GPU}}{\text{hardware peak FLOP/s per GPU}}
+$$
+
+"Useful model FLOPs" are the arithmetic the model *definition* requires for a forward and backward
+pass — not the FLOPs you actually executed, which recompute and padding inflate. The denominator is
+the chip's advertised peak. Ai2 uses the B300 dense BF16 peak of 2,250 TFLOP/s/GPU, and keeps that
+same denominator for the MXFP8 row, so 858 / 2250 = **38.1%** is deliberately a BF16 reference, not
+FP8-peak utilization (reasoned, matching the reported value).
+
+Why care? Because MFU is the one number that resists hand-waving. "Blazing fast" tells you nothing;
+"38% of a 2,250 TFLOP/s/GPU peak, denominator stated, on 512 GPUs" tells you exactly how much silicon
+is doing useful work. Frontier dense training typically lands somewhere in the 30-50% range; MoE makes
+it harder because the all-to-all dispatch and the capacity tax eat into it. A measured, denominator-
+disclosed **35%** at 512 GPUs is a real result — and most labs never publish the number at all.
+
+## Aleph Alpha's recipe: the opposite choice, and why it works
+
+Which is what makes Aleph Alpha's writeup the right foil. They take a **30B-A3B MoE** (30B total,
+3B active — reported) and scale it across NVIDIA B200 GPUs, 8 per node over NVLink, nodes joined by
+InfiniBand, from 16 to 512 GPUs. And they turn on almost nothing. No TP, no EP, no PP, no CP — just
+**FSDP plus data parallel**, with selective activation checkpointing throughout.
+
+<ParallelismPlanner />
+
+Slide through their three operating points. At 16 GPUs, FSDP shards the whole model across all 16;
+at 128, FSDP stretches to 128 ranks, which they diagnose from profiler traces as "right at the
+boundary of being communication-bound" (reported); at 512, they *cap* FSDP at 128 and replicate it
+four ways with plain DP — hybrid sharding, HSDP — because DP's extra cost is "paid only in the last
+gradient accumulation step" and so stays cheap. The result: MFU of **37.5% / 37.0% / 35.3%** and
+per-GPU throughput of **28.4k / 28.0k / 26.7k tokens/second** across 16 / 128 / 512 GPUs (reported).
+
+Per-GPU throughput falling from 28.4k to 26.7k across a 32x scale-up is a **6.0% drop** (reasoned),
+which is their "only 6% below perfect linear scaling" — the aggregate box in the planner shows it as
+94% of a linear line. That is what "near-linear" has to mean to be a real claim: you added 32x the
+GPUs and kept 94% of the per-GPU rate. Their projected run — 20 trillion tokens on 512 GPUs in 17
+days — cross-checks cleanly: 20e12 tokens over 17 days across 512 GPUs is **26,600 tokens/second/GPU**
+(reasoned), right on their reported 26.7k.
+
+The reason they can skip EP is the single most useful sentence in their post: "If our model were
+larger or sparser, we would likely need EP, as the communication-to-computation ratio would not tilt
+in our favour" (reported). A 30B-A3B model is small and dense enough that FSDP's weight re-gather is
+not yet the bottleneck Ai2 measured at 47B and beyond. That is the whole lesson, stated as a
+threshold: **the parallelism you need is a function of model size and sparsity against your
+hardware's interconnect, not a fixed recipe.** Flip the planner between the two campaigns and you are
+watching that function evaluate at two different inputs — Aleph Alpha lighting FSDP, Ai2 lighting
+DP + EP + PP.
+
+## The two meanings of open
+
+There is a last axis these two share, and it is the one the site cares about most: both are *open*,
+but not in the same way, and the difference is instructive.
+
+**Olmo-core is open as code.** Apache-2.0, on GitHub, with a 168-page report that documents not only
+what worked but what did not — and the failures are the most valuable part. They name a routing
+pathology they call **Token Gerrymandering**, where the router learns to lower the load-balancing loss
+while making the actual expert imbalance *worse* (reported). They report that overlapping communication
+with computation can slow the overlapped kernels "by more than it hides" (reported) — a negative result
+that will save someone a week. You can clone it, read the kernel, and run it on your own hardware. This
+is the same open-infrastructure instinct behind [MegaTrain's single-GPU
+training](/articles/megatrain-single-gpu-training) and the stack that made [Ring-Zero's
+trillion-parameter RL](/articles/ring-zero-trillion-scale-rl) stable; the MoE-RL failure mode in
+[Rollout Routing Replay](/articles/rollout-routing-replay) is a cousin of Token Gerrymandering, a router
+that behaves differently than you think it does.
+
+**Aleph Alpha is open as recipe.** No code, but something code alone does not give you: the reasoning.
+They show the PyTorch profiler traces at each scale, point at the exact kernels, and explain *why* they
+cap FSDP at 128 and add DP. You cannot run it, but you can learn the decision procedure — which, for a
+practitioner choosing their own parallelism, may be worth as much as a repo.
+
+Neither is the closed-lab norm of "we trained a big MoE, here is the model." Both tell you how. If you
+want the full openness ledger for an MoE — code, checkpoints, data recipes, the lot — AMD's
+[Instella-MoE](/articles/instella-moe) is the maximal version; and if you care about where the scaling
+budget itself is headed, [scaling laws in 2026](/articles/scaling-laws-2026) is why these teams are
+building for the trillion-parameter range at all.
+
+## What an open MoE training stack has to get right
+
+Strip it to the load-bearing ideas:
+
+1. **Stop paying the capacity tax.** Keep experts resident and route tokens to them (EP's all-to-all),
+   rather than re-gathering a growing expert pool every microbatch. This is what flattens the pink line
+   in Figure 8, and it is the difference between Olmo-core 2 and 3.
+2. **Compose axes that divide different state.** DDP for the base, EP for the experts, PP for the
+   layers, a distributed optimizer for the FP32 state — so per-GPU memory stays bounded as the global
+   model grows. `6/M_E + 12/D` bytes per parameter is the formula that reaches 1.2T on 512 GPUs.
+3. **Report MFU with its denominator, and near-linear with its reference.** 38.1% of a stated 2,250
+   TFLOP/s/GPU peak; 94% of a per-GPU-flat linear line. Numbers you can argue with beat adjectives you
+   cannot.
+4. **Match the parallelism to the model.** A 30B-A3B gets to 35% MFU near-linearly with *only* FSDP+DP;
+   a 1.2T MoE needs EP+PP+MXFP8. Neither recipe is wrong; they are the same function at different inputs.
+
+The quiet thing both releases demonstrate is that the hard part of large-model training has moved from
+the model to the plumbing — the bytes moved, the kernels launched, the host waits removed. Olmo-core 3
+hands you the plumbing and a report on how it bends. Aleph Alpha hands you the reasoning for bending it
+a different way. Read together, they are about as honest a picture of open MoE training as you will get
+without an H-cluster of your own.
