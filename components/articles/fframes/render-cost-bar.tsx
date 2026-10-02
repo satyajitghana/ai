@@ -7,8 +7,9 @@ import { cn } from "@/lib/utils"
 
 // The repo's own benchmark, render-bench/vs-remotion: one fixed scene of 99,000
 // one-pixel rects and 1,000 changing text digits at 1000x1000, 30 frames, both
-// renderers serial and with no video encoder. The timings are the repo's
-// results.md, measured on Linux ARM64 Docker against Remotion 4.0.529:
+// renderers serial and with no video encoder. The timings are the committed
+// table in render-bench/vs-remotion/README.md (the runner's results.md summary
+// is gitignored), measured on Linux ARM64 Docker against Remotion 4.0.529:
 //   fframes + Skia CPU   3.877 s
 //   fframes + Skia GPU   skipped (no hardware GPU in that environment)
 //   Remotion             120.801 s
@@ -57,7 +58,7 @@ export function RenderCostBar() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">vs-remotion: 30 frames, one scene, no encoder</span>
-        <span className="font-mono text-[10px] text-muted-foreground">Linux ARM64, Remotion 4.0.529, repo results.md</span>
+        <span className="font-mono text-[10px] text-muted-foreground">Linux ARM64, Remotion 4.0.529, repo README.md</span>
       </div>
 
       <div className="p-3 sm:p-4">
