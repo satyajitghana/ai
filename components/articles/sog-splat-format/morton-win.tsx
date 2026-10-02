@@ -71,7 +71,10 @@ export function MortonWin() {
           {ROWS.map((r, i) => {
             const y = TOP + i * ROW_H
             const lit = r.key === sel
-            const keep = Math.round((r.webp / r.raw) * 100)
+            // floor, not round: shN_labels is 1.61/2 = 80.5, and its measured
+            // ratio (8,049,818 / 10,000,000 = 80.50%) is 80% as the prose states.
+            // Rounding the 2-dp B/splat value would double-round up to 81.
+            const keep = Math.floor((r.webp / r.raw) * 100)
             return (
               <g key={r.key} onClick={() => setSel(r.key)} style={{ cursor: "pointer" }}>
                 <text x={LABEL_X} y={y + 15} fontSize={10} className="fill-foreground font-mono" fillOpacity={lit ? 1 : 0.7}>
@@ -111,7 +114,7 @@ export function MortonWin() {
 
         <div className="mt-1 rounded-lg border bg-background/50 px-3 py-2 font-mono text-xs leading-relaxed text-muted-foreground">
           <span className="text-foreground">{active.label}.webp</span> — {active.what}. WebP keeps{" "}
-          <span className="text-foreground">{active.webp.toFixed(2)} of {active.raw} B</span> ({Math.round((active.webp / active.raw) * 100)}%).{" "}
+          <span className="text-foreground">{active.webp.toFixed(2)} of {active.raw} B</span> ({Math.floor((active.webp / active.raw) * 100)}%).{" "}
           {active.key === "means_u"
             ? "The high position bits are nearly constant between spatially-adjacent splats, so Morton ordering lets WebP's predictors erase almost all of them."
             : active.key === "means_l"
