@@ -1,0 +1,117 @@
+---
+title: "Naive-N0.5-Flash: no full-attention layers, and a runtime built by AI"
+description: "A 309B-total, 15.5B-active open (MIT) MoE with native 1M context whose every attention layer is either a 128-token sliding window or a top-2,048 DeepSeek Sparse Attention layer — not one does dense global attention, which is the whole reason a million-token context is affordable. The lab says AI designed the hybrid architecture, found and fixed its numerical-stability bugs, and wrote NaiveRT, the runtime that decodes it at a reported 2,122 tokens a second. Here is what the config and the modeling code actually say, and what has to be taken on the lab's word."
+date: 2026-10-02
+tags:
+  - explainer
+  - llm
+  - mixture-of-experts
+  - attention
+  - long-context
+  - open-weights
+  - inference-optimization
+  - speculative-decoding
+draft: false
+---
+
+import { AllSparseStack } from "@/components/articles/naive-n05-flash/all-sparse-stack"
+
+The headline on [NaiveAI's release](https://naive.ai/en/research/) is a sentence most labs would not write: *"AI explored and designed its hybrid attention architecture while optimizing its training, inference, and deployment systems. Human researchers provided guidance and made key decisions."* That is a claim about a workflow, not a result you can download, and I will come back to how much of it is checkable. The parts that **are** checkable are unusually clean, because the weights, the config, and the modeling code shipped open under the MIT license on day one.
+
+There is no arXiv paper — the only writeup is the tech blog, which is thorough but is a blog. So this article grounds everything it can against two files you can read yourself without downloading 617 GB of weights: [`config.json`](https://huggingface.co/NaiveAI/Naive-N0.5-Flash/raw/main/config.json) and `modeling_naive_n05_flash.py` in the [Hugging Face repo](https://huggingface.co/NaiveAI/Naive-N0.5-Flash). Where a number comes from there, I label it **measured**. Where it is the lab's figure that I did not re-run, **reported**. Where it is my arithmetic on those, **reasoned**.
+
+| Property | Value | Source |
+|---|---|---|
+| Total parameters | 309B (308.9B measured) | safetensors sum, config |
+| Active per token | 15.5B | reported (my arithmetic lands near 15B) |
+| Layers | 48 | `num_hidden_layers` |
+| Attention composition | 39 SWA + 9 DSA, **no full attention** | `hybrid_layer_pattern` |
+| SWA window | 128 tokens | `sliding_window` |
+| DSA selection | top 2,048 keys | `index_top_k` |
+| Indexer | 16 heads, 1 KV head, fp8_e4m3 | `index_n_heads`, `indexer_activation_dtype` |
+| Attention heads | 64 Q, head dim 192, v dim 128 | `num_attention_heads`, `head_dim` |
+| KV groups | DSA GQA4, SWA GQA8 | `num_key_value_heads`, `swa_num_key_value_heads` |
+| Experts | 256 routed, top-8, no shared | `n_routed_experts`, `num_experts_per_tok` |
+| Context | native 1,048,576 | `max_position_embeddings` |
+| Base model | Xiaomi MiMo-V2.5 | reported |
+| License | MIT | `LICENSE` |
+
+<ModelCard repo="NaiveAI/Naive-N0.5-Flash" />
+
+## What "no full-attention layers" means
+
+A standard transformer layer does dense attention: every query reads every key in the context. That is the O(N²) bill, and at a million tokens it is ruinous — each new token, on each dense layer, has to look at a million cached keys. The usual fix is a hybrid: make most layers cheap and local, keep a few dense "global" layers to carry long-range information. That is exactly what Naive's base model, [MiMo-V2-Flash](/articles/mimo-v2-flash), does — eight blocks of five sliding-window layers and one global layer, a 5:1 ratio with a provocatively small 128-token window.
+
+Naive-N0.5-Flash keeps that skeleton and removes the one expensive part. The `hybrid_layer_pattern` in the config is a 48-entry list of ones and zeros. A `1` is a Sliding-Window Attention layer; a `0` is a DeepSeek Sparse Attention layer. There is no `2`. Counting the list: **39 ones and 9 zeros** (measured). The zeros sit at layers 0, 5, 11, 17, 23, 29, 35, 41, 47 — the blog describes it as "eight six-layer modules... five SWA layers followed by one DSA layer, with the first layer of the first module also replaced by DSA," which is precisely that pattern. Every single layer is either a 128-window local attention or a top-2,048 sparse attention. None does dense global attention.
+
+The modeling code confirms the branch directly. In `NaiveN05FlashAttention.__init__`, `self.is_swa = bool(config.hybrid_layer_pattern[layer_idx])`, and the forward pass has exactly two paths: the SWA path masks everything outside `query_offset - key_offset < sliding_window`, and the DSA path runs an indexer, takes `scores.argsort(...)[..., :index_top_k]`, and attends to only those keys. There is no third path, and no layer reads the full key set.
+
+Why that matters is arithmetic you can do yourself. The decode cost that scales is the number of cached keys a token reads per layer. SWA reads at most 128; DSA reads at most 2,048; a dense layer reads all of them. Slide the context up and watch where the cost goes:
+
+<AllSparseStack />
+
+At a 1M context the all-sparse stack reads **23,424** backbone keys per token per step (39 × 128 + 9 × 2,048, reasoned) — and that number stops growing above 2,048. The same stack with its 9 sparse layers replaced by dense global attention would read **9,442,176** (39 × 128 + 9 × 1,048,576, reasoned): about **403× more**, and climbing linearly forever. Removing dense attention is not a tuning knob here. It is the thing that makes the million-token context a fixed per-token cost instead of a runaway one.
+
+There is an honest asterisk, and it is the same one the [Qwen3.8-Flash-Next](/articles/qwen3-8-flash-next) team put on their own sparse layers: *the selector is the cost.* DSA's backbone attention is flat, but the indexer that chooses the 2,048 keys still scores the query against the entire history — an O(L) term. It is cheap (16 heads, a single KV head, fp8 activations) but not zero. So the expensive attention matmul is flat; the model is only *near*-linear, in that one cheap scan. NaiveAI's own framing is that the indexer's 16 heads "reduce index-selection wall time by 44% relative to the original DSA implementation" (reported) — a direct admission that the scan was worth optimising, because it is what is left.
+
+## Inside a DSA layer: the lightning indexer
+
+<Figure
+  src="/articles/naive-n05-flash/fig1.png"
+  alt="Two-panel architecture figure. Panel A, the network stack: tokens to embedding, then a typical hybrid group labeled SWA:DSA = 5:1 with five SWA blocks (local attention plus FFN) and one DSA block (sparse attention plus FFN), repeated, then a final RMSNorm and LM head. Panel B expands a DSA attention module: a hidden state is RMSNormed and splits into a sparse-attention path (Q/K/V projections, RoPE, a full-history K/V cache) and a lightning indexer path (16 index Q heads, a 1-head index K, LayerNorm, partial RoPE, FP8 quantization, an index sweep over all visible keys) that selects the top-2,048 positions; the main heads then gather and attend to only those selected K/V, scale and softmax, and an output projection writes back to the residual."
+  caption="The hybrid stack and one DSA module. The lightning indexer (yellow) scores every visible key with 16 fp8 heads to pick the top 2,048; the main heads (grey) attend to only those, while the full K/V cache is still retained (Naive-N0.5-Flash blog, Figure 1)."
+/>
+
+DeepSeek Sparse Attention splits one attention layer into two jobs. A **lightning indexer** decides *which* keys are worth reading; the **main heads** then do ordinary attention over just that subset. Reading `NaiveN05FlashIndexer.forward` (measured from the code): the indexer projects the hidden state to 16 query heads of dimension 128 and a single shared key head, normalises the key, applies RoPE, rounds both to `fp8_e4m3`, and computes `relu(q @ kᵀ)`. Those per-head scores are combined by a learned weight projection into one score per key. The main attention then selects the top 2,048 of those scores and masks out everything else before the softmax.
+
+Three things fall out of reading the code rather than the marketing. First, the full K/V cache is **retained** — sparse attention saves compute and memory bandwidth, not cache storage; every key the indexer scanned is still in memory. That is the problem [SparDA](/articles/sparda) attacks from a different angle. Second, Naive uses grouped-query attention, not the MLA that DeepSeek's original DSA was built on: `num_key_value_heads` is 4 for the DSA layers (GQA4) and 8 for the SWA layers (GQA8), the same head counts MiMo-V2-Flash uses. Third, there is a small discrepancy worth flagging in the spirit of checking receipts: the blog says "both attention types incorporate sink bias," but the config ships `add_swa_attention_sink_bias: true` and `add_full_attention_sink_bias: false`, and the code gives a sink column to SWA layers only. On the shipped weights, the DSA layers have no attention sink. A minor point, but it is the kind of thing that only turns up if you read the config.
+
+The rest of the attention block is MiMo's, inherited rather than invented: partial RoPE on a third of each head (`partial_rotary_factor: 0.334`), a longer rope base on the sparse layers (10,000,000 vs 10,000 on the windows), and a value scale of 0.707. The MoE is DeepSeek-V3-style — 256 routed experts, top-8, no shared expert, sigmoid routing with the aux-loss-free bias correction — and only layer 0 runs a dense FFN. This is a model assembled from known, open parts. The novelty is the swap: global attention out, DSA in, on a base that was already aggressively local.
+
+Teaching MiMo to use sparse attention is not free, and the training recipe is where the 1M context is actually earned. Per the blog, Naive-N0.5-Flash does 3.25T tokens of multi-stage continued training, all at a native 1M-token context (reported): 50B tokens of **indexer warmup** (only the DSA indexer trains, aligned to a full-attention reference by a KL objective, everything else frozen), then 3T tokens of **sparse-attention continued pretraining** to adapt the backbone to reading only the selected keys, then 200B tokens of learning-rate decay and supervised fine-tuning. Training at the full context from the start, rather than extending a short-context model afterward, is the part that makes "native 1M" more than a config value.
+
+## The runtime is the actual claim
+
+The architecture is interesting; the runtime is where NaiveAI is staking something. **NaiveRT** is an inference engine optimised for single-stream decode speed, and its headline is a reported **2,122 tokens per second** on 8 GPUs, single-stream, with bitwise-deterministic sampling. For a frontier-scale model that is a startling number — DeepSeek-class models decode at tens of tokens per second single-stream — and the blog is specific about where it comes from.
+
+The core idea is **mega-kernel fusion**. A single DSA layer, in the SGLang configuration NaiveAI profiled, took **29 kernel executions** per GPU per decoding step — Q/K/V projections, RoPE, KV-cache writes, the indexer GEMM, top-k selection, the sparse gather, the attention, the output projection — each a separate GPU launch with its own overhead and memory round-trip. NaiveRT collapses that DSA layer into **1 cooperative mega-kernel** running across 148 CTAs in one grid (reported). The MoE router, up/gate and down projections stay separate; the fusion is selective, aimed at the launch-bound attention path. Chaining the remaining dependent kernels uses Programmatic Dependent Launch (PDL), NVIDIA's mechanism for letting one kernel start before its predecessor fully drains.
+
+On top of that sits **DFlash**, a fused speculative-decoding draft model. The reported result: a full speculative round — draft, verify, sample, commit — drops from **12.3 ms** under SGLang to **3.4 ms** on the same system, a **72.4%** reduction (reported). In NaiveRT's two serving modes that is the difference between Standard mode at 50 tokens/s per user and Ultrafast mode at up to 2,000. The speculative-decoding lineage here is the same predict-several-verify-in-one-pass idea that [DeepSeek DSpark](/articles/deepseek-dspark) pushes on, and the single-kernel-per-layer ambition rhymes with the [Kimi K3 TPU megakernel](/articles/kimi-k3-tpu-megakernel) work — NaiveRT is the CUDA-side version of the same bet, that at low batch size the enemy is kernel-launch and memory-traffic overhead, not FLOPs.
+
+One caveat on availability. As of this writing (2 October 2026) the blog states the source code, Docker Compose and the runtime "will be available by Oct, 12th." The model's own `configuration_*.py` and `modeling_*.py` are already public on Hugging Face and are what I read for the architecture above. The NaiveRT runtime repository I could not inspect from here, so every NaiveRT number — 2,122 tok/s, the 29→1 kernel collapse, the 3.4 ms round — is **reported**, taken from the blog, not reproduced or read from code. When the runtime lands, those are the claims to check first.
+
+## How much of this did AI actually build?
+
+Now the sentence I opened with. The precise claim, quoted verbatim, is: *"AI explored and designed its hybrid attention architecture while optimizing its training, inference, and deployment systems. Human researchers provided guidance and made key decisions."* The blog is more concrete about the runtime: NaiveRT "was built in six days by human researchers working with AI models, across 151 documented optimization trials" — of which, per the writeup, 63 produced changes that were adopted, 71 failed or were rolled back, and 17 were exploratory. On the architecture side, the lab says AI models analysed top-k recall for the indexer's selections against a full-attention reference, "identified and fixed numerical-stability issues in indexer top-k selection and independently verified the fixes," and "uncovered precision issues in positional encoding and potential out-of-bounds sequence indexing."
+
+Read soberly, this is a description of a workflow, and it is not independently verifiable from the artifact. I can confirm the model exists, that its architecture is coherent and matches a design an expert might reach, and that the numerical details (fp8 indexer, stable-tie argsort, the sink-bias handling) read like someone — or something — chased real bugs. What I cannot confirm is the division of labour: which decisions were the model's and which were the humans'. The 151-trial ledger, the "six days," the bug-fix attributions are all the lab's account of its own process. Nothing in `config.json` tells you who chose `index_top_k = 2048`.
+
+So the fair framing is the one NaiveAI itself uses when it is being careful: humans set direction and made key decisions; AI did a large share of the exploration, implementation, profiling and verification. That is a plausible and interesting account of a 2026 research loop, and it is consistent with the kind of grinding ablation work — 151 trials, most of them failures — that AI agents are genuinely good at. It is a claim about how the work was done, offered in good faith, and it should be read as reported, not proven. The companion model this batch also covers, iQuest-Q1, makes a similar "designed by AI" argument; treat both the same way — as process claims whose honesty is the interesting part, not as a benchmark.
+
+## The benchmarks, and who they're against
+
+<Figure
+  src="/articles/naive-n05-flash/fig2.png"
+  alt="Coding benchmark panel. Seven grouped bar charts — DeepSWE v1.1, Agents' Last Exam (ALE-CLI), Terminal-Bench 2.1, SWE-bench Pro, ProgramBench, NL2Repo-Bench and FrontierSWE v1 — with Naive-N0.5-Flash in orange against open models under 600B, open models 600B and over, and closed/undisclosed models. Naive tops NL2Repo-Bench at 71.9 and is mid-pack elsewhere, below several much larger and closed frontier systems."
+  caption="Self-reported coding results. Naive-N0.5-Flash (orange, 15.5B active) leads NL2Repo-Bench and is competitive elsewhere against models up to and beyond 600B and closed frontier systems (Naive-N0.5-Flash blog, coding benchmarks)."
+/>
+
+All of these are self-reported, run by NaiveAI in a fixed harness: Claude Code 2.1.207 with a 1M-token context window, temperature 1.0, top-p 0.95, exposing only basic file I/O and Bash tools. On coding and agentic tasks it reports DeepSWE v1.1 **67.8**, Terminal-Bench 2.1 **86.7**, SWE-bench Pro **73.6**, NL2Repo-Bench **71.9**, FrontierSWE v1 **78.2**, ALE-CLI **32.4** and ProgramBench **17.5** (all reported). The honest reading of the figure is that this is a **competitive** model, not a dominant one: it tops the chart on NL2Repo-Bench (natural-language-to-repository generation) but sits mid-pack on DeepSWE and Terminal-Bench, below several larger open models and closed frontier systems like the Opus-5 and GPT-6 entries. For a model activating 15.5B parameters against competitors in the hundreds of billions, "mid-pack on the frontier board" is the claim, and the figure supports it without overselling.
+
+<Figure
+  src="/articles/naive-n05-flash/fig3.png"
+  alt="AI R&D benchmark panel with six charts: PostTrainBench, MLE-bench-30, PaperBench, SOL-ExecBench, NanoChat AutoResearch and NanoGPT SpeedRun, Naive-N0.5-Flash in orange against closed and open frontier models, with per-chart metric directions indicated."
+  caption="Self-reported AI-R&D results: MLE-bench-30 at 73.7% and a NanoGPT SpeedRun of 73.8 seconds among them. These are the tasks closest to the 'AI building AI' pitch, and also the hardest to compare across labs (Naive-N0.5-Flash blog, AI R&D benchmarks)."
+/>
+
+The AI-R&D panel is the one the "frontier AI built by AI" pitch rests on — MLE-bench-30 at **73.7%** and a NanoGPT SpeedRun of **73.8 seconds** are the two most legible entries (reported). These are also the benchmarks where cross-lab comparison is weakest, because harnesses and scoring protocols vary, so I would read them as evidence the model is a capable research assistant rather than as a settled ranking.
+
+## The take
+
+Strip away the framing and Naive-N0.5-Flash is a precise, well-motivated architecture move: take MiMo-V2.5's cheap local backbone, replace its one expensive global layer per block with DeepSeek Sparse Attention, and the million-token context goes from a runaway per-token cost to a fixed one — 23,424 backbone key-reads at 1M instead of nine-and-a-half million, flat above 2,048. That part is in the config and the code, and it is the kind of systems thinking that spends compute where it matters, the same instinct behind [GLM-5.3-Flash](/articles/glm-5-3-flash)'s "only eleven layers keep a cache" and the broader [field guide to attention](/articles/attention-mechanisms)'s two-bills framing.
+
+The runtime is a bigger, later-to-verify claim: 2,122 tokens a second from collapsing a 29-kernel DSA layer into one, with a code drop promised for Oct 12. And the "built by AI" story is the most interesting and the least checkable — a candid account of a research loop, strongest exactly where it is most honest about the 71 trials that failed. It is worth taking at face value as a description, and worth remembering it is a description. The weights are MIT, the config is readable, and the one thing you do not have to take on faith is the architecture — which is, satisfyingly, the part that holds up.
+
+---
+
+*Grounded in the [Naive-N0.5-Flash tech blog](https://naive.ai/en/research/) (NaiveAI, 2026-09-27, no arXiv paper), the open-weight [Hugging Face release](https://huggingface.co/NaiveAI/Naive-N0.5-Flash) (MIT) and its `config.json` and `modeling_naive_n05_flash.py`, read directly. Architecture facts are measured from those files; NaiveRT performance figures and benchmark scores are reported by NaiveAI and not independently reproduced here.*
