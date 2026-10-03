@@ -1,0 +1,117 @@
+---
+title: "OpenShell: give the agent a real shell, keep the boundary in the kernel"
+description: "NVIDIA open-sourced OpenShell (Apache-2.0, Rust): a sandbox that gives an AI agent real files, real network, and real credentials in play, but moves the boundary into the kernel. Landlock confines the filesystem, a seccomp user-notification filter hands every TCP open and DNS query to a trusted supervisor that checks a Rego policy and injects credentials the agent never sees, and a Z3 SMT prover gates policy changes with two checks: a boundary proof that a candidate stays inside a maximum policy, and a proposal-risk check that blocks auto-approval when a new rule would widen credentialed reach. I read the sandbox, supervisor and prover crates to see what the proof covers — filesystem, L4, REST, process, Landlock — and what it refuses to check — GraphQL, MCP. Paired against Cloudflare Computer, the state-first design that makes the filesystem itself a Durable Object."
+date: 2026-10-02
+interest: 5
+helpful: 5
+featured: true
+tags:
+  - explainer
+  - agents
+  - systems
+  - security
+  - open-source
+  - architecture
+---
+
+import { MediationTrace } from "@/components/articles/openshell/mediation-trace"
+import { ProverCoverage } from "@/components/articles/openshell/prover-coverage"
+
+An agent is most useful when it can do real work: read a repo, install a package, call an API with a real key. The moment you grant that, you have handed an untrusted text generator a shell on your machine. It can delete the wrong directory. It can read a private key it was never meant to touch. It can paste a token into a log and then POST that log somewhere. None of these require malice — a confused model and a plausible-looking command are enough.
+
+There are two honest ways to answer this, and two projects shipped in the same week that take opposite ones. NVIDIA open-sourced **OpenShell**, which puts the boundary in the kernel and takes the credentials out of the agent's hands. Cloudflare published **Computer**, a preview that makes the filesystem itself the durable state. One is security-first; the other is state-first. This is mostly about OpenShell — I read the code — with Computer as the contrast at the end.
+
+<RepoCard repo="NVIDIA/OpenShell" />
+
+OpenShell is Apache-2.0, written in Rust, and not small: the workspace is a few dozen crates covering the sandbox, a trusted supervisor, a policy engine, an SMT prover, and compute drivers for Docker, Podman, Kubernetes, and MicroVM. At the commit I read (`8719fc9`, 2026-10-02) the GitHub API reports 14,154 stars, 1,635 forks, and 525 open issues (measured). The star count is not the interesting number. The interesting numbers are where the boundary sits and what the prover will and will not prove.
+
+## The gap OpenShell is filling
+
+It helps to name the status quo. Most agent runtimes are explicit that they are not a security boundary. Prime Intellect's agent, which I wrote up in [Prime Agent](/articles/prime-agent), ships a persistent Python REPL as its one tool and says so plainly: its process isolation is "not a security sandbox." Against the *machine* — files, network, processes, credentials on disk — a REPL like that is unbounded, and a prompt cannot fix that, because the prompt is the thing you do not trust.
+
+Moonshot reached the same conclusion from the training side. In [Kimi K3](/articles/kimi-k3) the agentic-RL loop needed sandboxes close to a real machine — mount disks, run containers, launch VMs — and found that container isolation was not enough, so AgentENV runs each sandbox as a Firecracker microVM. The lesson both halves teach is the same: if the agent gets a real shell, the thing that says "no" has to live below the agent, where it cannot argue.
+
+OpenShell's answer is to put that "no" in two places the agent cannot reach: the Linux kernel, at runtime, and a formal proof, before a policy ever changes.
+
+## Where the boundary sits: Landlock and seccomp
+
+Each agent runs in a sandbox as **one non-root identity with no Linux capabilities** (measured — the launcher refuses a zero UID or GID in `boundary_server.rs`). On top of that, two kernel mechanisms do the enforcement, and it is worth being precise about which does what, because they are often blurred together.
+
+**Landlock** confines the filesystem. It is a Linux Security Module: you build a ruleset of path rules and call `restrict_self()`, and from then on the kernel refuses any file access outside the ruleset — for this process and its children, with no privilege required to drop the privilege. OpenShell uses the `landlock` crate (v0.4) and enforces in the child before `exec` (`crates/openshell-sandbox/src/sandbox/linux/landlock.rs`, measured). The consequence matters: a denied `open()` returns `EACCES` and no file descriptor is ever created. There is no wrapper to bypass. If `/root/.ssh` is not in the ruleset, the agent cannot read it even if it ignores every error.
+
+**seccomp** confines system calls. OpenShell uses the `seccompiler` crate (v0.5) to compile a default-allow BPF filter with targeted blocks (`seccomp.rs`, measured): `ptrace`, `mount`, `io_uring`, `kexec`, `userfaultfd`, module loading, fileless exec (`execveat` with `AT_EMPTY_PATH`), and `unshare(CLONE_NEWUSER)`. These are the privileged escape primitives a workload never legitimately needs. One block is worth calling out because the architecture leans on it: `bpf()` is denied. OpenShell's enforcement is **classic BPF inside a seccomp filter, not eBPF** — and the agent cannot load eBPF either. There is no eBPF program anywhere in the hot path. If you came expecting a kernel bytecode supervisor, that is not the design.
+
+<Callout type="note">
+Landlock answers "which files," seccomp answers "which syscalls." They are different kernel subsystems doing different jobs. The common shorthand "it's all eBPF" is wrong here: the filters are compiled cBPF, and `bpf()` is on the block list.
+</Callout>
+
+The part that ties the filesystem and syscall boundaries to the network is the clever bit. The workload has **no network egress at all** except one channel — each runtime builds that outer fence with its own tools (Docker and Podman turn the container's networking off; Kubernetes uses a `NetworkPolicy`; the MicroVM has no NIC). So how does the agent ever reach GitHub?
+
+## seccomp user notification: pause the syscall, don't fail it
+
+This is where OpenShell diverges from a plain filter. A seccomp filter can only *allow* or *fail* a syscall. OpenShell installs a filter that, for `connect()` and DNS, returns `SECCOMP_RET_USER_NOTIF` — it **pauses** the syscall and sends a notification to a listener held outside the workload (`SECCOMP_FILTER_FLAG_NEW_LISTENER`, in `crates/openshell-isolation-interface/src/linux/seccomp_notify.rs`, measured). An in-sandbox broker reads the notification, identifies the calling program from trusted `/proc` data (not from anything the agent claims), and forwards the request over an authenticated channel — the Sandbox Protocol — to a **trusted supervisor** on the other side of the boundary.
+
+The supervisor is the component that actually decides. It checks the request against a Rego policy evaluated by the `regorus` engine (v0.9, `openshell-supervisor-network/src/opa.rs`, measured), and only then opens the real connection itself and relays the bytes. The agent's `connect()` never reaches the network; it reaches a listener that may, on its behalf, dial out.
+
+<Figure src="/articles/openshell/fig2.png" alt="Flow diagram: the agent's TCP or DNS request goes to the OpenShell sandbox, which identifies the program and forwards it over the Sandbox Protocol (Unix socket, TCP, or vsock) to the trusted supervisor; the isolation backend verifies the boundary, policy enforcement checks destination, binary, L7 rules and credentials, and only then an approved connection reaches the upstream service. All other egress is denied." caption="The mediated path: the sandbox pauses the syscall and hands it to the trusted supervisor, which is the only allowed egress. (OpenShell docs)" />
+
+## The agent never holds the credentials
+
+Here is the move that makes the whole thing worth the complexity. When the supervisor approves a request to an endpoint that has a credential attached, it **injects** the credential — it adds an `Authorization` header before forwarding the request upstream (`l7/token_grant_injection.rs`: "injects an Authorization header before forwarding the request upstream," measured). A provider in OpenShell maps a service name to a stored secret, and the supervisor hands that secret out only where policy allows and only for the connection it is opening.
+
+The agent never sees the token. It is not in the environment, not on disk, not in a config file the agent can read. This collapses an entire bug class. The classic failure — a secret ends up in a log, the log gets shipped, the secret leaks — has no secret to catch, because the thing that holds the secret is the trusted supervisor, not the agent. `echo "$GITHUB_TOKEN"` prints an empty line.
+
+The interactive below walks the agent through a filesystem read, a blocked syscall, an approved call with injection, and a blocked call — showing which layer decides each one. Every mechanism and verdict is read from the source; the prose above carries the same points, so nothing here is load-bearing only in the widget.
+
+<MediationTrace />
+
+<Figure src="/articles/openshell/fig1.png" alt="System architecture: user interfaces (CLI, SDK, TUI) talk to the gateway control plane (API server, policy prover, durable state, compute driver). The OpenShell runtime data plane holds a trusted supervisor that governs the agent, and a network-isolated sandbox containing the untrusted agent, whose only egress is the mediated channel to the supervisor; the supervisor makes policy-approved egress to external services. A policy-lifecycle strip shows the agent proposing a change via policy.local, the gateway prover checking it, a human approving (or auto-approval when no new risk is found), and the supervisor reloading the policy." caption="The gateway runs the prover and holds durable state; the supervisor governs the agent and is the only egress; the policy lifecycle at the bottom is where the prover gates changes. (OpenShell docs)" />
+
+## The prover: proving a policy change before it applies
+
+Runtime enforcement answers "is this request allowed right now." A separate question is "is this *policy* safe to apply at all" — and OpenShell answers that with formal verification rather than a review checklist. The `openshell-prover` crate encodes a policy, the binaries' capabilities, and the credential scopes as Z3 SMT constraints (the `z3` crate, v0.21.0, measured) and asks the solver questions a human reviewer would get wrong. It runs two different checks, and a key caveat from the docs is that they answer different questions — passing one does not imply passing the other.
+
+**The boundary check** (`containment.rs`) verifies that a *candidate* policy allows no access beyond a *boundary* policy — the maximum access an environment permits. You run it from the CLI, and it is built for agents: a parent agent writing a policy for a subagent can prove the child stays inside the parent's own maximum before spawning it. That is the enforcement version of the delegation problem the [Jev swarms](/articles/jev-engineering-swarms) work runs into when one call fans out to ten. If the candidate exceeds the boundary, the prover does not return a score — it returns a concrete **counterexample**, a specific action the candidate allows that the boundary forbids:
+
+```text
+$ openshell-prover check candidate.yaml --boundary boundary.yaml
+result: exceeds_boundary
+coverage: domains=filesystem,network_l4,network_rest,process,landlock
+counterexample: filesystem write /tmp
+```
+
+**The proposal-risk check** (`queries.rs`) runs automatically every time an agent proposes a new network rule through the policy advisor. It runs four reachability queries over the merged policy — link-local reach (a path to a cloud-metadata address in `169.254.0.0/16` or `fe80::/10`), an L7-bypass binary gaining credentialed reach, a new credentialed host:port, and a new HTTP method on an already-credentialed target — and the gateway compares the findings against the current policy's. If the change introduces any **new** finding, auto-approval is blocked and a human reviews it; if it introduces none, it can auto-approve (`openshell-server/src/grpc/policy.rs`, measured). The policy-lifecycle strip at the bottom of the architecture diagram is exactly this loop.
+
+## What the proof does, and does not, guarantee
+
+This is the part to read slowly, because a proof invites more trust than it earns, and OpenShell is unusually honest about its own limits. A passing boundary check means the candidate allows nothing beyond the boundary **in the parts of the policy the prover models**. It does *not* mean the policy is as narrow as it could be, that it is safe for a given task, or that a running sandbox actually enforces it.
+
+And the model is deliberately narrow. The boundary check covers exactly five domains — filesystem, network L4, network REST, process identity, and Landlock settings (measured; this is the `DOMAINS` array in `containment.rs`). Anything else is not quietly ignored — it comes back `unsupported`, which you are told to treat as a failure. A policy with a GraphQL rule returns:
+
+```text
+result: unsupported
+coverage: domains=filesystem,network_l4,network_rest,process,landlock
+reason: candidate policy rule 'g' uses protocol 'graphql'; only L4 TCP and REST are modeled
+```
+
+MCP rules, JSON-RPC, WebSocket credential rewrites, credential signing, and network middleware return `unsupported` the same way. Within the modeled domains there are further holes it refuses to guess through: it compares filesystem paths one-to-one, so a candidate that writes `/tmp/cache` under a boundary that allows `/tmp` returns `unsupported`, not `within_boundary`, because a symlink in the sandbox image could make `/tmp/cache` point somewhere else. A UID change from `1500` to `1600` is `unsupported` because the prover cannot read the image's account database. It does not resolve hostnames. Policies past 1,024 network rules or 4,096 endpoints (measured, the limits in `containment.rs`) return `inconclusive` under a 10-second default timeout (reported).
+
+<ProverCoverage />
+
+The honesty is the feature. A prover that silently ignored the GraphQL rule and returned `within_boundary` would be worse than no prover, because it would launder a false sense of safety. OpenShell returns a result code you cannot mistake for a pass. The gap to watch, if you deploy this, is the one between what your policies actually use and what the five modeled domains cover — if your agents talk MCP, the prover is not checking that traffic's policy at all.
+
+## The contrast: Cloudflare Computer makes the filesystem the state
+
+Cloudflare's [Computer](https://github.com/cloudflare/computer) (MIT, commit `60d9002`, 2026-10-01, measured) starts from the other end. It is marked **preview only, APIs unstable, not for production** — I am describing the code, and its own docs say the written spec is forward-looking, so read this as a design sketch, not a shipped guarantee.
+
+The idea: a Workspace's authoritative state is **SQLite inside a Durable Object**. The filesystem is not a mount that happens to persist — it *is* the durable object, and execution backends plug into it through one entry point, `workspace.runtime.exec(source, { backend })`. Three backends ship (measured, from the README): a **container** whose `computerd` daemon FUSE-mounts the SQLite state as a real filesystem and syncs changes back over a capnweb RPC channel (full Linux userland, real binaries, real network); an **isolate shell** running `just-bash` in a Dynamic Worker that reaches the Workspace over Workers RPC with no second store; and an **isolate JavaScript** backend running an ES module with a Workspace-backed `node:fs/promises`. A single Workspace can register several backends under stable IDs and switch between them.
+
+The contrast is clean. OpenShell asks "where is the boundary, and who holds the keys," and answers in the kernel and a trusted proxy. Computer asks "where does the state live, and how do I plug execution into it," and answers in a Durable Object. Computer's container backend inherits whatever isolation the container platform gives it; the project is not making a kernel-mediation or credential-injection claim, and at preview maturity it should not be read as one. They are solving adjacent problems. If you want an agent workspace whose files survive, branch, and resume as first-class durable state, that is Computer's bet. If you want to hand an agent a shell and credentials without handing it your network or your secrets, that is OpenShell's.
+
+## What I would check before trusting it
+
+The design is coherent and the code backs the claims. The boundary is genuinely in the kernel: Landlock for files, a cBPF seccomp filter for syscalls, seccomp user-notification for network mediation, and no eBPF anywhere. Credentials genuinely leave the agent's reach. The prover genuinely runs Z3 and genuinely refuses to guess.
+
+The honest cautions are the ones OpenShell states itself. The prover models five domains; if your policies use GraphQL or MCP, those are `unsupported`, and the proposal-risk gate only reasons about the credentialed-reach categories it encodes. Kernel enforcement needs a kernel with Landlock enabled — the code probes for `CONFIG_SECURITY_LANDLOCK` and degrades or refuses when it is missing, so your runtime's kernel is part of your trust base. And a boundary proof is a statement about the policy, not about whether the running sandbox loaded it. None of this is a flaw in the design. It is the difference between a proof and a guarantee, and OpenShell draws that line in the right place — in the result codes, where you cannot miss it.
+
+That is the thing I would take from reading both repos. The hard part of giving an agent a real shell is not the shell. It is making the "no" live somewhere the agent cannot talk its way past, and then being precise about exactly how far that "no" reaches. OpenShell puts it in the kernel and in a proof, and tells you where the proof stops. (A companion piece this week covers DeepSeek's own agent sandbox; the two make an instructive pair on how differently the same boundary gets drawn.)

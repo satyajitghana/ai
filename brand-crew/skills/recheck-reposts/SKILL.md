@@ -30,7 +30,15 @@ The handle comes from `profile.links.x`.
 - expanded links
 - the quoted post
 - media types
-- **on the site** hints: pages that already mention its arXiv ids, Hugging Face or GitHub repos (**link** hits, strong), or distinctive names from the text (**name** hits, weak).
+- **on the site** hints: pages that already mention its arXiv ids, Hugging Face or GitHub repos (**link** hits, strong), or distinctive names from the text (**name** hits, weak);
+- its thread (below).
+
+**Threads.** Many posts keep the substance below the first post: "repo in the post below 👇", a 🧵 whose later posts carry the paper and the numbers, "情報元はリプ欄" (the source is in the replies). So for every new post the scan also reads its thread and the first page of replies, and prints:
+- `thread ↳` each continuation post by the author, with its links;
+- `author reply ↳` the author's replies that carry a link;
+- `replies link:` paper and repo links (arXiv, GitHub, Hugging Face, `*.github.io`, OpenReview, ModelScope) that other people replied with. These are leads, not sources: confirm one belongs to the post before using it.
+
+Thread links count toward the coverage hints. Read the thread before deciding a post has no source. `--no-threads` skips it (about a minute faster for a hundred posts).
 
 **Paging.** The API returns newest-repost first, but `created_at` is when the *original* was posted, so there is no date cutoff. Paging stops at the first page whose every post is already in the ledger.
 
@@ -44,7 +52,7 @@ For each post, find the **primary source** before deciding anything:
 - the model card (`https://huggingface.co/api/models?author=<org>` lists what exists);
 - or the report.
 
-Where to look when the post doesn't link it:
+Where to look when the post doesn't link it (after its thread, which the scan already printed):
 - Posts in Japanese, Chinese or Korean often say the source is in the replies ("情報元はリプ欄"). **WebSearch** the title plus the author names.
 - An `x.com/i/article/…` link cannot be read; search for the topic instead.
 
