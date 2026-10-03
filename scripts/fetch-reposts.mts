@@ -12,6 +12,7 @@
 //                                     page that is entirely in the ledger)
 //   pnpm reposts --pages=8 --all      ignore the ledger; read 8 pages
 //   pnpm reposts --json               machine-readable
+//   pnpm reposts --no-threads         skip reading each post's thread (faster)
 //   pnpm reposts record --status=article --slug=trackeverything 2104004642158051563
 //   pnpm reposts record --status=skip --note="meme" 2102822762662228398 …
 //                                     (author, url and date come from the last scan)
@@ -19,6 +20,14 @@
 // Statuses: article (a new article; --slug), update (an existing article gained a
 // section or note; --slug), covered (the site already had it; --slug), skip (no
 // article; --note says why), triaged (decided before this ledger existed).
+//
+// Many posts keep their substance in the thread: "repo in the post below 👇",
+// "情報元はリプ欄" (the source is in the replies), a 🧵 whose second post has the
+// paper. So for every new post this also reads its thread (the author's own
+// continuation posts) and the first page of replies, and prints the
+// continuation text and links, the author's replies that carry a link, and
+// paper or repo links other people replied with. Thread links count toward the
+// coverage hints like the post's own.
 //
 // The API returns reposts newest-repost first, but `created_at` is when the
 // original was posted, not when it was reposted, so there is no date cutoff:
@@ -35,7 +44,9 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..")
 const LEDGER = join(ROOT, "data", "reposts-ledger.json")
 // the last scan, so `record` can fill in each post's author, url and date
 const LAST = join(tmpdir(), "reposts-last-scan.json")
-const API = "https://api.fxtwitter.com/2/profile"
+const BASE = "https://api.fxtwitter.com/2"
+const API = `${BASE}/profile`
+const UA = { "User-Agent": "Mozilla/5.0 (ai.thesatyajit.com recheck-reposts)" }
 const STATUSES = ["article", "update", "covered", "skip", "triaged"] as const
 type Status = (typeof STATUSES)[number]
 
@@ -96,7 +107,7 @@ async function page(h: string, cursor?: string): Promise<{ results: Post[]; next
   const url = `${API}/${h}/statuses${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (ai.thesatyajit.com recheck-reposts)" } })
+      const res = await fetch(url, { headers: UA })
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       const d = (await res.json()) as { results?: Post[]; cursor?: { bottom?: string } }
       return { results: d.results ?? [], next: d.cursor?.bottom }
@@ -122,6 +133,44 @@ function links(p: Post): string[] {
   return [...out]
 }
 
+// A post's thread: the author's continuation posts (/2/thread), and from the
+// first page of replies (/2/conversation) the author's replies with a link and
+// any paper or repo link someone else replied with. Best-effort: a failure
+// returns nothing rather than failing the scan.
+type Thread = { more: { text: string; links: string[] }[]; replies: { text: string; links: string[] }[]; others: string[] }
+const PRIMARY = /^https?:\/\/([\w-]+\.)?(arxiv\.org|github\.com|huggingface\.co|openreview\.net|[\w-]+\.github\.io|modelscope\.(cn|ai))\//
+
+async function getJson(url: string): Promise<Record<string, unknown> | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, { headers: UA, signal: AbortSignal.timeout(20_000) })
+      if (res.ok) return (await res.json()) as Record<string, unknown>
+      if (res.status === 404) return null
+    } catch {}
+    await new Promise((r) => setTimeout(r, 1500))
+  }
+  return null
+}
+
+async function thread(p: Post): Promise<Thread> {
+  const author = p.author?.screen_name
+  const [t, c] = await Promise.all([getJson(`${BASE}/thread/${p.id}`), getJson(`${BASE}/conversation/${p.id}`)])
+  const text = (q: Post) => (q.raw_text?.text ?? q.text ?? "").replace(/https:\/\/t\.co\/\w+/g, "").trim()
+  const more = ((t?.thread as Post[] | undefined) ?? [])
+    .filter((q) => q.id !== p.id && q.author?.screen_name === author)
+    .map((q) => ({ text: text(q), links: links(q) }))
+  const seen = new Set(more.flatMap((m) => m.links))
+  const replies: Thread["replies"] = []
+  const others = new Set<string>()
+  for (const q of (c?.replies as Post[] | undefined) ?? []) {
+    const ls = links(q).filter((u) => !seen.has(u))
+    if (!ls.length) continue
+    if (q.author?.screen_name === author) replies.push({ text: text(q), links: ls })
+    else for (const u of ls) if (PRIMARY.test(u)) others.add(u)
+  }
+  return { more, replies: replies.slice(0, 6), others: [...others].slice(0, 6) }
+}
+
 // content index: every MDX body once, lower-cased, for coverage hints
 let INDEX: { path: string; text: string }[] | null = null
 function index() {
@@ -145,9 +194,9 @@ function index() {
 // uses on more than COMMON pages (WebGPU, OpenAI) says nothing about this post.
 const COMMON = 12
 const GENERIC = new Set(["neurips", "iclr", "icml", "cvpr", "iccv", "eccv", "acl", "emnlp", "webgpu", "openai", "github", "huggingface", "arxiv"])
-function keys(p: Post): { key: string; strong: boolean }[] {
+function keys(p: Post, extra: string[] = []): { key: string; strong: boolean }[] {
   const k = new Map<string, boolean>()
-  const all = [...links(p), ...(p.quote ? links(p.quote) : [])]
+  const all = [...links(p), ...(p.quote ? links(p.quote) : []), ...extra]
   for (const u of all) {
     const ax = /arxiv\.org\/(?:abs|pdf|html)\/(\d{4}\.\d{4,5})/.exec(u)
     if (ax) k.set(ax[1], true)
@@ -165,12 +214,12 @@ function keys(p: Post): { key: string; strong: boolean }[] {
   return [...k].map(([key, strong]) => ({ key, strong })).slice(0, 16)
 }
 
-function coverage(p: Post): { key: string; strong: boolean; pages: string[] }[] {
+function coverage(p: Post, extra: string[] = []): { key: string; strong: boolean; pages: string[] }[] {
   const idx = index()
   const hits: { key: string; strong: boolean; pages: string[] }[] = []
   const direct = idx.filter((f) => f.text.includes(`status/${p.id}`)).map((f) => f.path)
   if (direct.length) hits.push({ key: `this post (${p.id})`, strong: true, pages: direct })
-  for (const { key, strong } of keys(p)) {
+  for (const { key, strong } of keys(p, extra)) {
     const pages = idx.filter((f) => f.text.includes(key.toLowerCase())).map((f) => f.path)
     if (!pages.length || (!strong && pages.length > COMMON)) continue
     hits.push({ key, strong, pages: pages.slice(0, 6) })
@@ -178,7 +227,8 @@ function coverage(p: Post): { key: string; strong: boolean; pages: string[] }[] 
   return hits.sort((a, b) => Number(b.strong) - Number(a.strong))
 }
 
-function summary(p: Post) {
+function summary(p: Post, th?: Thread) {
+  const extra = th ? [...th.more.flatMap((m) => m.links), ...th.replies.flatMap((r) => r.links), ...th.others] : []
   return {
     id: p.id,
     url: p.url,
@@ -191,7 +241,8 @@ function summary(p: Post) {
     quote: p.quote
       ? { author: `@${p.quote.author?.screen_name ?? "?"}`, url: p.quote.url, text: p.quote.raw_text?.text ?? p.quote.text ?? "", links: links(p.quote) }
       : null,
-    coverage: coverage(p),
+    thread: th ?? null,
+    coverage: coverage(p, extra),
   }
 }
 
@@ -213,7 +264,15 @@ async function scan() {
     if (!next) { pages++; break }
     cursor = next
   }
-  const out = fresh.map(summary)
+  // read every new post's thread, four at a time
+  const threads = new Map<string, Thread>()
+  if (opt["no-threads"] !== "true") {
+    const queue = [...fresh]
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      for (let p = queue.shift(); p; p = queue.shift()) threads.set(p.id, await thread(p))
+    }))
+  }
+  const out = fresh.map((p) => summary(p, threads.get(p.id)))
   writeFileSync(LAST, JSON.stringify({ handle: h, posts: out }))
   if (opt.json === "true") {
     process.stdout.write(JSON.stringify({ handle: h, pages, count: out.length, posts: out }, null, 2) + "\n")
@@ -228,6 +287,12 @@ async function scan() {
     if (s.links.length) console.log(`   links: ${s.links.join("  ")}`)
     if (s.quote?.links.length) console.log(`   quote links: ${s.quote.links.join("  ")}`)
     if (s.media.length) console.log(`   media: ${s.media.join(", ")}`)
+    for (const m of s.thread?.more ?? []) {
+      console.log(`   thread ↳ ${m.text.replace(/\s+/g, " ").slice(0, 400)}`)
+      if (m.links.length) console.log(`     thread links: ${m.links.join("  ")}`)
+    }
+    for (const r of s.thread?.replies ?? []) console.log(`   author reply ↳ ${r.text.replace(/\s+/g, " ").slice(0, 200)}  [${r.links.join("  ")}]`)
+    if (s.thread?.others.length) console.log(`   replies link: ${s.thread.others.join("  ")}`)
     if (!s.coverage.length) console.log("   on the site: nothing found")
     for (const c of s.coverage) console.log(`   on the site ${c.strong ? "(link)" : "(name)"}: ${c.key} → ${c.pages.join(", ")}`)
     console.log()

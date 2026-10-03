@@ -1,0 +1,140 @@
+---
+title: "KVzip: compress the KV cache once, by scoring it with the model's own reread"
+description: "The KV cache dominates long-context memory and attention latency, and most eviction methods score it against the current query — so a cache compressed for one question is wrong for the next. KVzip (NeurIPS'25 oral) scores query-agnostically: it makes the model reconstruct the context from the cache and keeps whichever KV pairs that pass attended to, reported at 3-4x smaller cache and ~2x faster FlashAttention decode with negligible loss up to 170K tokens on LLaMA3.1, Qwen2.5 and Gemma3. Its complement, Attention Matching, throws the real pairs away entirely and synthesizes a smaller cache that reproduces the attention output in closed form, up to 50x in seconds. I read both papers and KVzip's MIT code; an applied blog scaling them to GLM-5.3's shared-latent sparse attention is the self-reported data point, not the spine."
+date: 2026-10-02
+interest: 5
+helpful: 4
+featured: true
+tags:
+  - kv-cache
+  - inference-optimization
+  - long-context
+  - attention
+  - llm
+  - open-source
+  - explainer
+draft: false
+---
+
+import { KVEvictToy } from "@/components/articles/kvzip-kv-compression/kv-evict-toy"
+import { ReconBars } from "@/components/articles/kvzip-kv-compression/recon-bars"
+
+This site has written about almost every lever on inference cost — [quantization down to 1.5 bits](/articles/runtime-dynamic-compression), [GPTQ in one fused loop](/articles/llm-compressor-0-14), [NVFP4 through Model Optimizer](/articles/nvidia-model-optimizer), [linear and sparse attention](/articles/glm-5-3-flash), [caching the value and rebuilding the key](/articles/grouped-value-attention) — and said almost nothing about the one structure that quietly decides what long context costs: the KV cache. This fills that gap.
+
+The surfacing hook was a blog from RampLabs that took two KV-compression methods to a 320B sparse-attention frontier model and reported an 80% smaller cache. That is the applied data point at the end. The spine is the two papers underneath it, both with open code, both of which I read: **KVzip** ([arXiv 2505.23416](https://arxiv.org/abs/2505.23416), NeurIPS'25 oral, [MIT](https://github.com/snu-mllab/KVzip)) and **Fast KV Compaction via Attention Matching** ([arXiv 2602.16284](https://arxiv.org/abs/2602.16284), MIT). They attack the same cost from opposite ends.
+
+## What the KV cache is, and why it runs the bill
+
+A decoder-only transformer caches, for every token it has already seen, the key and value vectors of every attention layer, so that generating the next token is one attention step over the cache instead of a re-read of the whole prompt. That is the trick that makes autoregressive decoding affordable. The cache is the receipt. For the mechanics of MHA, MQA, GQA and MLA byte by byte, the [KV cache architecture note](/architectures/attention-kv) is the long version; the [field guide to attention](/articles/attention-mechanisms) and [how self-attention works](/articles/how-transformers-attention-works) sit under it.
+
+The receipt grows linearly with context, and at long context it is the budget. The KVzip paper's own example: caching 120K tokens in Qwen2.5-14B at FP16 takes roughly 33 GB, more than the model's own 28 GB of parameters at the same precision (reported). And the cache is read in full on every decoded token, so it sets attention latency as much as attention memory. Shrinking it buys both.
+
+The lazy way to shrink it is to drop tokens. The question every method answers differently is *which* tokens — and, the part that turns out to matter most, *scored against what*.
+
+## Query-aware eviction, and why a reused cache goes wrong
+
+The established eviction methods — H2O, SnapKV, PyramidKV — score each KV pair by how much the *current query* attends to it, then keep the top fraction. That is **query-aware** scoring, and in a single-shot setting it works: the tokens the question looks at are the tokens the answer needs.
+
+It breaks the moment you want to reuse the cache. Compress a long document's cache for the first question and you have kept the pairs that question attended to. Ask a second, unrelated question of the same document and those pairs are the wrong ones — the cache overfit the first query. The KVzip paper measures exactly this: SnapKV is strong when it re-runs prefill and compression per query, and falls off a cliff when its first-query cache is reused for later ones (reported, their Figure 2). The abstract's sharp version: query-aware methods "suffer from performance degradation even at a 90% cache budget ratio under multi-query scenarios" — a 10% eviction is enough to hurt (reported).
+
+**Query-agnostic** eviction is the fix: score once, in a way that does not depend on any particular future query, so the compressed cache serves all of them. Then a long context is compressed a single time and reused across an entire conversation. The toy below is the whole argument. Compress the cache, pick which query you are asking, and watch what survives.
+
+<KVEvictToy />
+
+In query-aware mode the budget is spent on Q1; ask Q2 or Q3 and the tokens they need light up red, evicted because the first query never looked at them. In query-agnostic mode the same budget keeps the backbone every query draws on. The percentages are the toy's, not the paper's — but the shape is the result, and it is why "compress once, reuse" needs a query-independent score.
+
+## KVzip's score: make the model reread the context
+
+So what is a good query-independent importance score? KVzip's answer is almost cheeky: ask the model to reconstruct the context from the cache, and keep whatever it attended to while doing so. The intuition is that a KV pair you cannot reproduce the context without is a pair some future query will probably need — and one that gets no attention during a full reconstruction is dead weight.
+
+Concretely, after the normal prefill, KVzip runs one more forward pass over the cached context with a reconstruction instruction prepended. Its code states the prompt literally:
+
+```python
+# model/wrapper.py — the reconstruction "query" is query-independent
+prompt = "\n\nRepeat the previous context exactly."
+# later chunks: "...starting with <last 8 tokens of the previous chunk>"
+# the context tokens are then re-fed so the model attends back to the cache
+input_ids.append((a_ids, torch.cat([q_ids, self.postfix_ids, a_ids], dim=1)))
+```
+
+During that pass, each cached KV pair receives some attention from each reconstruction position. Its importance is the **maximum** attention it gets, across every query position and every grouped-query head that shares it. In the repository's scorer that is one line:
+
+```python
+# attention/score.py — softmax over keys, then max over the GQA group and queries
+attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+score = attn_weights[..., self.sink:self.sink + ctx_len].amax(dim=(-3, -2))
+```
+
+Writing $a_{j,i}$ for the attention the $j$-th reconstruction position places on cached pair $i$ after the softmax, the score is
+
+$$
+s_i = \max_{j}\ \max_{g \in \text{group}(i)}\ a^{(g)}_{j,i}.
+$$
+
+Max, not sum: a pair that is decisive for even one reconstruction position is worth keeping. The sink tokens — the system prompt — are held out and never evicted, matching the paper. Then eviction is a global top-$r$% over all layers and heads, with a non-uniform budget per head (KVzip adapts AdaKV's variable-length FlashAttention kernel for this), so a head that needs more pairs gets them.
+
+<Figure
+  src="/articles/kvzip-kv-compression/fig1.png"
+  alt="A left-to-right pipeline. Context feeds the language model f_LM on Prefill, producing a KV cache KV_c drawn as a green grid of L·H heads by n_c sequence positions. A second box feeds 'Repeat prompt + Context' back into f_LM to Measure max cross-attention, producing a KV importance heatmap with heads on the vertical axis and sequence on the horizontal, cells shaded by importance. Low-scoring pairs are evicted (pair- or head-level), leaving a sparse green KV_c,evicted, which f_LM then uses with incoming Queries to decode Responses."
+  caption="KVzip scores every cached pair by the maximum attention it receives while the model reconstructs the context from the cache, evicts the lowest, and reuses the compressed cache for any later query (KVzip, Figure 4)."
+/>
+
+Why reconstruction and not just the attention from the original prefill? Because prefill attention is spiky — it concentrates on a few tokens and under-scores many that the model still needs to reproduce the context later. The paper measures this gap directly (their Figure 5, prefill versus reconstruction attention). Score on the prefill pass and you evict pairs that matter; score on the reconstruction pass and you keep them.
+
+<ReconBars />
+
+## The claims, checked against the paper and code
+
+The headline numbers, each labelled:
+
+- **3-4x smaller KV cache, ~2x faster FlashAttention decode, negligible loss** (reported, abstract and their Figure 8). The efficiency figure is measured on LLaMA3.1-8B with a 124K-token context on an A100 in FP16, with the non-uniform head budget and variable-length FlashAttention-2. The 2x is the *attention* decode latency, not end-to-end.
+- **Accuracy holds while evicting up to 70% of the cache** (reported). Their benchmark grid is the cleanest receipt the paper has: across twelve datasets, KVzip stays flat as the budget drops to ~0.3 while H2O, SnapKV and PyramidKV collapse — most visibly on retrieval, where a query-aware cache has thrown away the needle.
+
+<Figure
+  src="/articles/kvzip-kv-compression/fig2.png"
+  alt="A three-by-four grid of line charts, accuracy in percent on the vertical axis against KV cache ratio from 0.1 to 1.0 on the horizontal, for four methods: KVzip in red, H2O in orange, SnapKV in green, PyramidKV in blue. Rows are Retrieval (NIAH, Retr.KV, Retr.Prefix-Suffix, Code.RepoQA), Contextual QA (SQuAD, GSM8K, En.QA, En.MultiChoice) and Redundancy (En.Summary, Retr.MultiHop, Math.Find, ICL.ManyShot). The red KVzip line stays high and flat as the ratio falls to about 0.3 on nearly every panel, while the other three drop steeply at low ratios, collapsing toward zero on the retrieval tasks."
+  caption="Accuracy against KV cache budget, Qwen2.5-7B-1M, twelve datasets. KVzip (red) holds down to ~30% cache where the query-aware baselines collapse, worst on retrieval (KVzip, Figure 9)."
+/>
+
+- **Up to 170K-token contexts, LLaMA3.1 (3B/8B), Qwen2.5-7B-1M and 14B-1M, Gemma3-12B** (reported). Models from 3B to 14B; GQA group sizes from 4 (LLaMA3.1-8B) to 7 (Qwen2.5-7B-1M); Gemma3's hybrid global/sliding-window attention is compressed only on the global layers, which dominate the cache at long context.
+- **The scoring is not free.** The reconstruction pass costs about the same as one extra prefill — "approximately twice the computational overhead of standard prefill" — with under 2% additional memory, paid once per context (reported). Per chunk the scoring is $O(m^2)$ and over the whole context $O(m\,n_c)$, linear in context length $n_c$ with chunk size $m$.
+
+Two honest wrinkles the paper is up front about. First, the score needs a `max` over query positions *after* the softmax over keys, and that cross-dimensional dependency will not fuse into a block-wise FlashAttention kernel — so the scoring pass cannot use the same fused path decoding does, which is part of why it costs a second prefill. KVzip ships a softmax-free CUDA variant to claw some of that back, at a small quality cost (reported). Second, 3-4x is the *context-dependent* mode that pays the scoring overhead. KVzip also has a **context-independent** mode: compute head-level importance scores once per model and drop whole heads' context KV, DuoAttention-style, with no per-context overhead but a more modest ratio (0.6 recommended, so ~1.67x). That mode is also where KVzip quietly lands a second result — it replaces DuoAttention's head-score optimization, "tens of GPU hours," with a few forward passes inside a minute (reported) — two orders of magnitude at least (reasoned).
+
+<RepoCard repo="snu-mllab/KVzip" />
+
+One number worth doing the arithmetic on. The paper stacks KVzip on QServe's 4-bit KV quantization: a 16-bit cache of 16.3 GB at 124K tokens becomes 1.2 GB with 4-bit quantization and 70% eviction together (reported) — about 13.6x off the 16-bit cache (reasoned). Eviction and quantization are orthogonal axes and they multiply.
+
+## Attention Matching: throw the pairs away and synthesize a smaller cache
+
+KVzip keeps a subset of the *real* KV pairs. The companion method makes a different bet: keep none of them, and build a smaller set of *synthetic* keys and values that reproduce what the full cache would have done.
+
+That is **Attention Matching** (Zweiger, Fu, Guo and Yoon Kim; [code](https://github.com/adamzweiger/compaction), MIT). Replace the full cache $(\mathbf{K},\mathbf{V}) \in \mathbb{R}^{T \times d}$ for one KV head with a shorter cache $(\mathbf{C}_k,\mathbf{C}_v) \in \mathbb{R}^{t \times d}$, $t \ll T$, chosen so that the attention output is preserved even when the compacted prefix is concatenated with arbitrary later tokens — the user's next turn, the model's continuation. The trick is that attention over concatenated blocks is a mass-weighted mixture of each block's local attention, so it is enough to match two things per block, over a set of reference queries: the block's local attention **output**, and its attention **mass**.
+
+<Figure
+  src="/articles/kvzip-kv-compression/fig3.png"
+  alt="A long row of blue cells labelled 'Full KV Cache K, V' followed by a few grey 'fixed' cells, compacted via an arrow into a short row of three orange cells labelled 'Compacted C_k, C_v' followed by the same grey fixed cells. Below, the equation: attention of query q over the stacked full keys K and K_fixed and values V and V_fixed is approximately equal to attention of q over the compacted C_k and K_fixed and C_v and V_fixed."
+  caption="Attention Matching replaces the real cache with a smaller synthetic one chosen so the attention output is preserved under concatenation with any fixed or future tokens (Attention Matching, Figure 2)."
+/>
+
+The reason it is *fast* is that the objective decomposes into subproblems that have closed forms, so no gradient descent runs at compaction time. Construct the compacted keys $\mathbf{C}_k$ first (by selecting from the real keys — the paper compares Highest-Attention-Keys and an Orthogonal-Matching-Pursuit selection), then solve a nonnegative least squares for per-key weights $w_j$ and set the bias $\beta_j = \log w_j$ — $w_j$ is "how many original keys' worth of attention mass this compact key carries" — then an ordinary least squares for the values $\mathbf{C}_v$. Reference queries come mostly from a repeat-prefill pass, with a few self-study prompts to broaden them, and layers are compacted one at a time so each later layer sees the queries the already-compacted earlier layers actually produce. The result: up to 50x compaction in seconds with little quality loss, two orders of magnitude faster than Cartridges (which trains a compact cache end-to-end over GPU-hours) at comparable ratios (reported, their Figure 1, QuALITY on Qwen3-4B). Stack it on a summary and it reaches ~200x total (reported). The paper runs KVzip as one of its one-shot eviction baselines, and Attention Matching generally comes out ahead on QuALITY and LongHealth — though it credits KVzip's non-uniform head budget with sometimes matching it at certain ratios (reported, their Figure 3). The two are rivals as much as companions.
+
+The line worth flagging for what comes next: Attention Matching, as published, fits a *separate* set of keys and values for each KV head, and never addresses **multi-head latent attention (MLA)**, which caches a shared low-rank latent instead of per-head keys and values. The two look complementary — compaction shrinks the sequence dimension, MLA shrinks the per-token dimension — but a method that picks a separate subset per head does not drop onto a shared-latent cache as written (reasoned; the paper does not discuss MLA).
+
+## What scaling to GLM-5.3 actually adds
+
+Which is exactly where the applied data point gets interesting, because [GLM-5.3-Flash](/articles/glm-5-3-flash) is an MLA model, and a sparse one. Its eleven expensive layers are NoPE sparse MLA with a shared latent (`kv_lora_rank: 512`), and an indexer picks a top-2,048 subset of positions each query even looks at. Both compression methods assume things that architecture denies: KVzip's dense scoring reads *all* previous tokens, which sparse attention will not do; and both methods, in their original form, choose a *separate* subset of keys per layer-head pair, which a shared latent cache — one cache serving every head in the group — cannot honor.
+
+The RampLabs write-up is their account of bridging that gap, and it is self-reported, with no code released, so I am reporting their claims as claims. They say they use dense scoring for KVzip with shared selection rules that balance importance across heads; and for Attention Matching they compare the two key-selection rules, then fit per-head biases and shared latent values against GLM's sparse attention, one layer at a time. The fit-per-head-biases-but-share-the-latent-values move is precisely the MLA extension the Attention Matching paper does not provide. Their headline: the KV cache 80% smaller while keeping over 90% of full-context accuracy on QuALITY (self-reported). Treat that as a vendor's own run on one benchmark — the useful signal is not the exact number but that a dense-attention, per-head method survived being bent onto a sparse, shared-latent frontier model at all.
+
+## Where it sits
+
+Three axes, and they compose. **Quantization** makes each cached number smaller — [4-bit KV in QServe](/articles/nvidia-model-optimizer), the [sub-2-bit expert work](/articles/runtime-dynamic-compression), [GPTQ at speed](/articles/llm-compressor-0-14). **Architecture** makes the cache grow slower — [GLM-5.3's linear and sparse layers](/articles/glm-5-3-flash), [SparDA prefetching its own KV](/articles/sparda), [Grouped Value Attention](/articles/grouped-value-attention), [Flash-dLLM's cache for keys that move](/articles/flash-dllm), [Qwen3.8-Flash-Next's four changes](/articles/qwen3-8-flash-next). And **compression after the fact** throws cached pairs away: KVzip evicts the real ones it can prove are redundant; Attention Matching evicts all of them and synthesizes a shorter cache that reproduces the attention output. The two differ in what they keep — subset versus synthesis — and agree on the thing that made both worth writing up: the score is query-agnostic, so you pay to compress once and read the cache for free forever after.
+
+<Callout type="note">
+**Query-agnostic** means the cache is scored without reference to any future query, so one compression serves them all — unlike H2O/SnapKV, which overfit the query they were scored on. **KVzip** scores by reconstruction (max attention during a "repeat the context" pass), keeps a subset of real pairs, reports 3-4x smaller cache and ~2x FlashAttention decode at negligible loss up to 170K tokens (all reported; the eval is LLaMA3.1/Qwen2.5/Gemma3, 3B-14B). **Attention Matching** synthesizes a smaller cache in closed form to match the attention output and mass, up to 50x in seconds (reported), but as published does not support MLA. **The GLM-5.3 result** (80% smaller, >90% QuALITY) is an applied blog's own run, self-reported, no code.
+</Callout>
+
+## The takeaway
+
+The fix that makes KV-cache eviction actually reusable is not a cleverer notion of "important." It is refusing to let the current query define importance at all. KVzip gets its query-independent score by making the model reconstruct the context it already cached and watching what it reaches for; Attention Matching skips the question of which pairs to keep and fits a smaller cache to the attention output in closed form. Both are query-agnostic, both are open, and the frontier-model result that surfaced them is the least load-bearing part — a sign the ideas travel, bent once onto a 320B model by someone who had to serve it.
