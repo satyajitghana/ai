@@ -12,6 +12,9 @@ import {
   getLogs,
   getProjects,
 } from "@/lib/content"
+import { TierBars } from "@/components/site/article-rating"
+import { topicById } from "@/data/taxonomy"
+import { articleScores, compareByLens } from "@/lib/content/signals"
 import { seo } from "@/lib/seo"
 import { HOME_TITLE, SITE_DESCRIPTION } from "@/lib/site"
 
@@ -48,6 +51,27 @@ export default function Page() {
   const posts = getBlogPosts().slice(0, 3)
   const logs = getLogs().slice(0, 3)
   const digest = getArxivDigests()[0]
+
+  // Rated-article picks. "Start here" is the clearest page (the learn lens) in
+  // each of the six topics with the most rated articles; "must-reads" is the
+  // best-scored work of the last 30 days, counted back from the newest article
+  // so the build is deterministic. Both are empty, and hidden, until articles
+  // carry ratings.
+  const scores = articleScores()
+  const all = getArticles()
+  const ratedAll = all.filter((a) => scores.get(a.slug)?.tier)
+  const byTopic = new Map<string, typeof all>()
+  for (const a of ratedAll) if (a.topic) byTopic.set(a.topic, [...(byTopic.get(a.topic) ?? []), a])
+  const startHere = [...byTopic.entries()]
+    .sort((x, y) => y[1].length - x[1].length || x[0].localeCompare(y[0]))
+    .slice(0, 6)
+    .map(([topic, list]) => ({ topic: topicById(topic)!, a: [...list].sort(compareByLens("learn", scores))[0] }))
+  const newest = all[0]?.lastUpdated ?? ""
+  const monthAgo = newest ? new Date(Date.parse(newest) - 30 * 86_400_000).toISOString().slice(0, 10) : ""
+  const mustReads = ratedAll
+    .filter((a) => a.lastUpdated >= monthAgo)
+    .sort(compareByLens("must-read", scores))
+    .slice(0, 5)
 
   return (
     <PageShell>
@@ -162,6 +186,57 @@ export default function Page() {
                 </Link>
               </li>
             ))}
+          </ul>
+        </>
+      ) : null}
+
+      {/* Start here — one clear first read per popular topic */}
+      {startHere.length ? (
+        <>
+          <SectionHeader path="start-here" href="/articles?lens=learn" />
+          <ul className="grid gap-x-8 gap-y-4 sm:grid-cols-2">
+            {startHere.map(({ topic, a }) => (
+              <li key={topic.id}>
+                <Link
+                  href={`/articles?topic=${topic.id}`}
+                  className="font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  {topic.label}
+                </Link>
+                <Link
+                  href={`/articles/${a.slug}`}
+                  className="mt-0.5 block leading-snug underline-offset-4 hover:underline"
+                >
+                  {a.title}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+
+      {/* Must-reads this month — the best-scored recent work */}
+      {mustReads.length ? (
+        <>
+          <SectionHeader path="must-reads" href="/articles" />
+          <ul className="space-y-3">
+            {mustReads.map((a) => {
+              const s = scores.get(a.slug)!
+              return (
+                <li key={a.slug}>
+                  <Link
+                    href={`/articles/${a.slug}`}
+                    className="group flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4"
+                  >
+                    <h3 className="underline-offset-4 group-hover:underline">{a.title}</h3>
+                    <span className="inline-flex shrink-0 items-center gap-1.5 font-mono text-xs text-muted-foreground">
+                      <TierBars tier={s.tier!} />
+                      {s.tier!.label}
+                    </span>
+                  </Link>
+                </li>
+              )
+            })}
           </ul>
         </>
       ) : null}
