@@ -1,0 +1,293 @@
+---
+title: "Decision models in llama.cpp: what /v1/systemone actually evaluates"
+description: "llama.cpp's new /v1/systemone endpoint answers Jev-style typed questions with no generated token. I built it at commit d7a695e, ran Kev-0.8B and Julia-1 on a CPU, and read every line between the JSON and the number. 'One forward pass' is per prompt: every question, and for lev every choice, gets its own, and a causal model evaluates the shared state once only while a free slot can take a copy — the blog's request evaluates 92 of its 130 tokens on Kev. Options cost tokens, not passes: 2 to 32 options took Kev from 70 to 437 tokens, and 64 were refused at 797 tokens by the 512-token batch. Julia-1, an encoder, re-reads the state for every question and runs its three-column head three times per token; past its 256-token head budget it truncates every option to four tokens without saying so, which turned 56 numbered queues into the same three words. The readouts are faithful to their upstreams, down to lev reading a 0-8 rating at the letters A to I. What the endpoint cannot do is make a small model right: on the playground's own lip-sync example Julia-1 says text to speech."
+date: 2026-10-06
+tags:
+  - explainer
+  - llm
+  - llama-cpp
+  - inference
+  - kv-cache
+  - gguf
+  - benchmarks
+draft: false
+---
+
+import { PromptAnatomy } from "@/components/articles/llamacpp-decision-models/prompt-anatomy"
+import { CostExplorer } from "@/components/articles/llamacpp-decision-models/cost-explorer"
+
+Georgi Gerganov's [post](https://x.com/ggerganov/status/2106029758350032937) on 2 October was short: "Decision models in llama.cpp are now available. The `/v1/systemone` endpoint is available in the latest llama builds. Use it to do Jev-style inference locally, efficiently and privately." The ggml-org [blog post](https://huggingface.co/blog/ggml-org/decision-models-in-llamacpp) behind it lists six models and one speed column, measured on a GPU.
+
+[Week four](/articles/jev-alternatives-week-four) gave this one section: a table of the six readouts and a widget for the softmax-and-temperature step that turns scores into an answer. This piece is the rest. I built llama-server at commit `d7a695e` (6 October), CPU only, and ran two small decision models through it: Kev-0.8B (a causal Qwen3.5 with a pointer head, 812 MB at Q8_0) and Julia-1 (an mmBERT encoder with a mask-token head, 168 MB). Then I read the path from request JSON to returned number, and measured what each piece of a request costs.
+
+One correction first. [Any model can be Jev](/articles/any-model-can-be-jev) said llama.cpp had no decision endpoint. It now has one, for **native** decision models only: a GGUF without `<arch>.decision.*` metadata gets error 501, "This model is not a decision model" (measured, `server-context.cpp:5586`). The SGLang trick of reading any chat model's letter logits is still not what llama.cpp does.
+
+<RepoCard repo="ggml-org/llama.cpp" note="Built at d7a695e (6 October 2026), CPU only. The decision path is tools/server/server-decision.cpp (840 lines), send_decision() in server-context.cpp, and the decision head in src/models/modern-bert.cpp and clef.cpp." />
+
+## A decision request, end to end
+
+A request is a `state` and named, typed questions: `choice` (pick one option), `score` (an ordered scale of 2 to 10 levels) and `noul` (the probability of yes). This is the blog's own example, sent to my server running Kev-0.8B:
+
+```json
+{
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "questions": {
+    "route": { "type": "choice", "instructions": "Which team should handle this?",
+               "criteria": { "billing": "payments, charges, refunds, invoices",
+                             "shipping": "delivery, tracking, lost or late parcels",
+                             "technical": "bugs, errors, login problems" } },
+    "angry": { "type": "noul", "instructions": "Is the customer angry?" },
+    "urgency": { "type": "score", "instructions": "How urgent is this?",
+                 "criteria": ["can wait", "this week", "today", "right now"] }
+  }
+}
+```
+
+The response, rounded to four places (measured):
+
+```json
+{
+  "model": "models/Kev-0.8B-Q8_0.gguf",
+  "answers": {
+    "route":   { "type": "choice", "choice": "billing",
+                 "probabilities": { "billing": 0.9355, "shipping": 0.0222, "technical": 0.0423 },
+                 "confidence": 0.9032 },
+    "angry":   { "type": "noul", "noul": 0.6650 },
+    "urgency": { "type": "score", "score": 1.1779,
+                 "legend": { "0": "can wait", "1": "this week", "2": "today", "3": "right now" },
+                 "probabilities": { "0": 0.3718, "1": 0.2778, "2": 0.1511, "3": 0.1993 },
+                 "confidence": 0.0 }
+  },
+  "usage": { "input_tokens": 130, "output_tokens": 0 }
+}
+```
+
+`output_tokens` is always 0; nothing is sampled. The 130 input tokens match the blog's Kev-4B response exactly (reported there, measured here), which is what you would expect: Kev-0.8B and Kev-4B share Qwen3.5's tokenizer and the same template. The answers do not match. The blog's Kev-4B put billing at 0.9049, anger at 0.8208 and urgency at 2.2821; Kev-0.8B says 0.9355, 0.6650 and 1.1779; Julia-1, on the same request, says 0.9824, 0.8555 and 1.1054 (all measured, except the blog's). Three models agree on the team and disagree on whether this is "today" or "this week".
+
+## From JSON to tokens: the systemone template
+
+The server knows nothing about any particular model. At load, `server_decision_context::init()` reads three things out of the GGUF:
+
+```cpp
+// tools/server/server-decision.cpp:40-49
+const std::string prefix    = decision_meta_str(model, "general.architecture") + ".decision.";
+const std::string type_name = decision_meta_str(model, prefix + "type");
+
+vocab = llama_model_get_vocab(model);
+
+const char * tmpl_src = llama_model_chat_template(model, "systemone");
+if (tmpl_src == nullptr) {
+    throw std::runtime_error("decision model has no \"systemone\" template");
+}
+```
+
+`<arch>.decision.type` picks one of six readouts. A named chat template, `systemone`, turns the request into a prompt. And every key under `<arch>.decision.temperature.` becomes a fitted temperature, per question type and optionally per option-count bucket (lines 51-66). The conversion scripts write all three. For a ModernBERT decision checkpoint, `conversion/bert.py:709-713` builds the template from the tokenizer's own special tokens:
+
+```python
+# conversion/bert.py:709-713
+return (
+    tok_cls + "{{ type }} question: " + jinja_str_or_json("instructions") + tok_sep
+    + "{% for o in options %}" + tok_mask + " " + option + "{% endfor %}"
+    + tok_sep + jinja_str_or_json("state") + tok_sep
+)
+```
+
+Read back out of the two files I ran, the templates put the pieces in opposite orders (measured, from the GGUF metadata):
+
+```text
+Kev-0.8B  <|fim_prefix|>{{ state }}<|fim_middle|>{{ instructions }}
+          {% for o in options %}<|box_start|>…<|box_end|>{% endfor %}<|fim_suffix|>
+Julia-1   <bos>{{ type }} question: {{ instructions }}<eos>
+          {% for o in options %}<mask> {{ description or key }}{% endfor %}<eos>{{ state }}<eos>
+```
+
+Kev puts the state first; Julia puts it last. That one choice decides most of what follows about cost.
+
+## Where the number comes from
+
+Each readout reads its scores at different positions of the same forward pass. In `send_decision()`, the letter families (OpenJev, lev, Nimble) read the vocabulary logits at the last prompt position, but only at the rows of their label tokens:
+
+```cpp
+// tools/server/server-context.cpp:2338-2348
+if (!decision.labels.empty()) {
+    const float * logits = llama_get_logits_ith(slot.ctx_tgt, i_batch);
+    ...
+    for (const llama_token label : decision.labels) {
+        res->scores.push_back(logits[label]);
+    }
+}
+```
+
+The labels are `A`, `B`, `C`… resolved once at load, and only codes that are a single token are kept. lev has one oddity worth knowing. Its prompt for a `noul` question says "Respond with only a digit from 0 to 8.", and the server reads the logits of `A` to `I` instead (`server-decision.cpp:475`, "lev reads the ratings of a noul question at its first labels, not at the digits"). That is not a llama.cpp bug. Upstream lev's router asks for nine single-token label codes for the rating scale (`packages/lev/src/lev/router.py:66` in [Abhinavexists/lev](https://github.com/Abhinavexists/lev)), and the port copies it (measured, both sources read).
+
+Kev, Laya and Clef run the server in embedding mode instead (`common/common.cpp:1282-1295`) and read hidden states. Kev's is a pointer: the last token's output is split into a query half and each `<|box_end|>` token's into a key half, and the score is a scaled dot product:
+
+```cpp
+// tools/server/server-context.cpp:2388-2392
+float dot = 0.0f;
+for (int32_t i = 0; i < n_pointer; i++) {
+    dot += embd_q[i] * embd[n_pointer + i];
+}
+res->scores.push_back(dot / sqrtf((float) n_pointer));
+```
+
+For Kev-0.8B, `embedding_length_out` is 512, so each half is 256 wide (measured, GGUF). The converter packs the pointer head's `q` and `k` projections into one `classifier.out_proj` matrix so the model emits `[q | k]` for every token (`conversion/lev.py:207-208`). Because the model is causal, option 1 cannot see option 3; [the Kev piece](/articles/kev) measured what that costs.
+
+Julia-1 and Laya are LAYA-type: an encoder, two extra transformer blocks, and a scorer that gives one number per token per question type. The question type is a learned embedding added before the head, and llama.cpp does not pass it into the graph, so it runs the head once per type and concatenates:
+
+```cpp
+// src/models/modern-bert.cpp:252-255
+// the question type is not a graph input, so the head is evaluated for each of them
+for (uint32_t it = 0; it < N_DECISION_TYPES; ++it) {
+    ggml_tensor * type_row = ggml_view_1d(ctx0, model.type_embd, n_embd, it * model.type_embd->nb[1]);
+    ggml_tensor * inpL = ggml_add(ctx0, inp, type_row);
+```
+
+The server then reads one column (`choice` 0, `score` 1, `noul` 2) at each `<mask>` and throws the other two away. The head is two blocks on top of a 22-layer encoder, so this is roughly a sixth more compute per token than the model needs (reasoned, from the [3.5M-parameter head](/articles/julia-1-decision-model) against about 45M non-embedding parameters). It is the price of keeping the type out of the graph's inputs, and it is a TODO-shaped price.
+
+Clef is the sixth: every question of a request goes into one prompt, the batch marks each token as question text, option text or neither (`llama_batch_ext_set_decision_order`, `src/llama-ext.h:103-115`), and the head returns option *i*'s score at output row *i*. It is the only family whose answers can depend on each other, and a server running it serves nothing else.
+
+Pick a family and a question to see exactly which tokens are evaluated and where the score is read. The pieces are the server's own `/tokenize` output on the rendered prompts:
+
+<PromptAnatomy />
+
+The same three questions are 130 tokens for Kev, 128 for Julia and 536 for lev, whose chat template carries a 34-word system prompt and runs the `choice` twice (measured with the Qwen3.5 tokenizer through the Kev-0.8B server; I did not run lev itself).
+
+## "One forward pass" is per prompt
+
+The blog says the model "returns a probability for each option in a single forward pass." For one question that is right: every option is in one prompt, and a 32-option `choice` is still one pass. A request is not one pass. The handler makes one task per question, and for lev's `choice` one per order:
+
+```cpp
+// tools/server/server-context.cpp:5611-5618
+for (const auto & question : questions) {
+    for (size_t variant = 0; variant < decision.n_variants(question); variant++) {
+        server_task task = server_task(SERVER_TASK_TYPE_DECISION);
+        task.id = rd.get_new_id();
+        decision.fill_task(state, questions, question, variant, files, ctx_server.mctx, ctx_server.init_opt, task);
+        tasks.push_back(std::move(task));
+    }
+}
+```
+
+So the blog's request is three prompts on Kev and Julia and four on lev. What makes this cheap on a causal model is `server_decision_group_tasks()`. It takes the tasks a slot-count at a time, makes the first the parent, and computes the shortest common prefix the others share with it:
+
+```cpp
+// tools/server/server-decision.cpp:814-823
+for (size_t i = 0; i < tasks.size(); i += n_slots) {
+    const size_t end = std::min(tasks.size(), i + n_slots);
+    server_task & parent = tasks[i];
+
+    // every task must have at least one token of its own to evaluate
+    size_t n_shared = parent.tokens.size() - 1;
+    for (size_t j = i + 1; j < end; j++) {
+        n_shared = std::min(n_shared, parent.tokens.get_common_prefix(tasks[j].tokens));
+        n_shared = std::min(n_shared, tasks[j].tokens.size() - 1);
+    }
+```
+
+The parent evaluates up to `n_shared`, stops, copies its state into each child's slot, and everyone finishes their own suffix in parallel. On Kev the three prompts share 19 tokens (`<|fim_prefix|>`, the state, `<|fim_middle|>`), so the request evaluates 59 + 12 + 21 = 92 tokens and copies 38. The server's `/metrics` counters said exactly 92 and 38 (measured). On lev the four prompts share 70 tokens, so 326 of its 536 would be evaluated (reasoned, from the token counts). Julia's prompts share one token, `<bos>`, and an encoder could not reuse a prefix anyway: with bidirectional attention, every token's state depends on the text after it, the options and the question included.
+
+Three limits of the sharing show up as soon as you measure it:
+
+- **It is capped at the slot count.** Groups are `n_slots` tasks wide. With 4 slots, 8 questions sharing a 352-token prefix evaluate it twice: 1,094 tokens evaluated and 2,118 copied, against 548 and 1,056 for 4 questions (measured).
+- **One slot shares nothing.** At `-np 1` the same 8 questions evaluate all 3,212 tokens, 2.9 times as many (measured). The test suite says so: "with one slot the prompt cannot be shared" (`tools/server/tests/unit/test_systemone.py:142`).
+- **Nothing carries across requests.** Sending the blog request three times in a row cost 92 evaluated tokens each time, although the server picked the slot holding the identical prompt ("f_sim_best = 1.000" in its log; measured). My guess is that Qwen3.5's recurrent layers cannot be rewound to a shorter prefix without a checkpoint, so a cached decision prompt is never reused; I have not traced it.
+
+The blog's tip, "Kev-4B, lev and OpenJev process the state only once," is true within one request and up to the slot count.
+
+## Measured on a CPU
+
+The setup, and why the milliseconds are not the point: llama-server with 6 threads at `nice -n 19` on a 16-core AMD EPYC 7R13 that seven other jobs were loading to a load average of 120 to 160. Every number below is the median of five requests, each with a fresh number at the start of the state so nothing was reused between requests. Token counts are exact. Milliseconds are inflated by contention several times over; their ratios are what carries. The blog's own speeds, 3 ms per question for Julia-1 and 12 ms for Kev-4B, are medians on an NVIDIA RTX PRO 6000 (reported).
+
+| what grows | Kev-0.8B tokens | Kev-0.8B ms | Julia-1 tokens | Julia-1 ms |
+|---|---|---|---|---|
+| 2 → 32 options, one question | 70 → 437 | 431 → 3,246 | 68 → 273 | 59 → 190 |
+| 64 options | refused (797 tokens) | | 306, truncated | 275 |
+| 1 → 8 questions, 4 slots | 398 → 1,094 evaluated | 2,877 → 8,981 | 390 → 3,148 | 281 → 2,878 |
+| state 2 → 96 sentences | 90 → 1,406 | 715 → 10,311 | 82 → 1,398 (`-ub 2048`) | 71 → 1,268 |
+
+All measured. Time follows evaluated tokens almost exactly: a straight-line fit gives about 7.8 ms per evaluated token for Kev-0.8B and 0.89 ms for Julia-1 on this machine. That ratio of about 9 is close to what the sizes predict (reasoned): Kev-0.8B's backbone is 1,024 wide and 24 layers, Julia's 384 wide, and two thirds of Julia's 144M parameters are an embedding table that costs a lookup, not a matmul.
+
+<CostExplorer />
+
+Two refusals are worth knowing before you deploy:
+
+**The question and its options must fit in one batch.** Embedding mode forces `n_batch = n_ubatch`, 512 by default (`common.cpp:1297-1300`), and `send_decision` reads every option's output from the last batch. Kev's state may span earlier batches, but its question and options may not. At 64 options:
+
+```json
+{"error":{"code":400,"message":"the question and its options (797 tokens) are too large to process. increase the batch size (current batch size: 512)","type":"invalid_request_error"}}
+```
+
+For an encoder the whole prompt must fit, state included. Julia-1 with a 726-token state returned a 500, "input (726 tokens) is too large to process. increase the physical batch size (current batch size: 512)". At `-ub 2048` it ran in 678 ms (both measured).
+
+**LAYA models truncate, silently.** Julia-1 was trained with a 256-token head budget for question plus options (`max_head_tokens`, in the GGUF), and the server reproduces the training-time cut:
+
+```cpp
+// tools/server/server-decision.cpp:537-542
+set_max(max_option_tokens + 1);
+if (n_options_tokens + 16 > max_head_tokens) {
+    // too many or too long options, shrink them evenly
+    set_max(std::max((size_t) 4, (max_head_tokens - std::min(max_head_tokens, (size_t) 16)) / n_options));
+}
+const size_t n_question_max = std::max((size_t) 8, max_head_tokens - std::min(max_head_tokens, n_options_tokens));
+```
+
+At 64 options that is (256 − 16) / 64 = 3, raised to the floor of 4: each option keeps its `<mask>` and three tokens, and the question keeps eight. My 64-option request came back as 300 input tokens, which is exactly 1 + 8 + 1 + 64 × 4 + 1 + 32 + 1 (measured, against `/tokenize`). "Billing" became `<mask> payments, charges`. Options 9 to 64, described as "regional queue number 9" through "regional queue number 64", all became `<mask> regional queue number`: 56 identical options that differ only by position. The response carries no warning; the README says it in one line ("For laya, long questions and options are truncated to the token budget the model was trained with"). Julia uses descriptions instead of keys when both exist, so the keys could not save it. Julia-1 is [built for 2 to 20 options](/articles/julia-1-decision-model); past 20, use a model with a bigger budget or split the list.
+
+## From scores to the answer
+
+The softmax, the temperature and the confidence formulas are the part week four's widget covers. Three details from the files I ran sharpen it:
+
+- **Temperatures are per model, and sometimes absent.** Kev-0.8B stores one, 2.351, for all three types. Julia-1 stores none, so every answer is a plain softmax at 1.0 (`server-decision.cpp:700`). Laya stores nine, including `temperature.choice.11` = 0.1006: once a question has more than ten options, its scores are divided by a tenth, sharpened tenfold (all measured, GGUF metadata and convert log).
+- **Score confidence clamps to zero.** It is one minus the expected distance from the mode, divided by that distance for a uniform distribution around the centre (lines 714-729). Kev-0.8B's urgency answer above put 0.3718 on level 0 and spread the rest, so the distance, 1.1779, exceeded the uniform's 1.0, and the confidence is 0.0 while the score is 1.1779 (reasoned, from the formula and the measured probabilities). A cutoff on confidence will reject it; a cutoff on the score will not.
+- **lev's reversed variant does not remove a position bias.** Week four's widget shows why: it moves it between the ends.
+
+## Same request, different models
+
+The fastest way to see what the endpoint does not fix is the community [Decision Models Playground](https://huggingface.co/spaces/fffiloni/decision-models-playground), which runs `ggml-org/Julia-1-GGUF:Q8_0` behind llama-server in a CPU Space (measured, its Dockerfile). Its first preset is an AI router:
+
+<Figure
+  src="/articles/llamacpp-decision-models/fig1.png"
+  alt="The Decision Models Playground with the AI Router preset. The context reads 'I have a portrait and an audio recording. Make the person say the audio naturally.' Detailed descriptions are on. The Choice card shows Text to speech at 73.5%, Lip sync 20.5%, Image editing 3.0%, Image generation 2.3%, and the remaining four options below 1%."
+  caption="The playground's own first example, run on 6 October: a request that is plainly lip sync, and Julia-1 answers text to speech at 73.5%. The Space builds llama-server's official image and calls /v1/systemone. (Sylvain Filoni, Decision Models Playground, screenshot.)"
+/>
+
+<Figure
+  src="/articles/llamacpp-decision-models/fig2.png"
+  alt="The lower half of the same playground run: a Yes/No card at 58.5% yes, a Score card at 1.12 of 4 on a five-level complexity scale, and a performance panel reading 0 generated tokens, 672.2 ms latency and 218 input tokens."
+  caption="The same request's other two questions and the Space's timing: 0 generated tokens, 218 input tokens, 672.2 ms for the whole System One request on the Space's CPU. (Sylvain Filoni, Decision Models Playground, screenshot.)"
+/>
+
+I sent the identical payload to my Julia-1 server: 218 input tokens, text to speech at 0.7491, lip sync at 0.2071, yes at 0.5854 and a score of 1.1048 (measured). Within two points of the Space everywhere, the score a few hundredths off, presumably a different build of the official image. With bare labels instead of descriptions, Julia-1 changed its answer to image to video at 0.7097. Kev-0.8B, same payload, chose lip sync at 0.9160 with descriptions and 0.6942 without (measured). The blog's own tip, "Describe your options," is real, and it is not enough for a 144M model.
+
+The [Decision Index](https://multimodalart-jev-decision-index.static.hf.space/index.html) the blog points to puts numbers on that. On its 28 September file, Jev scores 57.91; lev 38.54, Kev 4B 34.64, Kev 0.8B 14.6, Laya 6.04 and Julia 1 5.54 (reported, read from its `data/index.json`). Those runs used each model's own runtime on a GPU, not llama.cpp, so they say how good the weights are, not how faithful the port is.
+
+<Figure
+  src="/articles/llamacpp-decision-models/fig3.png"
+  alt="A scatter plot titled Model size vs Decision Index, parameters served on a log x axis from under 100M to 30B, Decision Index on the y axis from 0 to 60. A dashed line at 57.9 marks Jev. Points rise with size; lev and Kev 4B are labelled near 4B, between 30 and 40; the sub-billion models sit below 20, most of them below 10."
+  caption="Size against score for 70 open reproductions of Jev. The models llama.cpp serves on a laptop CPU are in the bottom-left cluster: Kev 0.8B at 14.6, Laya at 6.04 and Julia 1 at 5.54. lev and Kev 4B are labelled. (Decision Index 0.2.1, model size vs Decision Index.)"
+/>
+
+That is the trade the endpoint exposes rather than solves. The models that answer in under 100 ms on a loaded CPU score a quarter of Jev or less on the index; the ones that score well are 4B and up and want a GPU. Gerganov's reply to "do I need gpu" was "Small models should run on CPUs just fine". They run. That they decide well is a separate claim, and nobody has made it.
+
+## The replies, checked
+
+The post's replies named five related projects. Two need a correction.
+
+- **Winnow** ([EldanRing/winnow](https://huggingface.co/collections/EldanRing/winnow)): "Try Winnow-12B and Winnow-E4B now with latest llama.cpp!" Its own card says "Generic Hub llama.cpp snippets do not provide Winnow's `/v1/systemone` API." It ships its own inference server. Its Q8_0 GGUF header (read with one range request) has `general.architecture` gemma4 and no `decision.*` key and no `systemone` template, so ggml-org's endpoint would answer 501 (measured, then reasoned from the code).
+- **GLiNER2.5-Decide** ([fastino](https://huggingface.co/fastino/GLiNER2.5-Decide)), asked for twice: not supported. Its marker-per-label head, [taken apart here](/articles/gliner-2-5-decide), is closest to LAYA, but there is no converter for it (measured, `conversion/`). [gliner.cpp](https://github.com/sandrohanea/gliner.cpp) is a separate C++ port whose author suggests moving it into llama.cpp.
+- Armin Ronacher asked to "know which model is of which type". Half of that exists: `/models` reports `output_modalities` containing `"decisions"` for a native decision model, without loading it (README, measured). The readout type itself is only in the GGUF and the startup log ("decision model type: kev").
+
+## What holds
+
+**Holds.** One endpoint, six readouts, each faithful to its upstream, including the quirks: lev's two orders and its letter-coded rating scale, Laya's head budget, Kev's pointer at `<|box_end|>`. The blog's example reproduces: same 130 tokens, same response shape. The playground's numbers reproduce to within two points on a different machine. Errors are explicit when a prompt does not fit a batch.
+
+**Holds with a qualification.** "A single forward pass" is per prompt. A request is one prompt per question, one more per lev `choice`, and the state is shared only on causal models and only up to the slot count. Size `-np` to the number of questions you send, and expect a repeated request to cost the same as the first.
+
+**Silent.** Truncation on LAYA models, and the confidence of a score, which can be zero beside a perfectly usable expected level.
+
+**Not the endpoint's job, and still undone.** The CPU-sized models are the weak ones. The [option order](/articles/jev-is-not-deterministic) still matters for every causal family, the [limits of the format](/articles/what-decision-models-cannot-do) still apply, and the README's last line on calibration, "They are not guaranteed to be calibrated for your data," still means fit your own cutoff, per model and per quantization.
+
+*Sources, read on 6 October 2026: Georgi Gerganov's [post](https://x.com/ggerganov/status/2106029758350032937) and its replies through the fxtwitter mirror; ggml-org's [New in llama.cpp: Decision Models](https://huggingface.co/blog/ggml-org/decision-models-in-llamacpp); [llama.cpp](https://github.com/ggml-org/llama.cpp) at `d7a695e` (`tools/server/server-decision.cpp`, `server-context.cpp`, `README.md`, `tests/unit/test_systemone.py`, `common/common.cpp`, `src/models/modern-bert.cpp`, `src/models/clef.cpp`, `conversion/bert.py`, `conversion/lev.py`); the GGUFs and convert logs of [ggml-org/Kev-0.8B-GGUF](https://huggingface.co/ggml-org/Kev-0.8B-GGUF), [ggml-org/Julia-1-GGUF](https://huggingface.co/ggml-org/Julia-1-GGUF) and [ggml-org/Laya-GGUF](https://huggingface.co/ggml-org/Laya-GGUF); [Abhinavexists/lev](https://github.com/Abhinavexists/lev) at `65b782f`; the [Decision Models Playground](https://huggingface.co/spaces/fffiloni/decision-models-playground) and its source; the [Decision Index](https://multimodalart-jev-decision-index.static.hf.space/index.html) and its `data/index.json`; and the [Winnow-E4B](https://huggingface.co/EldanRing/Winnow-E4B) card. llama.cpp was built and run locally as the one exception to not executing third-party code; nothing else was executed. The screenshots are reproduced for commentary; the two interactives are original, built from my own runs.*
+
+<ModelCard repo="ggml-org/Kev-0.8B-GGUF" note="The causal model measured here: Qwen3.5-0.8B with Kev's LoRA merged and its pointer head packed into classifier.out_proj, decision.type kev, one temperature of 2.351 for all three question types, 812 MB at Q8_0." />
