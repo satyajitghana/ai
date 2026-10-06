@@ -1,0 +1,243 @@
+---
+title: "ALoDLM: a diffusion LM that loops on its hard tokens, read against its own tables"
+description: "Amazon AGI's ALoDLM turns Qwen3 into a masked diffusion LM whose middle 16 layers run up to 4 times inside every denoising step: confident tokens commit and feed back as embeddings, unresolved ones keep refining their hidden state, and a learned exit gate decides when the step ends. I read the code, the weights and the paper. The mechanism is real and well engineered. The headline, beating Qwen3-8B 80.3 to 78.5 on average, is measured in a one-token-per-pass mode against a parent that never saw the 5B-token math-and-code SFT corpus, with no same-data control; at 1.7B the whole margin comes from code and GPQA. The 2.7x speed-up is single-stream on one B200, and by the paper's own FLOP formula each ALoDLM token costs about 8.7 times the arithmetic of a Qwen3-8B token."
+date: 2026-10-06
+tags:
+  - diffusion
+  - looped-transformers
+  - block-diffusion
+  - benchmarks
+  - inference
+  - qwen
+  - licensing
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "The inner loop read from the decoder source, Table 1 re-averaged to show where the AR margin lives, and the speed-up re-priced in FLOPs and KV cache."
+topic: llm-architecture
+kind: paper
+level: research
+runsOn: consumer-gpu
+licence: CC-BY-NC-4.0
+---
+
+import { InnerLoop } from "@/components/articles/alodlm-looped-diffusion/inner-loop"
+import { TableOne } from "@/components/articles/alodlm-looped-diffusion/table-one"
+
+The post that sent me here was one line from Aran Komatsuzaki: Amazon AGI's Adaptively Looped Diffusion Language Models "outperform all evaluated DLMs and the corresponding AR baselines in average benchmark score". The second half is the unusual part. Diffusion language models are usually sold on speed with an apology about quality. One that beats its own autoregressive parent on quality and is also 2.7 times faster would be a real event.
+
+So I read the [paper](https://arxiv.org/abs/2610.04198), cloned [amazon-science/ALoDLM](https://github.com/amazon-science/ALoDLM) and read all of it, and pulled the config, the safetensors headers and the exit gate out of [amazon/ALoDLM-8B](https://huggingface.co/amazon/ALoDLM-8B) without downloading the weights. The idea is good, and the code does what the paper says. The headline needs three footnotes the abstract doesn't carry. The quality table is run in a mode that commits one token per recurrent pass, so it never uses the parallel decoding that makes a diffusion model worth having. The AR baseline is stock Qwen3, while ALoDLM got eight epochs over a 5B-token corpus of math, code and instructions that Qwen3 never saw. And the speed number is a single-stream measurement on one B200, where arithmetic is nearly free; ALoDLM spends roughly nine times Qwen3's FLOPs per token to get it.
+
+None of that makes the work bad. It does change what you can conclude from it.
+
+## Where a diffusion LM wastes its depth
+
+A masked diffusion LM, which this site builds up from first principles in [the architecture entry](/architectures/masked-diffusion-lm), generates by filling blanks. Start with a row of `[MASK]` tokens, run the network once, commit the predictions it is most sure about, and run again on the partly filled row. Modern versions such as [SDAR, WeDLM and Fast-dLLM v2](/articles/flash-dllm) do this block by block, left to right, so a KV cache works for everything already written; ALoDLM is built on WeDLM's streaming framework.
+
+The paper's complaint is about what happens inside one of those forward passes. Every masked position gets the same 36 layers. In "she sells 16 minus 3 minus 4 equals 9 eggs", the minus sign is trivially predictable and the 9 is the whole problem, but the network spends the same depth on both. Confidence-based decoding, the standard trick, only postpones the 9 to a later step, and at that step it starts over from a mask embedding. The work done on it is thrown away.
+
+ALoDLM's answer: keep the hard positions' hidden states and run them through more layers within the same step, while the easy ones commit and turn into context. That is a [looped transformer](/architectures/looped-transformer) inside a diffusion step, with a learned rule for when to stop looping.
+
+## One denoising step, as the decoder runs it
+
+The 36 layers of Qwen3-8B are split into a prelude of layers 0 to 9, a recurrent core of layers 10 to 25, and a coda of layers 26 to 35. The split is in `alodlm_config.json` on the Hub (`loop_start: 10`, `loop_end: 26`, `max_depth: 4`). The prelude runs once per step. The core then runs up to $K = 4$ times, and after every pass the coda branches off it to produce a readout. The next pass continues from the core's output, not from the coda's. At 1.7B there is no prelude or coda at all: the config says `loop_start: 0`, `loop_end: 28`, so the whole Qwen3-1.7B stack is the loop.
+
+<Figure
+  src="/articles/alodlm-looped-diffusion/fig1.png"
+  alt="Two decoding timelines. Top: a standard DLM runs one full pass per denoising step, committing a few tokens each time. Bottom: ALoDLM runs a prelude, then up to four inner iterations of recurrent core and coda; after each, an LM head and an exit gate read every position, confident tokens commit and re-enter as embeddings, and unresolved positions carry latent states h forward."
+  caption="One ALoDLM denoising step unrolled into four inner iterations. Committed positions (green) re-enter the core as token embeddings; unresolved positions keep their evolving latent states (yellow, then orange). The exit gate's output decides when the step ends (ALoDLM paper, Figure 2)."
+/>
+
+Each readout feeds two heads. The LM head gives a vocabulary distribution per position. The exit gate gives a scalar per position whose sigmoid is a halting probability: "stop now, given I haven't stopped yet". The gate is tiny. I read `exit_gate.pt` as a zip archive without unpickling it: a `[1, 4096]` weight, a bias, and four per-depth biases, 4,101 parameters in bfloat16. It reads a stop-gradient copy of the readout, so it can't push the backbone around.
+
+Here is the inner loop of the portable decoder, trimmed. The comments are mine.
+
+```python
+# alodlm/inference.py, Decoder._window, lines 119-136 (trimmed)
+hazard = self.model.exit_gate(selected, depth).float().sigmoid()
+survival *= 1 - hazard                       # P(not halted yet), per position
+adjusted = entropy + relative * penalty      # small penalty for positions further right
+if config.mode == "left1":
+    agree = torch.zeros_like(committed)
+    remaining = (~committed).nonzero().flatten()
+    if len(remaining):
+        agree[remaining[0]] = True           # commit the leftmost unresolved token, whatever its entropy
+else:
+    agree = (adjusted < config.tau) & ~committed
+tokens = torch.where(agree, predicted, tokens)
+committed |= agree
+residual = ~committed
+stop |= not bool(residual.any()) or bool((1 - survival)[residual].mean() >= config.q)
+```
+
+Two thresholds, two jobs. `tau` decides which positions commit: anything whose entropy is below it. `q` decides when the whole step ends: when the mean cumulative halting probability over the positions still unresolved reaches it. Before the next pass, committed positions get their hidden state replaced by the plain token embedding of what was committed (lines 101-105), and unresolved positions keep the core's output. If the step ends and nothing committed, the decoder force-commits the lowest-entropy position so it always makes progress. Positions still masked at the end of the step go back into the sequence as masks and lose their latent state; the next step starts from the prelude again.
+
+The widget runs those exact rules on a 12-position window. The entropies and halting probabilities are made up, because the decoder doesn't publish per-token traces; I gave the number tokens late confidence and low halting probability, the direction the paper's own analysis reports.
+
+<InnerLoop />
+
+Play with it for a minute and the shape of the design shows. With the defaults, τ = 0.4 and q = 0.5, the easy tokens commit after the first pass, the gate's mean crosses 0.5 after the second, and the step ends with the numbers still masked. Raise q toward 0.9 and the step runs all four passes, and the middling tokens commit at pass 3 once their states have been refined twice more. That is the mechanism working as advertised.
+
+Then switch to `left1`.
+
+## What "adaptive" means, mechanically
+
+I came in expecting each token to halt on its own gate. It doesn't. The gate is computed per token, but at inference its per-token values are only ever used as a mean over the unresolved positions, to decide when the whole window stops. Which tokens commit is decided by entropy, a separate signal from the LM head. The README says this plainly ("Entropy selects individual token commitments; the mean gate exit CDF over unresolved positions controls when the inner loop stops"), and the paper's Algorithm 1 says the same, so this isn't hidden. It just isn't what "token-adaptive halting" makes you picture.
+
+It matters more in `left1`, the mode Table 1 is run in. There, entropy is switched off: each pass commits exactly the leftmost unresolved token. A token's recurrent depth is then its rank in left-to-right order within the step. The first token gets one pass, the second two, and so on until the gate's mean says stop. The only adaptive decision left is how many passes the step runs. The quality results are real, but the token-by-difficulty story isn't what produces them.
+
+Training is closer to the story. In `ALoDLM.rollout`, each masked token samples its own exit from its own gate hazard, and once it exits, its ground-truth embedding replaces its latent state on later passes:
+
+```python
+# alodlm/model.py, ALoDLM.rollout, lines 152-168 (trimmed)
+for depth in range(cfg.max_depth):
+    if depth:
+        hidden = torch.where((exits <= depth).unsqueeze(-1), gold_embeddings, hidden)
+    for layer in base.layers[cfg.loop_start:cfg.loop_end]:
+        hidden = run(layer, hidden)
+    readout = hidden
+    for layer in base.layers[cfg.loop_end:]:
+        readout = run(layer, readout)
+    readout = base.norm(readout)
+    logits.append(self.backbone.lm_head(readout))
+    gates.append(self.exit_gate(readout.detach(), depth))
+    if depth < cfg.max_depth - 1:
+        with torch.no_grad():
+            hazard = gates[-1].float().sigmoid()
+            selected = (torch.rand_like(hazard) < hazard) & batch.masked & (exits == cfg.max_depth)
+        exits = torch.where(selected, depth + 1, exits)
+        hidden = base.norm(hidden)
+```
+
+So the model is trained on per-token schedules sampled from the gate, and decoded with entropy commits plus a window-level stop. The model sees committed embeddings appearing mid-loop in both cases, which is what matters for the backbone. The gate, though, is trained to make per-token decisions it never makes at inference. I'd like to see an ablation where commits come from the gate itself; the optimized engine has research switches for exactly that (`WEDLM_GATE_SOFT_ALPHA`, a "union" mode where gate or entropy can commit), but the shipped launcher clears every `WEDLM_*` variable and doesn't use them.
+
+The gate does learn something token-specific. The paper's Figure 4 (right) shows mean first-pass halting probability by token category: numbers 0.369, words 0.428, against a mean of 0.417. Numbers want more refinement, which is the right instinct, and nobody labelled them.
+
+<Figure
+  src="/articles/alodlm-looped-diffusion/fig5.png"
+  alt="Three panels. Left: training loss falls with recurrent depth, d=4 lowest. Middle: raising the exit threshold q from 0.1 to 0.4 raises loops per token from 1.60 to 2.34 and the average score from 77.9 to 79.1. Right: mean first-pass halt probability by token type, with numbers lowest at 0.369, 11.5% below the 0.417 mean."
+  caption="Deeper readouts reach lower training loss; raising q buys accuracy with more loops; and the gate halts numbers least eagerly. Note the middle panel: at q = 0.1 the average is 77.9, below Qwen3-8B's 78.5 in Table 1 (ALoDLM paper, Figure 4)."
+/>
+
+One more thing from the gate file. The documented initialisation sets uniform exit masses of 0.25 per depth, which the code in `GateHead.__init__` turns into depth biases of about −1.10, −0.69 and 0. The released per-depth biases decode to −0.003, 0.004 and 0.42, with a shared bias of 0.008. Either training walked the first two almost exactly to zero, or this checkpoint started from a zero-initialised gate, which gives a halting probability of 0.5 at every depth. The engine's loader has a "legacy" branch for gates without depth biases, so earlier gates clearly existed. I can't tell which happened, and it doesn't change how the model runs.
+
+## Training a halting decision you can't differentiate
+
+The exit depths are discrete, so you can't backpropagate through them, and you can't sum over them either: with $M$ masked tokens and 4 depths there are $4^M$ schedules, and each one changes the context for every other token, so every schedule needs its own forward run. PonderNet and Ouro sum over depths because their tokens don't interact through the halting decision. Here they do.
+
+The paper treats the schedule $\mathbf{z}$ as a latent variable and writes a conditional evidence bound with a variational distribution $q_\phi$ (the gate) and a prior $\pi$:
+
+$$
+J = \mathbb{E}_{\mathbf{z}\sim q_\phi}\Big[-\sum_{i} \log p_{\theta,i}^{(z_i)}(y_i \mid \mathbf{x}_t; \mathbf{z})\Big] + D_{\mathrm{KL}}(q_\phi \,\|\, \pi)
+$$
+
+The first term is the cross-entropy of each masked token at the depth it exited; the second keeps the gate near a prior that favours shallow exits. The prior is a truncated geometric, $\pi(d) \propto e^{-0.4 d}$ over $d = 1..4$, which works out to 0.413, 0.277, 0.186 and 0.124, mean depth 2.02. The denoiser gets ordinary gradients. The gate gets REINFORCE: the detached cost of the whole sampled schedule multiplies the log-probability of that schedule. In code:
+
+```python
+# alodlm/loss.py, outcome_loss, lines 75-80
+prediction = ce.detach().float().gather(0, z - 1).squeeze(0) - ce[0].detach().float()
+mi_cost = config.kl_beta_mi * (logq - marginal)
+budget_cost = config.kl_beta_marg * (marginal - prior)
+credit = (prediction + mi_cost) + budget_cost
+ids = masked_sequence_ids(selected, batch.boundaries)
+actor = sequence_score_function(credit, logq, ids, batch.boundaries.numel() - 1)
+```
+
+`prediction` is the loss at the sampled exit minus the loss at pass 1, the first-pass control variate: going deeper is rewarded exactly when it lowers the loss below what one pass would have given. `credit.py` sums these per sequence, so each halting decision gets credit for the whole sequence's outcome, not just its own token. The two KL weights, 0.1 and 1.0, split the prior penalty: a weak one on how much individual tokens' depth profiles differ from the batch average, a strong one pulling the batch average to the geometric prior. That split is what lets numbers and words end up with different halting habits.
+
+Two more pieces make it train. Every readout before a token's sampled exit also gets supervised, weighted by the gate's probability mass there, and the paper measures what that buys: without it, denoiser gradient variance is 1.76, 1.49 and 1.42 times higher at training steps 1,000, 6,500 and 17,000. And there is an autoregressive next-token loss on the clean stream, averaged over depths, weighted equally with the diffusion loss (`model.py` line 185: `total = (denoising_actor + ar_loss) / 2`).
+
+This is the most careful part of the paper, and the code matches it line for line. The derivation of the unbiased estimator in Appendix C is clean. The practical surrogate is not the unbiased one, and the paper says so: the relaxed KL is "a rollout-based relaxation", and the unbiasedness result "concerns the original joint-KL objective".
+
+## Checking "outperforms"
+
+Table 1 is where the headline comes from. Here it is as Amazon renders it on the model card.
+
+<Figure
+  src="/articles/alodlm-looped-diffusion/fig2.png"
+  alt="Table 1: eleven benchmarks in three groups (general reasoning, math and science, code) for Qwen3-1.7B, SDAR-1.7B, ALoDLM-1.7B, Qwen3-8B, LLaDA-8B, Dream-7B, Fast-dLLM-v2-7B, SDAR-8B, WeDLM-8B and ALoDLM-8B. Averages: 63.8, 61.0, 65.5, 78.5, 53.3, 60.5, 61.0, 74.2, 75.1, 80.3."
+  caption="The main results. ALoDLM averages 65.5 against Qwen3-1.7B's 63.8 and 80.3 against Qwen3-8B's 78.5 (ALoDLM paper, Table 1, as rendered on the amazon/ALoDLM-8B model card)."
+/>
+
+I re-typed every cell and recomputed the averages; they all match to the rounding (the 8B ALoDLM column averages 80.318, Qwen3-8B 78.545). The widget below lets you untick benchmarks and see what the margin rests on.
+
+<TableOne />
+
+At 8B, ALoDLM beats WeDLM-8B, the strongest diffusion baseline, by 5.2 points and on 10 of 11 benchmarks; only MMLU goes the other way. That part of the claim is solid, and it is the more interesting one. Against Qwen3-8B the margin is 1.8 points: 8 wins, one tie (MMLU, 76.6 each) and two losses (MATH-500 by 1.0, MBPP+ by 2.0). The largest single gain is MMLU-Pro at +7.1; drop it and the margin falls to 1.24. That's still a win, spread across code and reasoning.
+
+At 1.7B the picture is different. ALoDLM-1.7B loses to Qwen3-1.7B on ARC-C, ARC-E, MMLU and, by 10.2 points, MATH-500. Across the seven non-code benchmarks it is 0.59 points behind its parent. The average margin of 1.7 comes from code (+5.57 averaged over the four code benchmarks) and GPQA-Diamond (+10.1, which on 198 questions is about 20 more right answers, from a parent at 31.3, a few points above the 25% you'd get by guessing). And "outperforms all evaluated DLMs" at 1.7B means one DLM, SDAR-1.7B.
+
+The table also can't tell you three things. The first is the decoding mode. Section D.2 is explicit: "For this quality comparison, each model pass commits one token." ALoDLM runs `left1` with q = 0.5 at 8B (0.4 at 1.7B). Every DLM in the table is held to a single-token preset too, which is fair between DLMs, but it means the quality claim and the speed claim come from different operating modes. In the parallel mode that produces the speed numbers, GSM8K accuracy at q = 0.5 runs from 93.8% (τ = 0.1) down to 92.3% (τ = 0.6) and 89.9% (τ = 0.9). Table 1's GSM8K is 94.2.
+
+The second is data, and it's the one I'd weigh most. Both ALoDLM models are Qwen3 checkpoints fine-tuned on "a 5B-token corpus", eight epochs of it at 8B: 34,512 optimizer steps of 256 packed 4,096-token sequences, about 36 billion tokens processed. The model card says the data "includes mathematical problems and worked solutions, programming tasks and code solutions, and instruction-formatted text". The repository contains no data or data-acquisition code. The AR column is stock Qwen3. There is no Qwen3 fine-tuned on the same corpus, and no ALoDLM with $K = 1$, which would separate "looping helps" from "this SFT data helps". The depth ablation in Figure 5 compares $K = 2$, 4 and 8, all looped. The fact that the biggest 1.7B gains land on code, a stated focus of the training data, is what you'd expect from the data alone. It doesn't prove the loop contributes nothing; it means the table can't show that it does.
+
+The third is how Qwen3 itself was run. The paper says only that it used "each model's native chat template". The ALoDLM transcripts in the paper's case study open with an empty `<think></think>` block, Qwen3's non-thinking format. Which mode Qwen3 was run in isn't stated, and with a 4,096-token cap the answer matters for GPQA and MATH-500. I couldn't check this.
+
+The paper's own Figure 4 adds a footnote of its own. At q = 0.1 the eleven-benchmark average is 77.9, below Qwen3-8B's 78.5; at q = 0.4 it is 79.1. Table 1 uses q = 0.5 and reports 80.3. If Figure 4 is the released checkpoint, which the caption doesn't say, then whether ALoDLM beats its parent depends on how much looping you buy at inference. That is the test-time scaling story told from the other side.
+
+## The 2.7x, and what it costs in FLOPs
+
+<Figure
+  src="/articles/alodlm-looped-diffusion/fig3.png"
+  alt="Scatter of GSM8K accuracy against single-stream throughput on one B200. ALoDLM-8B sits at about 93.2% and just over 600 tokens per second; WeDLM-8B at about 93% and 510; Qwen3-8B on vLLM at about 93% and 230; Qwen3-8B with HF generate at about 93% and 40; SDAR-8B, Fast-dLLM-v2, LLaDA-8B and Dream-7B lower."
+  caption="Accuracy against single-stream throughput on GSM8K. The ALoDLM point is the 93.25% operating point at 612.4 tokens/s; vLLM-served Qwen3-8B runs at 229.3 tokens/s (ALoDLM paper, Figure 1, right; throughputs from the project page)."
+/>
+
+The 2.7x is 612.4 tokens/s against 229.3, both from the project page, which works out to 2.67. Three conditions sit under it. It is GSM8K only; no other benchmark has a speed number. It is one request at a time on one B200. And the ALoDLM point was picked from a sweep of 94 $(q, \tau)$ settings, against 21 for WeDLM and a single configuration for Qwen3. Against WeDLM, the honest comparison, the gain at matched 93.25% accuracy is 8.5% in throughput, and the two frontiers cross near 650 tokens/s, past which WeDLM is faster.
+
+<Figure
+  src="/articles/alodlm-looped-diffusion/fig4.png"
+  alt="Four panels. (a) GSM8K accuracy falls and speed rises as the entropy threshold tau goes from 0.1 to 0.9; accuracy rises slightly and speed falls as the exit threshold q goes from 0.1 to 0.9. (b) Accuracy against speed and against GFLOPs per token for ALoDLM-8B and WeDLM-8B, with ALoDLM's frontier higher over most of the range."
+  caption="τ trades accuracy for speed; q buys a little accuracy back with more loops. Against WeDLM-8B, ALoDLM's frontier is higher over most of the range in both throughput and estimated GFLOPs per token (ALoDLM paper, Figure 3)."
+/>
+
+The paper also estimates arithmetic, and that is where I'd look hardest. Appendix D.2 gives the formula: twice the dense parameters per layer times the token-layer evaluations, plus the output head, plus an attention term, over generated tokens. It gives 192.9M dense parameters per layer and 622.3M in the output head; I checked both against the safetensors header (192,946,432 per layer; 151,936 × 4,096 for `lm_head`). At 93.25% accuracy, ALoDLM costs 133.5 GFLOPs per generated token against WeDLM's 154.6, a 13.6% saving. The paper never applies the formula to Qwen3. I did: 36 layers, one position, one head readout per token, and a few hundred tokens of context gives about 15.3 GFLOPs. ALoDLM's 133.5 is about 8.7 times that.
+
+That isn't a contradiction. Decoding one request at a time is bound by memory bandwidth: every forward pass reads all 16.4 GB of weights (16,381,470,720 bytes in the four shards), and whether that pass carries 1 position or 20 barely changes its wall time. A diffusion decoder turns idle arithmetic into tokens. That is a fine trade for a single user on a big GPU. It is a bad one for a server that already batches many requests, because batching is the other way to use that idle arithmetic, and it doesn't cost nine times the FLOPs. The paper says as much in Appendix B.2 ("With batching, the shared execution can run to the largest stopping depth among the active sequences") and reports no batched throughput.
+
+The KV cache grows too. Weight sharing doesn't share keys and values: the same core layer sees different inputs at each depth, so each of the 16 core layers keeps a cache per depth. That is 36 + 3 × 16 = 84 key/value buffer pairs instead of 36. At 8 KV heads of 128 dimensions in bfloat16, that's 336 KiB per cached token against Qwen3-8B's 144 KiB, 2.33 times as much. Where a depth wasn't computed for a prefix token, the decoder reuses the deepest one that was, and the coda keeps only its latest branch. Appendix B.1 calls both "serving approximations".
+
+The paper's limitations section is candid about the rest: time to first token is longer, because prefill builds caches at every depth, and the speed advantage "may reverse" on prompts outside the training distribution.
+
+## What a step looks like on a real answer
+
+<Figure
+  src="/articles/alodlm-looped-diffusion/fig6.png"
+  alt="A GSM8K response about Janet's ducks, each token shaded by the recurrent pass at which it committed, from K=1 (lightest) to K=4 (darkest). Almost every token is shaded K=2 or darker; numbers, the boxed answer and many step headers are K=4."
+  caption="Token-wise commitment pass in one GSM8K response, entropy mode, q = 0.5, τ = 0.4, 16-token window (ALoDLM paper, Figure 6a)."
+/>
+
+I find this figure more telling than the averages. Almost nothing commits on the first pass. Most tokens commit at pass 2 or 3, and the boxed answer, the arithmetic and the step headers at pass 4. In this example the model loops most of the time; the "easy tokens exit early" picture applies to a few connectives. It fits Figure 4's middle panel, where even the shallowest setting averages 1.6 loops per token.
+
+## The code and the weights
+
+The repository is small and readable: a portable PyTorch decoder and trainer under `alodlm/` (about 1,800 lines), and under `optimized/` a modified copy of WeDLM's nano-vLLM engine with depth-aware paged caching, per-pass CUDA graphs and the cache repair. The tests build small random models and check the outcome gradient, the masking, the cache and the scorers. Things I noticed:
+
+- `alodlm-evaluate` uses the portable SDPA decoder, not the engine, so its timings aren't the paper's; the docs say to report which engine produced a number.
+- The engine carries research leftovers. `controller_gate.py` is a "lambda-conditioned depth optimal-stopping controller", an MLP that picks one stop depth per step, loaded only if `WEDLM_CONTROLLER` points at a weight file. The paper never mentions it, and the launcher clears it.
+- Parameter counts are exactly the parents'. ALoDLM-8B has 8,190,735,360 parameters across 399 tensors, the same as Qwen3-8B, plus the 4,101-parameter gate; ALoDLM-1.7B has 2,031,739,904, the same as Qwen3-1.7B. Looping adds depth, not weights.
+- The optimized 8B path is checked on a 40 GB A100. The bf16 weights alone are 16.4 GB; the 1.7B model fits on an ordinary consumer card.
+
+<ModelCard repo="amazon/ALoDLM-8B" />
+
+<RepoCard repo="amazon-science/ALoDLM" />
+
+The licences are the catch for anyone thinking of using this. Amazon's code, docs and weights are CC BY-NC 4.0: research use only. The WeDLM-derived engine keeps Tencent's licence, which opens with "WeDLM IS NOT INTENDED FOR USE WITHIN THE EUROPEAN UNION", and the NOTICE says the release "does not replace those upstream terms". So the fast path carries a non-commercial licence and a territorial clause on top of it.
+
+## What I'd take from it
+
+The idea I'll remember is the one in the first figure: inside a diffusion step, don't throw away the work on tokens you aren't ready to commit; keep looping them while their committed neighbours become context. The training objective for the halting policy is principled, and the code is honest about where it relaxes the principle. Beating WeDLM-8B by 5.2 points from the same Qwen3 family, while also being faster than it at matched accuracy, is a real result for diffusion LMs.
+
+The AR claim is the part I'd discount. It compares a model fine-tuned for eight epochs on math and code with a parent that wasn't, in a decoding mode that gives up parallelism, with no same-data control. At 1.7B it rests on code and GPQA. The speed claim is true where it was measured, one request on one B200, and it is bought with roughly nine times the arithmetic and 2.33 times the KV cache per token. If you serve batches, that trade likely runs the other way, and nobody has measured it yet.
+
+The experiment I'd want next is cheap by comparison: the same SFT corpus through plain Qwen3-8B, and through ALoDLM with the loop switched off. Until then, "looping beats autoregression" isn't something this paper shows. "Looping makes a better diffusion LM" mostly is. For more on why looped comparisons need compute matching, see [SMELT's compute-matched results](/articles/looped-transformers-matched-compute) and [LOOM](/articles/loom-looped-moe); for loops inside image diffusion, [LiFT](/articles/lift-loop-flow-transformer); and for the design axes of looped models generally, [IFM's ablations](/articles/looped-models-done-right).
+
+## How I checked
+
+I read the arXiv HTML of 2610.04198 (v1) in full, including the appendices, and the project page at alo-dlm.github.io, which gives the 229.3 and 612.4 tokens/s figures. Figures are the paper's own SVGs rendered to PNG, plus Table 1 as rendered on the Hugging Face model card. I shallow-cloned amazon-science/ALoDLM and read every file in `alodlm/`, the docs, the configs and the parts of `optimized/` that the launcher touches; I didn't run any of it. From amazon/ALoDLM-8B and ALoDLM-1.7B I read `config.json` and `alodlm_config.json`, and summed tensor shapes from the safetensors headers with HTTP range requests; I did the same for Qwen/Qwen3-8B and Qwen/Qwen3-1.7B. I opened `exit_gate.pt` as a zip and decoded its bfloat16 bytes directly, without loading it through PyTorch. I re-typed Table 1 and recomputed every average and difference. The Qwen3-8B FLOP figure is mine, from the paper's Equation 35 with the paper's per-layer and head parameter counts, one position per layer evaluation and a context of 200 to 500 tokens (15.25 to 15.43 GFLOPs). The KV cache sizes come from the config: 8 KV heads, head dimension 128, bfloat16, times 36 or 84 buffer pairs. I couldn't check the training data, the Qwen3 thinking mode used in Table 1, whether Figure 4 is the released checkpoint, or any number that needs a GPU to measure.
