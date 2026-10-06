@@ -1,0 +1,225 @@
+---
+title: "Prime Inference: serving GLM-5.3 to agents is a KV-cache problem"
+description: "Prime Intellect's write-up of how it serves GLM-5.3 on GB200 NVL72 with vLLM and Dynamo is four cache fixes in a row, and the numbers hold together better than most serving posts. I checked them against GLM-5.3's config and the vLLM source history. The 576 to 352 bytes per MLA row reconstructs exactly as 256 bytes of packed 4-bit latent, 32 FP8 scales and the 64-byte rope part, and 78 layers of it is 6.6 GB of FP8 cache for a typical 146K-token agent session. The ~5x prefix-cache win of DEP8 over TEP8 is the arithmetic of MLA itself: the latent has no head axis, so tensor parallelism cannot split it and every rank keeps all of it. Two things do not reconcile on the page: a 1.64x row shrink becomes 1.50x of capacity, and 66 sessions at 101 tok/s each would be 6,666 tok/s against the 2,400 that 24 GPUs at 100 tok/s actually produce."
+date: 2026-10-06
+interest: 4
+helpful: 5
+tags:
+  - inference
+  - serving
+  - vllm
+  - kv-cache
+  - quantization
+  - mixture-of-experts
+  - long-context
+  - systems
+---
+
+import { KvRowBytes } from "@/components/articles/prime-inference/kv-row-bytes"
+import { CopyCount } from "@/components/articles/prime-inference/copy-count"
+
+Prime Intellect [launched Prime Inference](https://primeintellect.ai/blog/prime-inference/) on 2 October with a long technical post about one deployment: [GLM-5.3](/articles/glm-5-3) on GB200 NVL72, run by vLLM under NVIDIA Dynamo, with Mooncake as a host-memory cache tier and FlashInfer kernels. The [launch thread](https://x.com/PrimeIntellect/status/2106146483003384253) compresses it to six claims. I read the post, then held its numbers against the model's own `config.json` and the vLLM pull requests it leans on.
+
+The sentence that organises the whole post is this one:
+
+<Callout type="note">
+*"Long-context agentic serving is as much a cache-management problem as a compute problem."*
+</Callout>
+
+Every optimisation in the post is a cache fix: where the cache lives, how many copies exist, how many bytes a row takes, and how many pieces it is cut into when it moves. I take them in the order a request meets them.
+
+Labels: **reported** is Prime Intellect's figure, not re-run. **Measured** is something I read out of a file myself. **Reasoned** is my arithmetic on the other two. I did not run the stack.
+
+## The workload
+
+A typical agent turn **adds about 6K tokens to a 140K-token prompt** (reported). Almost every request is a long prefix the system has seen before plus a short new tail, with cold long prompts mixed in. The benchmark is SemiAnalysis's AgentX, which replays multi-turn agent sessions, plus injected cold arrivals.
+
+Two metrics, defined in the chart's footer:
+
+- **E2E tok/s per user** is completion tokens divided by the whole request time, *queueing and first token included*. That is stricter than the usual `1 / TPOT`, which only counts time spent decoding.
+- **Output tok/s per GPU** is completed output tokens divided by measurement time, divided by every serving GPU, prefill and decode alike.
+
+The target was **100 E2E tok/s per user**, and the tuning question was how many concurrent sessions survive at that speed.
+
+## Prefill and decode on different GPUs
+
+A decode step for a batch of running sessions is short and memory-bound. A prefill of a 140K-token prompt is long and compute-bound. Put both on the same GPUs and the decode stream stalls whenever a prefill chunk runs. Chunked prefill makes the stalls shorter but more frequent; it does not remove them.
+
+<Figure
+  src="/articles/prime-inference/fig1.png"
+  alt="Three timelines titled 'A cold prompt on one engine vs on P/D'. Top: one engine with large prefill chunks, where blue decode steps stop for two long prefill blocks and every stream waits out each chunk. Middle: one engine with small prefill chunks, where decode steps are interleaved with many small prefill blocks, so every step slows and the first token comes later. Bottom: prefill/decode disaggregation, with prefill blocks on prefill GPUs, an arrow labelled 'KV over NIXL' down to decode GPUs whose blue steps never stop; the session joins the batch when its KV lands."
+  caption="The case for disaggregation in one picture. With separate pools, decode never runs a prefill; the cost moves into a KV transfer from one pool to the other, which comes back as a problem at the end of the post. (Prime Intellect, 'Prime Inference', chunked prefill vs P/D figure.)"
+/>
+
+So prefill and decode get separate GPU groups. Dynamo routes and orchestrates; vLLM runs the model in each group; when a prefill finishes, the decoder pulls the computed KV through NIXL and adds the request to its batch. The post reports that this cut **p90 inter-token latency by nearly 40%** in their tests (reported). The [vLLM](/articles/vllm#prefill-and-decode-as-separate-machines) and [SGLang](/articles/sglang#prefill-and-decode-on-separate-machines) pieces cover the general mechanism; [vLLM's Qwen3.8 recipe](/articles/qwen38-pd-serving) is the closest sibling of this post.
+
+Disaggregation adds a knob, the **P/D ratio**: how many decode engines each prefill group feeds. Too few decoders and prefill idles; too many and new sessions queue for prefill.
+
+## The headline, read carefully
+
+<Figure
+  src="/articles/prime-inference/fig2.png"
+  alt="Scatter chart titled 'Throughput per GPU against speed per user', for one DEP8 prefill group against TP4 decoders with NVFP4 KV. X axis: E2E tokens per second per user, mean, 60 to 140. Y axis: output tokens per second per GPU, 50 to 150. A dotted vertical line marks the SLA at 100 tok/s/user. Three series: 1:4 with 24 GPUs (blue circles: C96, C66, C64, C42), 1:3 with 20 GPUs (orange squares: C96, C72, C48), 1:2 with 16 GPUs (green diamonds: C64, C32). A dashed Pareto frontier runs from top left to bottom right. The point labelled C66, on the 1:4 series, sits just right of the SLA line at about 101 tok/s/user and 100 tok/s per GPU."
+  caption="Labels are concurrent sessions. The only point the post states numerically is C66 on the 1:4 curve: 101 tok/s per user and 100 output tok/s per GPU. The rest are read off the chart. (Prime Intellect, 'Prime Inference', performance Pareto figure.)"
+/>
+
+*"At the 100 tok/s/user bar, a 1:4 P/D ratio serves the most: 66 sessions per prefill group at 101 tok/s/user and 100 output tok/s per GPU"* (reported).
+
+The GPU counts in the legend decode cleanly. One DEP8 prefill group is 8 GPUs, and each TP4 decoder is 4, so 1:4 is 8 + 16 = 24, 1:3 is 8 + 12 = 20, and 1:2 is 8 + 8 = 16 (reasoned). The legend agrees on all three.
+
+Then the two halves of the headline stop agreeing with each other. If 66 sessions each received 101 tokens a second, the deployment would emit **6,666 tokens a second**. The per-GPU figure says it emits 100 &times; 24 = **2,400** (reasoned). The ratio is 0.36.
+
+Both can be true, because the denominators differ. Per-user speed is averaged over the time each *request* is in flight. Concurrency counts *sessions*, and an agent session spends part of its life between requests while its tools run. 2,400 &divide; 101 is about **24 requests in flight on average**, roughly a third of the 66 sessions (reasoned). The post never says whether AgentX replays inter-turn gaps, so I cannot confirm this; it is the only explanation I can find that fits both numbers. Either way, "66 sessions at 101 tok/s" is not 66 parallel streams, and anyone sizing a deployment should use the 2,400.
+
+For scale: TP4 decode's mean inter-token latency at 64 sessions is **6.08 ms** (reported, separate run), about 164 tok/s while decoding (reasoned). The E2E 101 also pays for queueing, retrieval and the first token, which is what the prefill work goes after.
+
+## Prefill topology: why DEP8 holds five times the cache
+
+GLM-5.3 uses DeepSeek-style [multi-head latent attention](/architectures/attention-kv). Instead of caching a key and a value per head, each token caches one **512-value latent** plus one **64-value rotary key**, and all 64 attention heads up-project from that same latent (measured from `config.json`: `kv_lora_rank: 512`, `qk_rope_head_dim: 64`, `num_attention_heads: 64`). The cache row has no head axis.
+
+Now shard attention with tensor parallelism. TP splits the work by heads: rank 0 gets heads 0-7, rank 1 gets 8-15, and so on. With an ordinary multi-head cache, each rank stores only its own heads' K and V, and the cache shards for free. With MLA, every head needs the *whole* latent, so every rank stores the whole latent for every request. **TP8 keeps eight copies of each request's cache.** The post's decode chart lists exactly this as "KV copies per request": TP4 4, TP8 8, DEP8 1.
+
+The alternative is to make attention data-parallel. In **DEP8**, eight ranks each run full attention for *different* requests, and only the MoE layers are sharded: 256 routed experts split across the eight ranks, with an all-to-all at every MoE layer to send tokens to their experts (see the [mixture-of-experts doc](/architectures/mixture-of-experts)). Each request's cache now lives on one rank. In **TEP8**, attention is tensor-parallel and experts are expert-parallel.
+
+The ideal capacity ratio is therefore 8x. DEP pays in weight memory: every rank holds all the attention weights, not an eighth. From the config the MLA projections are about 165M parameters per layer, 13B over 78 layers, so roughly 13 GB at FP8 per DEP rank against 1.6 GB under TP8 (reasoned). After that the post reports **roughly five times more usable prefix-cache capacity** for DEP8 over TEP8 (reported). Without the per-GPU memory budget I cannot close the gap from 8 to 5, but the direction and size are what MLA predicts.
+
+DEP's cost is synchronisation, and the post measures it:
+
+<Figure
+  src="/articles/prime-inference/fig3.png"
+  alt="Horizontal bar chart titled 'One prefill chunk on DP rank 6, 3,844 new tokens on a 165,888-token cached prefix'. Subtitle: the rank's own forward is 408 ms of a 678 ms window; the rest is 15 decode-shaped dummy forwards. Bars of GPU time inside the target forward: MoE all-to-all (dispatch, combine, sanitize) 150 ms, 34%, 375 launches; GEMM (dense plus NVFP4 expert) 110 ms, 25%, 888 launches; DSA indexer (logits, top-k, fused-q) 105 ms, 24%, 288 launches; MLA sparse attention (fmha) 57 ms, 13%, 78 launches; norm, rope, elementwise 9 ms, 2%; MoE routing and finalize 1 ms; other 4 ms. Footer: 2,639 launches in a 408 ms step, vLLM torch profiler, DEP8 prefill."
+  caption="One DEP8 rank's prefill chunk. Its own forward is 408 ms; the rest of the 678 ms window is dummy forwards it runs only to keep joining its peers' all-to-alls. Note the 78 attention launches, one per layer, which matches the config. (Prime Intellect, 'Prime Inference', DEP8 prefill timing figure.)"
+/>
+
+Every DP rank joins the same all-to-all at every MoE layer, so an idle rank still runs forwards to keep its peers moving. The profiled rank's own work is 408 ms of a 678 ms window, **60%**; the other 270 ms is 15 dummy forwards (reasoned from the figure; the text says "roughly 245 ms"). Widening EP makes it worse: one DEP16 took **17.9% longer** than two DEP8 groups (reported).
+
+## The scheduler bubble
+
+Cache capacity gets the prefix to the GPU. It does not get the request into a batch.
+
+<Figure
+  src="/articles/prime-inference/fig4.png"
+  alt="Two panels titled 'Cached KV can be ready long before the request runs'. Top: a timeline averaged over 540 requests: retrieve 127 ms in blue, then poll 444 ms, hand off 476 ms, admit 427 ms in red, bracketed as 1,347 ms waiting after the KV is ready. Bottom, a separate run: median prefill queue wait of 550 ms at 8K tokens per step against 110 ms at 4K per step, annotated 80% shorter wait and about 20% lower median TTFT."
+  caption="Retrieval is the short part. A mean of 1,347 ms passes between the KV being ready and the request running, against 127 ms to fetch it. The bottom panel is a separate run. (Prime Intellect, 'Prime Inference', scheduler bubble figure.)"
+/>
+
+Fetching the cached KV takes **127 ms**; the request then waits **1,347 ms** to be polled, handed off and admitted (reported, mean of 540 requests). Workers only check for completed loads between forward passes, and a long prefill step is a long time between checks. A ready request that just misses a scheduling decision waits a whole step.
+
+The fix is to make the steps shorter. Halving the prefill budget **from 8K to 4K tokens per GPU per step** cut median queue wait **from 550 ms to 110 ms** and median time to first token by **roughly 20%** (reported). Long cold prompts now pay for more, smaller steps; the post says the trade only works because most turns reuse a prefix. It is a setting tuned to this workload, not a default.
+
+## Decode: TP4, and the copies it keeps
+
+Decode has the same MLA problem in a different form.
+
+<Figure
+  src="/articles/prime-inference/fig5.png"
+  alt="Bar chart titled 'TP4 has the lowest inter-token latency of the four decode shapes', mean inter-token latency at 64 sessions on AgentX, lower is better. TP4 6.08 ms, highlighted, with 4 KV copies per request. TP8 6.74 ms, 8 copies. DEP8 8.48 ms, 1 copy. TP8 plus DCP4 14.02 ms, 2 copies."
+  caption="The latency ranking is the inverse of the cache ranking. TP4 is fastest and keeps four copies of every request's latent; DEP8 keeps one and is 39% slower; DCP cuts copies and pays in communication. TP8 + DCP4 is an isolated decode run. (Prime Intellect, 'Prime Inference', decode topology figure.)"
+/>
+
+TP4 gives the lowest inter-token latency, **6.08 ms** against 8.48 ms for DEP8 (reported), because DEP's pre-MoE synchronisation sits on the critical path of every decode step. But TP4 stores four copies of every latent.
+
+Decode context parallelism (DCP), which splits the cached *sequence* across ranks, lost badly at **14.02 ms**. GLM-5.3's attention is sparse: an indexer picks the top tokens and each query attends to at most **2,048** cached positions (measured: `index_topk: 2048`). There is little attention work to split, and the gather-merge-combine traffic costs more than it saves. (The [GLM-5.3-Flash piece](/articles/glm-5-3-flash) covers the same sparse-MLA family on the smaller model.)
+
+So they kept TP4 and made each copy smaller.
+
+## Four bits per latent value: where 352 comes from
+
+The post states the format: the 512-value latent stored in NVFP4, *"four bits per value, with an FP8 scale for each group of 16 values,"* the 64-value rope part left in FP8, and each row going from **576 to 352 bytes**. It does not show the sum, so here it is.
+
+| | FP8 row | NVFP4 row |
+|---|---:|---:|
+| Latent, 512 values | 512 &times; 1 B = 512 B | 512 &times; 4 bit = **256 B** |
+| Block scales | none | 512 &divide; 16 = 32 scales &times; 1 B = **32 B** |
+| Rope part, 64 values | 64 &times; 1 B = 64 B | 64 &times; 1 B = **64 B** |
+| **Row** | **576 B** | **352 B** |
+
+The reconstruction lands on both stated numbers exactly (reasoned), and it implies the FP8 baseline has no per-row scale: the leanest possible FP8 row, not a padded one. [SGLang's NVFP4 KV cache](/articles/nvfp4-kv-cache) uses the same 4-bit-plus-scale-per-16 format, and its "56.25% of FP8" is this table's 288 &divide; 512 for the latent alone.
+
+<KvRowBytes />
+
+Per row that is 576 &divide; 352 = **1.64x**. The post's capacity figure is smaller: **1.09 million to 1.63 million cached tokens per decoder**, **1.50x**, *"with the indexer and other state unchanged"* (reported). If the untouched state is $x$ bytes per token per layer, then $(576 + x) / (352 + x) = 1.495$ gives $x \approx 100$ bytes (reasoned). GLM-5.3 keeps sparse-indexer keys on 21 of its 78 layers (measured: `indexer_types` lists 21 `full` and 57 `shared`), and 128 FP8 values plus a scale on 21 layers would account for about a third of that if stored the way DeepSeek's indexer is. I cannot attribute the rest. "~50% more" is the honest summary, and it is what the post says.
+
+What does that buy? A 146K-token session is 146,000 &times; 78 &times; 576 = **6.6 GB** of FP8 latent, or **4.0 GB** in NVFP4 (reasoned, latent only). The reported capacities hold 7 such sessions per decoder in FP8 and 11 in NVFP4. The headline configuration runs 66 sessions over 4 decoders, about 16.5 each (reasoned), so even compressed, not every history fits in HBM at once. Prefix caching, sticky routing and Mooncake's host-DRAM tier carry the rest, and each extra resident session is a 146K-token prefix that does not come back over the wire.
+
+## A kernel that reads four bits directly
+
+Storing NVFP4 is easy. Attending over it without giving the savings back is the work.
+
+<Figure
+  src="/articles/prime-inference/fig6.png"
+  alt="Two data paths titled 'Reading the 4-bit rows directly removes a round trip through GPU memory', kernel time per launch at 15 tokens on GB200, with NVIDIA's FP8 kernel on a real FP8 cache at 13.7 microseconds. Staged, 17.7 microseconds per launch: a gather kernel reads 352 B NVFP4 rows from GPU memory, writes a 576 B FP8 copy back to GPU memory, and an FP8 attention kernel reads the 576 B copy and writes the output. Native, 12.0 microseconds per launch: one kernel reads the 352 B rows, unpacks on chip, then scores, softmaxes and blends, and writes the output, with no FP8 copy."
+  caption="The staged path touches 352 + 576 + 576 = 1,504 bytes per selected row; the native one touches 352. (Prime Intellect, 'Prime Inference', staged vs native decode figure.)"
+/>
+
+The first version unpacked the selected rows into a temporary FP8 buffer and called the existing FP8 attention kernel. That kept the capacity win but added a write and a read of a 576-byte row on every layer. Per selected row, the staged path moves 352 + 576 + 576 = **1,504 bytes** through HBM against 352 for a native read, 4.3x as much (reasoned from the figure).
+
+The native kernel loads the rows the indexer selected and unpacks them on-chip, computing in FP16 with FP32 accumulation. A cluster of three to eight SMs shares each query token's rows and merges partial results through distributed shared memory in one launch; within each SM, warp groups unpack, score and accumulate through a three-slot buffer. That is [FlashAttention-3](/articles/flash-attention-3)'s warp specialisation with a dequantisation stage in front. One tuning is worth stealing for any sparse kernel: short contexts leave `-1` entries in the 2,048-position list, the first version read row zero for each of them, and zero-filling them took a 35-token launch from about **41 μs to 20.6 μs** (reported).
+
+The final numbers at 15 query tokens per launch: native NVFP4 **12.0 μs**, staged NVFP4 **17.7 μs**, FP8 attention **13.7 μs** (reported). The post adds the caveat itself: *"These are results for that workload, not a speed advantage over FP8 at every batch size."* It also says attention is **about 8% of a decode step** at 32 sessions, so shaving 12.0 against 13.7 μs moves the whole step by roughly 1% (reasoned). The kernel exists to make the capacity win free, not to make decode faster, and the post says as much.
+
+The thread says the kernel is being contributed to FlashInfer as an experimental operation. As of 6 October I could not find a matching pull request in `flashinfer-ai/flashinfer` (searched for NVFP4 sparse-MLA decode, GLM-5.3 and 352-byte rows; there is a lot of adjacent NVFP4 MLA work, none of it obviously this). The post says "are contributing", which is consistent with that.
+
+## Accuracy
+
+<Figure
+  src="/articles/prime-inference/fig7.png"
+  alt="Table titled 'Accuracy with fp8 KV and NVFP4 KV', score per benchmark, delta is NVFP4 minus FP8 in percentage points. DeepSWE 68.47% vs 69.82%, +1.35. GSM8K 97.42% vs 97.50%, +0.08. MMLU 92.73% vs 92.82%, +0.09. HumanEval 99.39% vs 99.09%, -0.30. HumanEval+ 94.82% vs 93.90%, -0.92."
+  caption="Five benchmarks, deltas from +1.35 to -0.92 points, no sample counts or run counts given. (Prime Intellect, 'Prime Inference', NVFP4 KV accuracy figure.)"
+/>
+
+The post calls the suite *"rigorous"* with emphasis on long context. Of the five benchmarks shown, only DeepSWE is plausibly long-context, and with no sample sizes or error bars, neither +1.35 nor -0.92 can be told from noise. The table supports "no visible regression on these five". It is not evidence that 4-bit KV is harmless at 140K tokens of agent history, which is where this deployment runs.
+
+## Moving the cache: 32K copies for one request
+
+Every new session's KV crosses from a prefill rank to a decode rank. Prime uses vLLM's NIXL connector over multi-node NVLink, and in an early comparison NVLink **added roughly 292 ms to time to first token relative to InfiniBand** (reported). The faster wire was slower.
+
+The cause was fragmentation. One **200K-token request arriving at one TP4 rank triggered 32K device-to-device copies** (reported). In NVFP4 that request's latent is 200,000 &times; 78 &times; 352 = **5.5 GB** (reasoned). NVIDIA specifies NVLink on GB200 at 1.8 TB/s per GPU, both directions together, so the bytes themselves need well under 10 ms of wire time (reasoned from NVIDIA's spec). When the transfer takes an order of magnitude longer, the time is going to per-copy overhead, not bandwidth.
+
+The layout explains the count. vLLM describes every KV allocation with the axes `L` (layer), `B` (block), `H` (heads), `N` (tokens in a block) and `C` (channels), and since its [KV-cache layout refactor](https://github.com/vllm-project/vllm/pull/51718) (merged 22 August) the physical order is a choice: `LBHNC`, `BLHNC` and four others, selectable with `VLLM_KV_CACHE_LAYOUT` (measured from the PR description).
+
+<Figure
+  src="/articles/prime-inference/fig8.png"
+  alt="Diagram titled 'Block-major layout moves one block as one region instead of one per layer'. Left, layer-major as the engine allocates: a grid of rows labelled layer 1, 2, 3 to layer 75 and columns of 1,024-token blocks; one column is highlighted in each layer row, captioned 'one block = 75 regions, 75 descriptors'. Right, block-major: the same blocks drawn as tall columns with all 75 layers of a block contiguous, one column highlighted, captioned 'one block = 1 region, 1 descriptor'. Footer: same bytes either way; the transfer engine is told once per region. Measured on one harness: 19,559 to 1,940 descriptors, 146 to 78 ms per transfer."
+  caption="Same bytes, different number of pieces. The figure draws 75 layers; GLM-5.3's config has 78 attention layers, and the post's own profile shows 78 attention launches, so read 75 as schematic. (Prime Intellect, 'Prime Inference', KV layout figure.)"
+/>
+
+In **layer-major** `LBHNC`, each layer has its own cache tensor. A logical block, say tokens 0-1023 of one request, is one small region *per layer*, and NIXL gets one descriptor per region. In **block-major** `BLHNC`, all layers of a block are adjacent in memory, so a block is one region and one descriptor.
+
+<CopyCount />
+
+The widget is the idealised model. With 1,024-token blocks a 200K request is 196 blocks &times; 78 layers = **15,288** copies of 360 KB each; block-major with 64-token blocks is **3,125** copies of 1.8 MB each (reasoned). The post's 32K is about twice the idealised layer-major count.
+
+The post's controlled comparison is cleaner. On TP8, layer-major with 1,024-token blocks against block-major with **64-token blocks, 16x smaller**: descriptors fell **from 19,559 to roughly 1,940, about 10x**, and mean transfer time **from 146 ms to 78 ms**, a 47% cut (reported; the thread rounds this to "by half"). The idealised model predicts a smaller drop: 78 regions per block collapsing to 1, against 16x more blocks, is 78 &divide; 16 = **4.9x** fewer descriptors (reasoned). If block-major issued one descriptor per block, 1,940 descriptors at 64 tokens is about 124K tokens, and 19,559 descriptors over 121 blocks of 1,024 is about **160 regions per block**, roughly two per layer (reasoned, under that one assumption). That would also explain the 32K. Something in the layer-major path, a second cache tensor per layer or a split along heads, doubles the count; the post does not say which.
+
+The useful point survives the bookkeeping. Before, bigger blocks meant fewer copies and smaller blocks meant less waste in partly filled blocks. Block-major let them have **finer** blocks *and* fewer copies at once.
+
+## Tool calls
+
+Not a cache fix, but the part an agent user notices first. Dynamo was silently dropping calls to undeclared tools, and GLM's tool-call format had no structural-tag support, so schemas were not enforced during generation. Prime contributed a structural-tag builder that hands xgrammar the masking rules, and fixed a parser that turned the literal string `&lt;` into `<` inside code. The claim is a *"near zero error rate"* (reported), with no number and no published test suite.
+
+## The ledger
+
+| Claim | Status |
+|---|---|
+| 576 &rarr; 352 bytes per MLA row | **Holds.** 256 + 32 + 64, exactly (reasoned) |
+| ~50% more cached tokens | **Holds as stated.** 1.09M &rarr; 1.63M is 1.50x; the row alone is 1.64x, and the post says why they differ (reported) |
+| DEP8 ~5x the prefix cache of TEP8 | **Consistent with MLA.** TP keeps one latent copy per rank; ideal 8x, less replicated attention weights (reasoned) |
+| 1:4 serves 66 sessions at 101 tok/s/user, 100 tok/s/GPU | **Reported; internally consistent only if** about a third of sessions have a request in flight (6,666 vs 2,400 tok/s, reasoned) |
+| Halving the prefill budget cut queue wait 550 &rarr; 110 ms, TTFT ~20% | Reported, on a separate run |
+| Native kernel 12.0 μs vs 13.7 μs FP8 | Reported, at 15 tokens per launch only; worth ~1% of a decode step (reasoned) |
+| BLHNC: ~10x fewer descriptors, mean transfer halved | Reported: 19,559 &rarr; ~1,940 and 146 &rarr; 78 ms (47%). The idealised model predicts 4.9x; the extra factor is unexplained |
+| NVFP4 KV accuracy | Five benchmarks, no error bars; no visible regression |
+| ~600B tokens a day | Thread figure. The post says *"nearly a trillion tokens every day just internally"* before public release. Both may be true for different periods; neither is checkable |
+| Among the fastest GLM-5.3 endpoints on OpenRouter, 100% uptime | Unverified; a live leaderboard and a launch-to-date uptime, not a measurement anyone can reproduce |
+| Kernel contributed to FlashInfer | Not found as of 6 October; the post says "are contributing" |
+
+## What I would take from it
+
+The transferable lesson is about MLA. A latent cache with no head axis is cheap in memory and a trap for tensor parallelism: every TP rank keeps all of it. Prime uses each topology where it is cheap: data-parallel prefill for capacity, TP4 decode for latency with the copies shrunk to four bits. For any DeepSeek-family model, that split is the starting point.
+
+The second lesson is that the cache's enemies are mostly not bytes. They are scheduler steps that are too long (1,347 ms of waiting after a 127 ms fetch), copies that are too small (32K for one request), and kernels that write the cache out to read it back. NVFP4 gets the attention; the layout and scheduler fixes cost no accuracy at all.
+
+What I would ask for is the memory ladder. Every capacity claim here is a ratio of usable HBM, and the post never shows how much a decoder has left for KV after weights and buffers. With that one table, the 8x-to-5x gap and the missing 100 bytes per row would both close.
+
+Related on this site: [Z.ai's own account of building GLM's inference stack](/articles/glm-built-its-own-inference-infra), the [Kimi K3 TPU megakernel](/articles/kimi-k3-tpu-megakernel) for the opposite end of the latency trade, and [KVzip](/articles/kvzip-kv-compression) for compressing the cache by dropping tokens rather than bits.
