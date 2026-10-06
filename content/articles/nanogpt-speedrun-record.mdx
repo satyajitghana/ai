@@ -1,0 +1,213 @@
+---
+title: "CPLM in the NanoGPT speedrun: a pointer head takes 11% off the record"
+description: "A pending NanoGPT speedrun record (PR #379, Nathan Godey and Yoav Artzi) trains GPT-2 to 3.28 validation loss on 8xH100 in 36.009 s against 40.575 s for record #92 rerun on the same node. The change is one old idea: a pointer over the document's earlier tokens, mixed into the output distribution through a spare vocabulary row and a learned sink, which buys 144 fewer steps for about 0.9% more time per step. I re-derive the 11.25% from the PR's 21 run logs, check the p-value, explain the mechanism from the code, and place it against the record table and the n-gram and CPU retrieval entries it is pointedly not."
+date: 2026-10-06
+tags:
+  - training
+  - architecture
+  - llm
+  - benchmarks
+  - attention
+  - explainer
+---
+
+import { CopyMixer } from "@/components/articles/nanogpt-speedrun-record/copy-mixer"
+import { RecordJumps } from "@/components/articles/nanogpt-speedrun-record/record-jumps"
+
+On 5 October Nathan Godey [posted](https://x.com/nthngdy/status/2107169244203168113) that his team had set "a (pending) record for the NanoGPT speedrun improving by 11.3% over the previous best time". He called it "by far the largest architecture-centric improvement since Dec 2024", added that it "does not use extra n-gram tricks or more CPU compute", and promised a paper.
+
+The submission is [PR #379](https://github.com/KellerJordan/modded-nanogpt/pull/379), "CPLM on #360", still open as I write. One thing to get straight first: PR #360 is not this record. PR #360 is ANVIL2, Deven Pzak's 39.9 s run, merged as record #92, and CPLM is built on top of it. A reply under the post links #360, which is where that mix-up starts.
+
+CPLM stands for copy-sink pointer language model. The PR credits Nathan Godey and Yoav Artzi, with Claude Opus 5.5 listed for implementation optimization. The idea is about a decade old. The interesting part is that it still pays at 36 seconds.
+
+## The race, briefly
+
+I covered the speedrun's optimizer track and the agents racing it in [153 autonomous runs, no new ideas](/articles/nanogpt-speedrun-frontier), and the optimizer at its core in [Muon](/articles/muon-optimizer). I won't repeat that background. What matters here is track 1's four rules, from the repository README:
+
+1. Do not touch the train or validation token streams.
+2. Reach a mean validation loss of at most 3.28 on FineWeb, with enough runs to show p &lt; 0.01 that the mean is under the bar.
+3. No extra `torch.compile` or inductor flags.
+4. Run faster than the prior record **when baselined on the same hardware**.
+
+The clock is wall time on 8×H100. Compilation and warmup are not timed. The README also defines what is being scored: a valid probability model of language, judged on the first 10,485,760 validation tokens. That definition decides what CPLM is allowed to do at evaluation.
+
+The bar it has to beat is record #92. ANVIL2 took the record from 67.56 s (#91) to 39.9 s. It stacked sampled softmax, an 84.6M-row hashed n-gram table, a new optimizer, full-stack FP8, a smaller model and CUDA-graph capture of the training step. My [frontier article's update](/articles/nanogpt-speedrun-frontier) has that ablation.
+
+## The problem a pointer solves
+
+Take a document that introduces a name, Dr. Okafor, and uses it again forty tokens later. A standard transformer LM predicts the second "Okafor" through the vocabulary softmax. Something in the residual stream has to carry enough of the earlier occurrence for the final layer to produce a logit for that exact token id, out of 50,257. Attention does the retrieval, but the output layer still has to re-encode the token id, and the model has to learn that skill for every token separately.
+
+A pointer skips the re-encoding. It attends from the current position to earlier positions and puts probability directly on *whatever token sits there*. It does not need to know what "Okafor" means. It only needs to find where it was. Vinyals et al. called this a [pointer network](https://arxiv.org/abs/1506.03134). Merity, Xiong, Bradbury and Socher made it a language model in [Pointer Sentinel Mixture Models](https://arxiv.org/abs/1609.07843) (2016):
+
+<Figure
+  src="/articles/nanogpt-speedrun-record/fig2.png"
+  alt="Two bar charts stacked. The top one, labelled Pointer, spreads probability over earlier words in the context: Fed, Chair, Janet, Yellen, raised, rates, Ms., with the tallest bar on Yellen and a final bar labelled Sentinel, g. The bottom one, labelled Softmax RNN, is a vocabulary distribution with small bars on aardvark, Bernanke, Rosenthal, Yellen and zebra. Below: p(Yellen) = g p_vocab(Yellen) + (1 − g) p_ptr(Yellen)."
+  caption="The pointer-sentinel mixture. To predict the word after 'Ms.', the pointer puts most of its mass on the earlier 'Yellen'. The sentinel is an extra slot in the pointer softmax, and its mass g says how much to trust the vocabulary softmax instead. CPLM's sink plays the same role (Pointer Sentinel Mixture Models, Figure 1)."
+/>
+
+Their sentinel is the part that matters for CPLM. It is one more entry in the pointer's softmax. Mass the pointer puts there means "nothing worth copying here", and that mass becomes the mixture weight on the vocabulary model. Merity et al. reported 70.9 perplexity on Penn Treebank with this model, a state-of-the-art result for its year, with fewer parameters than a plain softmax LSTM.
+
+<Figure
+  src="/articles/nanogpt-speedrun-record/fig3.png"
+  alt="Architecture diagram. Embeddings feed an RNN row of cells. A query vector from the last RNN state takes inner products with every earlier hidden state and with a grey sentinel vector. A softmax over those scores gives the pointer distribution, whose last slot is the mixture gate g. The RNN's final state also goes through a vocabulary softmax. The two distributions are combined, weighted by g, into the output distribution."
+  caption="The same model as a data-flow diagram. The query comes from the last hidden state, the scores are inner products with earlier states, and the sentinel's slot is the gate. Swap the RNN for a transformer's final hidden states and this is close to CPLM's pointer head (Pointer Sentinel Mixture Models, Figure 2)."
+/>
+
+## What PR #379 adds
+
+Everything in #92 stays the same except the output distribution and the step count. The PR's README writes the new next-token distribution as
+
+$$
+p(y) = p_{\text{lm}}(y)\,\bigl(1 - \alpha\,(1 - a_{\text{sink}})\bigr) + \alpha\, p_{\text{copy}}(y)
+$$
+
+where:
+
+- $p_{\text{lm}}$ is #92's softcapped vocabulary softmax, renormalized over the real vocabulary;
+- $p_{\text{copy}}(y)$ is the pointer's attention mass on earlier positions of the same document that hold token $y$;
+- $a_{\text{sink}}$ is the pointer's mass on a learned sink key;
+- $\alpha$ is the gate.
+
+The weights sum to one. The LM side keeps $1 - \alpha + \alpha a_{\text{sink}}$, and the pointer side gets $\alpha(1 - a_{\text{sink}})$, which is exactly the attention it spent on real positions.
+
+There are **two** escape valves, and that is what differs from Merity. The **gate** $\alpha$ is not a new head. The LM head is 50,304 rows wide but the GPT-2 vocabulary has 50,257 tokens, so 47 rows are padding. CPLM takes the first padding row as a `<copy>` slot, and $\alpha$ is that slot's softmax mass:
+
+```python
+# track_1_short/perf/kernels/cplm_cross_entropy.py:24 (PR #379)
+COPY_TOKEN_ID = 50257  # first padding row of the 50304-wide vocab
+```
+
+So the LM decides *whether* to copy in the same softmax where it decides *what* to say. The gate gets no new output parameters. The **sink** is the sentinel: an extra key in the pointer's attention. When the pointer finds nothing worth copying, it parks mass on the sink, and that mass goes back to the LM.
+
+The pointer is one attention head of width 128 that reads the final hidden state. Its query and key projections share one parameter bank:
+
+```python
+# track_1_short/model/gpt.py:918 (PR #379)
+q, k = F.linear(xf, bank[:2].flatten(0, 1)).chunk(2, dim=-1)
+# ...
+# track_1_short/model/gpt.py:925-927
+if COPY_QK_NORM:
+    q = (F.rms_norm(q.float(), (q.size(-1),)) * self.copy_qk_gain).type_as(xf)
+    k = F.rms_norm(k.float(), (k.size(-1),)).type_as(xf)
+```
+
+The QK-norm line is there because of a failure. The code comment says that without it, "in some seeds the pointer scores reached std ~75, the pointer softmax saturated on wrong sources (p_copy underflowed to 0, pointer gradients vanished) and the copy gate then collapsed." The README says the same thing more briefly. The query gets a learnable gain, initialized at 1, which acts as the pointer's temperature.
+
+The pointer only looks backward. A query at position $i$ sees positions $j < i$ in the same document, inside a band of 2,048 tokens in training. Validation widens the band to 8,192, which the README's "evaluation at any sequence length" clause allows. The Triton kernel checks the token match tile by tile and never builds the score matrix:
+
+```python
+# track_1_short/cplm_copy.py:230-242 (PR #379), inside the flash-style forward kernel
+valid = (offs_n[None, :] < offs_m[:, None]) & (doc_k[None, :] == doc_q[:, None]) & ...
+...
+hit = (tok[None, :] == tgt[:, None]) & (offs_n[None, :] + kk <= offs_m[:, None])
+acc += tl.where(col[None, :] == kk, tl.sum(tl.where(hit, p, 0.0), axis=1)[:, None], 0.0)
+```
+
+One detail worth seeing: `hit` compares the *source* token with the *target*. The pointer puts mass on positions where the next token already appeared, not on positions whose successor is the next token. That keeps it a pure copy mechanism, and it is why it cannot predict a token the document has not used yet.
+
+At validation, the mixture is assembled from the full softmax:
+
+```python
+# track_1_short/model/gpt.py:1002-1008 (PR #379)
+alpha = self.copy_gate_lambda * torch.exp(logits[:, COPY_TOKEN_ID] - lse)
+p_t = p_lm / (1.0 - alpha).clamp_min(1e-6)  # LM over the real vocab
+# ...
+p = p_t * (1.0 - alpha * (1.0 - asink)) + alpha * pc
+nll = -torch.log(p + 1e-9)
+```
+
+In training, the same mixture runs inside #92's fused FP8 cross-entropy kernel, sampled-softmax stages included. The kernel returns closed-form gradients for the pointer's two outputs. Here is the toy version:
+
+<CopyMixer />
+
+The widget makes the trade concrete. The scores are invented, but the formula is the one in the PR. When the target already appears in the document, a small gate turns a token the LM finds unlikely into a cheap one. When the target is new ("Smith"), $p_{\text{copy}}$ is zero, and every bit of gate the pointer does not hand back through the sink is lost probability. The model has to learn when copying is worth that cost. The `<copy>` slot is how it says so.
+
+The PR states the size of the addition (reported), and I checked the arithmetic (reasoned): two 128×768 projections, a 128-wide sink key and one scalar gain make 2 × 128 × 768 + 128 + 1 = **196,737 parameters**. The README puts that at +0.35% of the transformer blocks' matrices, and at roughly zero of #92's 65B total once the n-gram table is counted.
+
+## Why fewer steps wins
+
+CPLM costs more per step than #92 and makes up for it in step count. Both sides of that come straight out of the logs.
+
+**Steps:** 1,194 for #92 and 1,050 for CPLM (measured, from the `step:N/N` lines). That is 144 steps, or 12.06% fewer (reasoned).
+
+**Time per step:** 40.575 s / 1,194 = 33.98 ms for #92, and 36.009 s / 1,050 = 34.29 ms for CPLM (reasoned from measured means). That is about **0.9% more per step**. The PR reports +1.3% per step measured on 4×GH200 and "consistent with ~1 % here". Fewer steps at a slightly higher cost per step nets out to the 11.25%.
+
+What buys those steps? The final validation in every CPLM log prints a diagnostic line. Averaged over the eight record runs (measured):
+
+| quantity | mean | range |
+|---|---|---|
+| mixture NLL (the scored loss) | 3.2769 | 3.2742 – 3.2794 |
+| same model, LM side alone | 3.3649 | 3.3572 – 3.3776 |
+| gate α | 0.0635 | 0.0557 – 0.0889 |
+| copy share of p(y) | 0.0625 | 0.0574 – 0.0738 |
+
+Removing the pointer from the trained model costs **0.088 nats** (reasoned, 3.3649 − 3.2769). Do not read that as "the pointer is worth 0.088 nats over #92". The backbone was trained alongside the pointer and has handed off part of its copying to it, so this is a lesion, not an ablation. The fair comparison is the one the PR makes: equal loss, fewer steps.
+
+The gate stays small. On average about 6% of the probability on the correct token comes from copying, which fits how the mechanism works: most tokens are not copies, and the pointer only helps on the ones that are. The sink is used even less. In seven runs its mean mass is between 0.0028 and 0.0036 (measured), so on a typical token the gate itself decides how much to copy. One run sits at 0.3828. That run also has the largest gate, 0.0889, and a loss of 3.2757, so it seems to have found the other balance: open the gate wider and send the misses back through the sink. The PR does not discuss it.
+
+## Checking the 11.3%
+
+The PR ships the raw logs: `this_pr/` with 8 runs and `baseline/` with 13 runs of #92 from the same tree (`CPLM=0 NUM_SCHEDULED_ITERATIONS=1122`). The two arms ran on the same 8×H100 SXM node and alternated strictly. I parsed the final `val_loss` and `train_time` lines from all 21 logs myself:
+
+| arm | runs | steps | train time (mean ± sd) | val loss (mean ± sd) |
+|---|---|---|---|---|
+| CPLM | 8 | 1,050 | 36.009 ± 0.039 s | 3.2769 ± 0.0016 |
+| #92, same node | 13 | 1,194 | 40.575 ± 0.024 s | 3.2765 ± 0.0016 |
+
+All of it is measured, and it matches the PR's table to the last digit. The delta is 4.566 s, or **11.25%**, which the post rounds to 11.3%.
+
+**Significance.** The eight CPLM losses give t = −5.39 against 3.28 with 7 degrees of freedom, so one-sided **p = 0.0005** (measured, recomputed with SciPy). That clears the rulebook's 0.01 by a factor of twenty. A Welch test between the two arms' losses gives p = 0.66 (measured). CPLM reaches the same loss as #92 in fewer steps; it does not quietly spend the loss buffer the README asks records to leave.
+
+**The baseline matters.** The 11.25% is against #92 *rerun on CPLM's node*, where #92 took 40.575 s. Its published time is 39.9 s. Against that number, CPLM's 36.009 s is only **9.78%** faster (reasoned). Neither number is wrong. Rule 4 asks for the same-hardware comparison because nodes differ by about 1.7%, which is the gap the PR reports between its node and #92's. If you compare published times across nodes, you get the smaller number.
+
+**Step selection was done in the open, on the same node.** The method was tuned on 4×GH200, where 1,035 steps averaged 3.2775. On 8×H100 the same setting missed: three runs averaged 3.2806 (reported). The PR's `dev_1035/` folder holds two of them, and I measure 3.2809 from those. Four runs at 1,040 steps averaged 3.2794 (measured), too close to the bar. The shipped configuration is 1,050 steps. The PR suspects the sampled-softmax candidate pools, which are twice as large per rank on 4 GPUs, but says this is "not confirmed by an ablation". I like that the failed configurations are in the PR. Picking a step count on the node you then certify on is a mild form of tuning on the test machine. Then again, every record PR does that, and this one publishes every run.
+
+**Seeds.** Both arms used `TRAIN_SEED` (1 to 8 for CPLM, 1 to 13 for the baseline). #92 was certified on unseeded runs. Here is the chart from the post:
+
+<Figure
+  src="/articles/nanogpt-speedrun-record/fig1.jpg"
+  alt="Scatter plot titled nanoGPT Speedrun Records Since December 2024. The x axis is added parameters, from −50M to 200M with a break to 64.6B. The y axis is speedup in percent, broken between 13 and 40. Orange dots mark architecture records and grey dots other records. Most cluster near zero added parameters below 5%. Labelled points: #62 at about 5.3% with about 190M parameters, #85 at about 3.7%, #53 and #63, #83 at −50M, grey #90 at about 8% and #19 at about 7.6%, and grey #92 above 40% at 64.6B. An orange star labelled CPLM (Ours) sits at about 11% with roughly zero added parameters."
+  caption="Each record's speedup over the one before it, plotted against the parameters it added. The authors classified records as architecture or other. CPLM is the star at near-zero added parameters; #92, with its n-gram table, is the grey point at 64.6B. The classification and the parameter axis are the authors' (Nathan Godey's announcement post, chart)."
+/>
+
+## "Largest architecture-centric improvement since Dec 2024"
+
+I can check the speedup half of this claim. The architecture half is a label. The README's record table gives a time for every record. Divide each record's cut by the time it replaced:
+
+<RecordJumps />
+
+The dots in the post's chart match these numbers: #19 at 7.59%, #90 at 8.13%, #62 at 5.32% and #85 at 3.71% (measured from the README table). Since record #13, only one record cut more than CPLM's 11.25% in a single step: **#92 at 40.94%**. The authors file #92 under "other". If you use the 9.78% cross-node figure instead, #15 (8 December 2024, U-net value embeddings, 10.43%) also moves ahead. That is probably why the chart begins "since December 2024".
+
+So the claim holds as stated, with two qualifications. First, "architecture" is the authors' classification, not the repository's. #92 also changed the architecture, with depth reduction and mixed-width attention, but its biggest wins came from sampled softmax and the n-gram table. Second, a reply under the post points out that #92 is still far larger in absolute terms. That is true, and it is a different measure. #92 is a stack of six changes. CPLM is one change measured against all six.
+
+## What "n-gram tricks" and "more CPU compute" refer to
+
+These are not jabs at nobody. They point at specific entries in the record history and the open PR queue.
+
+**N-gram tricks.** Record #62 added a hashed bigram embedding (5.32%), #83 added a sign trick on it, and #92 grew it into an 84.6M-row hashed bigram and trigram table, sharded across GPUs. The README counts it at 65B parameters, and the post's chart at 64.6B. These tables give the model memorized token statistics as input features. CPLM adds 196,737 parameters and memorizes nothing from the training set. It copies from the document being read, which is why the chart puts it at zero.
+
+**More CPU compute.** Open PR #366 moves those n-gram rows into host RAM (−6.16 s, reported). Two newer open PRs go much further: #367, exact-match retrieval, at **21.555 s** mean over 18 runs, and #380, an exact-count chain on top of it, at **9.653 s** mean over 16 runs (both reported, both pending). Both build exact-match indexes over the training shards in a Rust extension. The #380 machine lists 128 vCPUs and 2 TB of RAM. Each validation position gets "the next tokens that followed its context earlier in the training stream". That is retrieval from the training corpus done on the CPU side, and if those PRs are accepted, they change what a wall-clock record measures.
+
+CPLM keeps to the GPUs and to the document. There is also a cluster of PRs going after the same signal it uses. #376 mixes in a non-learned suffix-match copy distribution at the final validation, worth 0.0031 val loss on identical weights (reported). #378 feeds the matched in-document continuation to the model as an input feature and reports −2.91% (reported). Three independent PRs found in-document repetition at about the same time. That is a good sign the signal is real. CPLM is the one that learns where to point.
+
+## Is it still a valid probability model?
+
+The README defines the target as "a valid probability model of language", so a mixture that touches validation has to sum to one. The PR's argument is easy to follow:
+
+- The mixture sums to 1 over the vocabulary by construction. $p_{\text{copy}}$ is a distribution over tokens seen earlier, and its mass plus the sink's is exactly the gate's share.
+- The pointer only sees earlier positions in the same document. The target enters only to *read off* the probability, as it does for any softmax.
+- #91's canonical masking zeroes logits for impossible continuations at validation. Pointer mass that lands on a masked token is dropped rather than renormalized, so on feasible tokens the mixture sums to *at most* 1. That can only raise the loss.
+- The `1e-9` floor inside the log is not normalized. The PR bounds the overstatement at $\log(1 + 50257 \times 10^{-9})$, which is 0.00005 nats (reported; my arithmetic gives the same).
+
+I see no hole in it. The longer pointer band at validation (8,192 tokens, against 2,048 in training) is the one asymmetry, and the rules allow it in so many words.
+
+## What it costs, and what is not settled
+
+- **Stability took work.** The code carries a set of off-by-default switches, each with a comment about a failure. There is a sigmoid gate because "in some seeds it collapsed to ~1e-3 early and never recovered"; a gate cap because it "overshot to ~0.5 early in some seeds"; and a pointer auxiliary loss, a gate floor and a sink warmup. The shipped record turns on only QK-norm. The comments still show that a copy branch competing with a young LM for gradient was not a free addition.
+- **The memory number is odd.** Peak allocated memory is 35,895 MiB for CPLM against 48,411 MiB for #92 (measured from the logs). The PR estimates CPLM *adds* about 0.1 GB. It says "we have not investigated why" and does not rely on the number. Neither do I.
+- **The hardware story is partial.** The method was developed on 4×GH200. The GH200 results on top of #91 (10–15%) were never re-measured on H100.
+- **It is pending.** The PR is open. A maintainer still has to rerun it, and #367 and #380 may change the record it is measured against before it merges. The paper is "coming soon", and I could not find it on arXiv as of today. The question I most want it to answer: does the pointer still help once a model is large enough to copy well on its own, or is it mostly a shortcut for a 124M model trained for 36 seconds?
+
+Even so, this is a clean result. One small head, a spare vocabulary row and an idea from 2016 cut 144 steps off a heavily optimized trainer. The submission includes every run, the failed step counts and a probability argument you can check line by line. Most records stack ten changes; this one makes one.
+
+<RepoCard repo="KellerJordan/modded-nanogpt" />
