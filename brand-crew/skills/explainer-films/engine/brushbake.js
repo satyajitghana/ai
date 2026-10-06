@@ -28,7 +28,8 @@ const PB = (() => {
     if (tried) return ok
     tried = true
     try {
-      if (typeof brush === 'undefined' || !brush.createCanvas) return (ok = false)
+      // no fallback: a film or thumbnail painted without p5.brush is wrong, so it fails
+      if (typeof brush === 'undefined' || !brush.createCanvas) throw new Error('p5.brush is not loaded')
       BW = OUT_W; BH = OUT_H
       CVB = brush.createCanvas(BW, BH, { parent: null })
       // three brushes p5.brush does not ship, built from its own parts (a tip
@@ -44,7 +45,7 @@ const PB = (() => {
       // p5.brush sizes its built-in brushes for a ~500px canvas
       brush.scaleBrushes(1.4 * BW / 1280)
       ok = true
-    } catch (e) { console.warn('p5.brush unavailable, painting with Canvas2D washes:', e.message); ok = false }
+    } catch (e) { throw new Error('p5.brush unavailable (no WebGL2 on this page?): ' + e.message) }
     return ok
   }
 
