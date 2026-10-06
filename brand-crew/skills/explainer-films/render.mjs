@@ -231,6 +231,8 @@ async function launch(cr) {
       if (XVFB) { XVFB.kill(); XVFB = null }
     }
   }
+  // no silent fallback: SwiftShader only when asked for by name
+  if (!opt.swiftshader) throw new Error('no GPU: Mesa llvmpipe (through Xvfb) is not available; render on the GPU machine, or pass --swiftshader on purpose')
   const browser = await cr.launch({ args: [...BASE_ARGS, '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
   if (opt.gpu) console.error('gpu:', await rendererOf(browser))
   return browser
