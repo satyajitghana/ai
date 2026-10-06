@@ -2,6 +2,7 @@
 title: "EmbeddingGemma 2: the encoders are optional, the text model is not"
 description: "Google DeepMind's EmbeddingGemma 2 puts text, code, images, video and audio into one 768-dimensional space with 740M parameters, under Apache 2.0. I read the safetensors header, the transformers code and the processors. The 740M is real (744,371,992 in the file): a 271M text encoder that every input passes through, plus a 168M vision tower and a 306M audio tower that only turn pictures and sound into tokens for it. 'Modular' means those two towers can be left unbuilt, and a text embedding comes out the same either way. The audio tower is byte-for-byte Gemma 4 E2B's. The 'twice its size' line holds against the models Google picked, but on Google's own audio chart a sub-1B model (non-commercial) sits higher, the code chart plots EmbeddingGemma 2 about two points below its own card, and the 327 seconds of audio and 58 video frames are context arithmetic that the shipped processors cut to 30 seconds and 32 frames by default."
 date: 2026-10-06
+updated: 2026-10-06
 interest: 4
 helpful: 5
 tags:
@@ -480,9 +481,220 @@ other); classification and similarity put the same prefix on both. Media go in w
 Because the pooling includes the prompt, the prefix changes the vector; mixing prefixed and
 unprefixed text in one index is a quiet way to lose recall.
 
-For the on-device side, the [GGUF conversion](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF)
-splits the model the same way the code does: a 558 MB bf16 text file and a separate 982 MB
-`mmproj` file holding both towers. That separation is the modularity again, in another runtime.
+## Half a gigabyte, and which half
+
+A few hours after launch Unsloth posted that EmbeddingGemma 2 "runs locally on 0.5GB RAM", in the
+same breath as "740M parameter ... combines a 270M text model with vision (170M) + audio (300M)",
+and linked [its own GGUFs](https://huggingface.co/unsloth/embeddinggemma-2-GGUF) and
+[a guide](https://unsloth.ai/docs/models/embeddinggemma-2). Read together, that sounds like the
+whole multimodal model in half a gigabyte. I wanted to know which configuration the number
+belongs to, so I read the GGUF headers of both repos the same way I read the safetensors one:
+range requests for the first few megabytes, then a parse of every tensor's name, shape and type.
+
+The [ggml-org conversion](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF), made by the
+same people who merged EmbeddingGemma 2 support into llama.cpp (pull request 30054, merged on
+launch day), has four files: a text model in BF16 and Q8_0, and an `mmproj` in BF16 and Q8_0.
+Unsloth's repo has those four with byte-identical tensors (same 413 and 963 tensor lists, same
+types, the last 4 MB of each pair hash the same; the files differ by 64 to 96 bytes of name
+metadata), plus three "UD" text quants, Q4_K_XL, Q5_K_XL and Q6_K_XL, and F16 copies of both
+files. That is the whole difference.
+
+| File | Size | What is inside |
+|---|---:|---|
+| text, UD-Q4_K_XL (Unsloth) | 175.7 MB | 271,002,648 params; Q4_K almost everywhere |
+| text, UD-Q5_K_XL (Unsloth) | 210.1 MB | Q5_K, with Q6_K on `attn_v` and `ffn_down` in 12 of the 24 layers |
+| text, UD-Q6_K_XL (Unsloth) | 248.8 MB | Q6_K throughout |
+| text, Q8_0 (both) | 309.9 MB | Q8_0, the per-layer projection kept in BF16 |
+| text, BF16 (both) | 558.0 MB | unquantised |
+| mmproj, Q8_0 (both) | 554.8 MB | 473,369,344 params: vision 167.4M, audio 304.8M, two projections 1.2M |
+| mmproj, BF16 (both) | 982.1 MB | unquantised |
+
+The text file is exactly the 271M path from the safetensors header: token table, 24 blocks, the
+projection-only PLE (`per_layer_model_proj`, 512 x 12,288) and the 512-to-768 output head, stored
+as `output.weight`. There is no per-layer token table in it, which confirms the reading above from
+a second, independent implementation; llama.cpp's graph comments the function "this model has no
+per-layer token embeddings, the per-layer inputs come only from the projection". The header also
+answers the window question from earlier: it stores `sliding_window = 1024`, and llama.cpp's
+symmetric mask divides it by two, masking anything more than 512 positions away on either side.
+Same window, written down two ways.
+
+Two things in the files surprised me. About 15.8 MB of every text GGUF, 9% of the Q4 file, is
+not weights at all: it is the header, holding the 262,144-token vocabulary and 514,906 BPE merges.
+And the Q4_K_XL is less exotic than the "UD" label suggests. Every large matrix, the embedding
+table included, is plain Q4_K; what gets more bits are the small pieces, the per-layer gate and
+projection in every block (Q8_0), the PLE projection (Q5_K) and the output head (Q6_K). For a
+model whose last step is one 512 x 768 matrix that every embedding passes through, protecting
+that matrix is the sensible choice. The quantisation was calibrated with an importance matrix
+over 230 chunks of a text file (`quantize.imatrix.dataset = data/calib.txt` in the metadata),
+which is fine for a text index and says nothing either way about how image or audio tokens fare,
+since images and audio pass through the same quantised blocks.
+
+On the multimodal side there is only one mmproj, and it holds both towers. I checked what
+llama.cpp does with that: `clip_init` builds a vision context if the file has a vision encoder
+and an audio context if it has an audio encoder, with no switch to skip either (the only
+exception in the code is Gemma 3n). So the four configurations from the model card collapse to
+two in this runtime, text only or everything. The 440M "text and vision" setup doesn't exist in
+GGUF form; you carry the 305M audio tower whether you use it or not. The smallest mmproj is Q8_0,
+and even that one is 70.5 MB of F32, most of it the vision tower's 768 x 10,240 x 2 position
+table (62.9 MB), upcast from the BF16 it was stored in.
+
+### The arithmetic for 0.5 GB
+
+For an embedding model llama.cpp builds no KV cache (`build_attn_inp_no_cache` in the
+`gemma-embedding2` graph): every input is read once, in one batch. So the memory is the weights
+plus whatever the forward pass needs at once, and the forward pass has one large resident:
+the per-layer inputs. They are computed for every position before the first layer runs and kept
+until the last, 24 layers x 512 values x 4 bytes, which is 49,152 bytes per token.
+
+At the 2,048-token context Unsloth's guide uses, that tensor is 100.7 MB. Add the 175.7 MB Q4
+file, and the scratch for one layer (the 2,048-wide feed-forward activations are about 34 MB; the
+global layers' attention scores, if flash attention is off, are 4 heads x 2,048 x 2,048 x 4 bytes,
+67 MB), and the total comes out around 0.4 GB. So for text and code, at that context, "0.5 GB" is
+believable. At the full 8,192 tokens the per-layer inputs alone are 402.7 MB, and a text-only Q4
+run is already past half a gigabyte before anything else.
+
+With pictures and sound it isn't close. The smallest files that can embed an image are the Q4
+text model plus the Q8_0 mmproj, 730.5 MB on disk before a single activation. The figure that
+does fit the full model is Google's own: about 567 MB of active RAM for the full multimodal model
+on a Pixel 11 Pro, but that is the LiteRT bundle, whose audio encoder is partly int2, not a GGUF.
+
+So I'd read Unsloth's 0.5 GB as true of the 271M text configuration at a modest context, and of
+Google's LiteRT build for the whole model. Through Unsloth's own files, the whole model needs
+about 0.73 GB before it starts. These are sums from the headers and the graph code; I didn't run
+llama.cpp here, so the scratch sizes are an estimate of what its allocator holds, not a
+measurement.
+
+One more thing the repo contains that I wouldn't use: F16 copies of both files. The model card
+says EmbeddingGemma 2's activations exceed float16's range and come back as NaN or silently
+degraded, and Unsloth's own guide repeats "Do not use FP16". In ggml's CPU path an F16 weight
+matrix is multiplied against activations converted to F16, so the F16 GGUF is the one file where
+that warning plausibly applies. Take BF16 or Q8_0.
+
+### Running it
+
+Unsloth's llama.cpp recipe serves text and code only. The part worth copying is the flags:
+
+```bash
+# unsloth.ai/docs/models/embeddinggemma-2, "Run EmbeddingGemma 2 GGUFs in llama.cpp"
+./llama.cpp/build/bin/llama-server \
+  --model "embeddinggemma2-gguf/embeddinggemma-2-UD-Q4_K_XL.gguf" \
+  --alias embeddinggemma2 \
+  --embeddings \
+  --pooling mean \
+  --ctx-size 2048 \
+  --batch-size 2048 \
+  --ubatch-size 2048 \
+  --parallel 1 \
+  --host 127.0.0.1 \
+  --port 8080
+```
+
+`--pooling mean` matches the sentence-transformers pooling; the GGUF also carries
+`pooling_type = 1`, which is mean. The three sizes have to move together because a non-causal
+model can't split one input across batches: every token attends to every other, so an input has
+to fit in one physical batch. And the server does nothing about prompts. The guide's request
+writes them by hand, `task: search result | query: ...` for the query and `title: none | text: ...`
+for the document, and that is required: as noted above, the prompt is part of the mean.
+
+The guide's closing hint is honest about the rest: "For images, video or audio, use a runtime
+with explicit support for those encoders and their processor files." I didn't check whether
+llama-server's embeddings endpoint feeds an mmproj today. If you need media embeddings outside
+Python, LiteRT is the path Google tested.
+
+Unsloth also wired EmbeddingGemma 2 into Unsloth Desktop as the embedding model for its
+document chat. The settings screenshot in the guide labels it "Not downloaded · 135 MB". That
+matches none of the files: the smallest GGUF is 175.7 MB and the safetensors is 1.49 GB. I
+couldn't find which artefact it refers to.
+
+<Figure
+  src="/articles/embeddinggemma-2/fig6.png"
+  alt="Unsloth Desktop settings, General tab, Documents and RAG section. The Embedding model dropdown is set to google/embeddinggemma-2, with the note 'Hugging Face model or local path used to index and search your documents. Default is unsloth/bge-small-en-v1.5.' Below: 'Not downloaded · 135 MB', a Download button, and 'Only affects newly indexed documents. Re-upload existing ones after changing the model.'"
+  caption="Choosing EmbeddingGemma 2 as Unsloth Desktop's document embedder; changing it only affects newly indexed files (Unsloth EmbeddingGemma 2 guide, settings screenshot)."
+/>
+
+That last line in the screenshot is the right instinct, and it leads into the fine-tuning part.
+
+## Fine-tuning moves every modality at once
+
+Unsloth's guide trains the text model with LoRA. It saves the text-only configuration first, then
+loads it in 4-bit and attaches adapters to every attention and MLP projection:
+
+```python
+# unsloth.ai/docs/models/embeddinggemma-2, "Prepare the model"
+model = FastSentenceTransformer.from_pretrained(
+    model_name = "embeddinggemma2-text",
+    max_seq_length = 1024,
+    dtype = torch.bfloat16,
+    load_in_4bit = True,
+    load_in_16bit = False,
+    full_finetuning = False,
+)
+
+model = FastSentenceTransformer.get_peft_model(
+    model,
+    r = 16,
+    target_modules = [
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    lora_alpha = 32,
+    lora_dropout = 0,
+    bias = "none",
+    use_gradient_checkpointing = "unsloth",
+    random_state = 3407,
+    task_type = "FEATURE_EXTRACTION",
+)
+```
+
+Training is sentence-transformers' `SentenceTransformerTrainer` with
+`MultipleNegativesRankingLoss`, which is the in-batch-negatives contrastive loss from the training
+section above, a no-duplicates batch sampler (so a repeated query never becomes its own negative),
+`bf16=True` and the query and document prefixes applied to the training columns. The guide's
+advice to hold out queries and compare before and after is the part people skip and shouldn't.
+
+Two remarks on the recipe. Loading a 271M model in 4-bit saves about 0.4 GB of weights, which is
+small next to the activations at a training batch; the text notebook's own log puts peak reserved
+memory at 11.3 GB on a T4. Plain 16-bit LoRA costs little more here and trains against the weights
+you will actually deploy. And the adapters don't reach the per-layer gates, the PLE projection or
+the 512-to-768 head, which is fine for adapting a domain.
+
+The bigger point follows from the architecture. An image embedding is the text encoder's average
+over the image's soft tokens, and so is an audio one. LoRA on `q_proj` through `down_proj` of the
+text model therefore changes the vector for every photo and recording too, even though the
+training data was only text. The "embeddings you have already computed do not need to be
+re-computed" property from the modular section holds for adding towers, not for training the
+reader: after a fine-tune, everything in the index has to be re-embedded, and the image-text
+alignment has been nudged by a loss that never saw an image. If the index is mixed, train on
+mixed pairs, or keep the fine-tuned model for text and test cross-modal recall before swapping it
+in.
+
+Unsloth does have mixed-pair notebooks. The image one trains on 3,000 Flickr8k images with five
+captions each and tests on the Flickr30k 1K split, adding `finetune_vision_layers = True` so the
+vision tower gets adapters too; the audio one trains on Clotho clips with
+`finetune_audio_layers = True`. Note what the second does to the claim about sharing an audio
+encoder with Gemma 4: once those adapters are merged, the tower is no longer byte-identical to
+Gemma 4 E2B's, and a runtime that loads it once for both models can no longer do so.
+
+None of the three notebooks shows an EmbeddingGemma 2 result yet. The image and audio ones have no
+saved outputs. The text one does, but they come from the earlier model: its log reads "Fast
+Gemma3 patching" with transformers 4.57.3, and "Trainable parameters = 13,074,432 of 315,937,536".
+Rank-32 LoRA on EmbeddingGemma 1's 24 layers (768 wide, 1,152 MLP) is 8,355,840 parameters, and
+its two dense head layers, 768 x 3,072 each, add 4,718,592; together that is exactly the
+13,074,432. The NDCG@10 of 0.9267 before and 0.9351 after on the medical set are EmbeddingGemma 1
+numbers, in a notebook titled for EmbeddingGemma 2.
+
+## What else the launch blog says
+
+A few things in [Google's launch post](https://blog.google/innovation-and-ai/technology/developers-tools/embeddinggemma-2/)
+I haven't covered. EmbeddingGemma 1 passed 20 million downloads, which is the context for a
+second version. The 8K window is four times EmbeddingGemma 1's. Besides LiteRT there is a
+MediaPipe Decision Task API for classification and routing on top of the embeddings, and a
+Foresight app that pairs EmbeddingGemma 2 retrieval with Gemma 4 generation, which is where the
+shared-audio-encoder argument would pay off. The blog lists day-one support in transformers,
+sentence-transformers, MLX, vLLM, llama.cpp, SGLang, Ollama, LM Studio, transformers.js and
+Qdrant, and points to Unsloth for fine-tuning. Omar Sanseviero's launch post summed up the
+release as "Modular, going from 270m to 740m parameters", which after reading the llama.cpp
+loader I'd amend to: in GGUF, 271M or 744M, nothing in between.
 
 ## What I'd do with it
 
@@ -523,6 +735,18 @@ primitive at all.
   interpolated between the y-axis tick marks. Checked the axis against Qwen3-Embedding-0.6B's
   published MTEB code score. Parameter counts for jina-embeddings-v5-omni-nano and -small come from
   the Hub API's header totals.
+- **GGUFs.** Parsed the header of every file in `unsloth/embeddinggemma-2-GGUF` and
+  `ggml-org/embeddinggemma-2-GGUF` from range requests (the text headers are 15.8 MB, the mmproj
+  ones under 60 KB), summed parameters and bytes per quantisation type, and hashed the last 4 MB of
+  each file that both repos ship. Read llama.cpp's `src/models/gemma-embedding2.cpp`, the symmetric
+  window mask in `llama-hparams.h` and `clip_init` in `tools/mtmd/clip.cpp` at the merge commit of
+  pull request 30054. Compared `unsloth/embeddinggemma-2` with `google/embeddinggemma-2`: the
+  safetensors and tokenizer have the same LFS hashes, so it is a mirror.
+- **Unsloth guide and notebooks.** Read the guide's Markdown and the three EmbeddingGemma 2
+  notebooks in `unslothai/notebooks`, including their saved outputs, and checked the text
+  notebook's trainable-parameter count against EmbeddingGemma 1's shapes. I ran none of them.
 - **Not checked.** Anything about the training recipe beyond what the files imply; on-device
   quality at 70 vision tokens; whether vLLM or LiteRT apply the 280-token or the 750-token audio
-  cap; the 191 MB and 567 MB memory figures.
+  cap; the 191 MB and 567 MB memory figures; the real resident memory of llama.cpp with these
+  GGUFs (the 0.4 GB is a sum, not a reading); whether llama-server embeds images or audio through
+  an mmproj; what the 135 MB in Unsloth Desktop refers to.
