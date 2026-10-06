@@ -1,79 +1,101 @@
-import { KINDS, LEVELS, runsOnById } from "@/data/taxonomy"
-import { type ArticleFacts, RUBRIC, type RubricKey, TIER_COLOR, type TierId } from "@/lib/content/rating"
+import { CheckIcon } from "@phosphor-icons/react/dist/ssr"
+
+import { RUBRIC, type RubricKey, TIER_COLOR, type TierId, tierBand } from "@/lib/content/rating"
 import { cn } from "@/lib/utils"
 
 // The visual pieces of the article scoring system, shared by the /articles
-// list (client) and the "What you get" card on an article page (server). No
-// hooks and no server imports, so either side can render them.
+// list (client), the "Why read this" panel on an article page and the
+// homepage (server). No hooks and no server imports, so either side can
+// render them. What they say comes from lib/content/rating.ts (highlights,
+// practicalFacts, tierBand); these only decide how it looks.
 
 export type TierView = { id: TierId; label: string; level: number }
 
-/** Five ascending bars, filled to the tier's level. Decorative: pair it with text. */
-export function TierBars({ tier, className }: { tier: TierView; className?: string }) {
-  const color = TIER_COLOR[tier.id]
+/** URL of the methodology page, and its tier section. */
+export const SCORING_PATH = "/articles/scoring"
+
+/**
+ * The tier as one calm mark: a dot in the tier's hue and the word, on a faint
+ * tint of the same hue. The text stays the foreground colour, so contrast does
+ * not depend on the hue. `band` adds "Top 10%" after the word.
+ */
+export function TierMark({ tier, band = false, className }: { tier: TierView; band?: boolean; className?: string }) {
+  const c = TIER_COLOR[tier.id]
   return (
-    <span className={cn("flex items-end gap-[2px]", className)} aria-hidden="true">
-      {[1, 2, 3, 4, 5].map((b) => (
-        <span
-          key={b}
-          className="w-[3px] rounded-[1px]"
-          style={{
-            height: `${3 + b * 2}px`,
-            background: b <= tier.level ? color : "var(--border)",
-          }}
-        />
-      ))}
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border px-2 font-sans text-[11px] leading-5 font-medium whitespace-nowrap text-foreground",
+        className,
+      )}
+      style={{
+        borderColor: `color-mix(in oklch, ${c} 40%, transparent)`,
+        background: `color-mix(in oklch, ${c} 9%, transparent)`,
+      }}
+    >
+      <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: c }} />
+      {tier.label}
+      {band ? (
+        <span className="font-normal text-muted-foreground">
+          <span aria-hidden="true">· </span>
+          {tierBand(tier.id).short.toLowerCase()}
+        </span>
+      ) : null}
     </span>
   )
 }
 
-/** "▂▄▆ High · 79": tier bars, the tier's name and the 0–100 score. */
-export function TierLabel({ tier, score }: { tier: TierView; score: number }) {
+/** Plain-language highlights, each behind a small check. */
+export function HighlightList({
+  items,
+  className,
+  itemClassName,
+}: {
+  items: { key: string; text: string }[]
+  className?: string
+  itemClassName?: string
+}) {
+  if (!items.length) return null
   return (
-    <span className="inline-flex items-center gap-1.5 font-mono text-xs">
-      <TierBars tier={tier} />
-      <span className="text-foreground">{tier.label}</span>
-      <span className="tabular-nums text-muted-foreground">{Math.round(score)}</span>
-    </span>
+    <ul className={cn("flex flex-wrap gap-x-3 gap-y-1", className)} aria-label="Highlights">
+      {items.map((h) => (
+        <li key={h.key} className={cn("inline-flex items-center gap-1 whitespace-nowrap", itemClassName)}>
+          <CheckIcon size={12} weight="bold" aria-hidden="true" className="shrink-0 opacity-60" />
+          {h.text}
+        </li>
+      ))}
+    </ul>
   )
 }
 
 /**
- * The eight rubric dimensions as 0–3 segment bars. A definition list: each
- * term is the dimension and its description is the score, spoken as "2 of 3";
- * the segments themselves are decorative.
+ * The eight dimensions as reader questions with three small dots each, and
+ * the plain-words meaning of the score beside them. A definition list: the
+ * term is the question, the description is "2 of 3" plus the anchor; the dots
+ * are decorative.
  */
-export function RubricBars({
-  rating,
-  tier,
-  className,
-}: {
-  rating: Record<RubricKey, number>
-  tier: TierView | null
-  className?: string
-}) {
-  const color = tier ? TIER_COLOR[tier.id] : "var(--foreground)"
+export function RubricDots({ rating, className }: { rating: Record<RubricKey, number>; className?: string }) {
   return (
-    <dl className={cn("grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2", className)}>
+    <dl className={cn("divide-y divide-border/60", className)}>
       {RUBRIC.map((d) => {
         const v = rating[d.key]
         return (
-          <div key={d.key} className="grid grid-cols-[6.5rem_1fr] items-center gap-2" title={`${d.asks} ${v}/3: ${d.anchors[v]}`}>
-            <dt className="font-mono text-[11px] text-muted-foreground">{d.label}</dt>
-            <dd className="flex items-center gap-2">
-              <span className="flex flex-1 gap-[3px]" aria-hidden="true">
+          <div key={d.key} className="grid gap-x-4 gap-y-0.5 py-2 sm:grid-cols-[10.5rem_minmax(0,1fr)] sm:items-baseline">
+            <dt className="text-sm text-foreground">{d.q}</dt>
+            <dd className="flex items-baseline gap-3 text-[13px] leading-5 text-muted-foreground">
+              <span className="flex shrink-0 translate-y-[-1px] items-center gap-1" aria-hidden="true">
                 {[1, 2, 3].map((s) => (
                   <span
                     key={s}
-                    className="h-1.5 flex-1 rounded-full"
-                    style={{ background: s <= v ? color : "var(--border)" }}
+                    className={cn(
+                      "size-2 rounded-full border",
+                      s <= v ? "border-foreground/70 bg-foreground/70" : "border-foreground/25",
+                    )}
                   />
                 ))}
               </span>
-              <span className="w-7 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
-                {v}
-                <span className="sr-only"> of 3, {d.anchors[v]}</span>
-                <span aria-hidden="true">/3</span>
+              <span>
+                <span className="sr-only">{v} of 3: </span>
+                {d.anchors[v].charAt(0).toUpperCase() + d.anchors[v].slice(1)}
               </span>
             </dd>
           </div>
@@ -83,49 +105,27 @@ export function RubricBars({
   )
 }
 
-export type FactMeta = {
-  licence?: string
-  runsOn?: string
-  level?: string
-  kind?: string
-}
-
-const label = (list: readonly { id: string; label: string }[], id?: string) =>
-  id ? list.find((x) => x.id === id)?.label : undefined
-
-/** Small chips for what the page carries and what its subject needs. */
-export function FactChips({
-  facts,
-  meta,
-  className,
-}: {
-  facts: Pick<ArticleFacts, "figures" | "interactives" | "measured" | "film" | "readingTimeMins">
-  meta: FactMeta
-  className?: string
-}) {
-  const runs = meta.runsOn ? runsOnById(meta.runsOn) : undefined
-  const chips: { k: string; v: string }[] = []
-  const kind = label(KINDS, meta.kind)
-  const level = label(LEVELS, meta.level)
-  if (kind) chips.push({ k: "kind", v: kind })
-  if (level) chips.push({ k: "level", v: level })
-  if (runs) chips.push({ k: "runs on", v: runs.label })
-  if (meta.licence && meta.licence !== "n/a") chips.push({ k: "licence", v: meta.licence })
-  if (facts.figures) chips.push({ k: "figures", v: String(facts.figures) })
-  if (facts.interactives) chips.push({ k: "interactives", v: String(facts.interactives) })
-  if (facts.measured) chips.push({ k: "measured", v: `${facts.measured}×` })
-  if (facts.film) chips.push({ k: "film", v: "yes" })
-  chips.push({ k: "read", v: `${facts.readingTimeMins} min` })
+/**
+ * "A · B · C", with the separators hidden from screen readers. Each part
+ * carries its separator in front, and the row is shifted left by one
+ * separator's width and clipped, so a part that wraps to a new line never
+ * starts with a stray dot.
+ */
+export function DotLine({ parts, className }: { parts: React.ReactNode[]; className?: string }) {
+  const shown = parts.filter(Boolean)
+  if (!shown.length) return null
   return (
-    <ul className={cn("flex flex-wrap gap-1.5", className)} aria-label="Facts">
-      {chips.map((c) => (
-        <li
-          key={c.k}
-          className="rounded-md border bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] leading-5 text-muted-foreground"
-        >
-          {c.k} <span className="text-foreground">{c.v}</span>
-        </li>
-      ))}
-    </ul>
+    <p className={cn("overflow-hidden px-0.5", className)}>
+      <span className="-ml-4 flex flex-wrap">
+        {shown.map((p, i) => (
+          <span key={i} className="inline-flex items-center">
+            <span aria-hidden="true" className="w-4 shrink-0 text-center opacity-50">
+              ·
+            </span>
+            {p}
+          </span>
+        ))}
+      </span>
+    </p>
   )
 }
