@@ -31,7 +31,7 @@ export type Film = {
   pixel: boolean
 }
 
-type Entry = { duration: number; rendered: string; transcript: string; style?: string }
+type Entry = { duration: number; rendered: string; transcript: string; style?: string; width?: number; height?: number }
 const films = (manifest as { films: Record<string, Entry> }).films
 
 /** The film and thumbnail key of an architecture doc (content/architectures/<slug>.mdx). */
@@ -45,8 +45,8 @@ export function getFilm(slug: string): Film | null {
     poster: mediaUrl(`/films/${slug}-poster.webp`),
     captions: `/films/${slug}.vtt`,
     duration: f.duration,
-    width: 960,
-    height: 540,
+    width: f.width ?? 960,
+    height: f.height ?? 540,
     rendered: f.rendered,
     transcript: f.transcript,
     pixel: f.style === "pixel",

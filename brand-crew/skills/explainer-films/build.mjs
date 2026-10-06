@@ -55,6 +55,12 @@ const social = !!opt.social, preview = !!opt.style || !!opt.preview, keep = !soc
 if (preview && !opt.out) throw new Error('a preview (--preview, --style) needs --out=<dir> outside public/')
 const OUT = opt.out ? (opt.out.startsWith('/') ? opt.out : join(ROOT, opt.out)) : join(ROOT, 'public', 'films')
 const CACHE = process.env.EXPLAINER_CACHE || join(homedir(), '.cache', 'explainer-films')
+// the Python with Kokoro and the ffmpeg to use (a render machine may keep its own)
+const PY = process.env.EXPLAINER_PYTHON || 'python3', FF = process.env.EXPLAINER_FFMPEG || 'ffmpeg'
+// --live: the live tier (render.mjs --live): fresh p5.brush paint on every
+// drawing at 1920x1080, shipped at 1280x720. Without it, the lite tier.
+const live = !!opt.live, tier = live ? 'live' : 'lite'
+const liveFlag = live ? ['--live'] : []
 export const VOICE = 'af_heart'
 
 const all = storyboardKeys()
@@ -88,11 +94,11 @@ const run = (cmd, a) => { const r = spawnSync(cmd, a, { encoding: 'utf8', maxBuf
 
 // 1-2. lines, then voice
 console.log(`[1/3] narration for ${slugs.length} film(s)`)
-const lr = spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'lines', ...slugs.map(sbPath)], { encoding: 'utf8', maxBuffer: 1 << 28 })
+const lr = spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'lines', ...slugs.map(sbPath), ...liveFlag], { encoding: 'utf8', maxBuffer: 1 << 28 })
 if (lr.status !== 0) throw new Error(lr.stderr)
 const lines = JSON.parse(lr.stdout.trim().split('\n').pop())
 writeFileSync(join(tmp, 'lines.json'), JSON.stringify(lines))
-const tts = spawnSync('python3', [join(SKILL_DIR, 'audio.py'), 'tts', '--in', join(tmp, 'lines.json'), '--out', join(CACHE, 'voice'), '--voice', VOICE], { stdio: ['ignore', 'inherit', 'pipe'], encoding: 'utf8' })
+const tts = spawnSync(PY, [join(SKILL_DIR, 'audio.py'), 'tts', '--in', join(tmp, 'lines.json'), '--out', join(CACHE, 'voice'), '--voice', VOICE], { stdio: ['ignore', 'inherit', 'pipe'], encoding: 'utf8' })
 if (tts.status !== 0) throw new Error('tts failed: ' + (tts.stderr || '').split('\n').slice(-6).join('\n'))
 const durs = JSON.parse(readFileSync(join(CACHE, 'voice', 'durations.json'), 'utf8'))
 for (const slug of slugs) {
@@ -102,8 +108,8 @@ for (const slug of slugs) {
 
 // 3-5. frames, then sound, then one file, film by film as the frames finish
 console.log(`[2/3] painting ${slugs.length} film(s) on ${opt.workers || 3} page(s)`)
-const flags = social ? ['--crf264=28'] : ['--scale=960', '--crf264=32']
-const child = spawn(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'film', ...slugs.map(sbPath), `--out=${frames}`, `--workers=${opt.workers || 3}`, ...flags], { stdio: ['ignore', 'pipe', 'inherit'] })
+const flags = social ? ['--crf264=28'] : live ? ['--scale=1280', '--crf264=28'] : ['--scale=960', '--crf264=32']
+const child = spawn(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'film', ...slugs.map(sbPath), `--out=${frames}`, `--workers=${opt.workers || 3}`, ...flags, ...liveFlag], { stdio: ['ignore', 'pipe', 'inherit'] })
 let buf = '', n = 0
 child.stdout.on('data', d => {
   buf += d
@@ -125,9 +131,9 @@ function finish(r) {
   const slug = r.slug
   const film = join(tmp, `${flat(slug)}.film.json`), m4a = join(tmp, `${flat(slug)}.m4a`), vtt = join(OUT, `${slug}.vtt`)
   writeFileSync(film, JSON.stringify(r))
-  run('python3', [join(SKILL_DIR, 'audio.py'), 'mix', '--film', film, '--voice', join(CACHE, 'voice', slug), '--out', m4a, '--vtt', vtt])
+  run(PY, [join(SKILL_DIR, 'audio.py'), 'mix', '--film', film, '--voice', join(CACHE, 'voice', slug), '--out', m4a, '--vtt', vtt])
   const out = join(OUT, `${slug}.mp4`)
-  run('ffmpeg', ['-v', 'error', '-y', '-i', join(frames, `${slug}.mp4`), '-i', m4a, '-map', '0:v', '-map', '1:a', '-c', 'copy', '-shortest', '-movflags', '+faststart', out])
+  run(FF, ['-v', 'error', '-y', '-i', join(frames, `${slug}.mp4`), '-i', m4a, '-map', '0:v', '-map', '1:a', '-c', 'copy', '-shortest', '-movflags', '+faststart', out])
   renameSync(join(frames, `${slug}-poster.webp`), join(OUT, `${slug}-poster.webp`))
   n++
   const size = f => statSync(f).size
@@ -142,6 +148,9 @@ function finish(r) {
     posterT: r.posterT,
     scenes: r.scenes.length,
     style: r.style,
+    tier,
+    width: social ? 1280 : live ? 1280 : r.style === 'pixel' ? 640 : 960,
+    height: social ? 720 : live ? 720 : r.style === 'pixel' ? 360 : 540,
     mascot: r.mascot?.name,
     voice: VOICE,
     rendered: new Date().toISOString().slice(0, 10),
@@ -165,11 +174,11 @@ function thumbs(list) {
   for (const slug of list) if (!all.includes(slug)) throw new Error(`no storyboard: data/films/${slug}.json`)
   const files = list.map(slug => { dirFor(out, slug); const f = join(tmp, `${flat(slug)}.json`); writeFileSync(f, JSON.stringify({ ...load(slug), date: articleDate(slug) })); return f })
   for (let i = 0; i < files.length; i += 40) {
-    const r = spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'thumb', ...files.slice(i, i + 40), `--out=${out}`, `--workers=${opt.workers || 3}`], { encoding: 'utf8', maxBuffer: 1 << 26 })
+    const r = spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'thumb', ...files.slice(i, i + 40), `--out=${out}`, `--workers=${opt.workers || 3}`, ...liveFlag], { encoding: 'utf8', maxBuffer: 1 << 26 })
     if (r.status !== 0) throw new Error(r.stderr)
     for (const line of r.stdout.trim().split('\n').filter(l => l.startsWith('{'))) {
       const j = JSON.parse(line)
-      man.thumbs[j.slug] = { sha: shaOf(j.slug), bytes: j.bytes, style: j.style, scene: j.scene, mascot: j.mascot }
+      man.thumbs[j.slug] = { sha: shaOf(j.slug), bytes: j.bytes, style: j.style, scene: j.scene, mascot: j.mascot, tier }
       console.log(`  ${j.slug}  ${j.style}  ${(j.bytes / 1024).toFixed(0)} KB`)
     }
   }
