@@ -130,9 +130,6 @@ export function renderOgImage({
               {kicker}
             </div>
           </div>
-          <div style={{ display: "flex", fontSize: 18, color: FAINT }}>
-            managed by claude 🤖
-          </div>
         </div>
 
         {/* title block */}
