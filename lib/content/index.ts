@@ -49,7 +49,7 @@ export type {
   Snippet,
   SnippetFrontmatter,
 } from "./schema"
-export { articleSignal, paperLinks } from "./schema"
+export { articleSignal, paperLinks, ratingSchema } from "./schema"
 
 const CONTENT_DIR = path.join(process.cwd(), "content")
 
@@ -62,16 +62,30 @@ function readingTime(body: string): number {
 // (after frontmatter). Those ESM import lines are for the rendered page only —
 // strip them from the `body` we expose so the `.md` agent variants and the
 // reading-time count stay clean prose. Only removes the leading import block.
-function stripLeadingImports(body: string): string {
+function splitLeadingImports(body: string): { body: string; imports: string[] } {
   const lines = body.split("\n")
+  const imports: string[] = []
   let i = 0
   while (
     i < lines.length &&
     (lines[i].trim() === "" || /^import\s.+\sfrom\s.+$/.test(lines[i].trim()))
   ) {
+    const from = /from\s+["']([^"']+)["']/.exec(lines[i])
+    if (from) imports.push(from[1])
     i++
   }
-  return lines.slice(i).join("\n").replace(/^\n+/, "")
+  return { body: lines.slice(i).join("\n").replace(/^\n+/, ""), imports }
+}
+
+// The module specifiers each file imports at the top of its body, keyed by
+// `<kind>/<slug>`. Kept beside the items rather than on them because several
+// API routes spread whole items into their JSON; lib/content/signals.ts reads
+// it to count an article's interactives.
+const importsByKey = new Map<string, string[]>()
+
+/** The modules a content file imports at the top of its MDX body. */
+export function getContentImports(kind: ContentKind, slug: string): string[] {
+  return importsByKey.get(`${kind}/${slug}`) ?? []
 }
 
 // Content is read off disk and is immutable for the lifetime of a deployment,
@@ -111,7 +125,8 @@ function load<T>(kind: ContentKind, schema: ZodType<T>): ContentItem<T>[] {
       )
     }
     const slug = path.basename(file, ".mdx")
-    const body = stripLeadingImports(content)
+    const { body, imports } = splitLeadingImports(content)
+    importsByKey.set(`${kind}/${slug}`, imports)
     // Every kind has `date`; only blog/articles/notes may also have `updated`.
     // `lastUpdated` folds those into one always-present "last touched" signal.
     const fm = parsed.data as unknown as { date: string; updated?: string }
