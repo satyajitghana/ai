@@ -1,0 +1,361 @@
+---
+title: "A 200 GB MoE on one RTX 3090: the experts live in RAM, the speed lives in the CPU"
+description: "Two posts the same week ran very large mixture-of-experts models on a single 24 GB RTX 3090 by keeping the routed experts in system RAM. 0xSero's DeepSeek-V4.1-Flash build is not llama.cpp: it is vLLM with a 3.0-bit EXL3 quant, 190.5 GiB of experts pinned in eight-channel DDR4, a VRAM cache of the hottest experts and an AVX2 CPU tier for the misses, measured at 19-21 tok/s for one stream. I recompute every byte from the model configs, read the per-layer split the CPU tier runs, and find that the DDR4 bus is not what sets the speed: at the repo's own cost constants the CPU reaches about a third of the bus's peak, and the arithmetic of decoding a codebook quant is the long pole. The same holds for a Qwen3.8-Flash-Next IQ3_S run on DDR5, whose author found DDR4 and DDR5 almost the same."
+date: 2026-10-06
+tags:
+  - mixture-of-experts
+  - inference-optimization
+  - quantization
+  - offloading
+  - on-device
+  - systems
+  - vllm
+  - qwen
+---
+
+import { OffloadCeiling } from "@/components/articles/big-moe-one-3090/offload-ceiling"
+import { MissSplit } from "@/components/articles/big-moe-one-3090/miss-split"
+
+Two posts went past on the same day. [@0xSero](https://x.com/0xSero/status/2105996767682527397)
+wrote *"Here's Deepseek-v4.1-Flash running on CPU + DDR4 with just a single RTX 3090"*,
+and in the next post listed what you need: one 3090, 256 GB of DDR4 and 500 GB of
+NVMe, with the repository [`0xSero/dsv41-flash-offload`](https://github.com/0xSero/dsv41-flash-offload).
+A few hours later [@needmorevram](https://x.com/needmorevram/status/2106059795128307911)
+posted a screen recording of *"Qwen 3.8 Flash IQ3_S (GSQ RCO) on a single RTX 3090, this
+time paired with DDR5-5200 MT/s memory"*.
+
+DeepSeek-V4.1-Flash carries 543.6 billion routed-expert parameters. The 3090 has 24 GB.
+Both runs work for the same reason, and the reason has a number attached. This piece
+derives that number from the model configs, checks it against what the repository
+measured, and then finds the place where the simple story stops being true.
+
+<RepoCard repo="0xSero/dsv41-flash-offload" />
+
+<Figure
+  src="/articles/big-moe-one-3090/fig1.png"
+  alt="A dark blue banner: 'DeepSeek-V4.1-Flash · local. One RTX 3090. Full DeepSeek. 200 GB MoE · experts across GPU, CPU and RAM · 262k context.' A card on the right reads 20 tok/s, 1 user (D141, default) and 41 tok/s, 4 users + Arc B70 (experimental). Footer: community build, not affiliated with DeepSeek."
+  caption="The repository's own banner. 'Full DeepSeek' means the full model at 3.0 bits per weight, not the original FP8 and FP4 checkpoint; the 41 tok/s needs a second, Intel Arc B70 card and is marked experimental (0xSero/dsv41-flash-offload README)."
+/>
+
+## What the repository actually runs
+
+The task I set myself was to find the `--override-tensor` rules. There are none. This
+is not llama.cpp, ik_llama or KTransformers. The README pins its stack: vLLM 0.13
+from a DeepSeek-V4.1 backport image, Ampere patches from a third party, the
+`vllm_exl3` plugin with exllamav3 kernels built for `sm_86`, and a set of patches of
+its own that the image applies at build time and checks against SHA-256 receipts.
+
+The weights are [Mia-AiLab's EXL3 quant](https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-3.0bpw)
+at an average 3.02 bits per weight, about 205 GB in 41 shards (**reported**, model
+card). EXL3 is exllamav3's format: a trellis code with a codebook (`mul1`), not the
+block-scaled integers of a GGUF `Q4_K`. That detail matters later.
+
+<ModelCard repo="Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-3.0bpw" />
+
+The README's tier table says where everything lives (**reported**):
+
+| tier | holds | size |
+|---|---|---|
+| VRAM, 24 GiB at 936 GB/s | attention (with `wo_a` expanded to FP16), embeddings, shared experts, LM head, routers, hyper-connections, Engram projections | ~7.7 GiB |
+| | fp8 KV cache | 1.5 GiB (297,224 tokens) |
+| | CUDA graphs, prefill activations, DMA staging | ~5 GiB |
+| | mirror cache of the hottest experts | what is left (8.76 GiB = 709 of 15,360 experts in run D107) |
+| DDR4, pinned and GPU-mapped | all 15,360 routed experts | 190.5 GiB |
+| NVMe, memory-mapped | Engram n-gram tables, fp8 | 189 GiB |
+
+Three of those numbers I can check from the configs. DeepSeek-V4.1-Flash has 40 MoE
+layers, 384 routed experts per layer, hidden size 5,120 and expert width 2,304, and
+picks 6 experts per token ([`config.json`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)).
+One expert is three matrices of 5,120 × 2,304, so 35,389,440 weights. Then
+(**reasoned**):
+
+- 40 × 384 = **15,360** experts, the README's count.
+- 15,360 × 35,389,440 = **543.6B** routed weights. At 3.0 bits that is 203.8 GB, or
+  **189.8 GiB**; the README measures 190.5 GiB pinned, and the 3.02-bit average gives
+  191.1 GiB. Close enough that the experts are the whole of that allocation.
+- One expert at 3.0 bits is **13.27 MB** (12.66 MiB). 709 of them is **8.76 GiB**, exactly
+  the cache size the README reports for D107.
+
+The Engram tables are DeepSeek's n-gram memory, the same idea as the 51B-parameter
+table in [Qwen3.8-Flash-Next](/articles/qwen3-8-flash-next). They are read a few rows at
+a time (the README says about 50 small rows per token), so they stay on the NVMe and the
+page cache absorbs what it can. That is where the 500 GB of disk goes: 219.3 GB of EXL3
+checkpoint plus 203.1 GB of the original model's last two shards, which hold the tables.
+
+## Why this works at all: decode reads only what it routes to
+
+Generating one token at batch size 1 means reading every weight that token touches. On
+one stream the GPU has almost no arithmetic to do per byte, so the read sets the pace:
+
+$$
+\text{tok/s} \;\le\; \frac{B}{\text{bytes read per token}}
+$$
+
+A dense model reads every weight. A routed MoE reads only the experts its router
+picked. For DeepSeek-V4.1-Flash that is 6 of 384 per layer, 1.6% of the routed weights.
+Per token, from the config (**reasoned**):
+
+| | DeepSeek-V4.1-Flash | Qwen3.8-Flash-Next |
+|---|---|---|
+| routed experts, layers × top-k | 40 × 6 | 48 × 10 |
+| weights per expert | 35,389,440 | 4,915,200 |
+| routed weights read per token | 8.49B | 2.36B |
+| bytes per token at the run's quant | **3.19 GB** at 3.0 bits | **1.03 GB** at 3.5 bits (IQ3_S) |
+| bytes per token at native FP4 (4.25 bits with scales) | 4.51 GB | n/a |
+
+Qwen3.8-Flash-Next's shape comes from its own
+[`config.json`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8): 48 layers, 512
+experts of width 640 on a hidden size of 2,560, 10 picked per token. The 3.5 bits is the
+average the GSQ-RCO card gives for its IQ3_S file.
+
+So the experts can sit anywhere that can deliver about 3 GB per token. Divide by the
+bus and you get the ceiling, if nothing else cost time (**reasoned**, peak theoretical
+bandwidths, DeepSeek at 3.0 bits):
+
+| where the routed experts are read from | peak GB/s | DeepSeek ceiling | Qwen IQ3_S ceiling |
+|---|---|---|---|
+| DDR4-3200, 2 channels | 51.2 | 16 tok/s | 50 tok/s |
+| DDR5-5200, 2 channels | 83.2 | 26 tok/s | 81 tok/s |
+| DDR4-3200, 4 channels | 102.4 | 32 tok/s | 99 tok/s |
+| DDR4-3200, 8 channels | 204.8 | 64 tok/s | 198 tok/s |
+| PCIe 4.0 x16, GPU reading host memory | ~25 | 7.8 tok/s | 24 tok/s |
+| RTX 3090 VRAM, if they fitted | 936 | 294 tok/s | 907 tok/s |
+
+Two things fall out. First, a desktop's two DDR channels put DeepSeek at 16 to 26 tok/s
+before anything else is counted, which is why 0xSero's host is an AMD EPYC 7443P with
+eight. Second, streaming the experts over PCIe to the GPU is the worst option on the
+table: the link is a quarter of a desktop's RAM bandwidth. The fast path is the CPU
+computing the expert where it already sits.
+
+The dense part does not go away. Attention, the shared expert, the routers and the LM
+head are read every token from VRAM. Taking the README's ~7.7 GiB of dense weights and
+removing the 1.32 GB embedding table (one row of it is read per token), the GPU reads
+about 6.9 GB per token, **7.4 ms** at 936 GB/s (**reasoned**, an upper estimate). The
+widget below adds that to whichever side of the expert read is slower.
+
+<OffloadCeiling />
+
+## What sits on the GPU, and what does not
+
+The split is the same in every engine that does this, whatever its flags are called:
+
+- **On the GPU, always:** attention and its KV cache, the router, the shared expert,
+  norms, the LM head. These are read every token, so they belong in the fastest memory.
+  The KV cache also grows with context, and every GiB it takes is a GiB less for experts.
+- **In system RAM:** the routed experts, all of them, as the home copy.
+- **Back on the GPU, opportunistically:** whatever VRAM is left, filled with the experts
+  routed to most often.
+- **On disk, memory-mapped:** n-gram tables like Engram, which are looked up by row and
+  never multiplied.
+
+In llama.cpp that split is usually spelled with `--override-tensor` (`-ot`) patterns that
+send the `exps` tensors to the CPU, or `--n-cpu-moe`. What llama.cpp's flags do not give
+you is the third bullet: a cache that follows the routing. That is the part 0xSero's repo
+adds, along with the CPU tier that serves the misses.
+
+## The cache: 4.6% of the experts, 41% of the reads
+
+The VRAM mirror cache in `ct/ct_vllm.py` counts how often each `(layer, expert)` pair
+is routed to during decode, decays the scores, and every 16 steps swaps up to 48 of the
+coldest residents for the hottest non-residents. The home copy in pinned RAM stays valid,
+so a stale pointer can only be slower, never wrong. In run D107 the cache had 709 slots,
+**4.6%** of 15,360 experts, and the README reports a hit rate of **0.408** (**reported**).
+
+Routing is skewed enough that 4.6% of the experts serve 41% of the reads. With 6 experts
+routed per layer, 0.592 × 6 = **3.55 misses per layer** (**reasoned**), which matches the
+README's *"only about 3.5 experts per layer miss the VRAM cache"*.
+
+<Figure
+  src="/articles/big-moe-one-3090/fig2.jpg"
+  alt="A terminal coding-agent session with the model deepseek-v4.1-flash. The user asks the model to draw an ASCII diagram of an LLM; the reasoning trace and the beginning of a box diagram with Tokenizer, Embedding and Transformer x N layers are visible. The status line reads (omarchy-dsv41) deepseek-v4.1-flash and 5.1%/262k context."
+  caption="The served model inside the Pi coding agent, from the post's own screen recording. The recording shows the model working; it shows no tokens-per-second figure, so the speeds in this article come from the repository's result files (0xSero's post, video frame)."
+/>
+
+## The misses: a per-layer auction between PCIe and the CPU
+
+A miss can be served two ways. The GPU can read the expert straight out of pinned host
+memory over PCIe ("zero-copy"), or the host CPU can compute it in place and send back
+only the small output vector. `ft_split_k` in `ct/ft_tier_cu_v.cu` decides, per layer,
+per step. It sorts the misses, tries every count $k$ of them to hand to the CPU, and
+keeps the $k$ that minimises the slower side:
+
+$$
+t(k) = \max\Big(\, t_\text{hit}\,(n_h + n_m - k) + t_\text{zc}\,(n_m - k),\;\; c_a + c_b\,k \,\Big)
+$$
+
+where $n_h$ and $n_m$ are the layer's hits and misses. The constants are in the code, in
+milliseconds: $t_\text{hit} = 0.03$ per resident expert, $t_\text{zc} = 0.58$ per
+zero-copy expert, $c_a = 0.11$ fixed per CPU job and $c_b = 0.20$ per CPU expert (the
+`docker/entrypoint.sh` default; `ct_vllm.py` falls back to 0.16, and D132 notes it was 0.24
+before). This is the same PCIe-or-CPU trade the site worked through for
+[FreeToken](/articles/freetoken), and the source says so: the GPU side is a *"vLLM port of
+kernels/cpu_avx2/ft_tier_cu.cu"*, and the campaign is called FreeToken-EXL3.
+
+<MissSplit />
+
+Those constants are bandwidths in disguise. One expert is 13.27 MB at 3.0 bits, so
+(**reasoned**):
+
+- 0.58 ms zero-copy is **23 GB/s**, about what PCIe 4.0 x16 delivers.
+- 0.03 ms for a resident expert is **442 GB/s**, about half the 3090's peak.
+- 0.20 ms on the CPU is **66 GB/s** of expert weights, **32%** of eight-channel DDR4-3200's
+  204.8 GB/s peak.
+
+With four misses and two hits, the split sends three to the CPU and one over PCIe, and
+the layer costs **0.71 ms**. Forty layers make **28 ms** of expert time per token, and the
+dense read adds about 7.4 ms: a ceiling near **28 tok/s** (**reasoned**). The README's own
+description is coarser, *"the CPU computes them from DDR4 in about 1 ms per layer"*, which
+gives 40 ms and 25 tok/s.
+
+## Against what was measured
+
+| run | what changed | decode, one stream | source |
+|---|---|---|---|
+| D030 | experts zero-copy over PCIe, no CPU tier, no cache | 4.10 tok/s | `results/D030/sweep.json` |
+| D107 | + AVX2 CPU tier + 709-slot VRAM cache | 21.34 tok/s | `results/D107/sweep.json` |
+| D119 | 262,144-token default, 8k to 261k prompts | 16.38-20.91 tok/s | `results/D119/` |
+| D141 | current default | 19.3 tok/s (24.0 at 2 streams, 26.6 at 4) | README |
+
+All **reported**; I did not run the image, which needs the hardware.
+
+D030 is the PCIe row of the table above: a ceiling of 7.8 tok/s at 25 GB/s for the
+experts alone, plus the dense read, against 4.10 measured. D107 is the CPU tier: about
+28 tok/s from the code's own constants against 21.34 measured. Both land at 55-76% of
+their ceilings, which is a normal place for a hand-built pipeline with a CPU/GPU
+handshake in every layer and NVMe reads in the middle.
+
+Now the point I did not expect. If the CPU tier ran at the bus's peak, the 3.55 misses
+per layer would cost 1.89 GB per token, **9.2 ms** on eight channels (**reasoned**). The
+code budgets 0.20 ms per CPU expert, three times that rate. **The DDR4 bus is not the
+bottleneck on this machine.** The CPU is.
+
+The reason is the format. EXL3 stores each weight as a few bits of a trellis code that
+has to be decoded through a codebook before it can be multiplied. A `Q4_0` block is a
+scale and sixteen bytes of nibbles; an EXL3 weight is arithmetic. On 22 Zen 3 cores with
+AVX2, that arithmetic runs out before the memory controller does. The
+[Strata article](/articles/tensorfold-strata-engines) found the same thing from the
+other side: its paper measures 23-26 GB/s on six cores for llama.cpp's i-quants, limited
+by codebook arithmetic, against about 42 GB/s for a plain 2-bit format with a
+hand-written kernel.
+
+So the upgrade that helps 0xSero's build is more or faster cores, or more VRAM for the
+cache, not faster RAM. The repository's experimental branch is evidence for the second:
+an Intel Arc B70 added as a further expert tier takes four streams from 26.6 to
+**41.3 tok/s**, with its quality A/B still pending (**reported**).
+
+## Prefill is a different machine
+
+Decode touches 6 experts per layer per token. Prefill touches nearly all of them: the
+README says a 1,024-token chunk hits almost all 384 experts in all 40 layers, so the
+baseline moved about 203 GB over PCIe per chunk, about 8 s, and stayed near 95 tok/s.
+The fix is the opposite of decode's: make the chunk big (16,384 tokens in D061) and stream every expert to the GPU once per chunk with the copy engine,
+running busy experts as FP16 GEMMs. Prefill went to 690-790 tok/s from 8k to 261k
+(**reported**). A 261,000-token prompt still takes **341.6 s** to its first token, and
+prefix caching turns a cached 131k-token agent turn into **0.76 s** instead of 200.8 s.
+
+During prefill the VRAM expert cache is released to make room and refilled after four
+decode steps. That is why the 8k row of D119 decodes at 16.38 tok/s and the longer rows
+near 20.5: the README says the cache is still re-warming after a short answer.
+
+## What it costs in quality
+
+The banner says "Full DeepSeek". It is the full model at 3.02 bits per weight, and the
+repository is unusually direct about what that and its own kernels cost:
+
+- The busy-expert FP16 GEMM in prefill reconstructs weights and accumulates in a
+  different order than the fused kernel. Against a full-vocabulary teacher-forced
+  reference (12 prompts, 416 positions), top-1 agreement is **0.9856** and mean KL
+  **0.0068** nats, and the README marks this a **fail** against its own inherited guard
+  (top-1 0.988 or better, KL 0.00103 or less). The median KL is 2.8e-6, so most positions
+  match; a few move.
+- The CPU tier was checked against the GPU kernel on its own: relative RMS **0.0037**.
+- The D141 quality run, `results/Q001-d141-quality`, passes 50 of 50 task runs at one and
+  four streams: needles at 8k, 64k and 200k, executed code tests, four integer maths
+  answers, an essay of 3,131 words. One maths key was wrong, the README says, and the model was
+  right.
+
+None of this is a comparison with the FP8 and FP4 original on a benchmark suite. Nobody
+has published one for this quant that I could find, so how much 3.02 bits costs on hard
+tasks is open.
+
+## The Qwen run on DDR5
+
+The second post is only a video, but it is a screen recording of a dashboard, and the
+dashboard prints its numbers.
+
+<Figure
+  src="/articles/big-moe-one-3090/fig3.png"
+  alt="A terminal dashboard titled LLM VISUALS, process strata. Model Qwen3.8-Flash-Next-GSQ decoding at 99.0 tok/s; GPU RTX 3090 at 100%, 341 W, VRAM 23.3 of 24.0 GB; system RAM 60.3 of 67.2 GB. Context 10,608 of 262,144. Speculative draft-mtp: accept 87%, 3.29 per step. A request table lists seven requests; request 7 has a 2,421-token prompt and decodes at 97.0 tok/s, request 4 has a 142,550-token prompt and decoded at 54.1 tok/s."
+  caption="A frame from the post's screen recording: the Strata engine serving the GSQ-RCO IQ3_S file on one RTX 3090 with 64 GB of DDR5-5200. The author says in the replies that the prefill column is not accurate (needmorevram's post, video frame)."
+/>
+
+What the frame shows (**reported**, read off the recording): the process is `strata`,
+the engine the site covered in [TensorFold and Strata](/articles/tensorfold-strata-engines).
+VRAM is at 23.3 of 24.0 GB and system RAM at 60.3 of 67.2 GB. The MTP drafter is
+accepting 87% and committing **3.29 tokens per step**. A 2,421-token prompt decodes at
+**97.0 tok/s**; an earlier request with a 142,550-token prompt decoded at **54.1**. In the
+replies the author says the CPU is an i5-13600K, and that *"I tested the 3090 on both
+DDR4 and DDR5 and the difference was so tiny."*
+
+The file is [ISTA-DASLab's GSQ-RCO IQ3_S](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF):
+3.50 bits on average over the transformer weights, a 54.8 GB first shard that must be
+resident and a 28.8 GB n-gram shard that can stay on disk (**reported**). GSQ learns the
+grid assignment per weight; RCO picks a quant type per tensor under a size budget. The
+card's plot puts IQ3_S at the base model's task average:
+
+<Figure
+  src="/articles/big-moe-one-3090/fig4.png"
+  alt="A line chart of task average (mean of AIME25, GPQA-Diamond and LiveCodeBench v6) against average bit-width. Q2_0 at 2.4 bpw scores about 89.1, IQ2_XS at 2.5 about 89.2, IQ3_XXS at 3.0 about 92.6, IQ3_S at 3.5 about 93.3, against a dashed base-model line at 93.12."
+  caption="Quality against bits for the four GSQ-RCO files. IQ3_S sits on the base model's line; the drop is between 3.0 and 2.5 bits (ISTA-DASLab model card, task average vs bit-width plot)."
+/>
+
+Now the arithmetic (**reasoned**). At 97 tok/s and 3.29 tokens per step, one step takes
+**33.9 ms**. A step that commits 3.29 tokens reads up to 3.29 × 1.03 = 3.4 GB of experts,
+if no two tokens share one. Two channels of DDR5-5200 move 83.2 GB/s at peak, so even with
+the CPU at full bus speed, at least **26%** of those reads must come from the VRAM cache
+to fit in the step. If the CPU runs i-quants at Strata's own measured 23-26 GB/s, the
+cache has to serve about **78%** of them. Strata's paper measured 72% on a 12 GB card; a
+24 GB card holds more experts, so 78% is plausible. The OffloadCeiling widget's Qwen preset
+is that solution, not a measurement of the hit rate.
+
+And *"DDR4 and DDR5 … so tiny"* is what the second case predicts. If the CPU tier runs at
+25 GB/s, a bus that offers 51 or 83 GB/s is not the limit, and swapping it changes little.
+I did not measure the DDR4 run; the author did not post its number. One reply reports 93
+tok/s on two 3090s and 128 GB of DDR4 (**reported**, unverified).
+
+## What to take from both
+
+- **The number that decides feasibility is routed bytes per token,** not total size:
+  3.19 GB for DeepSeek-V4.1-Flash at 3.0 bits, 1.03 GB for Qwen3.8-Flash-Next at IQ3_S.
+  Divide by your RAM's real bandwidth before buying anything.
+- **Capacity decides whether it runs; it does not decide the speed.** 0xSero's build needs
+  256 GB because 190.5 GiB of experts must be pinned. Twice the channels would not make
+  it twice as fast.
+- **A codebook quant moves the bottleneck onto the CPU's arithmetic.** At the repo's
+  constants the CPU reaches 32% of eight-channel DDR4's peak; the i-quants on Strata reach
+  23-26 GB/s on six cores. More cores, a simpler format on the CPU side, or more VRAM for
+  the cache move the number. Faster RAM mostly does not.
+- **The VRAM left after the dense weights is an expert cache, and it is worth a lot.**
+  4.6% of DeepSeek's experts served 41% of reads. KV cache competes for the same bytes,
+  which is why the 262k-context default has a smaller cache than the 64k runs.
+
+Related reading on the site: [FreeToken](/articles/freetoken) for the PCIe-versus-CPU
+split as a measured policy, [VRAM is a policy](/articles/vram-is-a-policy) for what a
+residency choice costs when it is not stated, and
+[GLM-5.3-Flash on four mining cards](/articles/glm-5-3-cmp170hx) for another
+Ampere-only vLLM fork.
+
+### What I could not check
+
+- **The tok/s numbers.** All decode and prefill speeds above are the repository's own
+  result files or a frame of a recording. I did not run either engine.
+- **The DDR4 speed of 0xSero's host.** The README says eight channels of DDR4 on an EPYC
+  7443P but not the DIMM speed; the 204.8 GB/s peak assumes DDR4-3200, the fastest that
+  CPU supports.
+- **The dense-read estimate.** 6.9 GB per token from the README's 7.7 GiB is an upper
+  bound; some of those weights may not be read every token.
+- **Quality of the 3.02-bit DeepSeek against the original** on standard benchmarks. Not
+  published.
+- **The KTransformers comparison** a reply posted (an RTX PRO 6000 and 512 GB of DDR4 at
+  37 tok/s for one stream, on the original FP4 experts) is one person's run with no
+  receipts.
