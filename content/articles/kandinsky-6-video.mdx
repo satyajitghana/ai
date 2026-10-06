@@ -1,0 +1,367 @@
+---
+title: "Kandinsky 6.0 Video: two token streams on one clock, and where the lip-sync comes from"
+description: "Kandinsky Lab's open (MIT) audio-video diffusion models generate a 5-second clip and its 44.1 kHz soundtrack together: a video transformer carried over from Kandinsky 5.0 and an audio transformer trained from scratch, joined in every block by cross-attention both ways. I read the paper, the code and the safetensors headers. Lite is 3,176,632,424 parameters and Pro 30,139,423,760 (measured), not 29B; the cross-attention between streams is 18.7% of either. A clip is 50,220 video tokens and 218 audio tokens, and the two meet on RoPE positions scaled by 0.144. There is no lip-sync module: it comes from filtered data, a face-weighted loss, and an RL stage whose headline 47% WER cut is scored by Whisper-large-v3, which is also one of its rewards. On a held-out sentence set the cut is 28%, and on VABench's own speech check the RL'd Pro still has the highest WER of the three models tested."
+date: 2026-10-06
+tags:
+  - video-generation
+  - audio
+  - diffusion
+  - flow-matching
+  - reinforcement-learning
+  - distillation
+  - open-weights
+  - explainer
+draft: false
+---
+
+import { ClipTimeline } from "@/components/articles/kandinsky-6-video/clip-timeline"
+
+Kandinsky Lab released Kandinsky 6.0 Video this week: two diffusion models that write a 5-second clip
+and its soundtrack in one pass. Lite is advertised at 3B parameters, Pro at 29B. Both take text, or
+text plus a first frame, and return SD video with 44 kHz audio, speech and lip movement included. A
+separate super-resolution model takes the picture to 1920 x 1080. Weights, code and a diffusers
+integration are MIT-licensed. The [paper](https://arxiv.org/abs/2610.05608) is unusually complete. It
+gives data filters, per-stage learning rates, reward weights and timings on seven GPUs.
+
+This piece explains how a model draws a picture and its sound together, from the token up. Then it
+checks the release against what can be read without a GPU. I read the paper, the
+[`kandinskylab/kandinsky-6`](https://github.com/kandinskylab/kandinsky-6) code at commit `ea44d1b`, the
+diffusers configs, and the safetensors headers of the three ungated transformers, over HTTP range
+requests. The non-distilled Pro checkpoint is gated behind a click-through. Its parameter count comes
+from the Hub API, which reads the same header. I ran nothing on a GPU. Every number below is labelled
+**measured** (I read it from a file), **reported** (the paper's figure) or **reasoned** (my arithmetic on
+the other two).
+
+<ModelCard
+  repo="kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers"
+  claimed="29B"
+  note="Transformer only: 30,136,326,248 parameters, 4,730,755,072 of them stored in F32 (measured, Hub API), which is why the file is 69.7 GB. The distilled Pro is 30,139,423,760 parameters, 60.3 GB, almost all BF16 (measured from its header). Gated click-through; MIT licence."
+/>
+
+<ModelCard
+  repo="kandinskylab/Kandinsky-6.0-Lite-5s-Diffusers"
+  claimed="3B"
+  note="Transformer only: 3,176,632,424 parameters (measured from the header). The repo also ships the Qwen2.5-VL-7B and CLIP text encoders, the Hunyuan video VAE, and the MMAudio VAE and vocoder. Ungated; MIT licence."
+/>
+
+<RepoCard repo="kandinskylab/kandinsky-6" />
+
+<Figure
+  src="/articles/kandinsky-6-video/fig10.jpg"
+  alt="Four frames in a two-by-two grid: a brass deep-sea diver among fish in a flooded cathedral; a lion in a green coat on a subway car between passengers on their phones; a young woman blowing a pink bubblegum bubble in an autumn park; a reptile's head in a rainforest between two gloved hands."
+  caption="Four frames from the model card's promo reel. The reel is the publisher's selection; it has no audio on the page and says nothing about how often a prompt comes out like this (Kandinsky 6.0 Video model card)."
+/>
+
+## Two ways to put sound on a picture
+
+The obvious way is a cascade. Generate the video, then hand it to a video-to-audio model that listens to
+the pixels and writes a soundtrack. MMAudio, whose autoencoder Kandinsky 6.0 reuses, is that second
+stage. A cascade is modular, and each half can be trained on its own data. It also gets one thing
+structurally wrong. Speech has to drive the mouth, and a cascade can only drive it the other way. By
+the time the audio model runs, the lips are frozen pixels. The audio can only chase them.
+
+The joint way denoises both at once. Every step, the video sees where the audio is going and the audio
+sees where the video is going, so a word and the jaw that shapes it are one decision. There are two
+designs. One puts everything into a single token sequence with modality-specific weights, which is
+what [MAGI-2](/articles/magi-2-preview) does. The other keeps two transformers, one per modality, and
+has them talk through cross-attention in every block. Kandinsky 6.0 is the second kind, like Ovi and
+LTX-2. I took apart LTX-2's version of that block in
+[the restore and relight LoRAs piece](/articles/restore-and-relight-loras). MiniMax's H3, which [FastH3](/articles/fastvideo-fasth3) and
+[FreeVideo](/articles/freevideo-minimax-h3) work on, is another large joint audio-video transformer.
+
+## One block, two streams
+
+<Figure
+  src="/articles/kandinsky-6-video/fig1.png"
+  alt="A block diagram with two rows. The top row, on the video embedding: Video Self Attention, T2V Cross Attention, V2A Cross Attention, Feed Forward. The bottom row, on the audio embedding: Audio Self Attention, T2A Cross Attention, A2V Cross Attention, Feed Forward. Text feeds both text cross-attentions as keys and values; video feeds the A2V block as keys and values and audio feeds the V2A block."
+  caption="One Kandinsky 6.0 Video block. Each stream runs self-attention, text cross-attention, a cross-modal attention and an FFN; in V2A, video queries attend to audio keys and values, and A2V is the reverse (paper, Figure 1)."
+/>
+
+Read in the code (`FusedTransformerDecoderBlock` in `dit.py`), one block does this, in order:
+
+1. **Self-attention, per stream.** Video tokens attend to video tokens with a 3D RoPE over (time, height,
+   width). Audio tokens attend to audio tokens with a 1D RoPE over time.
+2. **Text cross-attention, per stream.** Each stream has its own small text transformer over the
+   Qwen2.5-VL embedding, so the video and the audio read the same prompt through different weights.
+3. **Cross-modal attention, both ways.** Video queries attend to audio keys and values, and audio
+   queries attend to video. The keys and values are taken from the *other* stream's state after
+   self-attention but before its text cross-attention, and each result is added back through a
+   learned gate (measured, `dit.py`).
+4. **Feed-forward, per stream.**
+
+Each stream gets its own timestep embedding. During joint training the noise level is drawn
+independently for video and audio, "so that the two modalities are noised to different levels"
+(reported). This is what lets one network also do audio-to-video and video-to-audio: hold one stream
+at zero noise and denoise the other.
+
+The two streams are deliberately unequal. The paper gives the split in round numbers. Here it is
+from the headers:
+
+| | Lite (paper) | Lite (header) | Pro (paper) | Pro distill (header) |
+|---|---|---|---|---|
+| video stream | 2B | 1,909,391,360 | 19B | 18,375,260,160 |
+| audio stream | 0.6B | 543,657,984 | 5B | 4,909,455,360 |
+| cross-attention | 0.4B | 595,152,896 | 5B | 5,664,921,600 |
+| text blocks and embeddings | not counted | 128,430,184 | not counted | 1,189,786,640 |
+| **total** | **3B** | **3,176,632,424** | **29B** | **30,139,423,760** |
+
+The header columns are measured. I bucketed every tensor by its prefix. "Cross-attention" means the
+`va_` and `av_` attention and modulation tensors in every block. The total row of the paper is the sum
+of its own three lines; it leaves out the per-stream text transformers, which is most of the 1.1B gap
+on Pro (reasoned). The cross-attention is 18.7% of Lite and 18.8% of Pro (reasoned from the measured
+counts). Lite has 32 blocks with a 1,792-wide video stream and an 896-wide audio stream. Pro has 60
+blocks at 4,096 and 2,048 (measured, `transformer/config.json`).
+
+## Counting one clip
+
+Now the token budget, because it explains most of the design. Video goes through the Hunyuan VAE,
+which compresses 8x in space and 4x in time into 16 channels. The transformer then patches 2 x 2. One
+video token is a 16 x 16 pixel square of one latent frame. The default clip is 121 frames at 24 fps,
+which the causal VAE turns into 31 latent frames: the first frame alone, then four per latent. At
+864 x 480 that is 54 x 30 = 1,620 tokens per latent frame, and 50,220 video tokens per clip
+(reasoned from the configs and `pipeline.py`).
+
+Audio goes through MMAudio's 44.1 kHz autoencoder, which turns 1,024 samples into one 40-channel
+latent frame. The DiT does not patch it: each latent frame is one token. The pipeline sizes the audio
+to the video as ceil(121 / 24 x 44,100 / 1,024) = 218 tokens (measured, `prepare_latents.py`). That
+is one audio token per 23.2 ms against one video latent frame per 166.7 ms, about 7.2 audio tokens
+under each latent frame (reasoned).
+
+So a clip is 50,220 video tokens next to 218 audio tokens, about 230 to 1. The audio stream holds 16% of Pro's weights and sees 0.4% of the tokens. Counting each stream's weights against its own tokens,
+audio is about 0.12% of the linear-layer work per step (reasoned). The audio stream is cheap to make
+wide. The cross-attention is where the two sizes meet: 50,220 x 218 query-key pairs each way, against
+2.5 billion pairs in video self-attention.
+
+<ClipTimeline />
+
+Pick a video latent frame to see which audio tokens play under it, and where RoPE puts them.
+
+How does a video token know *which* audio tokens are simultaneous with it? Through RoPE. The model
+passes rotary positions into the cross-modal attention too (`ca_rope: true`). Video queries carry their
+3D position; audio keys carry their 1D one. The paper says the video frame index is normalized to 24
+fps, and the audio RoPE's frequencies are all multiplied by `audio_freqs_scaling = 0.144` (measured,
+`transformer/config.json` and `rope.py`). That squeezes 218 audio positions into roughly the range of
+31 video positions: the last audio token lands at 217 x 0.144 = 31.2 (reasoned).
+
+Two details in the code make this a hint, not a lock (reasoned, from `rope.py`):
+
+- **The scale is close, not exact.** A video latent frame is 4/24 s and an audio token is 1,024 / 44,100
+  s, so a time-exact scale would be 0.1393. At 0.144, audio tokens at the end of the clip carry
+  positions about one latent frame ahead of the video tokens they play under. The widget shows both.
+- **The two RoPEs do not share a frequency table.** In Lite's 64-channel heads, the video's time axis
+  owns 16 channels at 8 frequencies, while the audio's 1D RoPE spreads 32 frequencies over all 64
+  channels. Only the first channel pair rotates in matching units. The rest of the audio head lines up
+  with the video's height and width channels.
+
+Neither is a bug. A cross-attention can learn to read a consistent, slightly off signal, and the sync
+results below suggest this one does. But the alignment is learned, not built in.
+
+The first-frame mode reuses the same machinery. In image-to-audio-video the reference frame's latent is
+appended along time, flagged by a mask channel and a learned "token role" embedding. The paper's
+ablation found the RoPE position does the binding. Give the reference a later temporal position and the
+model uses it as that later frame. The mask separates conditioning from noise. The role embedding is
+"partially redundant" (reported). The release code gives the appended frame position 0 (measured,
+`pipeline.py`).
+
+## Where 44 kHz comes from
+
+"44 kHz audio" is the sample rate of MMAudio's autoencoder: 44,100 Hz. That stack is a mel-spectrogram
+VAE plus a BigVGAN vocoder. The vocoder's upsampling rates multiply to 8 x 4 x 2 x 2 x 2 x 2 = 512
+samples per mel frame, over 128 mel bins (measured, `vocoder/config.json`). The VAE halves the frame
+rate again to reach 1,024 samples per latent (reasoned from the two configs). The DiT never sees a
+waveform. It denoises 218 x 40 numbers; the audio VAE decodes them to a mel spectrogram and the vocoder
+turns that into sound. Audio fidelity is therefore bounded by a frozen, borrowed codec. The paper's
+contribution is the transformer that writes into its latent space.
+
+## Training: two towers, then a merger
+
+<Figure
+  src="/articles/kandinsky-6-video/fig2.png"
+  alt="A flow chart. Video tower training: start from the pretrained Kandinsky 5.0 Video model, then T2V pretraining with T2AV captions. Audio tower training: T2A pretraining with T2A captions, then T2A pretraining with T2AV captions. Both feed Fused Audio-Video training: T2AV pretraining, T2AV and I2AV pretraining, model soup SFT, RL-based post-training, distillation."
+  caption="Training pipeline: the video tower starts from Kandinsky 5.0, the audio tower from random weights, and the two are fused for joint training, SFT, RL and distillation (paper, Figure 5)."
+/>
+
+The video stream starts from a Kandinsky 5.0 checkpoint. The audio stream starts from random weights
+and learns sound alone first, on 40 million audio tracks of 5 to 20 seconds (reported). Then the newly
+initialised cross-attention layers connect them. Lite trains jointly for 57.5k steps and Pro for 49k, on 7
+million audio-video segments. The last 4k to 5k steps put 25% of samples in image-conditioned mode
+(reported). A batch can also hold audio only, video only or images only (reported).
+
+## There is no lip-sync module
+
+Nothing in the architecture is about faces. Lip-sync is pressed in from four directions, all
+reported:
+
+- **Data.** A joint clip with a person in it is kept only if its lip-sync alignment score is at least 3
+  out of 5. A clip with audio-visual events needs a desync score below 0.1. About 25% of the joint data
+  has no faces at all.
+- **A face-weighted loss.** Supervised fine-tuning trains 11 domain experts. Stage 2 is about sync,
+  and its loss is 0.85 x video + 0.15 x audio + 1.0 x a "face loss": the video loss restricted to the
+  facial region in latent space. The 11 experts are averaged into one model, a model soup.
+- **A lip-sync reward** in the RL stage, below.
+- **Attention-weighted RL.** The RL loss weights video patches by how strongly audio tokens attend to
+  them in A2V cross-attention. Faces, hands and instruments get up to 1.5x. The model's own attention
+  decides where sync matters.
+
+<Figure
+  src="/articles/kandinsky-6-video/fig9.jpg"
+  alt="Ten frames of a young girl in a white medical coat with a stethoscope in a bright hospital room, her mouth in different positions as she speaks, above a green audio waveform whose bursts line up with the frames where her mouth is open."
+  caption="A Pro generation for the line 'When I grow up, I want to be a doctor!', frames sampled across 5 seconds above the generated waveform. One sample chosen by the authors (paper, Figure 28)."
+/>
+
+## The RL stage, and what the 47% measures
+
+<Figure
+  src="/articles/kandinsky-6-video/fig3.png"
+  alt="A diagram of the reward phase. A video prompt and audio prompt produce N videos with different seeds, scored by a table of eight reward models: HPS v3 (video, 0-15), VideoAlign (text+video, -2 to 2), Audiobox Aesthetics (audio, 0-1), CLAP (text+audio, -1 to 1), AV-Desync via Synchformer (video+audio, 0-1), AV-Align (video+audio, 0-1), LatentSync-gated via StableSyncNet (audio, 0-1) and Whisper ASR (text+audio, 0-1). Scores are normalized, routed into clamped video and audio advantages, broadcast to tokens, and mapped to per-token rewards between 0 and 1."
+  caption="The reward phase: eight reward models score each group of rollouts; the scores become separate video and audio advantages, clamped to plus or minus 5 and spread over each stream's tokens (paper, Figure 7)."
+/>
+
+The RL recipe is OmniNFT, originally built for LTX-2 and adapted here (reported). For each prompt Pro
+generates a group of K = 10 clips that differ only in seed (8 for Lite). The sampler is deterministic,
+DPM2 at 20 steps, so the seed is the only source of variety. Each of eight rewards is centred within
+the group and scaled by the batch's standard deviation, like GRPO. The weighted advantages then split
+by modality. Video rewards (HPSv3, VideoAlign) go to video tokens and audio rewards (Audiobox
+Aesthetics, CLAP, Whisper ASR) to audio tokens. The three sync rewards go to both. Each token gets a
+reward between 0 and 1. The update is not a policy gradient over log-probabilities, which a flow
+model does not have cheaply. It re-noises the finished clip, asks the current and previous LoRA to
+denoise it, and pulls the prediction toward the rollout in proportion to that reward:
+
+$$
+\ell_i = r_i \,\mathrm{MSE}(x_0^{cur}, x_0) + (1 - r_i)\,\mathrm{MSE}(2x_0^{old} - x_0^{cur}, x_0)
+$$
+
+where $r_i$ is token $i$'s reward, $x_0$ the rollout, and $x_0^{cur}$, $x_0^{old}$ the current and
+previous predictions (simplified: the paper also normalizes each term). A high reward pulls the current model toward the rollout. A low reward pulls its
+mirror image toward it, which pushes the model away. A small KL term ($\beta = 10^{-4}$) keeps it near
+the SFT model. Only a LoRA trains: rank 16, 199M parameters on Pro (0.69%) and 47M on Lite (1.57%)
+(reported). There is also a hand-tuned schedule that shrinks gradients flowing into the audio stream
+through V2A attention in some blocks, so video rewards do not wreck the audio.
+
+Now the 47%. The paper's sentence in full: Pro's word error rate on 64 held-out speech prompts, three
+seeds each, drops "from 0.235 for the SFT model to 0.124, a relative reduction of 47%" (reported, p
+under 0.001). Lite drops from 0.179 to 0.127, 29% (reported). The arithmetic checks.
+
+The catch is in the next line of the PDF: "WER is computed with Whisper-large-v3, which is also one of
+the reward models." Speech intelligibility is rewarded twice in the stack. Once directly, as Whisper
+ASR at weight 0.5. Once inside the lip-sync term, which multiplies the SyncNet score by
+$0.5 + 0.5\,s_{ASR}$, where $s_{ASR}$ is one minus the WER. Grading an RL policy with the
+model it was trained against measures how well it learned to please that model. The paper knows this
+and runs two other checks:
+
+- **A held-out sentence set.** On 100 Harvard sentences, Pro's WER goes from 0.251 to 0.180, p = 0.005
+  (reported). That is a 28% cut (reasoned), real but well short of 47%.
+- **A different recogniser.** VABench's speech subset is scored with Qwen3-ASR-1.7B. The RL'd models
+  score 0.103 (Lite) and 0.117 (Pro) against 0.099 for LTX 2.5 (reported). Pro has the *highest* WER of
+  the three. The paper says the two WERs "are not directly comparable", which is true, and is the point.
+
+<Figure
+  src="/articles/kandinsky-6-video/fig6.png"
+  alt="Stacked bars for six criteria comparing Kandinsky 6.0 Video Pro after RL against the SFT model on a speech-focused text-to-audio-video benchmark. Prompt following video: RL 0.31, tie 0.69. Prompt following audio: RL 0.08, tie 0.92. Visual quality: RL 0.58, tie 0.25, SFT 0.17. Audio quality: RL 0.08, tie 0.84, SFT 0.08. Audio-video sync: RL 0.41, tie 0.42, SFT 0.17. Motion realism: RL 0.50, tie 0.33, SFT 0.17."
+  caption="Human side-by-side, RL vs SFT, speech-focused prompts. The largest gains are visual quality and motion; audio quality and audio prompt following are mostly ties, and the chart has no speech-quality bar (paper, Figure 21a)."
+/>
+
+The human side-by-side of RL against SFT is the better evidence that RL helped, and it did. Visual
+quality goes 0.58 to 0.17 for RL, and audio-video sync 0.41 to 0.17 (reported, read off the chart).
+The text says speech quality "improves significantly" on this benchmark, but the published chart has
+no speech-quality bar. Audio prompt following is 92% ties. So the RL stage clearly made clips look
+better and sync better. How much it improved *speech* rests on a metric graded by its own reward.
+
+## Ten steps instead of a hundred
+
+The full Pro samples with 50 Euler steps at guidance 5.0 (measured, `pro.yaml`). With classifier-free
+guidance that is 100 transformer forwards. With MagCache, Pro SD evaluates 49 of those 100 (reported). The
+distilled checkpoint, which runs the public demo, uses 10 forwards at guidance 1.0 (measured,
+`pro-distill.yaml`). It gets there in two stages. π-Flow trains a student whose output head
+predicts ten velocities at once, a small policy that integrates a segment without calling the network
+again. The headers show it: the distilled output layers are 640 wide for video and 400 for audio, ten
+times the 64 and 40 of the base heads (measured). Then 300 steps of adversarial fine-tuning (Sim-LADD)
+on the student's own rollouts restore the texture that trajectory compression smooths away.
+
+In a human side-by-side on image-to-audio-video, the distilled Pro is preferred 51% to 49% over the
+full model, and no criterion differs significantly (reported). The demo is not a downgraded model, on
+the publisher's evidence.
+
+## From 480p to Full HD
+
+<Figure
+  src="/articles/kandinsky-6-video/fig4.png"
+  alt="A pipeline diagram titled SR Tiled Inference with Latent Upscaler. LQ video pixels go through a KVAE encoder to LQ latents, split into a latent tile grid. For each tile: a Latent Upscaler x2 or x4, partial re-noising of the upscaled latent, then an SR DiT with Euler steps in an iterative denoise loop, a KVAE decoder, and an HQ tile. Tiles are merged with a Hanning blend into the HQ video."
+  caption="Super-resolution: encode once, upscale each latent tile with a convolutional Latent Upscaler, restore it with a text-free SR-DiT, decode, and blend the tiles with Hann windows. The released model replaces the Euler loop with two network evaluations (paper, Figure 13)."
+/>
+
+The base model stops at 864 x 480. Full HD is a separate, text-free pipeline in a different latent
+space: K-VAE, 64 channels, 16x spatial compression. The clip is pre-scaled 1.125x in pixels to
+976 x 544, then encoded once and tiled. A convolutional Latent Upscaler doubles each tile in latent
+space. The tile is partially re-noised, and a 1.41B-parameter SR-DiT, initialised from Kandinsky 5.0
+Video Lite, restores detail. The output is 1952 x 1088, resized to 1920 x 1080 (reported). The released SR-DiT
+is distilled to two network calls per tile; its checkpoint is 1,414,263,936 parameters (measured, Hub
+API). On an H100, Full HD from 864 x 480 takes 9 tiles and 39.6 s per clip (reported). The SR model
+never sees the prompt or the audio. It adds texture to what the base model drew, and the paper's own
+examples say so: hair strands, racket strings, fabric.
+
+## What it takes to run
+
+Peak memory for Pro at SD is 72.8 GiB with everything resident (reported). The release streams
+transformer blocks from CPU memory, two on the GPU at a time. That brings Pro SD to 21.7 GiB, and to
+7.9 GiB on the 16 GB preset, which also quantizes the text encoder to NF4. On 16 GB, Pro needs about
+58 GiB of host RAM (reported). The paper notes that NF4 is the one setting that changes the output.
+
+Times for one 5-second clip with the full, non-distilled model (reported, Table 10):
+
+| | RTX 4090 | RTX 5090 | H100 |
+|---|---|---|---|
+| Lite SD | 437 s | 309 s | 239 s |
+| Pro SD | 936 s | 754 s | 356 s |
+| Pro Full HD | 1247 s | 854 s | 402 s |
+
+That is a quarter of an hour per Pro clip on a 4090. The distilled checkpoint cuts the forward count
+tenfold against an unaccelerated run. The paper publishes no table for it, so I won't guess its wall time.
+
+## How it compares
+
+<Figure
+  src="/articles/kandinsky-6-video/fig5.png"
+  alt="A radar chart of 14 normalized VABench metrics for LTX 2.5 (two-stage Full HD), Kandinsky 6.0 Video Pro and Kandinsky 6.0 Video Lite. The three polygons overlap closely; Pro sits outside on lip-sync, desync, audio-video alignment and visual realism, LTX 2.5 outside on alignment and expressiveness, and Lite outside on visual QA and audio QA."
+  caption="VABench, normalized, with desync and WER inverted. The only external model on the chart is LTX 2.5 (paper, Figure 14)."
+/>
+
+On VABench, Pro leads LTX 2.5 on lip-sync (2.072 vs 1.567) and desync (0.396 vs 0.521, lower is
+better) (reported). LTX 2.5 keeps the VLM-judged alignment and expressiveness scores and the WER.
+Two things limit the comparison. LTX 2.5 is the only external model on the chart. And it ran at Full
+HD while both Kandinsky models ran at 768 x 512. Lite beats Pro on 6 of the 13 VABench rows, and on WER, with a tenth of the parameters (reported, Table 11).
+
+The human side-by-sides use roughly 200 or more comparisons per criterion, majority-voted
+(reported). Against LTX 2.5, Pro wins overall visual quality 0.49 to 0.26 and speech quality 0.33 to
+0.16. Audio-video sync is 82% ties (reported, read off the chart).
+
+<Figure
+  src="/articles/kandinsky-6-video/fig7.png"
+  alt="Stacked bars for ten criteria, Kandinsky 6.0 Video Pro vs LTX 2.5 in text-to-audio-video. Overall visual quality 0.49 vs 0.26; artifacts 0.34 vs 0.25; motion realism 0.21 vs 0.13; visual prompt following 0.31 vs 0.23; camera motion 0.20 vs 0.15; speech quality 0.33 vs 0.16; audio-video sync 0.05 vs 0.13 with 0.82 ties; overall audio quality 0.12 vs 0.21; sound prompt following 0.24 vs 0.28; user task solving 0.44 vs 0.28."
+  caption="Pro vs LTX 2.5, text-to-audio-video: green is Kandinsky, grey ties, dark blue LTX 2.5 (paper, Figure 17a)."
+/>
+
+Against closed models the paper is candid. Veo 3.1 Fast wins user task solving 0.48 to 0.23 and sound
+prompt following 0.34 to 0.13. Kandinsky wins artifacts 0.50 to 0.19 (reported). MiniMax H3 and
+Seedance 2.0 are "preferred on the majority of criteria" and on visual criteria respectively. Kling 2.6
+is "competitive".
+
+<Figure
+  src="/articles/kandinsky-6-video/fig8.png"
+  alt="Stacked bars for ten criteria, Kandinsky 6.0 Video Pro vs Veo 3.1 Fast in text-to-audio-video. Overall visual quality 0.32 vs 0.42; artifacts 0.50 vs 0.19; motion realism 0.20 vs 0.14; visual prompt following 0.11 vs 0.40; camera motion 0.33 vs 0.12; speech quality 0.10 vs 0.26; audio-video sync 0.05 vs 0.16; overall audio quality 0.05 vs 0.32; sound prompt following 0.13 vs 0.34; user task solving 0.23 vs 0.48."
+  caption="Pro vs Veo 3.1 Fast, text-to-audio-video: Kandinsky has fewer artifacts and better camera motion; Veo follows the prompt better and sounds better (paper, Figure 18a)."
+/>
+
+## What I could not check
+
+- **Output quality.** I generated nothing. Every quality claim above is the publisher's, from a
+  human evaluation whose annotator pool and prompt set are not released.
+- **The non-distilled Pro weights.** Gated; the parameter count is the Hub API's reading of its header.
+- **Whether the RoPE mismatch costs anything.** The scale and the frequency layout are measured from the
+  code. Whether a time-exact scale would sync better is an experiment the paper does not report.
+
+
+The design is easy to state. Keep the video model you trust, grow a narrow audio model beside it, and
+let the two attend to each other every block on a shared, approximate clock. What makes the clips talk is training
+pressure: filtered data, a face loss, and a reward stack that scores intelligibility with the same
+recogniser the paper then reports. Read the 47% with that in mind, and the 28% next to it.
