@@ -1,0 +1,495 @@
+---
+title: "QuantUI-rs: exact to the last bit, and a default file stock ComfyUI won't open"
+description: "QuantUI-rs is one static Rust binary, no Python and no torch, that writes ComfyUI INT8, FP8, MXFP8 and NVFP4 safetensors and llama.cpp GGUFs, and promises output byte-exact against its references on every default path. I read all 27,000 lines of its library and CLI at d2cced6 next to the code it copies: convert_to_quant, comfy-kitchen, llama.cpp, and NVIDIA's ModelOpt for comparison. The arithmetic is ported with real care, down to torch's one-ULP division quirk and its AVX2 random-number polynomials. But the defaults miss the README in two places. Run quantize with no flags and every layer is tagged int8_blockwise, a format stock ComfyUI does not register, so the loader raises KeyError; the FP8 default has the same problem. And the default GGUF method, q4_k_m with no importance matrix, goes through a simplified encoder that the repo's own tests say is not byte-exact with llama-quantize. I also re-implemented the NVFP4 path in numpy: it matches ModelOpt's scales and codes on 1,048,576 blocks but packs nibbles the other way round, the opt-in L2 search is worth 23% less weight error on Gaussian weights, and the always-on bias correction subtracts noise with zero expected value."
+date: 2026-10-06
+tags:
+  - quantization
+  - gguf
+  - llama-cpp
+  - rust
+  - reproducibility
+  - developer-tools
+  - diffusion
+draft: false
+cover: /articles/quantui-rs/fig1.jpg
+rating:
+  novelty: 1
+  verification: 3
+  runnable: 3
+  explains: 3
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 3
+  why: "Reads every QuantUI-rs encoder against llama.cpp, comfy-kitchen and ModelOpt: the bytes are exact, the default ComfyUI and GGUF outputs are not what the README says."
+topic: quantization
+kind: tool
+level: practitioner
+runsOn: cpu
+licence: MIT
+---
+
+import { BlockLab } from "@/components/articles/quantui-rs/block-lab"
+import { PathFinder } from "@/components/articles/quantui-rs/path-finder"
+
+The post that sent me here was four lines long: "One static Rust binary that quantizes, converts, and
+casts models. No Python, no torch, no runtime dependencies," followed by a list of formats, INT8,
+FP8, MXFP8, NVFP4, f16, bf16, f32, q4_k_m, q8_0, q6_k, iq4_xs, and "ComfyUI ready output."
+
+A quantizer is a strange thing to rewrite. Its output is a few billion integers and a few million
+scales, and nothing inside the file tells you whether they are right. If two tools disagree in the
+last bit of one scale you will never see it, and if they disagree in the meaning of a scale you will
+see it as a blurry image or a model that forgets how to count. So the interesting question about a
+from-scratch quantizer is never "is it fast". It is "right according to whom?"
+
+QuantUI-rs has an unusually precise answer printed at the top of its README: "output is byte-exact
+against the Python/torch and `llama.cpp` references on every default path." I wanted to know which
+references, how you even get byte-exactness out of floating-point code written in two languages,
+and whether "ComfyUI ready" means ComfyUI loads it.
+
+<Figure
+  src="/articles/quantui-rs/fig1.jpg"
+  alt="Cartoon illustration: a rust-orange gear-shaped crab labelled QuantUI-RS squeezes sacks labelled safetensors MEGA MODEL into containers marked INT8, FP8 and GGUF, while small cubes labelled INT4, Q4_K and FP16 fly off to the side."
+  caption="The launch image: safetensors in, INT8, FP8 and GGUF out (the wildmindai post on X)."
+/>
+
+|  |  |
+|---|---|
+| Repository | [wildminder/quantui-rs](https://github.com/wildminder/quantui-rs), commit `d2cced6` (2026-10-05), release v0.3.1 |
+| Licence | MIT, with the ported llama.cpp notice in `LICENSE` |
+| Size | 27,226 lines of Rust in `src/`, 52,587 with tests; 781 `#[test]` functions |
+| Commands | `quantize` (ComfyUI safetensors), `gguf`, `cast`, `validate`, `info` |
+| Binaries | static musl builds for Linux x86-64 and ARM64, plus macOS and Windows, about 1.5 MB compressed |
+| Sibling | [wildminder/quantui](https://github.com/wildminder/quantui), the Python TUI it was ported from |
+
+<RepoCard repo="wildminder/quantui-rs" />
+
+## Byte-exact against whom
+
+The README says "the Python/torch reference". The source is more specific, and the specifics
+matter, because there are four different references depending on what you ask for:
+
+- INT8 and FP8 are ports of [convert_to_quant](https://github.com/silveroxides/convert_to_quant)
+  (ctq), the Python tool most ComfyUI quantized checkpoints come from, and of the streaming driver
+  in the Python QuantUI. But only of ctq's `--simple` path. ctq's default is an SVD-based learned
+  rounding ("Skip SVD optimization, use simple quantization" is how its own `--help` describes
+  `--simple`). QuantUI-rs accepts `--simple` "for reference compatibility (always on)" and has no
+  learned rounding at all.
+- MXFP8 and NVFP4 follow ComfyOrg's [comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen)
+  eager CPU kernels, the same code ComfyUI dequantizes with. The NVFP4 module header notes the goldens
+  have to be generated with CUDA hidden, because the CUDA kernel divides by multiplying with a
+  reciprocal and lands on different E2M1 codes at ties.
+- The legacy GGUF types (F16, BF16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1) are checked against `gguf-py`, 49
+  of 49 golden cases.
+- K-quants and i-quants are checked against `llama-quantize`, but only when an importance matrix
+  is supplied. More on that below, because it is where the "every default path" claim breaks.
+
+What impressed me is how far the port goes to match the Python bytes. Look at the INT8 row-wise
+scale, and the comment that explains why it is not written the obvious way:
+
+```rust
+// crates/quant-core/src/quant.rs:100-119 (abridged)
+// On row 3 of the conv_net fixture (row_max = 0.11627197265625):
+// IEEE `127.0/max` = 0x44888889 but torch emits 0x44888888 —
+// 1 ULP off correct rounding — and the golden dequant scale
+// 0x3a700001 follows. Plain IEEE division diverged on 29/128
+// rows (and cascaded into qdata ties: 3/16384).
+let quant_scale = 127.0f32 * (1.0f32 / clamped);
+let dequant_scale = 1.0f32 / quant_scale;
+```
+
+torch computes a CPU scalar divided by a tensor as the scalar times the reciprocal, which rounds twice.
+QuantUI-rs reproduces the double rounding on purpose. The MXFP8 kernel does the same kind of thing
+for `torch.ceil(torch.log2(x))`: torch takes the log in f32, so a value a few ULPs above a power of
+two gets the lower exponent, and the Rust computes the log in f64 and rounds it to f32 to match
+(`quant_mxfp8.rs:90`). The bias-correction path goes further still: it ports torch's MT19937
+generator, its Box-Muller sampler and the AVX2 `sincos256_ps` and `log256_ps` polynomials from
+`avx_mathfun.h`, plus oneDNN's habit of resetting the GEMM accumulator every 128 elements of K.
+
+All of this buys a real property: for the paths it covers, the Rust
+output and the Python output are the same file. It also defines exactly what "exact" can mean. The
+bias-correction numerics match torch 2.13 on an AVX2 machine; the header names `Vectorized<f32>::size() = 8`
+as an assumption. A torch build using 16-wide AVX-512 vectors sums in a different order, and then
+torch no longer agrees with itself, let alone with the port.
+
+## Four formats, one row of weights
+
+Before checking where the bytes go, it is worth being clear about what each ComfyUI format stores,
+because the formats differ in one design choice: how many weights share a scale, and what the scale
+is allowed to be.
+
+INT8 is the plain one. Take a block, find its largest magnitude, divide by 127, round every
+weight to the nearest integer step, half to even, and clamp to ±127. There is no −128; the grid is
+symmetric. QuantUI-rs's default block is a 128×128 tile with one F32 scale, which costs about 8.002
+bits per weight. Row mode keeps one scale per output row instead.
+
+FP8 E4M3 keeps the same per-tile scale but maps the tile's largest value to 448, the biggest
+finite `float8_e4m3fn`, and rounds each weight to the nearest FP8 value. An FP8 grid is a float grid:
+eight steps per power of two, so small weights keep relative precision that INT8's even spacing would
+throw away.
+
+MXFP8 shrinks the block to 32 weights along a row and makes the scale a pure power of two, one
+E8M0 byte. That costs 8.25 bits per weight. The interesting choice is the rounding of the exponent:
+
+$$
+e = \left\lceil \log_2 \frac{\max |w|}{448} \right\rceil
+$$
+
+Rounding up guarantees the block's largest weight lands at or below 448 after scaling, so nothing
+clips. The OCP MX specification instead uses $\lfloor \log_2 \max|w| \rfloor - 8$, which uses the
+whole range and lets the top values saturate. comfy-kitchen chose ceil
+(`comfy_kitchen/backends/eager/quantization.py:299-303`), and QuantUI-rs copies it. On a
+1024×1024 Gaussian matrix I counted where the two rules disagree: 16.8% of blocks, which are exactly
+the blocks whose largest value would have clipped under the spec's rule. The DEVELOPMENT notes
+record that the 4/3 "scale compensation" from [arXiv 2509.23202](https://arxiv.org/abs/2509.23202)
+was tried here and changed no output bytes, and this is why. Compensation exists to undo clipping, and
+a round-up exponent never clips.
+
+NVFP4 has two levels. Every 16 weights share an E4M3 scale byte, and the whole tensor shares one
+F32 scale:
+
+$$
+s_T = \frac{\max_{\text{tensor}} |w|}{448 \cdot 6}, \qquad
+\text{byte} = \mathrm{E4M3}\!\left(\frac{\max_{\text{block}} |w| / 6}{s_T}\right), \qquad
+\hat w = s_T \cdot \text{byte} \cdot \mathrm{E2M1}\!\left(\frac{w}{s_T \cdot \text{byte}}\right)
+$$
+
+E2M1 has eight magnitudes, 0, 0.5, 1, 1.5, 2, 3, 4 and 6, plus a sign. Four bits per weight plus
+eight bits of scale per 16 weights is 4.5 bits per weight. The figure from the MR-GPTQ paper puts the
+two microscaling formats side by side:
+
+<Figure
+  src="/articles/quantui-rs/fig2.png"
+  alt="Schematic comparing MXFP4 and NVFP4. MXFP4: 32-value blocks of FP4 values, each with an 8-bit E8M0 scaling factor made only of exponent bits. NVFP4: 16-value blocks of FP4 values, each with an E4M3 scaling factor (sign, 4 exponent, 3 mantissa bits), plus one FP32 per-tensor scaling factor."
+  caption="MXFP4 against NVFP4: 32-value blocks with a power-of-two scale, against 16-value blocks with an E4M3 scale and an FP32 tensor scale. MXFP8 is the MXFP4 layout with 8-bit E4M3 elements (Egiazarian et al., arXiv 2509.23202, Figure 1)."
+/>
+
+The formula hides one detail. The block scale is rounded to the nearest E4M3 value, and
+E4M3 has only three mantissa bits. About half the time the scale rounds down, and then the block's
+largest weight divides out to slightly more than 6 and clips. In my numpy re-implementation of the
+parity path, 50.9% of blocks on a Gaussian matrix and 51.1% on a Laplace matrix clip their largest
+weight. ModelOpt does the same thing (I compare the two below), so this is the format as everyone
+ships it, not a QuantUI-rs bug. But it is exactly the slack the one quality mode in the tool goes
+after.
+
+The widget runs one row of 32 weights through re-implementations of all four encoders. Boost weight
+#7 into an outlier and watch what each format gives up. INT8's even step widens for all 32 weights.
+FP8 and MXFP8 shift their whole grid up but keep relative precision for the small weights. NVFP4
+coarsens only the 16-weight block that holds the outlier; the other block keeps its own fine scale.
+
+<BlockLab />
+
+## The search that earned its place
+
+`nvfp4_l2` is the only opt-in format that the repo's own measurements kept. Its idea is short: for
+each block, try the E4M3 scale bytes around the one the parity path picked, re-encode the 16
+weights at each, and keep the byte with the lowest squared error. Then refit the tensor scale by
+least squares for the chosen codes, and repeat, three times in all.
+
+The long comment in `quant_nvfp4.rs:337-415` is the best thing in the repository, because it
+explains why the obvious version of this does not work. The reconstruction depends only on the
+product $s_T \cdot \text{byte}$, and halving an E4M3 value is exact until it reaches the subnormal
+range, so you can double $s_T$, halve every block byte, and not change a single decoded value. An unconstrained search has nothing
+to stop it drifting: "A prototype observed +32939% before anything objected." The flatness ends only
+when the halved block scales start falling into E4M3's subnormal range and rounding to zero. So the
+search is fenced in twice: each block may only move four E4M3 codes from its anchor (about half an
+octave either way), and $s_T$ may only move by a factor of 4.
+
+The same comment records a bug that is worth knowing about if you ever write one of these. The
+input is rounded through bf16 before encoding, because the reference pipeline does that. The
+first version scored its error against those rounded values, and for a one-element tensor holding
+0.27318907 it happily "improved" to zero error by reconstructing the bf16 value 0.2734375, which is
+2.5e-4 away from what the user passed in. The shipped version picks codes from the rounded values
+and scores them against the original ones.
+
+The README claims 17.7% lower aggregate L2 error, and 21–26% on uniform and Gaussian data. I
+re-implemented only the per-block half of the search (fixed $s_T$, eight neighbouring bytes) in
+numpy on a 4096×4096 matrix. It cuts the squared error by 23.0% on Gaussian weights and 18.1% on
+Laplace weights. So the claim is in the right range, and most of the gain comes from un-clipping the
+half of the blocks that clip.
+
+Two things the number does not say. It is weight-space error with every weight counted equally:
+there is no activation statistic and no importance weighting, and the crate never runs a model, so
+there is no perplexity or image-quality result behind it. The output is also not byte-exact with
+anything, and the run says so on its `parity: quality-tuned` line, which is the right way to ship
+a deviation.
+
+## Rotations, and the one that ComfyUI can't see
+
+`int8_convrot` rotates each row's weights by a group-wise Hadamard matrix before row-wise INT8,
+the trick from QuaRot and [ConvRot](https://arxiv.org/abs/2512.03673): a rotation spreads an
+outlier's energy across its group, so the absmax that sets the scale drops. The matrix is built from
+a 4×4 base whose rows each sum to 2, Kronecker-multiplied up to 256 (`convrot.rs:61-100`), rather
+than the Sylvester construction whose first column is all ones. The ConvRot paper's figure shows why
+that column matters: the standard transform piles the row-wise outliers onto one channel.
+
+<Figure
+  src="/articles/quantui-rs/fig4.png"
+  alt="Four panels of activation statistics over 15,000 hidden dimensions in a Flux transformer layer. Original activations have outliers up to 14.48. After a Sylvester-type Hadamard transform one channel reaches -106.19. After ConvRot's group-wise regular Hadamard transform the maximum is 9.26."
+  caption="A Sylvester Hadamard concentrates row-wise outliers into one channel (−106.19); the group-wise regular transform that int8_convrot uses spreads them (9.26) (Huang et al., arXiv 2512.03673, Figure 3)."
+/>
+
+A rotation only works if the inference side rotates the activations by the same matrix. For
+`int8_convrot` it does: the blob carries `"convrot": true, "convrot_groupsize": 256`, and ComfyUI's
+loader reads both keys (`comfy/ops.py:1237-1241`).
+
+`nvfp4_rot16` is the same idea at group size 16, aligned with the NVFP4 block. The blob it writes is
+the plain `nvfp4` blob. NVFP4's metadata has no rotation key, so ComfyUI loads the rotated weights,
+does not rotate the activations, and computes the wrong product without raising anything. The README
+does warn ("If the loader does not invert the rotation, the output is corrupt"), but the run prints
+`parity: exact`, which is true of the quantizer and misleading about the file.
+
+I am also not convinced the rotation would help if a loader did invert it. The MR-GPTQ paper's own
+measurements for the E4M3-scaled format, the solid lines in its Figure 3, show the Hadamard barely
+moving the error on real Llama weights at group size 16, and raising it on Laplace samples at small
+group sizes:
+
+<Figure
+  src="/articles/quantui-rs/fig3.png"
+  alt="Grid of six line plots of relative mean squared error against group size 8 to 128, for Laplace samples, Llama-3.1-8B weights and activations. Dashed lines are E8M0 scales, solid lines E4M3 scales; red is without and green with a Hadamard transform. For E4M3 the red and green solid lines almost coincide on weights."
+  caption="Effect of a Hadamard transform on FP4 quantization error by group size. Solid lines are E4M3 scales (NVFP4-style): with and without the transform they nearly coincide on real weights (Egiazarian et al., arXiv 2509.23202, Figure 3)."
+/>
+
+## What "ComfyUI ready" means, and where it isn't
+
+ComfyUI's quantized checkpoints are ordinary safetensors with a convention on top. For each quantized
+layer there is the weight, its scale tensors, and a small `uint8` tensor named `<layer>.comfy_quant`
+holding a JSON object. When ComfyUI sees any `.comfy_quant` key it switches to its mixed-precision ops
+(`comfy/utils.py:1434-1439`), and each layer's loader reads the JSON and looks its `format` up in a
+table:
+
+```python
+# comfy/ops.py:1202, 1211 (ComfyUI master, 0b5b009)
+module.quant_format = layer_conf.get("format", None)
+...
+qconfig = QUANT_ALGOS[module.quant_format]
+```
+
+`QUANT_ALGOS` (`comfy/quant_ops.py:211-264`) registers `float8_e4m3fn`, `float8_e5m2`, `nvfp4`,
+`mxfp8` (only when comfy-kitchen reports MXFP8 support), `int8_tensorwise`, `convrot_w4a4`,
+`asym_w4a8_int8` and `w6a8_int8`. Nothing else, and the lookup has no fallback.
+
+Now the default. `quantui-rs quantize model.safetensors`, with no flags, means INT8 with block scaling
+at block size 128 (`commands/quantize.rs:43-44`), and the encoder writes this blob for every
+quantized layer (`stream.rs:1188-1194`):
+
+```json
+{"format": "int8_blockwise", "orig_dtype": "torch.bfloat16", "group_size": 128}
+```
+
+`int8_blockwise` is not in the table, so the loader raises `KeyError` on the first quantized layer.
+FP8 defaults to block scaling too, and writes `float8_e4m3fn_blockwise`; its row mode writes
+`float8_e4m3fn_rowwise`. Neither is registered. The repository knows this. Its contract test for the
+ComfyUI loader builds an `int8_blockwise` file, asserts it is fatal, and says in its doc comment:
+"This is a real, currently-unflagged incompatibility" (`tests/comfy_loader_contract.rs:167-171`). The
+README still lists "ComfyUI INT8 / FP8" as the first line of output formats without saying which
+scaling modes stock ComfyUI can read.
+
+The format strings come from ctq, whose README thanks a contributor "For ComfyUI `int8_blockwise`
+support", so some loader somewhere reads them. I could not find it in ComfyUI master. If you rely on a
+custom node, check that it is installed wherever the file is going. The `validate --comfy` command in
+QuantUI-rs does flag these files as fatal; plain `validate` passes them, because it checks the
+encoder's contract rather than the consumer's.
+
+The widget walks the combinations and shows the blob each writes, what the loader does with it, and
+what the bytes are pinned to.
+
+<PathFinder />
+
+For stock ComfyUI the formats that load are `--format int8 -m row` or `-m tensor`,
+`--format int8_convrot`, `--format fp8_e4m3 -m tensor`, `--format mxfp8` and `--format nvfp4`
+(the last two need comfy-kitchen in the ComfyUI environment).
+
+## NVFP4 here is not ModelOpt's NVFP4 file
+
+NVIDIA's [Model Optimizer](/articles/nvidia-model-optimizer) is the other NVFP4 implementation people
+will compare this with, so I put the two side by side. The arithmetic agrees. ModelOpt computes the
+tensor scale as `reduce_amax(input).float() / (E2M1_MAX * E4M3_MAX)` (`nvfp4_tensor.py:208`) and the
+block scale as `per_block_amax / (E2M1_MAX * weights_scaling_factor_2)` (`:195`), then casts to E4M3
+with round to nearest. comfy-kitchen, and QuantUI-rs after it, divide in a different order,
+`(block_max / 6) / s_T`, which could in principle round differently. I implemented both in numpy and
+ran them over a 4096×4096 Gaussian matrix and a Laplace one, 1,048,576 blocks each: every scale byte
+and every E2M1 code came out identical.
+
+The file layout does not agree:
+
+```python
+# ModelOpt, modelopt/torch/quantization/qtensor/nvfp4_tensor.py:338
+packed_weight = (q_weight[..., 1::2] << 4) | q_weight[..., 0::2]
+```
+
+```rust
+// quantui-rs, crates/quant-core/src/quant_nvfp4.rs:237-240
+// pack_uint4(hi_first=True): even index → high nibble.
+let hi = encode_element(pair[0], total_scale);
+let lo = encode_element(pair[1], total_scale);
+row_q.push(hi << 4 | lo);
+```
+
+ModelOpt puts the even-indexed weight in the low nibble; comfy-kitchen puts it in the high nibble.
+QuantUI-rs also stores the block scales already swizzled into cuBLAS's 128×4 tiled layout, padded
+to a multiple of 128 rows, where a ModelOpt export stores them as a plain `[rows, cols/16]` grid. And
+ModelOpt clamps every block scale to at least 2^-9 before the cast (`nvfp4_tensor.py:46`), so a
+nearly-empty block keeps a nonzero scale, where the comfy-kitchen path clamps only the top and lets
+such a block round to a zero scale. None of this is wrong for ComfyUI, which reads comfy-kitchen's
+layout. It does mean an NVFP4 file from this tool is not a drop-in for vLLM or TensorRT-LLM, even
+though the numbers inside are the same. If you want the background on why NVFP4 has two scales at
+all, the [Nemotron NVFP4](/articles/nemotron-nvfp4) and [NVFP4 KV cache](/articles/nvfp4-kv-cache)
+pieces cover the format from the training and serving sides.
+
+## The GGUF half: a faithful port behind a flag
+
+The `gguf` command is a different program wearing the same binary. It reads `config.json` for the
+architecture, renames Hugging Face tensors to llama.cpp's (`model.layers.0.self_attn.q_proj.weight`
+becomes `blk.0.attn_q.weight`), picks a type per tensor and writes the GGUF. The per-tensor policy is
+a port of llama.cpp's `llama_tensor_get_type`, including the heuristic that decides which layers get
+more bits:
+
+```cpp
+// llama.cpp src/llama-quant.cpp:452-454 (master, abeada3)
+auto use_more_bits = [](int i_layer, int n_layers) -> bool {
+    return i_layer < n_layers/8 || i_layer >= 7*n_layers/8 || (i_layer - n_layers/8)%3 == 2;
+};
+```
+
+For Q4_K_M that sends `attn_v` and `ffn_down` to Q6_K on the first eighth of layers, the last eighth,
+and every third layer in between, and leaves the rest at Q4_K (`llama-quant.cpp:590-591, 651`).
+`llama_policy.rs` reproduces that tree, with the per-category counters it depends on.
+
+The encoders are where it gets interesting. A Q4_K block is 256 weights in eight sub-blocks of 32.
+Each sub-block gets a 6-bit scale and a 6-bit minimum, the block gets two fp16 multipliers (one for the
+scales, one for the minimums), and each weight is a 4-bit code: 144 bytes for 256 weights, 4.5 bits each. The quality lives in how you
+choose each sub-block's scale and minimum, and llama.cpp has two versions of that choice:
+
+```c
+// ggml/src/ggml-quants.c:1476-1477, quantize_row_q4_K_ref (no importance matrix)
+for (int l = 0; l < 32; ++l) weights[l] = av_x + fabsf(x[32*j + l]);
+scales[j] = make_qkx2_quants(32, 15, x + 32*j, weights, L + 32*j, &mins[j], Laux, -1.f, 0.1f, 20, false);
+
+// ggml/src/ggml-quants.c:1577, 1584, quantize_row_q4_K_impl (with one)
+for (int l = 0; l < 32; ++l) weights[l] = qw[l] * sqrtf(sigma2 + x[32*j + l]*x[32*j + l]);
+scales[j] = make_qkx3_quants(32, 15, x + 32*j, weights, L + 32*j, &mins[j], Laux, -0.9f, 0.05f, 36, false);
+```
+
+Both run an iterative search over candidate scales, 20 steps without an importance matrix, 36 with.
+QuantUI-rs ports the second one, line for line (`gguf_quants.rs:375-488`), and the IQ4_XS engine,
+`quantize_row_iq4_nl_impl`, the same way, down to the order of the floating-point multiplications. It
+does not port the first one. Without an `--imatrix`, every K-quant goes through the `rlx-gguf` crate
+(`gguf_convert.rs:1292`), whose K-quant encoders describe themselves, in the words QuantUI-rs quotes, as
+a "Simplified per-sub-block quantizer; valid output but lower quality than upstream's iterative
+search."
+
+So the default `gguf` run, `-m q4_k_m` with no importance matrix, is not byte-exact with
+`llama-quantize`. The repo says so plainly in a test header, `tests/gguf_unweighted_parity.rs`: "It
+is NOT a byte-parity test against `llama-quantize`. That oracle does not exist for this path." The
+CLI prints a warning with the cost measured on 20 tensors of YuE2-3B at Q2_K, relative L2 error
+against the bf16 source: 0.32985 for the simplified path, 0.26936 for the weighted port, and 0.29840
+for a published GGUF of the same model. The README's capability table still files `q2_k` through
+`q6_k` under "usable, no imatrix" with the parity column "byte-exact vs llama-quantize", and the
+contract line still says every default path is exact. Those two lines are wrong for the most common GGUF invocation the tool has.
+
+The suggested fix is to pass an all-ones importance matrix, which routes everything through the
+weighted port. That works, with two catches. An all-ones imatrix in llama.cpp is not the same as no
+imatrix (the weight becomes `sqrt(sigma2 + x²)` instead of `av_x + |x|`, and the search runs 36 steps
+instead of 20), so the result matches `llama-quantize` handed the same all-ones file, not plain `llama-quantize`. And
+the all-ones file comes from `tools/make_uniform_imatrix.py`, a Python script that reads tensor names
+out of a GGUF you have already produced, so the no-Python story ends at the second step.
+
+Two smaller things. QuantUI-rs refuses `iq4_xs`, `iq4_nl` and `iq3_s` without an importance matrix,
+citing llama-quantize "refuses the same conversion". llama.cpp's `tensor_requires_imatrix`
+(`llama-quant.cpp:856-875`) only requires one for IQ3_XXS, IQ2_XXS, IQ2_XS, IQ2_S, IQ1_M, IQ1_S and
+Q2_K inside a Q2_K_S file; IQ4_XS without one falls back to $x^2$ weights. The stricter gate matches
+Unsloth's list rather than llama.cpp's. And the `llama-quantize` used as the oracle was built with
+MSVC and `-DGGML_NATIVE=OFF -DGGML_FMA=OFF` (`tools/build_llamacpp.sh:54`). A default Linux build
+compiles ggml as GNU C with `-march=native`, and GCC's default for GNU C lets it fuse `sumqx += w*q*x` into a
+fused multiply-add, which rounds once instead of twice. I did not run both builds, but I would not
+assume a natively built `llama-quantize` lands on the same bytes at every rounding tie.
+
+## A bias correction that corrects nothing
+
+Every `quantize` run that meets a layer with a bias adjusts that bias, and this is where the most
+elaborate porting in the repository goes: the MT19937 generator seeded with 233983427, the
+Box-Muller sampler, oneDNN's GEMM accumulation order. The algorithm, from ctq's
+`fp8_conversion.py:325` and `:751-753`, is:
+
+$$
+X \sim \mathcal{N}(0, I)^{3072 \times n}, \qquad
+b' = b - \frac{1}{3072} \sum_{s} X_s \,(W - \hat W)^\top
+$$
+
+Bias correction is a real technique: if a layer's inputs have a nonzero mean $\mu$, quantization
+shifts the output mean by $(W - \hat W)\mu$, and folding that into the bias removes it. But the
+inputs here are standard normal, with mean zero. The expected correction is exactly zero, and what
+is left is sampling noise with a standard deviation of $\lVert W_j - \hat W_j \rVert / \sqrt{3072}$
+for output $j$.
+
+I checked the size in numpy on a 1024×1024 matrix with standard deviation 0.02, quantized to INT8 with
+128×128 blocks. The RMS of the correction was 1.70% of the RMS per-output error that a single
+unit-Gaussian input sees; $1/\sqrt{3072}$ predicts 1.8%. Harmless, then. But it is a random
+perturbation of the bias, with no information about the model's real activations in it, and the
+torch RNG port exists so that the perturbation is the same random one ctq would have added.
+
+## What I would use it for
+
+The `cast` command is the cleanest thing here, and the one I would recommend without conditions.
+Merging a sharded Hugging Face model into one bf16 file is a common chore, and it does it the careful
+way: same-dtype tensors are copied byte for byte, never round-tripped through f32 (which can quiet a
+NaN payload); an f16 cast that would overflow past 65504 is an error naming the tensor, not a silent
+infinity; f64 input is refused rather than double-rounded; the output is written to a temporary file
+and renamed only at the end.
+
+For ComfyUI, use it with flags. The formats that load in stock ComfyUI are listed above; `int8 -m row`
+and `int8_convrot` are the INT8 options, `nvfp4` is the 4-bit one, and `nvfp4_l2` is worth trying when
+4-bit quality is the constraint, with the caveat that its gain is measured in weight space. Leave
+`nvfp4_rot16` alone until a loader advertises support.
+
+```sh
+quantui-rs quantize model.safetensors model-int8-row.safetensors --format int8 -m row
+quantui-rs quantize model.safetensors model-nvfp4.safetensors --format nvfp4
+quantui-rs validate model-int8-row.safetensors --comfy
+```
+
+For GGUF, the weighted K-quant and i-quant ports look faithful, and if you already have an importance
+matrix from `llama-imatrix`, passing it gets you llama.cpp's encoders without a C++ toolchain. Without
+one, `q8_0` and the other legacy types are exact, and the K-quants are a simpler encoder that the CLI
+honestly warns about. Then check what you got. The writer sets the architecture, the
+hyperparameters it can read from `config.json`, `general.name` and `general.quantized_by`
+(`gguf_convert.rs:284-296`), and no `tokenizer.ggml.*` keys at all; the README lists this among its
+boundaries. llama.cpp reads `tokenizer.ggml.model` as a required key (`src/llama-vocab.cpp:2057`), so
+a text model converted here will not open in `llama-cli` until something adds a vocabulary. The
+README's own worked examples compare tensors against Unsloth's GGUFs; they never load one.
+
+Speed is not the reason to switch. The README's own benchmark, a 1 GiB fixture on a 24-core machine,
+puts end-to-end INT8 streaming at 4.10 s against 4.80 s for the Python reference, 1.17x, with the
+kernel alone at 1.86x. Everything runs on the CPU, and the one open issue on the repository is a
+request for GPU support. The win is installation: a static binary of about 2.6 MB (1.5 MB as a
+release archive) instead of a torch environment.
+
+What I keep coming back to is how much honesty is already in the repo, in the wrong places. The test
+that says `int8_blockwise` won't load, the test that says the default K-quant path has no oracle,
+the DEVELOPMENT notes that record three rejected ideas with their measured failures: a reader of the
+source learns all of it. A reader of the README, which is where the "byte-exact on every default path"
+line and the format list live, learns none of it. The [stable-diffusion.cpp](/articles/stable-diffusion-cpp)
+quantizer had the same kind of gap between its flag and what it did to convolutions. If you are
+building a pipeline on either, read the code path for the flags you actually pass.
+
+## How I checked
+
+I shallow-cloned `wildminder/quantui-rs` at `d2cced6` and read the library (`crates/quant-core/src`),
+the CLI and the test headers that state what each path is compared against; line counts and test
+counts are from `wc` and `grep` over that tree. I did not build or run the binary. ComfyUI's loader is
+read from master at `0b5b009` (`comfy/ops.py`, `comfy/quant_ops.py`, `comfy/utils.py`), comfy-kitchen
+from `be003b7` (`backends/eager/quantization.py`), ModelOpt from `33e3117`
+(`modelopt/torch/quantization/qtensor/nvfp4_tensor.py`), llama.cpp from `abeada3`
+(`ggml/src/ggml-quants.c`, `src/llama-quant.cpp`), convert_to_quant from `5d2f539`, and PyTorch's
+`Float8_e4m3fn.h` from main, which saturates overflow to 448 as QuantUI-rs does. The seven arXiv ids
+cited in the README and DEVELOPMENT notes all resolve to papers with the titles and topics the notes
+describe; I read the relevant sections of the two whose figures appear here.
+
+The measured numbers are from my own numpy re-implementations of the arithmetic I read, not from
+running anyone's code: the NVFP4 comparison with ModelOpt and the clipping rate (4096×4096 Gaussian
+and Laplace matrices, standard deviation 0.02), the per-block search gain on the same matrices, the
+MXFP8 ceil-versus-floor count (1024×1024 Gaussian), and the bias-correction noise (1024×1024, 3072
+samples). The YuE2-3B relative errors, the 1 GiB timings and the 17.7% are the repository's own measurements; I could
+not reproduce them without the models and the reference outputs. Whether a custom ComfyUI node
+somewhere loads `int8_blockwise` files I could not establish.
