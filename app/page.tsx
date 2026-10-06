@@ -12,8 +12,8 @@ import {
   getLogs,
   getProjects,
 } from "@/lib/content"
-import { TierBars } from "@/components/site/article-rating"
 import { topicById } from "@/data/taxonomy"
+import { highlights } from "@/lib/content/rating"
 import { articleScores, compareByLens } from "@/lib/content/signals"
 import { seo } from "@/lib/seo"
 import { HOME_TITLE, SITE_DESCRIPTION } from "@/lib/site"
@@ -215,13 +215,16 @@ export default function Page() {
         </>
       ) : null}
 
-      {/* Must-reads this month — the best-scored recent work */}
+      {/* Must-reads this month — the best-scored recent work, each with what it offers */}
       {mustReads.length ? (
         <>
           <SectionHeader path="must-reads" href="/articles" />
           <ul className="space-y-3">
             {mustReads.map((a) => {
-              const s = scores.get(a.slug)!
+              // Every line here is a top-tier page, so a tier mark on each
+              // would repeat one word five times; say what each one offers.
+              const hs = a.rating ? highlights(a.rating, a.runsOn) : []
+              const pick = (hs.find((h) => h.key !== "analysis" && h.key !== "verification" && h.key !== "unique") ?? hs[0])?.text
               return (
                 <li key={a.slug}>
                   <Link
@@ -229,10 +232,7 @@ export default function Page() {
                     className="group flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4"
                   >
                     <h3 className="underline-offset-4 group-hover:underline">{a.title}</h3>
-                    <span className="inline-flex shrink-0 items-center gap-1.5 font-mono text-xs text-muted-foreground">
-                      <TierBars tier={s.tier!} />
-                      {s.tier!.label}
-                    </span>
+                    {pick ? <span className="shrink-0 text-xs text-muted-foreground">{pick}</span> : null}
                   </Link>
                 </li>
               )

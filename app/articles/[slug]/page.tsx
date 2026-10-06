@@ -7,7 +7,7 @@ import { Citation } from "@/components/site/citation"
 import { PageShell } from "@/components/site/page-shell"
 import { RelatedArticles } from "@/components/site/related-articles"
 import { ShareButtons } from "@/components/site/share-buttons"
-import { WhatYouGet } from "@/components/site/what-you-get"
+import { WhyReadThis } from "@/components/site/why-read-this"
 import { displayTags } from "@/data/taxonomy"
 import { getArticle, getArticles } from "@/lib/content"
 import { getFilm } from "@/lib/films"
@@ -109,7 +109,7 @@ export default async function Page({
               />
             </div>
           ) : null}
-          <WhatYouGet article={article} />
+          <WhyReadThis article={article} />
         </header>
         <Article />
       </article>

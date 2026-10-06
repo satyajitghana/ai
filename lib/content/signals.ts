@@ -4,6 +4,7 @@ import {
   type ArticleFacts,
   type ArticleScore,
   compareLens,
+  highlights,
   type LensId,
   RUBRIC,
   type Rating,
@@ -201,5 +202,6 @@ export function articleApiFields(a: Article) {
     tier: s.tier,
     rank: s.rank,
     lenses: s.lenses,
+    highlights: a.rating ? highlights(a.rating, a.runsOn).map((h) => h.text) : [],
   }
 }
