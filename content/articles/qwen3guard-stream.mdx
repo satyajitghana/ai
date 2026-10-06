@@ -1,0 +1,203 @@
+---
+title: "Qwen3Guard-Stream: a safety verdict on every token"
+description: "Qwen3Guard-Stream is a Qwen3 backbone with its vocabulary projection removed and two small classification heads attached, so it scores a response token by token while the generator is still writing, instead of judging the finished text. I read the configs, the safetensors headers, the modeling code and the eval script: the heads are about 1.06M parameters on a 597M-parameter model, the labels come from rollouts judged by the generative guard, a two-token debounce decides where to cut, and the reported cost is about two F1 points against Qwen3Guard-Gen. What it does not do is work with a generator that uses another tokenizer, or read reasoning traces as well as final answers."
+date: 2026-10-06
+tags:
+  - explainer
+  - safety
+  - qwen
+  - llm
+  - inference
+  - open-weights
+  - classification
+  - streaming
+---
+
+import { StreamViewer } from "@/components/articles/qwen3guard-stream/stream-viewer"
+import { RecheckCost } from "@/components/articles/qwen3guard-stream/recheck-cost"
+
+A post on X this week made a small pitch: [Qwen3Guard-Stream-0.6B](https://x.com/mfranz_on/status/2106877285479649500) is "interesting for enterprises running AI locally", a small real-time safety layer that sits next to your LLM, and paired with a sandbox it gives you "a real security environment". The pitch is about deployment. The model is more interesting than that, because it changes *when* a guard can speak.
+
+Most guard models (Llama Guard, WildGuard, ShieldGemma, and Qwen's own Qwen3Guard-Gen) are classifiers you call on a finished text. That fits a request/response API. It does not fit a chat UI that streams tokens to the user as they are produced: by the time the finished response is available for judging, the user has already read it. Qwen3Guard-Stream is built for the other case. It reads the response as it is generated and emits a verdict after every token.
+
+I read the [technical report](https://arxiv.org/abs/2510.14276), the three [Hugging Face](https://huggingface.co/Qwen/Qwen3Guard-Stream-0.6B) checkpoints' configs and safetensors headers (by HTTP range request, without downloading weights), the custom `modeling_qwen3_guard.py`, and the evaluation script in [QwenLM/Qwen3Guard](https://github.com/QwenLM/Qwen3Guard). Numbers below are labelled: **measured** (I read or computed them from a file), **reported** (Qwen's figure, not re-run) or **reasoned** (my arithmetic on the other two). I did not run the model.
+
+<ModelCard repo="Qwen/Qwen3Guard-Stream-0.6B" />
+
+## Two ways to put a guard on a stream
+
+A generative guard is an LLM prompted with a policy and a conversation, and it answers in text: `Safety: Unsafe`, `Categories: Violent`. To use it on a stream you have two choices. Wait for the end, which means the user sees everything first. Or re-submit the response so far every few tokens, and judge each prefix from scratch.
+
+The report measures the second option. It cuts each response into 32-token chunks, and after each chunk it sends the whole accumulated response to Qwen3Guard-Gen again (**reported**). That work is quadratic in the response length. For a 2,048-token response, the re-checking guard pushes 32 × (1 + 2 + … + 64) = 66,560 response tokens through its backbone; a guard that reads each token once pushes 2,048, a ratio of 32.5 (**reasoned**).
+
+<RecheckCost />
+
+The measured wall-clock gap is smaller than that token count, because prefill runs a whole chunk in parallel and is cheaper per token than decoding. The report's Figure 9 plots it: normalised to the generative guard's time on the first 32-token chunk, the generative curve reaches a relative time of a little over 20 at 2,048 tokens, and the streaming curve stays near 2 (**reported**, read off the chart; the report gives no table and no hardware).
+
+<Figure
+  src="/articles/qwen3guard-stream/fig3.png"
+  alt="Line chart of relative moderation time against number of tokens from 32 to 2048. The blue Qwen3Guard-Gen line climbs from 1 to about 23. The red Qwen3Guard-Stream line stays almost flat, ending near 2."
+  caption="Moderation time on a stream, normalised to Qwen3Guard-Gen's time on the first 32-token chunk. The generative guard re-reads the whole response each time; the stream guard reads each token once. No hardware is stated (Qwen3Guard technical report, Figure 9)."
+/>
+
+A streaming guard does what a generator does: it keeps a KV cache, so each new token costs one decode step of the guard's backbone, no matter how long the response is. The only change from a language model is what comes out at the top.
+
+## The architecture: a decoder with its vocabulary head swapped out
+
+Qwen3Guard-Stream is a stock Qwen3 decoder. The config's `architectures` field is `Qwen3ForGuardModel`, and the code builds a plain `Qwen3Model` (embeddings, 28 decoder layers on the 0.6B, a final RMSNorm) and then, where a causal LM would put `lm_head`, attaches two small branches (**measured**, `config.json` and `modeling_qwen3_guard.py`).
+
+<Figure
+  src="/articles/qwen3guard-stream/fig1.png"
+  alt="Diagram. A user prompt goes into both an LLM assistant and Stream Qwen3Guard. The assistant's response tokens are fed one by one into Stream Qwen3Guard. Above each position, a yellow Prompt Moderator box and a blue Response Moderator box emit a label: unsafe violent for the prompt, then safe for the first six response tokens and unsafe violent for the last three."
+  caption="Stream Qwen3Guard reads the prompt and then every response token as the assistant produces it. Two heads sit on each position: a prompt moderator and a response moderator (Qwen3Guard technical report, Figure 7)."
+/>
+
+Each branch is a down-projection from the hidden size to a 512-wide inner size, an RMSNorm, and then two linear heads that read the same 512-vector:
+
+$$
+\mathbf{x}_r = \mathrm{Norm}(W_{\text{r-pre}}\,\mathbf{h}), \qquad
+\mathbf{y}_{\text{r-risk}} = \mathrm{softmax}(W_{\text{r-risk}}\,\mathbf{x}_r), \qquad
+\mathbf{y}_{\text{r-cat}} = \mathrm{softmax}(W_{\text{r-cat}}\,\mathbf{x}_r)
+$$
+
+Here $\mathbf{h}$ is the last hidden state at one token position, $W_{\text{r-pre}}$ maps it to 512 dimensions, and the two heads produce a 3-way risk distribution and an 8-way category distribution. The query branch has the same shape with its own weights, and a 9-way category head (**measured**, from the safetensors header). The report writes "LayerNorm"; the code uses `Qwen3RMSNorm` (**measured**).
+
+Read through the headers, the whole guard addition on the 0.6B is eight tensors:
+
+| tensor | shape (0.6B) |
+|---|---|
+| `risk_level_category_pre` | 512 × 1024 |
+| `risk_level_category_layernorm` | 512 |
+| `risk_level_head` | 3 × 512 |
+| `category_head` | 8 × 512 |
+| `query_risk_level_category_pre` | 512 × 1024 |
+| `query_risk_level_category_layernorm` | 512 |
+| `query_risk_level_head` | 3 × 512 |
+| `query_category_head` | 9 × 512 |
+
+That is 1,061,376 parameters out of 597,111,296 in the checkpoint, 0.18% of the model (**measured** counts; ratio **reasoned**). On the 4B the heads are 2,634,240 parameters and on the 8B 4,207,104, since only the down-projection grows with the hidden size (**measured**). All three checkpoints are BF16, and none carries an `lm_head` tensor (**measured**).
+
+That last point has a visible consequence in the file size. The base Qwen3-0.6B checkpoint is 1,503,300,328 bytes of safetensors; the stream guard is 1,194,258,680 (**measured**). The difference is the 151,936 × 1,024 vocabulary projection that the base file stores in BF16 (311,164,928 bytes), minus the 2,122,752 bytes of new heads, to within 528 bytes of header (**reasoned**). The guard keeps the embedding table because it still has to read tokens, and drops the projection back to the vocabulary because it never writes any.
+
+Three things fall out of this design.
+
+**The verdict is a softmax, not a sentence.** There is no decoding, no parsing of `Safety: Unsafe` out of generated text, and no chance of the guard rambling. Each forward pass produces four small logit vectors, and `stream_moderate_from_ids` turns the right pair into a label with an argmax (**measured**).
+
+**The label set is fixed in the config.** Risk index 0 is Safe, 1 is Unsafe, 2 is Controversial. The response categories are Violent, Sexual Content, Self-Harm, Political, PII, Copyright, Illegal Acts and Unethical; the query categories add Jailbreak (**measured**, `response_category_map` and `query_category_map`). Controversial is the report's addition to the usual binary: content whose harm depends on context or on whose policy you apply. A deployment picks **strict** mode (Controversial counts as unsafe) or **loose** mode (it counts as safe).
+
+**The guard is tied to Qwen3's tokenizer.** It takes token ids, not text, and those ids must come from Qwen3's 151,936-entry vocabulary (**measured**, `vocab_size`). The model card says so directly: streaming detection is "best suited for use alongside language models that share Qwen3's tokenizer", and anything else has to be re-tokenized into Qwen3's vocabulary and fed in incrementally. With a Llama or Gemma generator you detokenize, re-tokenize, and the token boundaries no longer line up with what the guard was trained on. Nobody has published what that costs.
+
+## How you train a per-token label you do not have
+
+The architecture is the easy part. The hard part is the training data. Safety datasets label whole samples: this prompt is unsafe, this response is safe. A per-token head needs a label at every position, which means deciding *where* in a response it becomes unsafe. Nobody annotates 1.19 million samples at the token level (1.19 million is the size of the Qwen3Guard training set, **reported**).
+
+The report turns sample labels into token labels in two stages (Section 4.2, **reported**):
+
+1. **Rollouts.** For a response labelled unsafe or controversial, take every prefix $P_i = S_1 \dots S_i$. Feed it to an ensemble of language models and sample $k$ continuations. Judge each completed text with Qwen3Guard-Gen. Token $S_i$ is a rollout-positive if at least $X\%$ of its completions come back unsafe or controversial; the report sets $X = 85$, chosen in pilot experiments to match human annotations.
+2. **A judge.** Rollouts over-attribute risk: a harmless prefix can still have mostly harmful continuations because the models are easy to push. So every rollout-positive prefix also goes to Qwen3-235B-A22B, asked whether the text *as it stands* is unsafe, without predicting what comes next.
+
+The first token where both agree is the **boundary token**. That token and everything after it get the sample's label; everything before it is Safe. The report does not give $k$ or the ensemble's members.
+
+Training is then plain cross-entropy (Section 4.3, **reported**). The response loss is averaged over every response token. The query loss is computed at one position only, the `<|im_end|>` that closes the user turn. And the category loss is computed only where the true risk label is Unsafe or Controversial.
+
+Two operational rules follow from those last two choices (**reasoned**):
+
+- **Read the query head at the end of the user turn, not mid-prompt.** Its outputs at other positions were never trained. The reference code does this: it feeds the whole prompt up to and including `<|im_end|>` in one call and reads the last position.
+- **Read the category head only when the risk head says non-Safe.** On a token labelled Safe the category head got no gradient, so whatever it argmaxes there is noise. The widget below shows the category only at the cut.
+
+## Where to stop: a two-token debounce
+
+A per-token signal is jumpy. One token can spike and fall back. The report does not cut on the first flagged token. It flags the response from token $i$ only when token $i$ **and** token $i-1$ are both Unsafe or Controversial, and it reports the category of token $i$ as the category of the whole response (Section 4.4, **reported**).
+
+The eval script implements this as `consecutive_unsafe`, with one detail the report leaves out: it scans the whole sequence for an Unsafe pair first, and only if there is none does it look for a Controversial pair (**measured**, `eval/eval_stream.py`). An offline score can do that. A live system has to decide at the first pair it sees, so a deployment's notion of "where it cut" can differ from the benchmark's when a response turns Controversial before it turns Unsafe.
+
+The viewer below streams one response I wrote for this page. It is harmless: an onboarding note that drifts into a colleague's personal phone number and home address, both invented, which is the PII category in Qwen3Guard's policy. **Every probability in it is illustrative**, shaped to the behaviour the report describes (safe up to a boundary, then risky), with one isolated spike to show what the debounce is for. None of it is model output.
+
+<StreamViewer />
+
+With the debounce on, strict mode and τ = 0.6, the stream is cut at `address`, two tokens before the street number. The user receives "…Her home" and nothing after it. Turn the debounce off and the lone spike on `personal` cuts the note at a harmless sentence. That is the false alarm the two-token rule absorbs, and it costs one token of extra exposure on every true positive. Loose mode ignores the Controversial mass and cuts later, at the first digit of the street number.
+
+One more honest note about the slider: the reference implementation does not use a threshold. It takes the argmax over the three classes. A threshold on $P(\text{unsafe})$, or on $P(\text{unsafe}) + P(\text{controversial})$ in strict mode, is what you would add on top to trade false alarms against misses, since the forward pass returns the full logits for all three classes.
+
+## What it costs to run beside a generator
+
+The reference loop in the model card calls `model.stream_moderate_from_ids(token, role="assistant", stream_state=…)` once per generated token. Under the hood, a Python generator holds a `DynamicCache` and runs a single-token forward pass with `logits_to_keep=1`, and it raises if a later call passes more than one token (**measured**). That is batch size one, one token at a time, which is a demo and not a server. The model card's SGLang example feeds response tokens in chunks of 8 into a resumable request; vLLM support is listed as in progress (**measured**, model card).
+
+The per-token compute and memory follow from the config (**reasoned**):
+
+| | 0.6B | 4B | 8B |
+|---|---|---|---|
+| checkpoint (BF16, measured) | 1.19 GB | 8.05 GB | 15.15 GB |
+| layers × KV heads × head dim (measured) | 28 × 8 × 128 | 36 × 8 × 128 | 36 × 8 × 128 |
+| KV cache per token, BF16 | 112 KiB | 144 KiB | 144 KiB |
+
+For the 0.6B, the KV cache is 28 layers × 2 (K and V) × 8 heads × 128 × 2 bytes = 114,688 bytes per token. The weights a decode step multiplies are the 597M parameters minus the 155.6M-parameter embedding table, which is a lookup and not a matmul: about 441M, or about 0.88 GFLOP per token at two FLOPs per weight (**reasoned**). Next to an 8B-class generator, whose BF16 weights are around 16 GB, the 0.6B guard reads about a thirteenth as many bytes per step (**reasoned**, using the 8B guard's 15.15 GB file as a stand-in for an 8B decoder). The 8B guard nearly doubles it. In a local deployment, where decode is memory-bound, that ratio is close to the slowdown you pay if guard and generator share a GPU and run in lockstep. Running the guard a chunk behind, on its own stream, hides most of it, at the price of releasing tokens a chunk late.
+
+One config value is worth checking before you rely on long contexts. The stream checkpoints declare `max_position_embeddings: 8192`; Qwen3Guard-Gen-0.6B declares 32,768 and the base Qwen3-0.6B 40,960 (**measured**). The config does not say whether 8,192 is the training length or just a default, and the HF code does not enforce it. The model card's own SGLang example sets `context_length=10000`. I would treat anything past 8K tokens of prompt plus response as unvalidated.
+
+## What the report measured
+
+### Accuracy against the generative guard
+
+The stream guard is evaluated on the same benchmarks as Qwen3Guard-Gen, with the debounce applied to responses (Tables 11 and 12, **reported**). Each "average" uses the better of strict and loose mode per benchmark, which is chosen after seeing the labels and flatters every Qwen3Guard row a little.
+
+| English F1, average | prompt | response |
+|---|---|---|
+| Qwen3Guard-Gen-0.6B | 88.1 | 82.0 |
+| Qwen3Guard-Stream-0.6B | 86.3 | 79.2 |
+| Qwen3Guard-Gen-4B | 89.3 | 83.7 |
+| Qwen3Guard-Stream-4B | 89.1 | 81.8 |
+| Qwen3Guard-Gen-8B | 90.0 | 83.9 |
+| Qwen3Guard-Stream-8B | 88.3 | 81.1 |
+| WildGuard-7B | 85.8 | 79.9 |
+| LlamaGuard3-8B | 79.4 | 70.7 |
+
+The report calls the gap "merely around two points". On responses that holds: the stream guards trail by 2.8, 1.9 and 2.8 points (**reasoned**). On prompts the gap is 1.8, 0.2 and 1.7. Two smaller things stand out. The 4B stream guard is the best of the three on responses, ahead of the 8B. And the 0.6B stream guard's 79.2 on English responses sits just under WildGuard-7B's 79.9 (**reported** figures), so "small and streaming" is not free against the strongest older baseline.
+
+<Figure
+  src="/articles/qwen3guard-stream/fig5.png"
+  alt="Six bar charts of average F1 for prompt and response classification in English, Chinese and multilingual sets. Qwen3Guard-Gen 0.6B, 4B and 8B bars in purple are tallest in every panel; grey bars show LlamaGuard3-8B, WildGuard-7B, ShieldGemma-27B, NemoGuard-8B and PolyGuard-Qwen-7B."
+  caption="For contrast, the generative guard's own numbers against older guard models. The streaming guard is not on this chart; its English averages are about two points lower (Qwen3Guard repository README, performance figure)."
+/>
+
+The category head is weaker than the risk head. In the report's confusion matrices for Qwen3Guard-Stream-4B on unsafe responses, Political is right in 6 of 30 cases, with 19 going to Unethical Acts, and all 7 Copyright cases are predicted as Non-Violent (**reported**, Figure 12; the counts are the figure's own). If you route Political or Copyright differently from the rest, do not trust the category alone.
+
+<Figure
+  src="/articles/qwen3guard-stream/fig4.png"
+  alt="Two confusion matrices for Qwen3Guard-4B-Stream. Prompt matrix in blue with a strong diagonal. Response matrix in green: Violent 167 correct, Non-Violent 161, Sexual Content 56, PII 64, Self-Harm 20, Unethical Acts 185, Political only 6 with 19 predicted as Unethical Acts, and Copyright Violation 0 correct with all 7 predicted Non-Violent."
+  caption="Category predictions of Qwen3Guard-4B-Stream on unsafe prompts and responses. Political and Copyright responses are mostly assigned to other categories (Qwen3Guard technical report, Figure 12)."
+/>
+
+### How early it fires
+
+Timing is the reason this model exists, and the report tests it on a separate set: 813 unsafe final responses and 569 unsafe responses with thinking traces, where human annotators marked the first unsafe *sentence* rather than a token, because token-level agreement between annotators was low (**reported**). A "hit" means the debounced flag lands inside that sentence; "ahead" means it fires before it.
+
+<Figure
+  src="/articles/qwen3guard-stream/fig2.png"
+  alt="Four bar charts of detection latency in tokens for Qwen3Guard-Stream-8B and 4B. For final responses, Hit dominates: 694 of the 8B's cases and 699 of the 4B's, with Safe (missed) at 64 and 51. For thinking plus response, the bars spread across latency bins: the 8B has 25 ahead, 27 hit and 126 in the 65 to 128 bin; the 4B has 98 ahead, 123 hit and 126 missed."
+  caption="Where the first debounced flag lands relative to the first unsafe sentence a human marked. Top: final responses only. Bottom: thinking trace plus response. 'Safe' means the guard never fired (Qwen3Guard technical report, Figure 8)."
+/>
+
+On final responses, the 4B hits the marked sentence in 699 of 813 cases, which is the report's "nearly 86.0%"; the 8B hits 694 (**reported**). Reading the same bars the other way, the 4B never fires on 51 of 813 unsafe responses (6.3%) and the 8B on 64 (7.9%) (**reasoned** from the figure's counts).
+
+Thinking traces are much harder. The repository's eval README gives exact-hit rates of 20.91% (0.6B), 21.62% (4B) and 4.7% (8B), and "hit in first 128 tokens" rates of 78.38%, 66.78% and 64.67% (**reported**). The 128-token number counts any flag before the marked sentence as a success, so "ahead" fires, some of which will be early false alarms, inflate it. The 4B misses 126 of 569 entirely, 22.1% (**reasoned** from Figure 8). The report does not discuss why the smallest model is the earliest on reasoning traces.
+
+One trap in `eval_stream.py`: `evaluate_f1` prints the loose result under "strict" and the strict result under "loose" (**measured**). If you reproduce the split with it, swap them back.
+
+### Used as a brake on a live model
+
+The report's last experiment uses the stream guard as the detector in CARE, a detect, roll back and retry loop, around Qwen3-4B with a 40-token buffer and up to 5 retries (**reported**, Table 16). The safety rate, judged by Qwen3-235B, goes from 47.5 to 85.7 without thinking and from 43.8 to 72.0 with it. Users wait an average of 70.1 and 101.0 extra tokens for rollbacks. That is the deployment the X post describes, and it is the right shape: the guard does not just cut, it lets the generator back up and try again.
+
+## Where it breaks
+
+- **Tokenizer coupling.** Outside the Qwen3 family you re-tokenize and lose alignment, and there is no published number for how much that costs.
+- **Reasoning traces.** Final answers get a hit inside the marked sentence about 86% of the time; thinking traces get one about a fifth of the time or less, and 22.1% are never flagged by the 4B.
+- **A one-token minimum exposure.** The debounce means at least one flagged token has already been produced before the cut. Release tokens to the user a few positions behind the guard if that matters.
+- **The category is a hint.** It is untrained on safe tokens by construction and confuses Political, Unethical and Copyright in the report's own matrices.
+- **It is a classifier, not a boundary.** A streaming guard decides which tokens a person sees. It does not limit what a tool-calling agent *does*. That is the sandbox's job, which is the half of the X post's pitch this model does not cover. For sandboxes, see [DeepSeek's DSec](/articles/dsec-agent-sandbox).
+
+## How it relates to probes
+
+The closest relative on this site is the [activation probe monitor](/articles/activation-probe-monitors): a linear classifier on a hidden state of the *generator itself*. Qwen3Guard-Stream moves the same idea into a separate model, with a head on the last hidden state, scored at every token. A probe costs almost nothing but needs the generator's internals and one probe per model. A separate guard costs a second decoder's memory and bandwidth, but it works on any Qwen3-tokenized stream and brings its policy with it. [GLiNER2.5-Decide](/articles/gliner-2-5-decide) is a third point: a small encoder with a safety head that scores a finished text. The [runtime abliteration piece](/articles/runtime-abliteration) is the reminder of why an external guard earns its memory: a model's own refusal can be edited out of its weights, and a separate classifier reading the output is not in those weights.
+
+What is new here is not the head. It is the label pipeline that tells the head where unsafety begins, and the decision to make the safety check part of the decode loop rather than a call made after it.
