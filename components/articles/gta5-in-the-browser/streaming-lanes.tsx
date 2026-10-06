@@ -47,15 +47,16 @@ export function StreamingLanes() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">fetches in flight → throughput (porter&apos;s measurement)</span>
-        <div className="flex gap-1">
+        <div className="flex items-center gap-1" role="group" aria-label="Fetches in flight">
           {LANES.map((l, i) => (
             <button
               key={l.n}
               type="button"
               onClick={() => setLane(i)}
+              aria-pressed={lane === i}
               className={cn(
-                "rounded-md border px-2 py-0.5 font-mono text-xs",
-                lane === i ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground",
+                "h-6 min-w-8 cursor-pointer rounded-md border px-1.5 font-mono text-xs tabular-nums transition-colors",
+                lane === i ? "border-foreground bg-foreground text-background" : "text-muted-foreground hover:text-foreground",
               )}
             >
               {l.n}
@@ -64,8 +65,12 @@ export function StreamingLanes() {
         </div>
       </div>
       <div className="space-y-3 px-4 py-4">
-        <div className="font-mono text-sm">
-          {L.n} in flight → <span style={{ color: ACCENT }}>{L.mbps} MB/s</span>
+        <div className="flex items-baseline gap-2 font-mono text-sm tabular-nums">
+          <span>{L.n} in flight</span>
+          <span className="text-muted-foreground">→</span>
+          <span className="font-semibold" style={{ color: ACCENT }}>
+            {L.mbps} MB/s
+          </span>
         </div>
         {JOBS.map((j) => {
           const s = j.mb / L.mbps
@@ -73,14 +78,14 @@ export function StreamingLanes() {
           const w = (mlog10(1 + s) / mlog10(1 + max)) * 100
           return (
             <div key={j.key}>
-              <div className="flex justify-between font-mono text-xs text-muted-foreground">
+              <div className="flex justify-between gap-3 font-mono text-xs tabular-nums text-muted-foreground">
                 <span>
                   {j.label} · {j.mb >= 1000 ? `${(j.mb / 1000).toFixed(1)} GB` : `${j.mb} MB`}
                 </span>
                 <span className="text-foreground">{fmt(s)}</span>
               </div>
-              <div className="mt-1 h-2.5 rounded-full bg-muted">
-                <div className="h-2.5 rounded-full" style={{ width: `${w.toFixed(1)}%`, background: ACCENT }} />
+              <div className="mt-1.5 h-2.5 rounded-full bg-muted">
+                <div className="h-2.5 rounded-full transition-[width] duration-300 motion-reduce:transition-none" style={{ width: `${w.toFixed(1)}%`, background: ACCENT }} />
               </div>
             </div>
           )
