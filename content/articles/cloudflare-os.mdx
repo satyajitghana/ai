@@ -1,0 +1,312 @@
+---
+title: "Cloudflare OS: approve the agent's writes after it has finished"
+description: "Cloudflare open-sourced Cloudflare OS, the agent workspace thousands of its employees use. Its security layer, Gatekeepers, sits between agent code and every external service: reads run and are logged as observations, writes are queued and simulated so the agent keeps working, and a human approves the batch later. I read the kernel and the gatekeepers at commit b304e8c. The capability model is real and the sandbox is a V8 isolate with no outbound network, but the promise not to write before approval is kept by each gatekeeper's own code, not by the kernel, and some gatekeepers can't simulate, so the agent's turn stops and waits."
+date: 2026-10-06
+interest: 4
+helpful: 4
+tags:
+  - explainer
+  - agents
+  - security
+  - harness
+  - mcp
+  - systems
+  - open-source
+draft: false
+---
+
+import { ApprovalQueue } from "@/components/articles/cloudflare-os/approval-queue"
+
+Give an agent your calendar, your tickets and your data warehouse, and you have two bad options. You can approve every call it makes, which means it stops at the first write and waits while you get coffee. Or you can turn approvals off, the `--dangerously-skip-permissions` route, and hope. Cloudflare OS adds a third option: let the agent believe its writes went through, record everything it did, and let a human approve the writes in a batch afterwards.
+
+Cloudflare OS is the browser workspace Cloudflare gives its staff: an agent chat, small agent-built apps called **Gadgets**, and a security layer called **Gatekeepers**. The [launch post](https://blog.cloudflare.com/cloudflare-os/) (2026-08-05) says the first version went to every employee in May and "thousands of people across every function" use it daily (reported). The open-source repository is v2, a full rewrite. A Chinese-language [post on X](https://x.com/Ryrenz/status/2106439139662925914) brought it back into view this week. I cloned the repository and read the kernel, the gatekeeper contract and the GitHub, Google and MCP gatekeepers. Below is how the capability design works, where the trust boundaries sit, and which parts are still unfinished.
+
+<RepoCard repo="cloudflare/cloudflare-os" note="Read at b304e8c (2026-10-05). The kernel's overseer.ts alone is 12,669 lines; 16 gatekeeper Workers ship in the repo." />
+
+<Figure
+  src="/articles/cloudflare-os/fig1.png"
+  alt="The Cloudflare OS workspace in a browser. The left pane is an agent chat listing the six slides it built for a Q3 planning deck; the right pane shows slide five of six, a three-column plan for July, August and September with a checkpoint under each. A note under the chat reads 'Phillip accepted changes'."
+  caption="A workspace: the agent chat on the left, a Gadget (here the built-in slides app) on the right, and an accepted change set under the chat (the project's README)."
+/>
+
+| | |
+|---|---|
+| Repository | [cloudflare/cloudflare-os](https://github.com/cloudflare/cloudflare-os), Apache-2.0, TypeScript |
+| Commit read | `b304e8c`, 2026-10-05 |
+| Created | 2026-04-15; 11,098 stars and 1,315 forks on 2026-10-06 (GitHub API, read by me) |
+| Kernel | `packages/workshop-backend`; `src/overseer.ts` is 12,669 lines (measured) |
+| Gatekeepers | 16 Worker packages: GitHub, Google, Slack, Linear, Notion, Confluence, MCP and nine more (measured) |
+| Status | "early access", per the README |
+
+## Three moving parts
+
+The README compares the system to an operating system, and the comparison holds up better than most product analogies. `workshop-backend` is the kernel. Each `gatekeeper-*` package is a device driver for one external service. Gadgets are processes and blueprints are executables. There is one row it leaves as `???`: agents, which in its view a traditional OS has no concept for.
+
+A **workspace** is one Durable Object. Everything the agent and its Gadgets do is serialised through it: its chats, its Gadgets' code (stored as git commits), its bindings and its action log.
+
+A **Gadget** is a small full-stack app the agent writes. Its server code is loaded on demand as a Dynamic Worker, a V8 isolate created from code at runtime, and instantiated as a Durable Object *facet*, so it gets its own SQLite database inside the workspace. Its client runs in a sandboxed iframe and talks to its server over [Cap'n Web](https://github.com/cloudflare/capnweb) RPC. Because the API is an RPC surface, the agent can call the same methods the UI calls.
+
+A **Gatekeeper** is a separate Worker per external service. It holds the OAuth credential, exposes a small TypeScript API to agents and Gadgets, and decides, call by call, whether something is a read or a write.
+
+The agent itself is a [Code Mode](https://blog.cloudflare.com/code-mode/) agent: it does not emit tool-call JSON, it writes a snippet of TypeScript and the kernel runs it. This matters for security. The thing to sandbox is not a list of tool calls, it is arbitrary code the model just wrote, and a capability model fits that better than a tool allowlist.
+
+<Figure
+  src="/articles/cloudflare-os/fig3.png"
+  alt="Diagram. Top: an Agent session box ('writes the app, then calls it') and a Browser client box ('sandboxed frame, no network of its own'), both connected by Cap'n Web RPC to a wide Application API box reading app.listIssues({ status: 'done' }) and 'whatever the UI can do, the agent can do'. Below it, an App server box loaded on demand, split into Dynamic Worker ('lightweight V8 isolate, nothing sitting idle') and Durable Object Facet ('its own SQLite, separate from the runtime'). At the bottom, three typed resource bindings: env.PROJECT one repo issues only, env.CALENDAR read with approval to write, env.WAREHOUSE masked columns, labelled 'granted per resource, never a credential'."
+  caption="A Gadget: one RPC surface shared by the UI and the agent, a server in a Dynamic Worker facet, and typed bindings that carry a resource grant but never a credential (Cloudflare launch post, figure 4)."
+/>
+
+## Capabilities, not configuration
+
+Most agent harnesses wire MCP servers in up front, and then every chat can reach every connected service. Cloudflare OS starts every agent and every Gadget with nothing. To give one access you *introduce* it to a resource, for example by pasting a GitHub repository link. The introduction creates a gatekeeper instance scoped to that resource and adds a named binding to the caller's `env`.
+
+This is literal. The kernel builds the agent's environment from the chat's binding map and nothing else (`overseer.ts`, `getEnvForAgent`, trimmed):
+
+```ts
+let caller: GatekeeperCaller = {from: "agent", chatId};
+let env: Record<string, any> = {};
+env[GIT_BINDING_NAME] = this.makeBindingLoopback({type: "git"}, caller);
+
+for (let [name, entry] of Object.entries(bindings)) {
+  // ...name validation...
+  if (this.storage.gatekeepers.get(entry.id)) {
+    env[name] = this.makeBindingLoopback({type: "gatekeeper", id: entry.id}, caller);
+  }
+}
+```
+
+Two properties fall out of this. First, a resource the user never introduced does not exist for the agent: `env.SLACK` is `undefined`, not a denied call. Second, the `caller` stamped into each loopback is set by the kernel, not by the code. The agent's snippet cannot claim to be a Gadget, and the action log can say which chat or Gadget made each call. The repository's own contributor guide puts the rule plainly: a resource becomes ambient "only by user/admin configuration — a gatekeeper must never assert its own ambience".
+
+Scope lives in the grant, not in the code. For the MCP gatekeepers it is a fragment on the resource URL, which is what the user approved and what the facet enforces (`mcp-shared/src/scope.ts`):
+
+```text
+<endpoint>                                  every tool the endpoint offers, now and later
+<endpoint>#server=github                    every tool of one portal upstream server
+<endpoint>#tool=a&tool=b                    only these exact tools
+<endpoint>#server=github&tool=github_a      both, enforced independently
+```
+
+For GitHub the scope is the resource kind: one repository, one issue or one pull request, and `startSession` returns a different session class for each.
+
+## The sandbox has no network
+
+Agent code and Gadget servers both run in isolates loaded through the Worker Loader binding, and all three call sites in the kernel pass the same option. The agent's `executeCode` run:
+
+```ts
+let workerDef: WorkerLoaderWorkerCode = {
+  compatibilityDate: "2026-02-01",
+  compatibilityFlags: [
+    // disallow_importable_env also disallows importable ctx.exports, to prevent the code
+    // from calling itself in a loop.
+    "disallow_importable_env",
+    "allow_irrevocable_stub_storage",
+  ],
+  mainModule: "harness.js",
+  modules: { "harness.js": CODE_MODE_HARNESS, "agent.js": code },
+  env: this.getEnvForAgent(chatId, bindings, executionId),
+  tails: [this.ctx.exports.CodeModeTailLoopback({props: tailProps})],
+  globalOutbound: null,
+};
+```
+
+`globalOutbound: null` means `fetch()` from inside the isolate has nowhere to go. The only way out is through the bindings in `env`, and every binding is a loopback into the workspace Durable Object. I counted three `globalOutbound: null` sites in `overseer.ts`: the code-mode harness, every Gadget server, and a small helper worker (measured). The Gadget's browser half gets the browser's equivalent, a `sandbox` iframe whose document carries `connect-src 'none'` and `default-src 'none'` in its Content-Security-Policy (`workshop-frontend/src/GadgetUI.tsx`). The README hedges this as "to the maximum extent allowed by browsers", which is right: a browser sandbox is a weaker wall than an isolate with no outbound socket.
+
+So the summary's line "server-side network egress off by default" is accurate. It is also stronger than "off by default" suggests: I found no option in the loader code that turns it on for a Gadget. Egress happens through a gatekeeper or not at all.
+
+## Gatekeepers: every call is a read or a write
+
+Every gatekeeper implements one interface, `Gatekeeper<Session>` in `workshop-shared/src/gatekeeper.ts`. The kernel calls `startSession` with an approval queue and hands the returned session object to the agent or Gadget as its binding. The contract is in the doc comment:
+
+```ts
+/**
+ * Every operation performed through this session must be submitted to the approval queue.
+ * Observations (read-only operations) must be authorized before data is returned to the caller.
+ * Side-effecting actions must not actually be performed until they are approved.
+ *
+ * It is suggested that the gatekeeper "simulate" actions that have not been approved yet, ...
+ */
+startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<Session>;
+```
+
+The queue has two verbs. `authorizeObservation(description)` is synchronous from the caller's side: the gatekeeper awaits it before returning data, and it throws if the read is not allowed. `submitAction(id, description)` returns at once, and its comment sets the expectation: "the user might not approve actions until hours or days later, but this shouldn't cause any problems."
+
+Here is the pattern in the GitHub gatekeeper (`gatekeeper-github/src/github.ts`, trimmed). A read fetches, records, then returns:
+
+```ts
+async getMetadata(): Promise<GitHubRepoMetadata> {
+  const metadata = await this.#gatekeeper.repoMetadata();
+  await this.#approvalQueue.authorizeObservation({
+    title: `Read repository metadata for ${metadata.fullName}`,
+    description: `Read basic metadata for the GitHub repository ${metadata.fullName}.`,
+  });
+  return metadata;
+}
+```
+
+A write stages the action, submits it, and hands back an object that behaves as if the write had happened:
+
+```ts
+async createIssue(options: GitHubCreateIssueOptions): Promise<GitHubIssue> {
+  const action = await this.#gatekeeper.prepareCreateIssue(options);
+  await this.#gatekeeper.submitActionForApproval(this.#approvalQueue, action, {
+    title: `Create issue ${options.title}`,
+    implementsRevert: false,
+  });
+  return new GitHubIssueImpl(this.#gatekeeper, this.#approvalQueue.dup(), action.provisionalId, "issue");
+}
+```
+
+The returned issue has a provisional id such as `"~1"`. The agent can comment on it, link to it as `#~1`, and list issues and see it: the GitHub gatekeeper's cursors inject pending items into results at the right sort position. When the action is applied, `#~1` references are rewritten to the real number. If the user rejects the creation, the gatekeeper also rejects every pending action that depends on `~1`. The shared `gatekeeper-kit` library does the same cascade, and marks each dependent with "This action needed action N, which did not complete."
+
+<Figure
+  src="/articles/cloudflare-os/fig2.png"
+  alt="Diagram. An 'Agent or app' box connects through a 'TYPED RPC CAPABILITY' pill to a large GATEKEEPER panel that 'holds the credential'. The panel has two columns: Read — authorize the resource, call the service, record an observation; Action — enforce policy, simulate the result, queue for approval, apply once approved. A dashed line runs from the panel to a 'You: approve or reject' box. Below the panel is a 'System of record' box."
+  caption="The gatekeeper's two paths: a read is authorized and recorded as an observation, an action is simulated, queued and applied only after approval (Cloudflare launch post, figure 2)."
+/>
+
+## What the kernel records
+
+The kernel side of both verbs is in `overseer.ts`. An observation is written to the action log already in state `approved`. An action is written as `pending`. The record type is the audit log schema (`storage-schema/overseer-storage.ts`, trimmed):
+
+```ts
+export type ActionRecord = {
+  id: number,
+  gatekeeperId: WorkpieceId;
+  caller: GatekeeperCaller;        // agent (chatId) | gadget (gadgetId) | user
+  resourceTitle?: string;
+  resourceUrl?: string;
+  createdAt: Date;
+  appliedAt?: Date;
+  state: ActionState;              // "pending" | "approved" | "rejected"
+} & ({
+  type: "action";
+  action: number;                  // the gatekeeper's own id, passed back on apply/reject/revert
+  description: ActionDescription;
+  resolvedBy?: AiChatAuthorInfo;
+  autoApproved?: boolean;
+} | {
+  type: "observation";
+  description: ObservationDescription;
+} | {
+  type: "bindHook";
+  description: HookDescription;
+  hookId?: number;
+  enabled: boolean;
+});
+```
+
+Reads and writes share one counter and one table, so "what did this agent look at before it wrote that" is a range query, not a join across services. The `description` is the approver-facing text, and the contract holds it to a standard. `descriptionIsComplete` is the gatekeeper's claim that the description and its typed `fields` reproduce verbatim everything the action will send. The kit's `buildDescription` only sets that flag when every field fit under a 96 KiB budget (reported, `MAX_ACTION_DESCRIPTION_BYTES = 96 * 1024`). An incomplete description is still submitted, and the approver is told part of the action is not shown.
+
+The log does a second job. Each observation stays attached to the workspace, and when someone else opens a shared Gadget the gatekeepers that produced those observations are asked, through `addObserver()`, whether that person could have read the data directly. A dashboard built from a revenue table cannot become a way to share the revenue table.
+
+<Figure
+  src="/articles/cloudflare-os/fig4.png"
+  alt="Diagram. An AGENT WORKSPACE panel holds three observed resources: revenue table, support tickets, team calendar, with the note 'observations stay attached to the agent and its work'. Below, 'Someone asks to view' leads to a 'CAN THEY READ IT?' check that fans out to three gatekeepers — Warehouse (revenue table), GitHub (support tickets), Calendar (team calendar) — which join into 'Allow or deny'."
+  caption="Observations stay attached to the work, and every gatekeeper that produced one is asked whether a new viewer could read it directly (Cloudflare launch post, figure 3)."
+/>
+
+## Async approval, and when it stops being async
+
+Auto-approval is the exception, and it needs three things. From `workshop-backend/src/auto-approval.ts`:
+
+```ts
+export function autoApprovalRule(
+    storage: AutoApprovalStorage, gatekeeperId: number, description: ActionDescription)
+    : AutoApproveTagRecord | undefined {
+  if (description.autoApprovable !== true) return undefined;
+  let tag = description.actionKind?.tag;
+  if (tag === undefined) return undefined;
+  if (storage.containsRestrictedData.get()) return undefined;
+  return storage.autoApproveTags.get(`${gatekeeperId}:${tag}`);
+}
+```
+
+The gatekeeper author has to mark the specific action `autoApprovable`, the user has to have enabled a rule for its kind on that connection, and the workspace must not have read anything flagged `containsRestrictedData`. That last one is a latch. Once any observation carries the flag, nothing in that workspace auto-approves again, and a git push is refused outright, because the approver cannot review commits as text. Google Docs edits are a real example: they carry `actionKind: editDocument` and `autoApprovable: true`, so a user can let doc edits through without a prompt.
+
+The simulation that makes approval asynchronous is optional, though. The interface calls it "suggested", and some gatekeepers cannot do it. The clearest case is MCP. A gatekeeper fronting an arbitrary MCP server has no idea what `update_status` does to the server's state, so it cannot project the effect onto later reads (`mcp-shared/src/session.ts`):
+
+```ts
+const description: ActionDescription = {
+  title,
+  description: text,
+  implementsRevert: false,
+  // Nothing about a queued call is simulated, so later reads would show a world in which it
+  // never happened. Wait for the decision instead.
+  awaitDecision: true,
+  autoApprovable: entry.autoApprovable,
+  actionKind: host.actionKindFor(name),
+};
+```
+
+`awaitDecision` makes the kernel suspend the agent's turn after the submission and resume it when the user decides. That is the synchronous approval loop the README criticises, kept as the fallback. Its own doc comment says why: an agent that keeps going against a world where its write "didn't happen" tends to retry, second-guess or undo its own work. I found `awaitDecision: true` set directly in three places: the MCP session, Supabase and ZoomInfo, plus the kit's `"await-decision"` delivery mode (measured, by grep). So "the agent never waits" depends on the connector. It holds for GitHub and Google Docs. For any MCP tool it does not.
+
+MCP also shows how the read/write split is decided when the gatekeeper does not know the API. `classifyTool` in `mcp-shared/src/tools.ts` is, in its own words, "the single place a server's self-description becomes a policy decision":
+
+```ts
+export function classifyTool(tool: McpTool, trust: ServerTrust): ClassifiedTool {
+  const annotations = tool.annotations ?? {};
+  const readOnly = isDeclaredReadOnly(tool);           // readOnlyHint === true
+
+  const autoApprovable = !readOnly
+    && trust === "vetted"
+    && annotations.destructiveHint === false
+    && annotations.idempotentHint === true;
+
+  return { tool, mode: readOnly ? "read" : "action", autoApprovable, /* ... */ };
+}
+```
+
+A tool with no annotation is a write that can never auto-apply. A tool that declares `readOnlyHint: true` runs immediately as an observation, even on an endpoint a user pasted in. The file calls that "a tradeoff, not a free win": a server that mislabels a write as a read gets it executed with no approval. Auto-applying a write additionally needs an endpoint an administrator marked `vetted`.
+
+Run one turn through all of this below. The agent makes ten calls; each is classified the way the code above classifies it. Then you are the approver who comes back later.
+
+<ApprovalQueue />
+
+The widget follows the code paths quoted above. Reads appear in the log already approved. The issue creation returns `~1` and the following `listIssues` shows it. The doc edit auto-applies only while the rule is on and the doc read was not flagged as restricted; flag it and the same edit pends. The `fetch` and the `env.CHAT` call never reach the log, because there was no binding for them to go through. The MCP call suspends the turn until you decide it. Rejecting the issue creation strands the comment queued against `~1`.
+
+## Where the trust boundaries are
+
+This is the part worth getting precise, because "a security layer between agents and services" can mean several different guarantees.
+
+**Agent code and Gadget code are untrusted.** They run in isolates with no outbound network and an `env` the kernel built. They cannot name a resource they were not introduced to, and they cannot choose the `caller` the kernel records. This boundary is enforced by the Workers runtime, and it is the strongest one in the system.
+
+**Gatekeepers are trusted.** Each holds an OAuth credential, and each makes the promise not to write before approval. The kernel cannot check that promise. It sees a `submitAction` call and a later `applyAction` call. If a gatekeeper's `createIssue` called GitHub first and submitted second, the log would still look right. The interface comment says so: "the gatekeeper is nevertheless expected to submit all actions for approval; there is no mode in which it's OK to skip the check." *Expected*. So the security of every write path is the correctness of that gatekeeper's code, and the repository treats it that way: the kit's README lists, per concern, which guarantees the shared library owns and which "the gatekeeper owns". For now gatekeepers ship with the OS and are deployed by whoever deploys it. The README describes independently maintained gatekeeper services as a future the team "envision[s]", and says "the details have yet to be worked out".
+
+**The human approver is a boundary, and the system works to keep them honest.** Approval text is built from the staged payload, not from what the caller says it is doing. The GitHub gatekeeper's comment on this reads: "The text comes from the staged payload, not the caller, so it always shows what applies." Agent-supplied values go into literal `fields`, never into Markdown. Incompleteness is flagged rather than hidden.
+
+**Sharing is a boundary, and it has a documented hole.** The observer checks above cover a collaborator for the gatekeepers in their role's scope. The repository's own plan for restricted data, `plans/restricted-data-sharing.md`, records a "known security limitation": data the agent reads through a connection that is not bound to a Gadget can end up in that Gadget's state, which a `use` collaborator who was never checked against that connection can see. The plan accepts the risk for now and lists the remedies it wants later. I'd rather read a limitation section like that than a claim of completeness.
+
+Compare [gdp-ts](/articles/gdp-ts), which I wrote up this morning. gdp-ts makes the authorization check a value the compiler can see: a sensitive function demands a proof that only the checking module can mint, so a forgotten check fails to compile. That works when you trust the code's author to run the compiler. Cloudflare OS starts from the opposite assumption. The code is written by a model, seconds before it runs, and nobody reviews it. So the check cannot live in the code. It moves into the object the code is handed: the binding *is* the capability, and every call on it passes through a gatekeeper that holds the credential. Both designs replace a boolean check with an unforgeable value. One is enforced by `tsc` at build time, the other by an isolate boundary and a Durable Object at runtime.
+
+## Sharing a Gadget versus sharing a blueprint
+
+The summary's line about copying a tool to a colleague, where they "get their own independent instance", maps to blueprints. Sharing the Gadget itself gives a collaborator the same live app and the same SQLite state, subject to the observer checks. Sharing a blueprint gives them the code only. Their copy starts with no data, no conversation history, no credentials and no connected resources, so it has to be introduced to resources all over again. A blueprint is a git commit stored in R2; a Gadget made from one can take later releases, merged against the release it last took.
+
+<Figure
+  src="/articles/cloudflare-os/fig5.png"
+  alt="Two-panel diagram. Left, 'SHARE THE APP — collaborate in real time': You and Teammate both connect to one box, 'ONE APP · ONE STATE — The same app: one SQLite database, edits appear live, one set of connected resources'. Right, 'SHARE A BLUEPRINT — hand over how it was built': a Blueprint box ('code and structure only') fans out to Team A app and Team B app, each with own state, own resources, and modified for its team."
+  caption="Sharing a Gadget shares its state; sharing a blueprint shares only its code, so every copy starts with no data and no resources (Cloudflare launch post, figure 5)."
+/>
+
+## What is unfinished
+
+The README calls v2 "very capable, but still has many rough edges", and the code agrees. I'd hold these in mind before deploying it:
+
+- **Self-hosting on `workerd`** is "COMING SOON". `pnpm run-local` runs the whole stack on wrangler and workerd for a look, "not meant for production use". The supported deploy target is a Cloudflare account.
+- **Auto-approval is a single boolean.** The `autoApprovable` field carries a to-do note saying that eventually the gatekeeper should describe the action's nature (destructive or additive, reversible or not, posting arbitrary content or flipping a switch) and a policy should decide, "rather than the gatekeeper author hard-coding that judgement here".
+- **Insufficient OAuth scope has no flow yet.** `ApprovalQueue` has a TODO for telling the user that an action needs a scope the gatekeeper was not granted.
+- **The gatekeeper kit is half built.** Only "Layer 1", independent modules, ships. The base classes a new gatekeeper would extend are a proposal in `plans/gatekeeper-kit.md`, and "no gatekeeper consumes it". Writing a gatekeeper today means owning the guarantees above by hand.
+- **Rejection can be messy.** Because a simulating gatekeeper told the agent its write happened, rejecting can leave a Gadget in a state it cannot unwind. `rejectAction` may answer `{restart: true}`, and the kernel restarts the Gadget.
+- **Hook attribution is a heuristic.** When an agent registers a persistent callback, the kernel guesses which Gadget it belongs to, with a TODO to replace the guess "once the runtime offers an API for that".
+
+I did not run the system. Every claim above comes from reading the source at `b304e8c` and Cloudflare's launch post. The star and fork counts come from GitHub's API on the day I wrote this. The usage figures and the May internal launch are Cloudflare's own and I can't check them.
+
+## Why the design is worth copying
+
+Strip out the Workers specifics and two ideas carry over to any agent harness, including the ones in [Agent harnesses: engineering the loop around the model](/articles/agent-harness).
+
+First, **classify at the connector, not at the model.** Approval policy keyed on tool names is brittle. Approval policy keyed on "does this call change the outside world", decided by code that knows the service's API, is something a human can reason about. The GitHub gatekeeper knows `createIssue` is a write. The MCP gatekeeper honestly does not know, so it asks the server and defaults to write.
+
+Second, **simulation is what makes approval asynchronous, and you only get it where you can model the service.** A gatekeeper that can project pending writes onto later reads lets the agent finish its whole task before anyone looks at the queue. One that cannot falls back to stopping the agent. Cloudflare OS is honest about this in its types: `continue-with-simulation` and `await-decision` are the two delivery modes, and the kit makes each action declare one. If you are building connectors for your own agents, that per-action choice, and the work it takes to earn the first one, is the part to take.
+
+For the other direction, an agent watched from outside rather than gated from inside, see [Uber's ADR](/articles/uber-adr). For how isolated execution looks at training scale, see [DeepSeek's DSec](/articles/dsec-agent-sandbox).
