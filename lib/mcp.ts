@@ -8,6 +8,7 @@
 // (and the route) compiles and runs regardless of the other agents' progress.
 
 import {
+  getArticles,
   getBlogPost,
   getBlogPosts,
   getLog,
@@ -18,7 +19,10 @@ import {
   getProjects,
   getSnippets,
 } from "@/lib/content"
-import { paperLinks } from "@/lib/content/schema"
+import type { LensId } from "@/lib/content/rating"
+import { articleSignal, paperLinks } from "@/lib/content/schema"
+import { articleApiFields, compareByLens } from "@/lib/content/signals"
+import { runsOnById } from "@/data/taxonomy"
 import { searchContent } from "@/lib/search"
 
 // ── result helpers ──────────────────────────────────────────────────────────
@@ -83,6 +87,53 @@ export async function getResumePayload() {
 }
 
 // ── projects ────────────────────────────────────────────────────────────────
+
+// ── articles, with their scores (lib/content/signals.ts) ─────────────────────
+
+export type ListArticlesArgs = {
+  lens?: LensId
+  topic?: string
+  kind?: string
+  level?: string
+  /** Hardware ceiling: keep articles whose subject runs on this or less. */
+  runsOn?: string
+  limit?: number
+}
+
+export function listArticlesPayload({ lens = "must-read", topic, kind, level, runsOn, limit }: ListArticlesArgs) {
+  const ceiling = runsOn ? runsOnById(runsOn) : undefined
+  const items = getArticles()
+    .filter((a) => !topic || a.topic === topic)
+    .filter((a) => !kind || a.articleKind === kind)
+    .filter((a) => !level || a.level === level)
+    .filter((a) => {
+      if (!ceiling) return true
+      const got = a.runsOn ? runsOnById(a.runsOn) : undefined
+      if (!got) return false
+      return ceiling.rank === null ? got.id === ceiling.id : got.rank !== null && got.rank <= ceiling.rank
+    })
+    .sort(compareByLens(lens))
+  const sliced = limit && limit > 0 ? items.slice(0, limit) : items
+  return json(
+    sliced.map((a) => {
+      const f = articleApiFields(a)
+      return {
+        slug: a.slug,
+        title: a.title,
+        description: a.description,
+        why: a.rating?.why ?? null,
+        date: a.date,
+        lastUpdated: a.lastUpdated,
+        tags: a.tags,
+        featured: a.featured,
+        url: a.url,
+        markdown: `${a.url}.md`,
+        ...f,
+        signal: articleSignal(a, f),
+      }
+    })
+  )
+}
 
 export function listProjectsPayload() {
   return json(
