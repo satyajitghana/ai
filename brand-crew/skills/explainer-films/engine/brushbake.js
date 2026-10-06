@@ -83,7 +83,9 @@ const PB = (() => {
       w = Math.min(BW, Math.ceil(bb.w * k) + 2 * pad); h = Math.min(BH, Math.ceil(bb.h * k) + 2 * pad)
     }
     const P = simplify(pts.map(([x, y]) => [(x - bb.x0) * k + pad, (y - bb.y0) * k + pad]), o.eps ?? 1.3)
-    const t0 = performance.now(), kk = k / (OUT_W / W)
+    // stroke weights are tuned at the lite tier's 1280-wide canvas; the live tier
+    // paints at 1920 and must lay the same weight per unit of the frame, not per pixel
+    const t0 = performance.now(), kk = k / (1280 / W)
     // a covering pigment is painted light-on-black or dark-on-white, whichever
     // separates it from its ground best, and un-mixed into alpha afterwards
     const col = o.fill || o.ink, bg = o.cover && lum(col) > .5 ? '#000000' : '#FFFFFF'
@@ -137,7 +139,10 @@ const PB = (() => {
     const s = bakeScale()
     const geo = pts.map(([x, y]) => Math.round(x * s) + ',' + Math.round(y * s)).join(' ')
     const key = kind + '|' + s.toFixed(3) + '|' + [o.fill, o.alpha, o.bleed, o.tex, o.border, o.ink, o.brush, o.weight,
-      o.medium, o.fillBrush, o.fillWeight, o.dist, o.angle, o.cross, o.rand, o.continuous, o.gradient, o.strength, o.precision, o.cover].join('|') + '|' + geo
+      o.medium, o.fillBrush, o.fillWeight, o.dist, o.angle, o.cross, o.rand, o.continuous, o.gradient, o.strength, o.precision, o.cover].join('|') + '|' + geo +
+      // the live tier paints every shape afresh on every drawing (BOILN, two frames on
+      // twos), so the paint itself boils; the lite tier paints it once per film
+      (self.LIVE_TIER ? '|d' + BOILN : '')
     const id = fnv(key) + ':' + fnv(key.split('').reverse().join('')) + ':' + key.length
     let e = cache.get(id)
     if (e) { stats.hits++; cache.delete(id); cache.set(id, e); return e }

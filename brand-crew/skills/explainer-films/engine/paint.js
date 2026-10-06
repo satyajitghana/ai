@@ -24,7 +24,9 @@
 // (styles.js) owns what is under the world (paper, a chalkboard, a blueprint
 // grid) and what is over it (grain, dust), and may paint the whole frame at a
 // lower resolution and scale it up with hard edges (the pixel style).
-const W = 1920, H = 1080, OUT_W = 1280, OUT_H = 720;
+// OUT is the canvas the frame is rasterised at: 1280x720 for the lite tier,
+// 1920x1080 for the live tier (render.mjs --live sets TIER_OUT before load).
+const W = 1920, H = 1080, OUT_W = (self.TIER_OUT || [1280, 720])[0], OUT_H = (self.TIER_OUT || [1280, 720])[1];
 let SCALE = OUT_W / W;
 const PROJECT = window.PROJECT || { bpm: 120, offset: 0, duration: 30 };
 const BPM = PROJECT.bpm, BEAT = 60 / BPM, OFF = PROJECT.offset || 0, BOIL = 12;

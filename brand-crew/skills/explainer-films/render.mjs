@@ -40,8 +40,12 @@ const mode = args[0]
 const opt = Object.fromEntries(args.filter(a => a.startsWith('--')).map(a => { const [k, ...v] = a.slice(2).split('='); return [k, v.join('=') || true] }))
 const files = args.slice(1).filter(a => !a.startsWith('--'))
 
+// --live: the live tier. Every p5.brush shape is painted afresh on every
+// drawing, on a 1920x1080 canvas (the lite tier paints each shape once per film
+// at 1280x720 and reuses it). Set before the engine's scripts run.
 async function openPage(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } })
+  const page = await browser.newPage({ viewport: opt.live ? { width: 1920, height: 1080 } : { width: 1280, height: 720 } })
+  if (opt.live) await page.addInitScript(() => { self.LIVE_TIER = true; self.TIER_OUT = [1920, 1080] })
   page.on('pageerror', e => console.error('page error:', e.message))
   await page.goto(pathToFileURL(join(HERE, 'studio.html')).href)
   await page.evaluate(() => window.READY)
@@ -210,6 +214,13 @@ async function rendererOf(browser) {
   try { return await p.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); if (!gl) return 'none'; const e = gl.getExtension('WEBGL_debug_renderer_info'); return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER) }) } finally { await p.close() }
 }
 async function launch(cr) {
+  // Windows: Chrome on the machine's own GPU through ANGLE's Direct3D 11 backend.
+  // There is no Xvfb or llvmpipe there, and SwiftShader would waste the GPU.
+  if (process.platform === 'win32') {
+    const browser = await cr.launch({ executablePath: process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: [...BASE_ARGS, '--use-angle=d3d11'] })
+    if (opt.gpu) console.error('gpu:', await rendererOf(browser))
+    return browser
+  }
   if (!opt.swiftshader) {
     const display = await startXvfb()
     if (display) {
