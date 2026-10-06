@@ -1,0 +1,226 @@
+---
+title: "Multi-harness RL: training a model inside Claude Code, Codex and OpenCode without touching them"
+description: "Hugging Face's multi-harness RL guide turns unmodified coding agents into RL environments by pointing them at a capture proxy that speaks four model APIs, forwards to vLLM, and records the exact token ids and logprobs the policy sampled. I read the proxy's source and recomputed the guide's claims from the Space's own data files. The headline numbers hold: LFM2.5-2.6B goes from 42.2% to 54.2% pass@1 across four harnesses, and the same base weights score 62.1% under Mini-SWE-Agent and 33.2% under Claude Code. The reward's 'small' tool-call bonus recovers as 1 + 1.5/(15 + calls), which GRPO's group normalization turns into advantages of ±1.3 when all eight rollouts are correct. Two posts about it mislabel one number: the 47.5% SFT result came from 801 OpenCode rollouts, and the run on all 3,189 rollouts scored 43.1%."
+date: 2026-10-06
+tags:
+  - reinforcement-learning
+  - rl-environments
+  - agents
+  - harness
+  - grpo
+  - trl
+  - openenv
+  - huggingface
+  - reward-design
+  - small-models
+  - liquid-ai
+  - explainer
+draft: false
+---
+
+import { CaptureTape } from "@/components/articles/multi-harness-rl/capture-tape"
+import { HarnessGrid } from "@/components/articles/multi-harness-rl/harness-grid"
+
+The same model weights solve 62.1% of a task set under one coding agent and 33.2% under another. That is the opening number of Hugging Face's [ultimate guide to multi-harness RL](https://huggingface.co/spaces/FineEnvs/multi-harness-rl), by Adithya S Kolavi, Joel Niklaus, Sergio Paniego Blanco, Leonie Monigatti (Liquid AI), Amine Dirhoussi, Ben Burtenshaw, Lewis Tunstall and Leandro von Werra. The model is Liquid AI's `LFM2.5-2.6B`. The agents are Mini-SWE-Agent and Claude Code. Neither the model nor the task changed.
+
+The guide's answer is to train the model inside the agents people actually ship, unmodified. The trick is a proxy. The agent thinks it is talking to a model provider; it is talking to a recorder that forwards to vLLM and keeps the exact tokens the policy sampled.
+
+I read the proxy's source in [OpenEnv](https://github.com/huggingface/OpenEnv) at commit `3f14355`, downloaded the JSON behind the guide's charts, and recomputed the claims in [Clément Delangue's post](https://x.com/ClementDelangue/status/2107120717980471638) and [Hugging Face's](https://x.com/huggingface/status/2106034221005312448) against them. Every number below is labelled **measured** (I computed it from a file), **reported** (the guide's figure, not re-run) or **reasoned** (my arithmetic on the other two).
+
+<RepoCard repo="huggingface/OpenEnv" />
+
+| | |
+|---|---|
+| Guide | [The ultimate guide to multi-harness RL](https://huggingface.co/spaces/FineEnvs/multi-harness-rl), published September 24, 2026, updated October 1 |
+| Stack | OpenEnv capture proxy + [Harbor](https://harborframework.com/) tasks and sandboxes + [TRL](https://github.com/huggingface/trl) Async GRPO, vLLM as the sampler |
+| Model | `LiquidAI/LFM2.5-2.6B`; earlier runs on `Qwen3.5-2B` |
+| Tasks | 1,000 SmolDataEnvs training tasks (400 medium, 600 hard), 250 held-out test tasks, each run once under 4 harnesses |
+| Result | 42.2% → 54.2% pass@1 over all four harnesses, trained across all four (**reported**, and **measured** from `training-results.json`) |
+| Released | 7 checkpoints under [`FineEnvs`](https://huggingface.co/FineEnvs) (**measured**, Hub API), SFT data, training scripts |
+
+## Why the harness changes the score
+
+A harness is the program around the model: it runs the loop, names the tools, writes the context, parses replies and decides when to stop ([Agent harnesses: engineering the loop around the model](/articles/agent-harness) covers the general shape). Two harnesses present the same task to the same weights as two different problems.
+
+They differ along three axes. The [KAT-Coder report](/articles/kat-coder-agentic-training), which the guide quotes, names them as the three ways a model overfits to its harness:
+
+- **Action format.** Each harness names its tools and their arguments its own way. A model that learned one harness's names emits calls another harness rejects before any tool runs.
+- **Context structure.** Claude Code compacts and rewrites its own history; Mini-SWE-Agent keeps a plain linear transcript.
+- **Control flow.** Retries, stop conditions and how much planning the harness does for the model.
+
+They also speak different wire protocols. The proxy's `detection.py` lists four: OpenAI Chat Completions (OpenCode, Mini-SWE-Agent, Terminus 2 and most others), OpenAI Responses (Codex, trae-agent), Anthropic Messages (Claude Code) and Google `generateContent` (Gemini CLI).
+
+<Figure
+  src="/articles/multi-harness-rl/fig4.png"
+  alt="Horizontal bar chart of LFM2.5-2.6B pass@1 before training: OpenCode 33.6%, Claude Code 33.2%, Codex 40.0%, Mini-SWE-Agent 62.1%, overall 42.2%."
+  caption="The base model on 250 held-out tasks under each harness, before any training. Same weights in every bar (multi-harness RL guide, 'Where the base model starts')."
+/>
+
+The 29-point spread is **reported**, and the values match the Space's `training-results.json` to the decimal (**measured**). It is not a small-model quirk: the guide cites Claude Opus 4.5 at 45.9% on SWE-bench Pro on Scale's leaderboard and 55.4% inside Claude Code (**reported**, second-hand). The [harness effect](/articles/harness-effect) piece found the same thing on cost.
+
+A model trained in one harness also learns that harness's habits. Liquid AI names Hermes Agent and OpenClaw among the harnesses LFM2.5 was trained in. None of the four harnesses here is named.
+
+## What a trainer needs, and why a harness hides it
+
+In the usual RL setup the trainer owns the loop: it samples, calls `env.step()`, reads the observation, samples again, so every token is already in its hands. That is how the [GeoGuessr environment](/articles/geoguessr-rl-environment) and most of [OpenEnv's catalogue](/articles/scaling-agentic-rl) work. A real coding agent inverts this. Claude Code runs its own loop, tools and context, and the trainer sees only calls arriving at a model endpoint.
+
+A policy-gradient update needs two things per generated token: which token was sampled, and the probability it was sampled with. GRPO's clipped objective weights each token by an importance ratio:
+
+$$
+\rho_t = \exp\big(\log \pi_\theta(y_t \mid y_{<t}) - \log \pi_{\text{old}}(y_t \mid y_{<t})\big)
+$$
+
+Here $\pi_\theta$ is the policy being updated, $\pi_{\text{old}}$ the policy that generated the rollout, and $y_t$ the token at position $t$. In Async GRPO those two really differ: the guide's rollouts come from weights usually two optimizer steps old, and never more than four (**reported**).
+
+A harness that returns text and a score supplies neither ingredient, and the two obvious workarounds are both wrong.
+
+**Re-tokenizing the text gives you different tokens.** A model can sample a non-canonical split, say `.c` then `sv` where a tokenizer encoding the string would produce one `.csv` token. The text is identical. Train on the re-encoded ids and the gradient lands on a token the model never produced. Harnesses make it worse: they insert role markers, normalize whitespace and repair malformed JSON before the next call, so the text you saved is not even the text the model wrote. TRL's own write-up states the rule plainly: "in RL, you optimize on the exact tokens the model produced."
+
+**Recomputing the logprob afterwards gives you the wrong probability.** Score the saved tokens with the current weights and $\pi_{\text{old}}$ becomes $\pi_\theta$, so $\rho_t = 1$ for every token even when the weights have moved two steps. The off-policy correction silently turns off.
+
+The guide notes that OpenForgeRL builds the same proxy, trains on prompt and response pairs without token ids, and reports strong multi-harness results anyway. It calls the question unsettled, and so do I: exact tokens remove a known bias, but nobody has isolated what that bias costs at this scale. The [Rollout Routing Replay](/articles/rollout-routing-replay) article covers the same train/inference mismatch from the MoE side.
+
+## The capture proxy
+
+The proxy is the one interface every harness is guaranteed to have: a base URL and an API key for a model provider.
+
+<CaptureTape />
+
+The widget's tokens and logprobs are illustrative; the sequence of operations is the one in `openenv/core/harness/capture`:
+
+1. **The API key is the session id.** OpenEnv mints one key per rollout and hands it to the harness as its `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or a provider config field. Every SDK forwards it unchanged, so one proxy on one port serves a whole GRPO group; an unregistered key gets a 401.
+2. **Detect the dialect.** `detection.py` checks the path first (`/v1/messages`, `/v1/chat/completions`, `/v1/responses`, `generatecontent` case-insensitively), then an `anthropic-version` header, then body shape.
+3. **Normalize and forward.** The request becomes chat completions, using converters vendored from NVIDIA's Polar gateway. The proxy asks vLLM for prompt ids, sampled ids and per-token logprobs, and pins `top_p` to 1.0 and `top_k` to -1. vLLM computes processed logprobs after truncation, so truncated logprobs would not be the policy's. Moving `top_p` to 1.0 took their measured importance ratio from 0.985–0.993 to 0.9984–0.9999 (**reported**).
+4. **Never stream upstream.** The proxy waits for the whole completion, stores it, and replays it to the harness in its own dialect, as a stream if it asked for one.
+
+vLLM needs `--return-tokens-as-token-ids --logprobs-mode processed_logprobs`, and the proxy does not trust the flags. It probes the engine and grades it at one of three capture levels: `tokens` (ids and aligned logprobs, trainable), `logprobs` (no ids) or `text`. Anything below `tokens` serves evaluation rollouts only, and asking it for training data raises. Hosted APIs land there: they can evaluate a harness, not train through it.
+
+<Figure
+  src="/articles/multi-harness-rl/fig1.png"
+  alt="Animated diagram frozen at its last step: sandbox with the unmodified agent and key sess_7f3a, the capture proxy that detects dialect, normalizes and records, and the inference engine with ids and logprobs on. Below, a capture store shows turn 1 and turn 2 as hatched masked prompt cells followed by blue sampled cells, with turn 2's prompt bracketed as identical to everything in turn 1."
+  caption="The capture proxy at the last of eleven steps: turn 2's prompt begins with turn 1 token for token, so the two calls link (multi-harness RL guide, 'The capture proxy' figure)."
+/>
+
+<Figure
+  src="/articles/multi-harness-rl/fig2.png"
+  alt="Diagram of the Anthropic Messages dialect: the agent sends system, messages and tools to POST /v1/messages; the proxy renames it to a normalized messages and tools shape and adds logprobs and token-id flags; the inference engine returns a normalized response with prompt token ids, completion token ids and per-token logprobs, which go to a capture store and are never returned to the agent, while the answer is re-enveloped as content blocks and stop_reason."
+  caption="Four dialects in, one shape to the engine and the trainer; the token fields go to the capture store and never back to the agent (multi-harness RL guide, 'Four API dialects, one shape' figure)."
+/>
+
+## From calls to training sequences
+
+Harnesses retry, spawn subagents and compact context, all on the same wire. `graph.py` turns it into a graph with one rule: a call's parent is the earlier call whose prompt plus completion is the **longest exact token prefix** of the new call's prompt.
+
+- **A retry** becomes a sibling that never continued: same parent, no children.
+- **A subagent** has its own system prompt, so its first call extends nothing and starts a new root.
+- **A compaction** rewrites history, which is not a prefix extension, so it also opens a new root instead of corrupting the chain.
+
+Every root-to-leaf path becomes one training sequence. Context tokens get loss mask 0, sampled tokens get mask 1 with their logprobs, and a turn whose logprobs are missing or misaligned stays as context and is never a target. The source comment puts it bluntly: a trainable token without a real behaviour logprob "would make GRPO's importance ratio `exp(new - old)` a ratio against a number we invented."
+
+<Figure
+  src="/articles/multi-harness-rl/fig3.png"
+  alt="Graph of one trace: a system node with a main branch through task, turn 1, result, turn 2, result and summary, a discarded resample branching off turn 2, a second branch where a compaction summary rejoins the root and continues to turn 3, a result and submit, and a subagent with its own root. Counters read 16 unique messages, 3 branches so 3 samples."
+  caption="A trace as a graph of model calls: a discarded resample, a compaction that starts its own branch, and a subagent with its own root, three training samples in all (multi-harness RL guide, 'The rollout graph' figure)."
+/>
+
+One consequence I worked out from the code (**reasoned**): the proxy never tokenizes anything itself. Turn 2's prompt ids are whatever vLLM produced when it tokenized the harness's text. So if the model sampled a non-canonical split on turn 1, or the harness re-serialized a tool call's JSON, the prefix test fails and turn 2 starts a new root. Nothing is fabricated, every target keeps its true logprob, but one rollout becomes several sequences, each carrying its own copy of the context. That is the cost of being exact, and it shows in the data: Claude Code's rollouts became about eight training rows each, against about one for the other harnesses, and in the Qwen runs Claude Code produced 77% of the training rows from about a quarter of the rollouts (**reported**).
+
+## The training setup
+
+The tasks are SmolDataEnvs, data-analysis questions from Kaggle notebooks with automatic graders, served through Harbor, which keeps task, harness and sandbox independent.
+
+- Two runs over the same 1,000 tasks in the same order: OpenCode only, and multi-harness, where each GRPO group of eight uses one of the four harnesses. A group never mixes harnesses.
+- TRL Async GRPO for 1,000 steps on two H100s per run (one trains, one serves vLLM), one E2B sandbox per rollout with 1 CPU and 4 GB. About 32 hours for OpenCode only and 46 hours for multi-harness, excluding evaluation (all **reported**).
+- Every 100 steps, each test task runs once under each harness: 1,000 cells, scored on the first graded attempt.
+
+## The reward: correctness plus a bonus GRPO makes large
+
+The reward is 1 for a correct answer, 0 for a wrong one, plus "a small bonus, at most 0.1, for a correct answer that takes fewer calls." The guide does not print the formula. The chart code in `d3-train-results.html` does, and the logged rewards confirm it (**measured**):
+
+$$
+r = \begin{cases} 1 + \dfrac{1.5}{15 + c} & \text{correct, after } c \text{ tool calls} \\[4pt] 0 & \text{wrong} \end{cases}
+$$
+
+At zero calls the bonus is $1.5/15 = 0.1$, the stated cap. At 4 calls it is 0.0789, at 10 it is 0.06. Wrong answers get nothing, so stopping early cannot earn it.
+
+GRPO learns only from differences inside a group of eight. If all eight are correct, a correctness-only reward makes every advantage zero and the group teaches nothing. In the earlier Qwen runs, which had no bonus, 35% to 58% of optimizer steps had no reward contrast in any group, and tool calls per rollout crept from 13 to 41 in one run (**reported**).
+
+With the bonus, those groups do carry signal, and it is not small at all. I recomputed the guide's example group, eight correct Claude Code rollouts at training step 80, using its own normalization (reward minus group mean, divided by the group's standard deviation):
+
+| tool calls | 4 | 4 | 5 | 6 | 8 | 9 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|
+| reward | 1.0789 | 1.0789 | 1.0750 | 1.0714 | 1.0652 | 1.0625 | 1.0625 | 1.0600 |
+| advantage | +1.33 | +1.33 | +0.79 | +0.29 | −0.57 | −0.94 | −0.94 | −1.29 |
+
+(**measured**: the rewards match the logged values to four decimals, and the advantages match the guide's chart when the standard deviation is the population one.) The rewards span 0.019. Divided by a group standard deviation of about 0.007, that becomes a spread of 2.6 standard units, the same push a four-four split of right and wrong answers gets, ±1.0. So "a bonus of at most 0.1" undersells it. Inside an all-correct group, the bonus *is* the whole gradient, at full strength. The [GeoGuessr analysis](/articles/geoguessr-rl-environment) found the same amplification.
+
+How often that happened: in 97 of 555 OpenCode-only groups (17.5%) and 155 of 686 multi-harness groups (22.6%), every scorable rollout was correct but tool counts differed (**reported**; the counts and the percentages check out against `reward-group-audit.json`, **measured**).
+
+There is no LFM run without the bonus, so the drop in tool calls cannot be pinned on it alone; the guide says so. It also records a reward that went wrong: an earlier `+0.2 for submitting anything` term taught the policy to submit immediately, and held-out accuracy fell from 0.740 to 0.178 while training reward looked healthy (**reported**). Integration code therefore never combines verifier scores on its own.
+
+## What training did, harness by harness
+
+<HarnessGrid />
+
+The grid's numbers are copied from the Space's data files (OpenCode, Claude Code, Codex, Mini-SWE-Agent, overall). Base: 33.6, 33.2, 40.0, 62.1, 42.2. OpenCode-only RL at step 1,000: 58.0, 42.0, 43.2, 66.0, 52.3, so +24.4 in its own harness and inside the noise in Codex and Mini-SWE-Agent. Multi-harness RL at step 1,000: 49.6, 48.8, 53.6, 64.8, 54.2, so +16.0, +15.6 and +13.6 in three harnesses and +2.7, inside the noise, in Mini-SWE-Agent. Head to head, OpenCode-only wins under OpenCode and multi-harness wins under Claude Code and Codex; the overall gap of 1.9 points is noise, as the guide says.
+
+The noise band is my arithmetic (**reasoned**): one attempt per task and 250 tasks per harness gives a 95% binomial half-width of about 6.2 points per harness at a 50% pass rate, and 3.1 points over 1,000 cells. The guide itself says to trust trends across checkpoints over any one of them.
+
+<Figure
+  src="/articles/multi-harness-rl/fig6.png"
+  alt="Grouped bar chart at step 1,000 by harness. OpenCode: base 34, OpenCode-only 58, multi-harness 50. Claude Code: 33, 42, 49. Codex: 40, 43, 54. Mini-SWE-Agent: 62, 66, 65."
+  caption="LFM2.5-2.6B at step 1,000 under each harness, next to the base model. The OpenCode-only model leads in OpenCode; the multi-harness model leads in Claude Code and Codex (multi-harness RL guide, 'LFM2.5-2.6B at step 1,000, by harness')."
+/>
+
+### The posts against the data
+
+| claim in the posts | what the Space's data says | verdict |
+|---|---|---|
+| Same model, 62% under Mini-SWE-Agent, 33% under Claude Code | 62.1 and 33.2 | holds (**measured**) |
+| Trained in OpenCode alone: OpenCode 34% → 58% | 33.6 → 58.0 at step 1,000 | holds (**measured**) |
+| Trained in 4 harnesses: 42% → 54%, "better in all 4" | 42.2 → 54.2 overall; all four rise, but Mini-SWE-Agent only +2.7 | holds, the fourth gain is noise (**measured**, **reasoned**) |
+| 31% fewer tool calls, in every harness, about half under Codex | 31.1% overall at step 1,000; per harness 32.8, 28.3, 53.0, 16.2 | holds (**measured**) |
+| SFT on 3,189 rollouts from Qwen3.8-27B plateaus at 47.5% | 47.5% is OpenCode SFT, trained on 801 rollouts; the 3,189-rollout run scored 43.1% | mislabelled (**measured**) |
+| All seven trained models released | 4 LFM checkpoints and 3 Qwen checkpoints on the Hub | holds (**measured**) |
+
+The tool-call saving counts only task-harness pairs both the base and the trained model solved, so it is not inflated by the model giving up. The flip side: the OpenCode-only model under Claude Code, a harness it never trained in, made 9.6% *more* calls than the base and at step 500 generated 62% more output tokens (**reported**, and the first figure **measured** from `training-results.json`).
+
+## Why training across harnesses spreads the gain
+
+The guide reports the effect, not a mechanism, so this section is my reading (**reasoned**) of what its data supports.
+
+Training in one harness optimizes the policy against one action format, one context layout and one control flow. Some of what it learns is task skill and transfers. Some of it is OpenCode's tool names and OpenCode's prompt layout, which does not. The OpenCode-only run is the clean case: +24.4 in its own harness and +8.8 in Claude Code.
+
+Rotating harnesses across groups changes what the gradient can reward. A habit that only pays off in one harness earns advantage in a quarter of the groups and nothing, or worse, in the rest. Skill that pays off everywhere is rewarded in every group. Keeping each group inside one harness matters too: the advantage then compares eight attempts under the same interface, so the policy is never rewarded for the harness it happened to land in.
+
+Two caveats keep this from being clean. First, exposure was unequal. Both runs took 1,000 steps, but the multi-harness run saw 626 distinct tasks against 555 and processed 451M training tokens against 162M (**reported**), 2.8 times as many (**reasoned**). Second, there is one seed per run. OpenForgeRL, which the guide cites, saw the same pattern with more harnesses: three-harness training beat single-harness training even on the single harness's home ground, 48.5 to 46.0 (**reported**, second-hand).
+
+The large labs make the same bet: the guide lists [Kimi K3](/articles/kimi-k3) building Claude Code and Codex style harnesses from composable modules and [MiMo-V2.6](/articles/mimo-rl-environments) training on a pool of task-adapted mini-harnesses. This guide adds an open way to do it with harnesses you do not control. The [harness-as-generalizer](/articles/harness-compositional-generalization) argument runs the other way, putting the generalization in the scaffold rather than the weights; both are probably part of the answer.
+
+## Imitation versus practice
+
+The capture also records whole trajectories, so the guide tried the cheaper route: supervised fine-tuning on a bigger model's successes. `Qwen3.8-27B` ran the training tasks under all four harnesses with up to three attempts each. The first verified-correct attempt per task and harness was kept: 3,189 rollouts from 888 tasks. Every assistant turn became one example, tokenized with LFM's chat template, loss on the next response only. Two full fine-tunes, two epochs, learning rate 3e-6, effective batch 8 (all **reported**).
+
+- **OpenCode SFT** (801 rollouts, 4,825 examples): 47.5% overall. Almost all of its gain is in OpenCode, 33.6 → 51.6, close to OpenCode RL's 56.0 at its best checkpoint. Claude Code stays at 33.2; Mini-SWE-Agent drops to 58.8.
+- **Multi-harness SFT** (3,189 rollouts, 17,929 examples): 43.1% overall, within noise of the base 42.2. It gains under Claude Code (+9.2), Codex (+6.8) and OpenCode (+4.4), and loses 16.9 points under Mini-SWE-Agent, 62.1 → 45.2. After epoch 1 it was below the base model, at 38.3.
+- **Multi-harness RL**, best checkpoint (step 700): 54.6%, 11.5 points above multi-harness SFT.
+
+<Figure
+  src="/articles/multi-harness-rl/fig7.png"
+  alt="Scatter of overall pass@1 against percent fewer tool calls than base. Base 42.2% at 0; multi-harness SFT 43.1% at 24.2%; OpenCode SFT 47.5% at 8.5%; OpenCode RL 52.4% at 13.2%; multi-harness RL 54.6% at 26.7%; hollow epoch-1 points for SFT at 38.3% and 45.1%."
+  caption="SFT and RL on LFM2.5-2.6B: overall pass@1 against fewer tool calls than the base model, with RL at its best checkpoint and SFT after epoch 2 (multi-harness RL guide, 'SFT and RL on LFM2.5-2.6B')."
+/>
+
+So "plateaus at 47.5%" is the better SFT run, not the one trained on all 3,189 rollouts. The posts' framing, imitation below both RL runs, still holds. The guide is more careful than the posts: objective, data, task pool and compute all differ, multi-harness SFT had about seven times the supervised tokens of OpenCode SFT, and each ran once. Its phrase is "observations, not a ranking of methods." The Mini-SWE-Agent collapse is unexplained in the guide. One plausible reading (**reasoned**, not tested) is that the teacher's long Claude Code and Codex trajectories dominate the unbalanced mix, and imitating their habits hurts in a harness that wants terse, linear turns.
+
+SFT also cut tool calls without being rewarded for it: multi-harness SFT makes 24.2% fewer calls than the base on tasks both solved, fewer in every harness (**reported**).
+
+## Where it breaks
+
+- **The Qwen runs went up and came back down.** `Qwen3.5-2B` multi-harness rose from 14.6% to 37.0% at step 500 and fell to about 26% by step 1,000. Answers grew until they hit the 4,096-token evaluation limit, because training allowed 16,384; cut-off cells rose from 9 to 556 of 1,000 (**reported**). The LFM runs used one limit for both and did not decline. Exact tokens make the update correct, not the objective.
+- **The proxy is one process.** It starved at around 200 concurrent sessions and crashed at 320 (**reported**).
+- **Small, short, single-seed.** 2 to 2.6 billion parameters, 1,000 steps, one seed per run, one task family (data analysis). The guide says larger runs are coming.
+
+The capture proxy is the transferable idea. It treats the model API as the one interface every agent must expose, records at the engine where the tokens are real, and links calls by exact token prefix so retries, subagents and compaction fall out as graph structure. That is enough to make Claude Code an RL environment without asking Anthropic.
+
+<ModelCard repo="FineEnvs/LFM2.5-2.6B-multiharness-RL" />
