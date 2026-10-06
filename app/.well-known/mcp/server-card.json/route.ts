@@ -16,6 +16,7 @@ const TOOLS = [
   { name: "search_content", description: "BM25 search across every article, post, log, project, arXiv digest, snippet and note. Start here when you do not already know the page." },
   { name: "get_profile", description: "Identity record: role, employer, location, links, GitHub stats." },
   { name: "get_resume", description: "Full structured CV: experience, education, skills." },
+  { name: "list_articles", description: "Articles with their rating, topic, kind, level, hardware, score, percentile tier and facts; ordered by a lens (must-read, run-it, learn, new, deep, newest) and filterable." },
   { name: "list_projects", description: "Every project with its stack, repository and demo links." },
   { name: "get_project", description: "One project, in full." },
   { name: "list_posts", description: "Index of blog posts and dated build logs." },
