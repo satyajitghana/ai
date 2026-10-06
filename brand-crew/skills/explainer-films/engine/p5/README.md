@@ -43,3 +43,18 @@ readback when 2D drawing resumes) costs ~20 ms on the farm's UHD 770; a
 diagram drawing has ~15, and a motion-blurred frame repeats them per sub-paint.
 On the pilot strip that was 80% of the brush time. Runs of brush ops share one
 hand-off; a style that interleaves 2D and brush calls less paints faster.
+
+## Per style
+
+- **sumi** (`sumi.js`): washes landed at twice multiply's tint (they all but
+  vanished); a closed outline of many vertices is painted as one stroke per
+  side of its bounding box, since brush.polygon's stroke-per-edge beaded the
+  sumi brush round every rounded box. The host's outline (`PB.loops`) still
+  beads: it is brush.polygon in p5tier.js.
+- **engraving** (`engraving.js`): the host's ruled tone without hatch
+  `gradient`, which compounds across the sheet into stripes ~34 px apart;
+  now even rules ~13 px apart.
+- **stipple**: no file; the dots land crisper and as dense as live.
+- **calligraphy** (`calligraphy.js`): tints landed at 1.5x multiply's tint;
+  the nib is unchanged.
+- **notebook**: no file; pen and marker hatching match the live tier.
