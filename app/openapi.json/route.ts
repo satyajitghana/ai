@@ -163,6 +163,11 @@ const S = {
             description: "Sort keys, higher first: must-read, run-it, learn, new, deep.",
             additionalProperties: { type: "number" },
           },
+          highlights: {
+            type: "array",
+            items: { type: "string" },
+            description: "Up to three plain-language highlights derived from the rating's strongest answers (e.g. \"Checked against the source\"), the same words the site shows. Empty when unrated or nothing scores above 1. Methodology: /articles/scoring.",
+          },
           facts: {
             type: "object",
             description: "Read off the page itself, never hand-entered.",

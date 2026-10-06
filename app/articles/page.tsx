@@ -1,8 +1,12 @@
 import type { Metadata } from "next"
 
+import Link from "next/link"
+
+import { SCORING_PATH } from "@/components/site/article-rating"
 import { PageShell } from "@/components/site/page-shell"
 import { displayTags } from "@/data/taxonomy"
 import { getArticles } from "@/lib/content"
+import { highlights } from "@/lib/content/rating"
 import { articleScores, compareByLens } from "@/lib/content/signals"
 import { getThumb } from "@/lib/thumbs"
 
@@ -41,35 +45,31 @@ export default function Page() {
         kind: a.articleKind ?? null,
         level: a.level ?? null,
         runsOn: a.runsOn ?? null,
-        licence: a.licence ?? null,
-        rating: a.rating
-          ? {
-              novelty: a.rating.novelty,
-              verification: a.rating.verification,
-              runnable: a.rating.runnable,
-              explains: a.rating.explains,
-              takeaway: a.rating.takeaway,
-              durability: a.rating.durability,
-              reach: a.rating.reach,
-              unique: a.rating.unique,
-            }
-          : null,
+        highlights: a.rating ? highlights(a.rating, a.runsOn, 2).map(({ key, text }) => ({ key, text })) : [],
         score: s.score,
         tier: s.tier,
         lenses: s.lenses,
-        facts: {
-          figures: s.facts.figures,
-          interactives: s.facts.interactives,
-          measured: s.facts.measured,
-          film: s.facts.film,
-          readingTimeMins: s.facts.readingTimeMins,
-        },
+        readingTimeMins: s.facts.readingTimeMins,
         thumb: thumb?.src ?? null,
       }
     })
 
   return (
-    <PageShell title="Articles" lede={LEDE} agentPath={{ json: "/api/articles" }}>
+    <PageShell
+      title="Articles"
+      lede={
+        <>
+          {LEDE}{" "}
+          <Link
+            href={SCORING_PATH}
+            className="whitespace-nowrap text-foreground/80 underline decoration-foreground/25 underline-offset-4 hover:decoration-foreground"
+          >
+            How articles are scored
+          </Link>
+        </>
+      }
+      agentPath={{ json: "/api/articles" }}
+    >
       <ArticlesList articles={articles} />
     </PageShell>
   )

@@ -10,6 +10,7 @@ import {
   getSnippets,
 } from "@/lib/content"
 import { topicById } from "@/data/taxonomy"
+import { highlights } from "@/lib/content/rating"
 import { getArticleScore } from "@/lib/content/signals"
 import { absoluteUrl } from "@/lib/site"
 
@@ -97,12 +98,19 @@ export function GET() {
     "",
     "## Articles",
     "",
-    `Rated articles end with [topic · tier · score/100]; tiers are percentiles (Essential top 10%, High next 20%). Ratings, facts and lens keys as JSON: ${absoluteUrl("/api/articles")}, or the MCP tool list_articles.`,
+    `Rated articles end with [topic · tier · score/100 · highlights]; tiers are percentiles (Essential top 10%, High next 20%), and highlights are the rating's strongest answers in plain words. How scoring works: ${absoluteUrl("/articles/scoring")}. Ratings, facts and lens keys as JSON: ${absoluteUrl("/api/articles")}, or the MCP tool list_articles.`,
     "",
     ...articles.map((a) => {
       const s = getArticleScore(a.slug)
       const tag = s.tier && s.score !== null
-        ? ` [${[a.topic ? topicById(a.topic)?.label : null, s.tier.label, `${Math.round(s.score)}/100`].filter(Boolean).join(" · ")}]`
+        ? ` [${[
+            a.topic ? topicById(a.topic)?.label : null,
+            s.tier.label,
+            `${Math.round(s.score)}/100`,
+            a.rating ? highlights(a.rating, a.runsOn, 2).map((h) => h.text).join("; ") : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")}]`
         : ""
       return `- [${a.title}](${absoluteUrl(`/articles/${a.slug}.md`)}): ${a.description} (${a.date})${tag}`
     }),
