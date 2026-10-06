@@ -9,7 +9,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react/dist/ssr"
 
-import { FactChips, RubricBars, TierBars, type TierView } from "@/components/site/article-rating"
+import { DotLine, HighlightList, SCORING_PATH, TierMark, type TierView } from "@/components/site/article-rating"
 import {
   KINDS,
   LEVELS,
@@ -23,12 +23,11 @@ import {
   topicById,
 } from "@/data/taxonomy"
 import {
-  type ArticleFacts,
   type LensId,
   LENSES,
-  type RubricKey,
   type ScoredLensId,
   compareLens,
+  tierBand,
 } from "@/lib/content/rating"
 import { useHydrated } from "@/lib/use-hydrated"
 import { useUrlState } from "@/lib/use-url-state"
@@ -40,8 +39,10 @@ import { cn } from "@/lib/utils"
 //
 // The server renders every article in the default lens so the whole corpus is
 // in the HTML; once hydrated, the list shows a page at a time with "Show more".
-// Scores, tiers and lens keys arrive precomputed (lib/content/signals.ts) —
-// nothing here does arithmetic that reaches the DOM beyond Math.round.
+// Scores, tiers, lens keys and highlights arrive precomputed
+// (lib/content/signals.ts, lib/content/rating.ts) — nothing here does
+// arithmetic that reaches the DOM. A card shows the tier as one mark and the
+// highlights in words; the eight-question breakdown lives on the article page.
 
 export type ArticleCard = {
   slug: string
@@ -57,12 +58,12 @@ export type ArticleCard = {
   kind: KindId | null
   level: LevelId | null
   runsOn: RunsOnId | null
-  licence: string | null
-  rating: Record<RubricKey, number> | null
+  /** Plain-language highlights (lib/content/rating.ts `highlights`), at most two. */
+  highlights: { key: string; text: string }[]
   score: number | null
   tier: TierView | null
   lenses: Record<ScoredLensId, number> | null
-  facts: Pick<ArticleFacts, "figures" | "interactives" | "measured" | "film" | "readingTimeMins">
+  readingTimeMins: number
   thumb: string | null
 }
 
@@ -233,19 +234,32 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
         ) : null}
       </div>
 
-      {/* Lenses: a sort order each, named for the question it answers. */}
-      <div role="group" aria-label="Sort by" className="mt-4 grid grid-cols-3 gap-1.5 sm:flex sm:flex-wrap sm:gap-2">
-        {LENSES.map((l) => (
-          <button
-            key={l.id}
-            type="button"
-            onClick={() => set({ lens: l.id })}
-            aria-pressed={state.lens === l.id}
-            className={cn(pill(state.lens === l.id), "rounded-lg px-2 text-center leading-tight sm:rounded-full sm:px-3")}
-          >
-            {l.label}
-          </button>
-        ))}
+      {/* Lenses: a sort order each, named for the question it answers. One
+          segmented row; a phone scrolls it sideways rather than wrapping it
+          into a block of boxes. */}
+      <div className="-mx-6 mt-4 overflow-x-auto px-6 [scrollbar-width:none] sm:mx-0 sm:px-0 [&::-webkit-scrollbar]:hidden">
+        <div role="group" aria-label="Sort by" className="inline-flex gap-0.5 rounded-full border bg-muted/40 p-1">
+          {LENSES.map((l) => {
+            const on = state.lens === l.id
+            return (
+              <button
+                key={l.id}
+                type="button"
+                onClick={() => set({ lens: l.id })}
+                aria-pressed={on}
+                className={cn(
+                  "inline-flex min-h-10 shrink-0 cursor-pointer items-center rounded-full px-3.5 text-[13px] whitespace-nowrap transition-colors sm:min-h-8",
+                  "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring",
+                  on
+                    ? "bg-background font-medium text-foreground shadow-sm ring-1 ring-border"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {l.label}
+              </button>
+            )
+          })}
+        </div>
       </div>
 
       {/* Topics: one scrolling row on a phone, wrapped on wider screens. */}
@@ -400,7 +414,7 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
       ) : (
         <ul className="divide-y">
           {visible.map((a) => (
-            <ArticleRow key={a.slug} a={a} />
+            <ArticleRow key={a.slug} a={a} showDate={state.lens === "newest" || state.lens === "new"} />
           ))}
         </ul>
       )}
@@ -442,19 +456,18 @@ function Thumb({ src, className }: { src: string | null; className?: string }) {
   )
 }
 
-function ArticleRow({ a }: { a: ArticleCard }) {
-  const [open, setOpen] = useState(false)
-  const panelId = useId()
+function ArticleRow({ a, showDate }: { a: ArticleCard; showDate: boolean }) {
   const topic = a.topic ? topicById(a.topic) : null
   const blurb = a.why ?? a.description
+  const band = a.tier ? tierBand(a.tier.id) : null
 
   return (
     <li className="group relative grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-2 py-5 sm:grid-cols-[10.5rem_minmax(0,1fr)] sm:gap-x-5">
       <Thumb src={a.thumb} className="col-start-1 row-start-1 self-start rounded-md transition-opacity group-hover:opacity-90 sm:row-span-3" />
 
       <h2 className="col-start-2 row-start-1 self-center font-heading text-base leading-snug font-semibold text-balance sm:self-start sm:text-lg">
-        {/* Stretched link: the whole row is the target; the badge button and
-            the panel sit above it. */}
+        {/* Stretched link: the whole row is the target; the tier mark sits
+            above it and links to how scoring works. */}
         <Link
           href={`/articles/${a.slug}`}
           className="underline-offset-4 group-hover:underline after:absolute after:inset-0 focus-visible:outline-none focus-visible:after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-ring"
@@ -470,46 +483,28 @@ function ArticleRow({ a }: { a: ArticleCard }) {
         {blurb}
       </p>
 
-      <div className="col-span-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground sm:col-span-1 sm:col-start-2">
-        {a.tier && a.score !== null ? (
-          <button
-            type="button"
-            onClick={() => setOpen((o) => !o)}
-            aria-expanded={open}
-            aria-controls={panelId}
-            aria-label={`${a.tier.label}, score ${Math.round(a.score)} of 100. ${open ? "Hide" : "Show"} the rating`}
-            className={cn(
-              "relative z-10 -my-2 -ml-2 inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full px-2 transition-colors hover:bg-muted sm:min-h-8",
-              "focus-visible:outline-2 focus-visible:outline-ring",
-              open && "bg-muted",
-            )}
+      <div className="col-span-2 flex flex-wrap items-start gap-x-3 gap-y-1.5 text-xs leading-5 text-muted-foreground sm:col-span-1 sm:col-start-2">
+        {a.tier && band ? (
+          <Link
+            href={`${SCORING_PATH}#tiers`}
+            aria-label={`${a.tier.label}: ${band.long}. How articles are scored`}
+            className="group/tier relative z-10 rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           >
-            <TierBars tier={a.tier} />
-            <span className="text-foreground">{a.tier.label}</span>
-            <span className="tabular-nums">{Math.round(a.score)}</span>
-            <span aria-hidden="true" className={cn("text-[10px] transition-transform motion-reduce:transition-none", open && "rotate-180")}>
-              ▾
+            <TierMark tier={a.tier} />
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden rounded-md bg-foreground px-2 py-1 text-[11px] whitespace-nowrap text-background shadow-md group-hover/tier:block group-focus-visible/tier:block"
+            >
+              {band.short} of rated articles
             </span>
-          </button>
+          </Link>
         ) : null}
-        <span>{a.date}</span>
-        <span>{a.facts.readingTimeMins} min</span>
-        {topic ? <span>{topic.label}</span> : null}
+        <HighlightList items={a.highlights} className="min-w-0 flex-1" itemClassName="text-foreground/75" />
+        <DotLine
+          className="basis-full font-mono text-[11px]"
+          parts={[showDate ? a.date : null, `${a.readingTimeMins} min`, topic?.label]}
+        />
       </div>
-
-      {a.rating ? (
-        <div id={panelId} hidden={!open} className="relative z-10 col-span-2 rounded-lg border bg-background p-3 sm:col-start-2 sm:col-span-1 sm:p-4">
-          <RubricBars rating={a.rating} tier={a.tier} />
-          <FactChips
-            className="mt-3"
-            facts={a.facts}
-            meta={{ kind: a.kind ?? undefined, level: a.level ?? undefined, runsOn: a.runsOn ?? undefined, licence: a.licence ?? undefined }}
-          />
-          <p className="mt-3 text-xs leading-5 text-muted-foreground">
-            Each dimension is scored 0–3, and 3 is rare. The tier is a percentile of every rated article (top 10% Essential, next 20% High), so it cannot inflate.
-          </p>
-        </div>
-      ) : null}
     </li>
   )
 }
