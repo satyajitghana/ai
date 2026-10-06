@@ -24,6 +24,21 @@ paper lands much lighter than it multiplies. Where a fill disappears, pass the
 colour multiply would have landed at (`watercolour.js`), or raise its alpha.
 Strokes need no change: weights are scaled as `brushbake.js` scales them.
 
+Per style, so far (`media()` styles land their fills from inside `shape`,
+`hl` and `shadow`, after the label lift; their files swap `PB.shape` for
+the length of those calls only, so `PB.shape` sees the landed colour):
+
+- `crayon.js`: fills land at the multiply tint; mixed raw they went chalky
+  and cool on the cream paper. Massed fills are seeded once, not per drawing:
+  re-seeded, the whole gesture turned every drawing and strobed under labels.
+- `charcoal.js`: fills land at the multiply tint; mixed raw, a lifted fill
+  came out lighter than the grey paper, which charcoal cannot do. Massed
+  fills are seeded once, as crayon's are.
+- `pencil.js`: fills land at the multiply tint; mixed raw, pale fills took
+  a lavender cast on the cream paper.
+- ballpoint, marker: no file. On near-white paper mixing and multiply land
+  alike; fills, strokes and the host match the live tier at full resolution.
+
 **Covering media (pastel, chalkboard, spray, blueprint's rotring):** ops with
 `cover: true` are painted on a plain ground, un-mixed into colour and alpha and
 laid on with `source-over`, fresh on every drawing. They work as they are.
