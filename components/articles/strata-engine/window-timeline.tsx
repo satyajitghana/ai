@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils"
 //   t = D / (Bg·eff) + max( (hit + pcie) / (Bg·eff), pcie / Bp, cpu / Bc ) + fix
 //   tok/s = L / t
 //
-// Constants from the code (commit 1735d64):
+// Constants from the code (commit 1cbcacb; first read as 1735d64, amended upstream):
 //   U(T) = 1, 1.75, 2.4, 3.05 for T = 1..4: include/strata/core/verify.hpp:11
 //     ("1.75x one token's misses for T=2, 2.4x for 3, 3.05x for 4").
 //   p defaults: 0.2 (Q2_0 pack) / 0.55 (native i-quant packs):
@@ -28,6 +28,17 @@ import { cn } from "@/lib/utils"
 // eff = 0.5 is the share of VRAM bandwidth the GPU half reaches, from the
 // paper's own split (5.1 GB in 14.6 ms at 672 GB/s). The 3090 hit rate is not
 // published anywhere: the preset's 0.70 is a solution, not a measurement.
+//
+// The two V100 presets (update of 2026-10-06) share one CPU speed, 14 GB/s,
+// so the only differences are the ones the engines make. E = 1.504 GB (the
+// UD-Q4_K_XL routed tensors, 77.0 GB over 24,576 experts × 480) and D = 4.83
+// GB (every other tensor except the embedding and the PLE table), both summed
+// from the GGUF shards' headers. h = 0.38 is the paper's Figure 3 curve at the
+// ~2,775 experts 8.1 GiB holds; p = 0.55 × 12/20 for a Gen3 x16 link that
+// probes at an assumed 12 GB/s; L = 3 and the 10 ms of drafting are guesses
+// (that dashboard does not show Strata's acceptance). The second preset is a
+// llama.cpp-style run with the experts on the CPU: no cache, no PCIe lane, no
+// drafts. Neither is a measurement of that box.
 
 type Params = {
   bg: number
@@ -65,6 +76,20 @@ const PRESETS: Preset[] = [
     p: { bg: 936, bp: 25, bc: 25, d: 3.54, e: 0.98, h: 0.7, p: 0.55, t: 4, l: 3.29, fix: 6.3 },
     measured: 97.0,
     mlabel: "reported 97.0 (video frame)",
+  },
+  {
+    key: "v100",
+    label: "V100 16 GB · UD-Q4_K_XL · Strata",
+    p: { bg: 900, bp: 12, bc: 14, d: 4.83, e: 1.504, h: 0.38, p: 0.33, t: 4, l: 3, fix: 10 },
+    measured: 20.0,
+    mlabel: "reported ~20 (VectorCrossProd)",
+  },
+  {
+    key: "v100cpu",
+    label: "V100 16 GB · experts on CPU",
+    p: { bg: 900, bp: 12, bc: 14, d: 4.83, e: 1.504, h: 0, p: 0, t: 1, l: 1, fix: 1 },
+    measured: 9.0,
+    mlabel: "reported ~9 (llama.cpp)",
   },
 ]
 
@@ -267,7 +292,8 @@ export function WindowTimeline() {
       <figcaption className="border-t px-4 py-2 text-xs text-muted-foreground">
         {r.x.toFixed(2)} GB of distinct experts per window: {r.hit.toFixed(2)} from VRAM, {r.pcie.toFixed(2)} over PCIe,{" "}
         {r.cpu.toFixed(2)} on the CPU. A ceiling, not a prediction: on the 5070 the paper measured 82% of it for Q2_0 and
-        67% for IQ3_XXS. The 3090 preset&apos;s hit rate is solved for, not published.
+        67% for IQ3_XXS. The 3090 preset&apos;s hit rate is solved for, not published; the V100 presets share one
+        assumed CPU speed, so only the cache, the PCIe lane and the drafts differ between them.
       </figcaption>
     </figure>
   )
