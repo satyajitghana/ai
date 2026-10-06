@@ -1,0 +1,381 @@
+---
+title: "Strata in the source: one verify window, three workers and a cache that learns"
+description: "Ten days after the site first checked Strata against the memory bus, the repository has gone from 4 commits to 1,152, gained an MIT licence, replaced its 'output is not correct' warning with a measured A/B, and learned to sample. I read the engine at commit 1735d64: the doorbell that hands each layer's routed experts to the CPU mid-graph, the per-layer plan that splits misses between the VRAM cache, the PCIe copy engine and six AVX-512 cores, the 2-bit and codebook CPU kernels, the cache's replacement rule, the MTP verify window and the KV layout behind a 142,550-token prompt. Then I rebuild the 3090 run at 97 tok/s from those constants: it needs a VRAM hit rate between about 0.70 and 0.86, and its slowest lane is not the RAM, which is why DDR4 and DDR5 measured almost the same."
+date: 2026-10-06
+tags:
+  - inference-optimization
+  - mixture-of-experts
+  - offloading
+  - speculative-decoding
+  - kernels
+  - cuda
+  - on-device
+  - qwen
+  - systems
+draft: false
+---
+
+import { WindowTimeline } from "@/components/articles/strata-engine/window-timeline"
+
+Two posts this week pointed at the same repository. A Chinese post by
+[@Lonely__MH](https://x.com/Lonely__MH/status/2106916027699245509) said that
+"MoE heterogeneous parallelism" runs the 125B Qwen 3.8 Flash Next on 12 GB of
+VRAM at over 80 tok/s, and ended with *"有谁试试吗？我不信"*: has anyone tried it, I
+don't believe it. A few days earlier
+[@needmorevram](https://x.com/needmorevram/status/2106059795128307911) had posted a
+screen recording of the same engine on one RTX 3090: 97 tok/s on a 2,421-token
+prompt, 54.1 tok/s on a 142,550-token one, MTP drafts accepted 87% of the time at
+3.29 tokens per step.
+
+The site has covered Strata twice. [TensorFold and Strata](/articles/tensorfold-strata-engines)
+checked the launch numbers against bytes per token and found the 65 tok/s claim
+real but paired with an untuned baseline. [A 200 GB MoE on one RTX 3090](/articles/big-moe-one-3090)
+read the 3090 frame and argued that the CPU's arithmetic, not the DDR bus, sets
+the pace. I will not redo either. This piece reads the code: what happens in one
+verify window, in what order, with which constants, and what those constants say
+about the 3090 run.
+
+<RepoCard repo="Niko1221/Strata" />
+
+## What changed since 26 September
+
+I cloned the repository with full history at commit `1735d64` (6 October, 03:07
+CEST). The first article described 4 commits and no licence. Now (**measured**,
+from `git log`):
+
+- **1,152 commits**, 1,147 of them since 26 September, from 132 author names.
+  Niko1221 wrote 700. There are 41 `v0.1.x` tags; `v0.1.40` is from today.
+- **An MIT licence**, added on 28 September. `third_party/ggml` keeps its own MIT
+  notice.
+- **The cache warning is gone.** The first article quoted a start-up message that
+  said the GPU hit path *"is NOT CORRECT"*. On 27 September the author ran the A/B
+  the article asked for, in `bench/results/2026-09-27-cache-parity`: teacher-forced
+  over 2,557 tokens of three texts, cache on against cache off, the top-1 token
+  agreed at 95.0-97.7% of positions and perplexity moved by -0.005 ± 0.005 nats per
+  token (**reported**). The flips are near-ties: a GPU expert and a CPU expert sum
+  the same quantized product in a different order. Engine 0.1.8 replaced the
+  warning.
+- **Sampling and a conversation cache.** The paper said decoding was greedy and
+  every request re-read its prompt. Both are fixed; the sampling turns out to use
+  the same trick as TensorFold (below), and `--prompt-cache` keeps 6 checkpoints of
+  about 118 MB each (`src/program/generate.cpp:582`).
+- **More hardware:** AMD through HIP, an Intel Arc port, multi-GPU layer splits, a low-RAM mode.
+
+Two things did not change. The engine is still 101,329 lines of C++ and CUDA
+written around one model's shape (**measured**, `wc -l` over `src` and
+`include`). And the llama.cpp-oracle tests are still left out: `CMakeLists.txt:94`
+says *"The test suite and the micro benchmarks live in tests/ and bench/micro/,
+which the published source leaves out"*, and `ref/` still holds only `load.py`.
+
+## The byte budget, in code
+
+<Figure
+  src="/articles/strata-engine/fig1.png"
+  alt="Strata's explainer card: the model is made of 24,576 small experts, and each word asks only 10 of them. The graphics card (12-24 GB) runs the core of the model for every word and keeps about 4,000 of the most-used experts. RAM and the processor (32-64 GB) hold all 24,576 experts, and the CPU computes the ones the card does not have, at once. The SSD holds a 29 GB lookup table read a few rows per word."
+  caption="The split Strata is built around, as its own docs draw it. The card's '~4,000 experts' is the 12 GB case; a 24 GB card holds more than twice that (Strata README, docs/media/how-it-works.svg)."
+/>
+
+Everything below is sized from four numbers in the source. The model has 48
+layers of 512 experts, each `2,560 × 640` for gate, up and down
+(`include/strata/core/layout.hpp:28-56`), and the router picks 10. The Q2_0 format
+stores 64 weights as 16 bytes of 2-bit codes plus an fp16 scale, so one expert is
+fixed at compile time:
+
+```cpp
+// include/strata/kernels/cpu/expert.hpp:34-45
+inline constexpr int H = 2560;      // n_embd
+inline constexpr int FF = 640;      // expert intermediate width
+inline constexpr int QK = 64;       // QK2_0: weights per fp16 scale
+inline constexpr size_t BLOB = 3ull * (H * FF * BB / QK);   // 1,382,400
+```
+
+`3 × 2,560 × 640 × 18 / 64` is 1,382,400 bytes, 2.25 bits a weight. The i-quant
+packs keep each expert's raw GGUF slices, so their blob size varies by layer.
+`setup.py` lists the arenas: 34.0 GB for Q2_0 and 50.3 GB for IQ3_S, the file the
+3090 ran. Divided over 24,576 experts that is 2.05 MB per IQ3_S expert, and one
+token's 480 routed experts read **0.98 GB** (**reasoned**). The first article's
+0.66 GB for Q2_0 still holds.
+
+## One layer: the doorbell
+
+A GPU running a captured CUDA graph does not stop halfway to ask the host for
+help. Strata needs it to: the router's 10 ids decide which experts the CPU must
+compute, and the CPU should start before the layer is over. The answer is a
+"doorbell", a few bytes of mapped pinned memory the graph writes with a kernel.
+The comment above the struct records how the author got there:
+
+```cpp
+// include/strata/core/layer.hpp:411-419
+///   * **THE WAIT MUST POLL THE DRIVER.**  Round 195: a host spin that only reads a memory location never runs
+///     the kernel - 5,907,703 spins over 500 ms and the datum flips the instant `cudaStreamSynchronize` is
+///     called and never before, because on Windows the driver BATCHES command submission and a memory-only
+///     spin gives it no reason to flush.  So `h_seq` is read AND `cudaEventQuery` is called, which is a query
+///     and not a blocking sync - P2.X3's "zero synchronization calls in the layer loop" still holds.
+///   * **THE WRITE MUST BE CAPTURABLE, AND A KERNEL IS.**  Round 199: `cudaEventRecord` inside a capture is
+///     SILENTLY DROPPED - 2 nodes for two kernels plus an event record, and the event never completed across a
+///     41 ms graph.  A mid-graph doorbell KERNEL is captured normally, and round 209 measured the host seeing a
+///     pinned handoff **0.050 ms** into a 39.8 ms graph.
+```
+
+So each layer is two graphs. `block_layer_pre` runs attention or DeltaNet, the
+hyper-connection read and the router, then rings the bell and computes the shared
+expert while the host works. `block_layer_post` combines the routed outputs with
+this layer's own router weights. The header explains why the split is in the
+graph and not in time: an earlier version handed layer *l*'s CPU results to layer
+*l+1* to win overlap, and produced *"a finite, fluent, deterministic token that is
+not the model's"* (`layer.hpp:182`). The consequence it draws is the design's
+thesis: *"A per-layer CPU pool cannot be hidden behind a strictly serial residual
+chain"*. The CPU's time can only be shortened, by giving it fewer experts.
+
+## The plan: three destinations per expert
+
+When the bell rings, the host runs `expert_pool_dispatch_multi` over every token
+of the verify window at once. It first dedups the window's routed ids, so an
+expert two drafts both chose is computed once for both. Then it counts the
+distinct misses and gives the GPU a share of them:
+
+```cpp
+// src/core/expert_source.cpp:2473 and 2494
+const int m = pcie_ok ? (nmiss * d.pcie_num) >> 8 : 0;
+...
+if (miss_rank >= nmiss - m && fetches < P.staging_cap && fetches < 64) {
+```
+
+`pcie_num` is the PCIe share in 256ths. The last `m` misses in routing order are
+copied by the GPU's copy engine into staging slots; the rest become CPU jobs.
+Hits are published to the GPU first, so the GPU starts on cached experts while the
+DMA and the CPU run. The default share depends on the pack:
+
+```cpp
+// src/program/generate.cpp:550
+double pcie_frac = -1.0;   ///< < 0: the model's default (0.2 direct for the Q2_0 pack, 0.55 DMA for native packs)
+```
+
+The reason for the difference is the paper's ninth finding: Q2_0's CPU kernel
+already uses the RAM's bandwidth, so DMA would steal from it; the i-quants'
+CPU is arithmetic-bound and leaves bandwidth free. Since 0.1.20 a probe measures
+the link at start and scales the i-quant share down below 20 GB/s
+(`generate.cpp:1497`: `base * min(1.0, gbps / 20.0)`), so an x8 slot gets about
+half the share. This is [FreeToken's](/articles/freetoken) split, with a fixed
+share per format instead of FreeToken's per-machine optimum.
+
+The window shape matters as much as the split. The verifier's header gives the
+union of a window's missed experts as a multiple of one token's: *"1.75x one
+token's misses for T=2, 2.4x for 3, 3.05x for 4"* (`include/strata/core/verify.hpp:11`,
+**reported**, measured on the author's decode traces). Four tokens share a fifth
+of their experts. That is the only sharing the first article's roofline left out.
+
+The widget puts those constants together: the dense read, then three lanes that end with the slowest (GPU experts, the PCIe copy, the CPU's misses), then drafting and commit.
+
+<WindowTimeline />
+
+It is a ceiling. With the paper's Table 5 inputs it gives 116 tok/s for Q2_0 against 94.6 measured, and 97 for IQ3_XXS against 65.6 (**reasoned**). Much of the gap is structure it cannot see: each of 48 layers waits for its own slowest lane, and a sum of maxima exceeds the maximum of sums.
+
+## The CPU kernels
+
+**Q2_0 on AVX-512.** The weights are codes `{0, 1, 2, 3}` meaning
+`{-1, 0, 1, 2} × scale`. The kernel unpacks 64 of them with one
+`vpmultishiftqb`, multiplies them against int8 activations with one VNNI
+`vpdpbusd`, and removes the offset of 1 with a correction term computed once per
+eight blocks:
+
+```cpp
+// src/kernels/cpu/expert.cpp:155-160
+inline __m512i unpack64_q2_0(const uint8_t* codes) {
+    const __m128i packed = _mm_loadu_si128((const __m128i*) codes);          // 8 u16 = 64 codes
+    const __m512i lanes = _mm512_cvtepu16_epi64(packed);                    // 8 qwords, 8 codes each
+    const __m512i ctrl = _mm512_set1_epi64((long long) 0x0E0C0A0806040200ULL);
+    return _mm512_and_si512(_mm512_multishift_epi64_epi8(ctrl, lanes), _mm512_set1_epi8(3));
+}
+```
+
+The comment above it says the 256-bit version *"spent ~12 cycles per 64-weight block"*, compute-bound at about 39 GB/s *"while the machine streams 52"* (`expert.cpp:146-148`, **reported**). Another records that the multishift argument order in Intel's guide gave 43 of 64 wrong codes.
+
+**i-quants.** IQ3_XXS stores 256 weights in 98 bytes. Each group of four weights
+is an 8-bit index into a 256-entry grid, and signs come from a 7-bit index into a
+sign table. `src/kernels/cpu/iq_avx512.cpp` decodes 64 weights as 16 grid lookups
+and 8 sign lookups assembled into one 512-bit vector and a 64-bit mask, then
+applies them to every token of the window with a masked subtract, a `maddubs` and
+a `madd`. The header names the point: ggml's kernels are *"single-token: every
+token re-decodes the weights"*, here *"64 values are decoded once"* for up to 8
+tokens. A one-instruction gather of the grid was tried and measured *"3-5% SLOWER
+than the scalar lookups on a Ryzen 5 7600 (Zen 4 gathers are microcoded)"*, so it
+is opt-in there.
+
+The 3090 run's i5-13600K has no AVX-512. It runs the AVX2 forms in
+`iq_avx2.cpp`, with AVX-VNNI where the CPU has it (*"the same integer sums, 4-25%
+faster rows"*, `docs/DETAILS.md`) and a gathered grid decode that turns on
+automatically on Alder Lake and newer P-cores. The canonical Q2_0 pack is
+AVX-512-only, so that machine runs only the native packs.
+
+**The pool.** `include/strata/kernels/cpu/pool.hpp` is a flat batch, not a queue,
+because a layer is a barrier. Each phase (gate and up rows, then a requantize,
+then down rows) is cut into three tasks per thread so the tail is short, and a
+claim is a CAS on one 64-bit `epoch | njobs | index` word so a worker that woke
+late cannot take a job from the next batch. One core is kept for the host thread
+that spins on the doorbell, and the comment says why it is pinned: the pool ran
+at *"36.32 GB/s on 5 workers with nothing else running"* and at *"26.9 GB/s inside
+the host loop"* when the host was free to land on a worker's core
+(`pool.hpp:112-114`, **reported**).
+
+## The cache's replacement rule
+
+At start the VRAM tier is filled from a shipped profile that ranks all 24,576
+`(layer, expert)` pairs. Then every routed id bumps a float counter
+(`expert_source.cpp:2444`), and every fourth round the tier swaps:
+
+```cpp
+// src/program/generate.cpp:6736-6748 (per layer)
+if (r[e] < 0) { if (u[e] >= 2.0f && ...) cand.emplace_back(u[e], e); }   // a hot non-resident
+else vict.emplace_back(u[e], e);                                          // a resident
+...
+for (size_t i = 0; i < nc; ++i) {
+    if (cand[i].first < vict[i].first + 1.5f) break;
+    swaps.push_back({cand[i].first - vict[i].first, (int32_t) l, cand[i].second, vict[i].second});
+}
+```
+
+In words: per layer, pair the hottest missing experts with the coldest resident
+ones; swap only while the newcomer's decayed count beats the resident's by 1.5 and
+is at least 2. Across layers, keep the 96 largest gains. After each round every
+counter is multiplied by 0.7 (`--adapt-decay`, `generate.cpp:555`). The evicted
+expert stops being planned for the GPU at once; the new one is planned only once
+its copy has landed (`apply_pending`), which is the paper's tenth finding, worth
+91.7 to 94.4 tok/s at 4K (**reported**).
+
+It is LFU with exponential decay and hysteresis, and it is the reason the paper's
+profile-only hit rate of 0.50 becomes 0.72. It also has a cost the docs state
+plainly: the GPU and the CPU round an expert differently, so a cache that adapts
+to the conversation makes sampled output non-reproducible across runs unless you
+pin it with `--adapt-every 100000`.
+
+## Drafting and verifying
+
+<Figure
+  src="/articles/strata-engine/fig2.png"
+  alt="Strata's explainer card 'Guess, then check - many words per step'. A helper guesses def, reverse, (items and ):. The big model confirms the first three, rejects the fourth and writes ', key):' itself, so four words come out of one step: three guesses kept plus its own word."
+  caption="The verify window as the README draws it: drafts are proposals, every kept token is the full model's own (Strata README, docs/media/guess-and-check.svg)."
+/>
+
+Setup launches the engine with `--spec 4 --spec-min-p 0.5` (`setup.py:4775`): a
+window of up to four tokens, the last committed one and up to three drafts, and a
+draft enters only while the drafter is at least 50% sure. The drafter is the
+model's own MTP layer, fetched from the BF16 checkpoint because the GGUF files
+lack it. `include/strata/core/mtp.hpp` lists what it trades: Q8_0 projections,
+dense attention over the last 32,768 cells instead of the sparse selection, and
+*"all 512 routed experts live in VRAM (708 MB)"*, so drafting never touches the
+CPU. Its head covers a token subset, 106,299 ids by default since 0.1.27 so that
+Chinese, Japanese and Korean get drafts too; the same vocabulary trimming the
+site traced in [HauhauCS FastMTP](/articles/hauhaucs-qwen-fastmtp).
+
+The verifier's contract is the strong one: *"Token t's argmax is what plain greedy
+decode would produce after token t, BIT FOR BIT"* (`verify.hpp:5-6`). Every
+multi-token kernel does per token what the single-token kernel does, so a draft is
+accepted exactly when greedy decoding would have produced it.
+
+Sampling keeps that property, and the way it does is worth noting.
+`include/strata/core/coupled_draft.hpp` says the verify row at position *p* samples
+with Philox keyed by the seed and *p*, and *"a draft is kept only when it EQUALS
+that row's pick. The output is therefore a function of the seed alone, whatever
+the drafts are"*. That is TensorFold's keyed-Gumbel construction from the first
+article, arrived at independently, and it has the same price: an exact-match test
+accepts less often than rejection sampling. An opt-in `STRATA_SPEC_COUPLED=1`
+makes the drafter sample with the same uniform the target will draw, to win some
+of that back.
+
+How deep to draft is learned. `src/spec/draft_policy.cpp:12` starts from a cost shape measured on the 5070, windows of 1, 2, 3 and 4 tokens costing 1.0, 1.35, 1.7 and 2.05 single-token rounds, and replaces it with running averages. Each extra token costs a third of a round because it brings its own misses.
+
+## 142,550 tokens of context
+
+Only 12 of the 48 layers keep a KV cache; the other 36 are Gated DeltaNet with a
+fixed state. Each attention layer has 2 KV heads of 256 dimensions, and
+`setup.py:120` prices a token at 1,056 bytes per attention layer in 8-bit, 13
+layers counting the drafter: 13.7 KB a token. A 142,550-token prompt is **1.96
+GB** of KV (**reasoned**), about a tenth of what a 24 GB card has left for experts.
+
+From 64K up, setup streams it: `--kv-resident 32768` keeps 32,768 cells in VRAM,
+0.45 GB, and the rest in pinned RAM. The paper's sparse attention reads at most
+about 2,048 selected positions per query, so decode reads a bounded slice
+whatever the length; what streaming buys is room for experts. On the 5070 at 262K
+it raised the cache from 1,589 to 3,872 experts and Q2_0 from 50.9 to 62.6 tok/s
+(**reported**, `docs/DETAILS.md`). In the 3090 thread, needmorevram tells another
+user *"You can get more speed by adding kv resident 32768"*: that is this flag.
+
+## The 3090 run, rebuilt
+
+<Figure
+  src="/articles/strata-engine/fig4.png"
+  alt="A terminal dashboard named LLM VISUALS watching the process strata. Decode at 89.0 tok/s on an RTX 3090 at 99% load and 335 W, VRAM 23.3 of 24.0 GB, system RAM 60.2 of 67.2 GB. The speculative panel shows draft-mtp accepting 87% at 3.29 per step, session 87%, 10,257 of 11,813. The request table lists request 7 with a 2,421-token prompt at 95.7 tok/s decode and request 4 with a 142,550-token prompt, 2,473 cached, 305 generated, prefill 34,878 t/s, decode 54.1 tok/s, time to first token 1m09s."
+  caption="A later frame of the same recording the 3090 article used. The dashboard is a third-party monitor reading the strata process, not Strata's own Monitor tab; its prefill column is wrong, as the author says in the replies (needmorevram's post, video frame at 30 s)."
+/>
+
+Read off this frame (**reported**): the drafter accepted 10,257 of 11,813 drafts,
+86.8%. At 3.29 tokens per step that is 2.29 accepted drafts a window, so about
+2.63 offered: most windows were full four-token windows (**reasoned**). The
+142,550-token request generated only 305 tokens, so its 54.1 tok/s is a short
+sample. Its time to first token was 1 minute 9 seconds for 140,077 fresh tokens,
+about 2,030 tok/s of real prefill; the 34,878 in the prefill column is the
+error the author mentions (**reasoned**).
+
+Now the window. At 97 tok/s and 3.29 tokens a step, a window takes 33.9 ms. Four
+tokens route to 3.05 × 480 distinct experts, 2.99 GB of IQ3_S. With the 0.55 PCIe
+share, PCIe and CPU at 25 GB/s each, the dense read at half of 936 GB/s (the Q2_0 file's 3.54 GB; the IQ3_S file's dense bytes are not published) and the paper's 6.3 ms of drafting and commit, the widget's 3090 preset lands at 97.9
+tok/s with a hit rate of **0.70** (**reasoned**). If the 3090 sits as far below
+its ceiling as the 5070 did (0.82 for Q2_0, 0.67 for IQ3_XXS), the hit rate is
+**0.79 to 0.86** instead. Setup's own sizing rule leaves a 24 GB card about 19 GB
+for experts (`setup.py`: VRAM minus 5 GB), about 9,300 IQ3_S experts, 38% of them.
+The paper's profile-only curve gives at least two thirds at that size, and the
+adaptive tier adds to it, so the range is plausible. Nobody has published the
+number; the server's `/metrics` endpoint reports it as `hit_rate`.
+
+The frame also answers the DDR question. In this solution the slowest lane is
+PCIe, 19.7 ms, with the CPU at 16.1 ms close behind, and the two together read RAM
+at about 27 GB/s. Dual-channel DDR4-3200 offers 51.2 GB/s at peak and DDR5-5200
+83.2, so neither bus binds (**reasoned**). That is why *"the difference was so
+tiny"*. The two levers left are the ones the paper names: more VRAM for the cache,
+and cheaper i-quant arithmetic on the CPU.
+
+Other runs fit the same shape and are unverified (**reported**): a 4090 with 64 GB at 95 tok/s and a 3080 10 GB at 10, in replies to the Chinese post, and a 4090 D with an i9-14900KF on IQ3_S at a p50 of 111.7 tok/s ([ferstar's log](https://blog.ferstar.org/posts/qwen38-flash-next-strata-4090/)).
+
+## What the 80+ is, and one thing it is not
+
+The README's own table, on the author's RTX 5070, 12 GB and Ryzen 5 7600, says
+94 tok/s for Q2_0 at 4K on engine 0.1.36, and 79 for IQ2_XS and 53 for IQ3_S on 0.1.26 (**reported**). So "12 GB and 80+" is true for the 2-bit files at short context,
+on a CPU with AVX-512. It is not true for IQ3_S, the file the 3090 ran, and the same card at 128K gives 76.4 for Q2_0 on 0.1.36.
+
+<Figure
+  src="/articles/strata-engine/fig3.jpg"
+  alt="Strata's web Monitor tab on an RTX 5070 beside a coding agent writing a voxel pagoda garden. Speed 50.4 tok/s, GPU load 88%, VRAM 11.2 of 12 GB with 1,644 experts cached, PCIe Gen4 x16, CPU 14% on 6 cores, context 37K of 128K, system RAM 58.5 of 63 GB. The recent-requests table marks each request ESP and lists a 17,183-token prompt with 19,511 output tokens at 50.4 tok/s."
+  caption="The author's own Monitor tab on the 12 GB card, IQ3_S at 128K: 50.4 tok/s over a 19,511-token answer, 1,644 experts in VRAM. Each request is tagged ESP, the experimental speed projection discussed below (Strata README, docs/media/runpagoda.png)."
+/>
+
+The Monitor tags those requests **ESP**, the "experimental speed projection". It
+is off by default, and its own section of `docs/DETAILS.md` is candid about what
+it is: a control vector that projects one direction out of the residual stream in
+layers 4-44, which its package describes as *"a refusal-direction projection"*.
+It costs 0.2-0.4% per token rather than saving any, moves the top-1 token at 10%
+of positions, and raises perplexity on code by 15% (**reported**). The name says
+speed; the mechanism is a safety change. The docs say so, and the replies to the
+Chinese post show some users run it for that reason. A tok/s figure taken with it
+on is a measurement of a different model.
+
+## What I would take from it
+
+The engine has a habit worth copying: the measurement that justifies a line is written in the comment above it. Reading those comments is the fastest way to understand it.
+
+Three constants carry the design. **The doorbell** lets a captured graph hand
+work to the CPU mid-layer in 0.050 ms. **The plan** sends each distinct missed
+expert to one of three workers, with a PCIe share fixed per format and scaled by a
+probe. **The cache** is decayed LFU with hysteresis that trades reproducibility
+for 22 points of hit rate. Everything else, the kernels, the drafter, the KV
+streaming, exists to make one of those three cheaper or to give the cache more
+room.
+
+<ChangeMyMind>
+<Falsifier claim="The 3090 run at 97 tok/s implies a VRAM hit rate between about 0.70 and 0.86.">
+Read `hit_rate` and `pcie_share` from `GET /metrics` for the 2,421-token request. Below 0.65 would mean the CPU or PCIe lanes are faster on that box than the paper's 25 GB/s.
+</Falsifier>
+<Falsifier claim="On the i-quant files, RAM speed barely matters because neither the PCIe lane nor the CPU's codebook arithmetic is limited by the DDR bus.">
+`STRATA_DECODE_TIMING=1` prints the window split. If the CPU pool's time drops by a third between DDR4 and DDR5 on the same i5-13600K, the CPU is bandwidth-bound after all.
+</Falsifier>
+</ChangeMyMind>
