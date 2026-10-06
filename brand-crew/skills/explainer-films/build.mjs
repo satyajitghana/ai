@@ -58,9 +58,12 @@ const CACHE = process.env.EXPLAINER_CACHE || join(homedir(), '.cache', 'explaine
 // the Python with Kokoro and the ffmpeg to use (a render machine may keep its own)
 const PY = process.env.EXPLAINER_PYTHON || 'python3', FF = process.env.EXPLAINER_FFMPEG || 'ffmpeg'
 // --live: the live tier (render.mjs --live): fresh p5.brush paint on every
-// drawing at 1920x1080, shipped at 1280x720. Without it, the lite tier.
-const live = !!opt.live, tier = live ? 'live' : 'lite'
-const liveFlag = live ? ['--live'] : []
+// drawing at 1920x1080, shipped at 1280x720. --p5: the p5 tier (render.mjs
+// --p5): a real p5.js canvas that p5.brush paints straight into, at the same
+// sizes. Without either, the lite tier.
+if (opt.live && opt.p5) throw new Error('--live or --p5, not both')
+const live = !!(opt.live || opt.p5), tier = opt.p5 ? 'p5' : live ? 'live' : 'lite'
+const liveFlag = opt.p5 ? ['--p5'] : live ? ['--live'] : []
 export const VOICE = 'af_heart'
 
 const all = storyboardKeys()
