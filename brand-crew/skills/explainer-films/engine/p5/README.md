@@ -76,3 +76,18 @@ p5.brush's own work: a watercolour wash rasterizes its fill mask in Canvas2D
 and uploads it (`getShaderMask`), about half of a frame. `render.mjs strip
 ... --profile` splits PB.stats into brush, up, back, fade and cover with the
 GPU drained at each edge; `--cpuprofile=file` writes a V8 profile of the frames.
+
+## Per style
+
+- **sumi** (`sumi.js`): washes landed at twice multiply's tint (they all but
+  vanished); a closed outline of many vertices is painted as one stroke per
+  side of its bounding box, since brush.polygon's stroke-per-edge beaded the
+  sumi brush round every rounded box. The host's outline (`PB.loops`) still
+  beads: it is brush.polygon in p5tier.js.
+- **engraving** (`engraving.js`): the host's ruled tone without hatch
+  `gradient`, which compounds across the sheet into stripes ~34 px apart;
+  now even rules ~13 px apart.
+- **stipple**: no file; the dots land crisper and as dense as live.
+- **calligraphy** (`calligraphy.js`): tints landed at 1.5x multiply's tint;
+  the nib is unchanged.
+- **notebook**: no file; pen and marker hatching match the live tier.
