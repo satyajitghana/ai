@@ -38,8 +38,26 @@ scaled up hard-edged on purpose and should stay as it is.
 
 ## Cost
 
-Every hand-off between Canvas2D and the p5 canvas (a texture upload, then a
-readback when 2D drawing resumes) costs ~20 ms on the farm's UHD 770; a
-diagram drawing has ~15, and a motion-blurred frame repeats them per sub-paint.
-On the pilot strip that was 80% of the brush time. Runs of brush ops share one
-hand-off; a style that interleaves 2D and brush calls less paints faster.
+Every hand-off between Canvas2D and the p5 canvas is a texture upload one
+way or a readback the other (~10 ms each at 1920x1080 on the farm's UHD 770,
+plus the GPU work it waits for). When every brush op paid both, that was 80%
+of the brush time. `p5tier.js` now hands the frame to the p5 canvas once per
+frame and keeps it there: 2D drawing in between lands on G's emptied canvas as
+an overlay and is uploaded over the frame before the next brush op; faded ops
+are faded on the GPU (a framebuffer copy laid back at 1 - a); covering media
+un-mix on the GPU in one shader pass. A readback happens only at the end of
+the frame (or sub-frame, under motion blur) and before 2D drawing that needs
+the pixels under it: a composite other than source-over (multiply, screen,
+destination-*), a clip, a clear, a put or a read. A style that multiplies or
+clips between brush ops costs a readback there, so prefer source-over for 2D
+marks laid between brush work.
+
+Measured on the farm (sail-robot-trajectories, 22-24 s strip, 49 frames,
+watercolour): 1.41 s/frame before, 1.10 after. A thumbnail painted again in
+the same page (the steady state of a batch): watercolour (the same film)
+0.73 s before, 0.46 after; pastel (jepa-anything) 1.08 s before, 0.40 after,
+since covering media no longer read back. What remains is
+p5.brush's own work: a watercolour wash rasterizes its fill mask in Canvas2D
+and uploads it (`getShaderMask`), about half of a frame. `render.mjs strip
+... --profile` splits PB.stats into brush, up, back, fade and cover with the
+GPU drained at each edge; `--cpuprofile=file` writes a V8 profile of the frames.

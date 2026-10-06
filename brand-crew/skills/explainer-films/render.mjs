@@ -53,13 +53,15 @@ const files = args.slice(1).filter(a => !a.startsWith('--'))
 // (engine/p5tier.js). A style's p5-tier code, when it has any, is its own
 // file, engine/p5/<style>.js, loaded after the engine. --eager hands the
 // frame back to Canvas2D after every brush op (a reference: it must match the
-// default pixel for pixel); --trace prints each op's hand-off with a thumb.
+// default to within rounding); --trace prints each op's hand-off with a thumb;
+// --profile waits for the GPU around every hand-off, so PB.stats splits the
+// time into brush, upload, readback and fade (slower; for measuring only).
 const P5_DIR = join(HERE, 'engine', 'p5')
 async function openPage(browser) {
   const big = opt.live || opt.p5
   const page = await browser.newPage({ viewport: big ? { width: 1920, height: 1080 } : { width: 1280, height: 720 } })
   if (opt.live) await page.addInitScript(() => { self.LIVE_TIER = true; self.TIER_OUT = [1920, 1080] })
-  if (opt.p5) await page.addInitScript(o => { self.P5_TIER = true; self.TIER_OUT = [1920, 1080]; self.P5_EAGER = o.eager; self.P5_TRACE = o.trace }, { eager: !!opt.eager, trace: !!opt.trace })
+  if (opt.p5) await page.addInitScript(o => { self.P5_TIER = true; self.TIER_OUT = [1920, 1080]; self.P5_EAGER = o.eager; self.P5_TRACE = o.trace; self.P5_PROFILE = o.profile }, { eager: !!opt.eager, trace: !!opt.trace, profile: !!opt.profile })
   page.on('pageerror', e => console.error('page error:', e.message))
   await page.goto(pathToFileURL(join(HERE, 'studio.html')).href)
   await page.evaluate(() => window.READY)
@@ -101,6 +103,9 @@ async function prepMedia(page, sb) {
 async function sheet(page, sb, times, cols, w, out, labels = true) {
   await prepMedia(page, sb)
   const info = await page.evaluate(sb => FILM.load(sb), sb)
+  // --cpuprofile=file: a V8 CPU profile of the frames (for finding where a tier spends its time)
+  let cdp = null
+  if (opt.cpuprofile) { cdp = await page.context().newCDPSession(page); await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 500 }); await cdp.send('Profiler.start') }
   const data = await page.evaluate(({ times, cols, w, labels, dump }) => {
     const h = Math.round(w * 720 / 1280), rows = Math.ceil(times.length / cols)
     const c = document.createElement('canvas'); c.width = cols * w; c.height = rows * (h + (labels ? 22 : 0))
@@ -114,8 +119,9 @@ async function sheet(page, sb, times, cols, w, out, labels = true) {
       g.drawImage(src, x, y, w, h)
       if (labels) { g.fillStyle = '#ddd'; g.font = '13px monospace'; g.fillText(t.toFixed(2) + 's', x + 6, y + h + 15) }
     })
-    return { url: c.toDataURL('image/jpeg', .9), full, ms: ms.reduce((a, b) => a + b, 0) / ms.length, msEach: ms.map(Math.round), pb: typeof PB !== 'undefined' && (PB.stats.bakes || PB.stats.ops) ? { ...PB.stats, ms: Math.round(PB.stats.ms), sync: Math.round(PB.stats.sync || 0) } : undefined }
+    return { url: c.toDataURL('image/jpeg', .9), full, ms: ms.reduce((a, b) => a + b, 0) / ms.length, msEach: ms.map(Math.round), pb: typeof PB !== 'undefined' && (PB.stats.bakes || PB.stats.ops) ? Object.fromEntries(Object.entries(PB.stats).map(([k, v]) => [k, Math.round(v)])) : undefined }
   }, { times, cols, w, labels, dump: !!opt.dump })
+  if (cdp) { const { profile } = await cdp.send('Profiler.stop'); writeFileSync(opt.cpuprofile, JSON.stringify(profile)) }
   mkdirSync(dirname(resolve(out)), { recursive: true })
   writeFileSync(out, Buffer.from(data.url.split(',')[1], 'base64'))
   if (opt.dump) { mkdirSync(opt.dump, { recursive: true }); data.full.forEach((u, i) => writeFileSync(join(opt.dump, `${sb.slug}-${times[i].toFixed(3)}.png`), Buffer.from(u.split(',')[1], 'base64'))) }
@@ -317,12 +323,13 @@ const main = async () => {
           const g = c.getContext('2d'), sh = src.width * h / w
           g.imageSmoothingEnabled = info.style !== 'pixel'; g.imageSmoothingQuality = 'high'
           g.drawImage(src, 0, (src.height - sh) / 2, src.width, sh, 0, 0, w, h)
-          return { ...info, ms, url: c.toDataURL('image/jpeg', q), full: full ? src.toDataURL('image/png') : null }
+          const pb = typeof PB !== 'undefined' && PB.stats.ops ? Object.fromEntries(Object.entries(PB.stats).map(([k, v]) => [k, Math.round(v)])) : undefined
+          return { ...info, ms, pb, url: c.toDataURL('image/jpeg', q), full: full ? src.toDataURL('image/png') : null }
         }, { sb, w, q, full: !!opt.full })
         const file = join(out, `${sb.slug}.jpg`)
         writeFileSync(file, Buffer.from(r.url.split(',')[1], 'base64'))
         if (r.full) writeFileSync(join(out, `${sb.slug}-full.png`), Buffer.from(r.full.split(',')[1], 'base64'))
-        console.log(JSON.stringify({ slug: sb.slug, file, bytes: statSync(file).size, scene: r.scene, style: r.style, mascot: r.mascot, ms: Math.round(r.ms) }))
+        console.log(JSON.stringify({ slug: sb.slug, file, bytes: statSync(file).size, scene: r.scene, style: r.style, mascot: r.mascot, ms: Math.round(r.ms), pb: r.pb }))
         if (opt.trace) console.log(JSON.stringify(await page.evaluate(() => ({ stats: PB.stats, trace: PB.trace }))))
       }
       }))

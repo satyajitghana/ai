@@ -11,29 +11,46 @@
 // The rest of the engine (ground, type, figures, the host's fills, overlays)
 // is Canvas2D on G, and stays so; it enters the p5 canvas in order, as the
 // animation kit's own paper and lettering do (claude-animation-base core.js,
-// image() of a 2D layer). The frame is handed between the two:
+// image() of a 2D layer). The frame is handed between the two, and every
+// hand-off is a texture upload one way or a readback the other, which (with
+// the GPU waits they force) was 80% of the brush time when each op paid both.
+// So the frame goes over to the p5 canvas once and mostly stays there:
 //
 //   op     p5.brush paints the shape into the p5 canvas with its own
-//          predraw/postdraw hooks (what p5 runs around a draw()). If G has
-//          been drawn on since the p5 canvas last matched it, G's canvas goes
-//          in first (a texture upload). The paint stays in the p5 canvas, so a
-//          run of brush ops (a node's wash, its outline, the arrows) is one
-//          hand-off, not one per op
-//   settle the p5 canvas comes back into G before anything else touches G:
-//          any 2D draw on the frame, a clip, a read of its pixels (from any
-//          context), the end of paintFrame. The frame's context is watched
-//          for those, so no caller has to know
-//   fade   a shape at alpha a, or under a clip (an op's own, or one already
-//          on G), is settled at once: it comes back at a, inside the clip,
-//          over what G held, which is the frame without it, so
-//          a*painted + (1-a)*before, exactly as a 2D drawImage would lay it
+//          predraw/postdraw hooks (what p5 runs around a draw()). The first
+//          op of a frame uploads G's canvas whole and empties it; from then
+//          on the p5 canvas holds the frame and G's canvas is an overlay
+//   overlay 2D drawing on the frame while the p5 canvas holds it lands on the
+//          emptied canvas, and goes into the p5 canvas (an upload laid with
+//          ONE / ONE_MINUS_SRC_ALPHA, which is 2D source-over) before the
+//          next brush op, so 2D and brush work keep their order. Source-over
+//          is associative, so drawing on the overlay and laying it over the
+//          frame is drawing on the frame, to within 8-bit rounding
+//   settle the p5 canvas comes back into G (the overlay first, then a readback
+//          with 'copy') when 2D drawing needs the pixels under it: any other
+//          composite (multiply, screen, a clear, a put), a clip, a read of
+//          its pixels from any context, the end of paintFrame. The frame's
+//          context is watched for those, so no caller has to know
+//   fade   a shape at alpha a (its own, times G's): the frame is copied aside
+//          on the GPU (a framebuffer blit), the op painted at full strength,
+//          and the copy laid back over it at 1 - a, which is
+//          a*painted + (1-a)*before, as a 2D drawImage at a would lay it.
+//          Under a clip (an op's own, or one already on G) the frame settles
+//          and the op comes back into G at a, inside the clip
 //   cover  an opaque medium (pastel, chalk, spray paint, a rotring on a
 //          dark sheet). p5.brush mixes every stroke into what is under it as
 //          transparent pigment, so a light chalk on a dark board mixes to mud
 //          instead of sitting on top. A covering op is painted on a plain
-//          ground in the p5 canvas, un-mixed into its colour at an alpha (as
-//          brushbake.js does) and laid on G with 'source-over', still fresh
-//          for every drawing and still in drawing order
+//          ground and un-mixed into its colour at an alpha (as brushbake.js
+//          does), on the GPU: the frame and the painting are copied aside and
+//          one shader pass writes the frame back with the colour laid over it
+//          at that alpha, inside the shape's neighbourhood. Under a clip, a
+//          filter or a shadow, the same is done through a readback and G
+//          (cover2d), still fresh for every drawing and in drawing order
+//
+// --eager (P5_EAGER) hands the frame back after every op through G, the
+// first design; it is the reference the default is diffed against (within
+// rounding: max 3/255 on a watercolour thumbnail, 4/255 on a pastel one).
 //
 // Every op is seeded from its geometry, its paint and the drawing (BOILN), so
 // a shape repaints identically across workers and boils on twos like the rest
@@ -44,10 +61,11 @@ const PB = (() => {
   const wraps = new Map(), textures = new Map(), curves = new Map()
   const stats = { ops: 0, ms: 0, sync: 0, uploads: 0, settles: 0 }
   // the hand-off: `mirror` is the 2D canvas the p5 canvas holds a copy of;
-  // `ahead`, it holds paint that canvas has not got yet; `stale`, that canvas
-  // was drawn on since. Only the frame's own canvas (MAIN) is left ahead;
+  // `ahead`, the p5 canvas holds the frame and that canvas only an overlay,
+  // what 2D drawing added since (`dirty`); `stale`, that canvas was drawn on
+  // since the two matched. Only the frame's own canvas (MAIN) is left ahead;
   // any other canvas an op lands on (a pixel style's small one) settles at once.
-  let mirror = null, ahead = false, stale = true, mainCtx = null, clipped = false
+  let mirror = null, ahead = false, dirty = false, stale = true, mainCtx = null, clipped = false
   const clipStack = []
   const C2D = CanvasRenderingContext2D.prototype, ORIG = {}
 
@@ -122,10 +140,24 @@ const PB = (() => {
     w.setModified(true)
     return w
   }
-  function upload(cv) {
-    const t0 = performance.now()
-    p.push(); p.resetMatrix(); p.clear(); p.imageMode(p.CORNER); p.noTint(); p.image(wrap(cv), -OUT_W / 2, -OUT_H / 2, cv.width, cv.height); p.pop()
-    stale = false; stats.uploads++; stats.sync += performance.now() - t0
+  // P5_PROFILE: wait for the GPU at each phase's edges (a 1-pixel read), so
+  // the time a hand-off spends waiting for brush work is the brush's, not the
+  // hand-off's. Off by default: it is a measurement, and it costs.
+  const px1 = new Uint8Array(4)
+  function drain() { if (self.P5_PROFILE) gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px1) }
+  function timed(key, f) {
+    drain(); const t0 = performance.now()
+    try { return f() } finally { drain(); const dt = performance.now() - t0; stats[key] = (stats[key] || 0) + dt; if (key !== 'brush') stats.sync += dt }
+  }
+  // G's canvas into the p5 canvas: the whole frame (over a cleared canvas), or
+  // an overlay of what 2D drawing added since, laid over it as a 2D
+  // source-over would (premultiplied, ONE / ONE_MINUS_SRC_ALPHA)
+  function upload(cv, over = false) {
+    timed('up', () => {
+      p.push(); p.resetMatrix(); if (!over) p.clear(); p.imageMode(p.CORNER); p.noTint(); p.blendMode(p.BLEND)
+      p.image(wrap(cv), -OUT_W / 2, -OUT_H / 2, cv.width, cv.height); p.pop()
+    })
+    stale = false; stats.uploads++
   }
   // the p5 canvas into a 2D context, through the context's untouched drawImage
   function lay(g, alpha, clip, tf, op) {
@@ -137,24 +169,41 @@ const PB = (() => {
     ORIG.drawImage.call(g, p.canvas, 0, 0, cv.width, cv.height, 0, 0, cv.width, cv.height)
     ORIG.restore.call(g)
   }
-  // the paint the p5 canvas is ahead by, into its 2D canvas (never under a clip: a clip settles first)
+  // the frame's canvas emptied, to collect the next overlay (never under a clip: in the p5's hands, a clip settles first)
+  function empty(g) {
+    ORIG.save.call(g); g.setTransform(1, 0, 0, 1, 0, 0); ORIG.clearRect.call(g, 0, 0, g.canvas.width, g.canvas.height); ORIG.restore.call(g)
+    dirty = false
+  }
+  // the frame, back from the p5 canvas into its 2D canvas: the overlay goes in
+  // first, then the whole p5 canvas comes back with 'copy'
   function settle() {
     if (!ahead) return
-    const t0 = performance.now()
     ahead = false
-    lay(mirror.getContext('2d'), 1, null, null, 'copy')
-    stats.settles++; stats.sync += performance.now() - t0
+    if (dirty) upload(mirror, true)
+    dirty = false
+    timed('back', () => lay(mirror.getContext('2d'), 1, null, null, 'copy'))
+    stale = false; stats.settles++
   }
-  // Watch the frame's context: settle before anything draws on it, clips it
-  // or reads it, and note that it changed. Reads of it from other contexts
-  // come through drawImage on the prototype.
+  // Watch the frame's context. While the p5 canvas holds the frame, its 2D
+  // canvas is an overlay: a draw that composites source-over (most of them:
+  // fills, strokes, type, images, at any alpha, blurred or shadowed) lands on
+  // it and goes into the p5 canvas, in order, before the next brush op. One
+  // that needs the pixels under it (multiply, screen, a clear, a put, a clip,
+  // a read of its pixels from any context) settles first.
   function watch(ctx) {
     mainCtx = ctx
-    for (const m of ['save', 'restore', 'clip', 'drawImage', 'getImageData']) ORIG[m] = C2D[m]
+    for (const m of ['save', 'restore', 'clip', 'drawImage', 'getImageData', 'clearRect']) ORIG[m] = C2D[m]
     const writes = ['fill', 'stroke', 'fillRect', 'strokeRect', 'clearRect', 'fillText', 'strokeText', 'drawImage', 'putImageData', 'reset']
+    const over = new Set(['fill', 'stroke', 'fillRect', 'strokeRect', 'fillText', 'strokeText', 'drawImage'])
     for (const m of writes) {
-      const f = C2D[m]
-      ctx[m] = function (...a) { settle(); const r = f.apply(this, a); if (mirror === this.canvas) stale = true; return r }
+      const f = C2D[m], lays = over.has(m)
+      ctx[m] = function (...a) {
+        if (ahead) {
+          if (lays && this.globalCompositeOperation === 'source-over' && a[0] !== this.canvas) { dirty = true; return f.apply(this, a) }
+          settle()
+        }
+        const r = f.apply(this, a); if (mirror === this.canvas) stale = true; return r
+      }
     }
     ctx.getImageData = function (...a) { settle(); return ORIG.getImageData.apply(this, a) }
     ctx.save = function () { clipStack.push(clipped); return ORIG.save.call(this) }
@@ -169,21 +218,50 @@ const PB = (() => {
     const pf = paintFrame
     paintFrame = function (...a) { try { return pf.apply(this, a) } finally { settle() } }
   }
+  // a framebuffer the frame is copied into, on the GPU, as p5.brush's blend
+  // pass copies it. Row for row: the canvas is multisampled, and a resolving
+  // blit cannot flip, so the copy is upside down for image() and is drawn
+  // flipped back (see onCanvas). The first copy checks that the blit took.
+  const fbs = {}
+  function snapshot(name = 'before') {
+    let fb = fbs[name]
+    if (!fb) fb = fbs[name] = p.createFramebuffer({ width: OUT_W, height: OUT_H, density: 1, antialias: false, depth: false, stencil: false })
+    p._renderer?.flushDraw?.()
+    const r = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING), d = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)
+    if (!fb.checked) gl.getError()
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fb.framebuffer)
+    gl.blitFramebuffer(0, 0, OUT_W, OUT_H, 0, 0, OUT_W, OUT_H, gl.COLOR_BUFFER_BIT, gl.NEAREST)
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, r); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, d)
+    if (!fb.checked) { const e = gl.getError(); if (e) throw new Error('p5 tier: copying the frame on the GPU failed (GL error ' + e + ')'); fb.checked = true }
+    return fb
+  }
   // run one op's brush work on G's canvas; see the header for when it settles
   function onCanvas(g, alpha, clip, tf, draw) {
     const cv = g.canvas
     if (mirror !== cv) { settle(); mirror = cv; stale = true }
-    const keep = !self.P5_EAGER && g === mainCtx && !clipped && !clip && alpha >= 1 && g.globalAlpha >= 1
-    if (self.P5_TRACE) (PB.trace || (PB.trace = [])).push([keep ? 'keep' : 'lay', stale, clipped, +alpha.toFixed(2), +g.globalAlpha.toFixed(2), !!clip, g === mainCtx])
-    if (!keep) settle()
+    const a = g.globalAlpha * clamp(alpha)
+    const keep = !self.P5_EAGER && g === mainCtx && !clipped && !clip
+    if (self.P5_TRACE) (PB.trace || (PB.trace = [])).push([keep ? (a < 1 ? 'fade' : 'keep') : 'lay', ahead, dirty, stale, clipped, +a.toFixed(2), !!clip, g === mainCtx])
+    if (keep) {
+      // the frame goes over to the p5 canvas (once), or the overlay drawn since goes into it
+      if (!ahead) { if (stale) upload(cv); empty(g); ahead = true }
+      else if (dirty) { upload(cv, true); empty(g) }
+      if (a >= 1) return timed('brush', () => op(draw))
+      // a fade on the GPU: the frame before the op, laid back over it at 1 - a
+      const before = timed('fade', snapshot)
+      timed('brush', () => op(draw))
+      timed('fade', () => { p.push(); p.resetMatrix(); p.scale(1, -1); p.imageMode(p.CORNER); p.blendMode(p.BLEND); p.tint(255, 255 * (1 - a)); p.image(before, -OUT_W / 2, -OUT_H / 2, OUT_W, OUT_H); p.pop() })
+      stats.fades = (stats.fades || 0) + 1
+      return
+    }
+    const why = 'lay_' + (g !== mainCtx ? 'canvas' : clipped ? 'clipped' : clip ? 'clip' : 'eager'); stats[why] = (stats[why] || 0) + 1
+    settle()
     if (stale) upload(cv)
-    op(draw)
-    if (keep) { ahead = true; return }
-    const t0 = performance.now()
-    lay(g, g.globalAlpha * clamp(alpha), clip, tf, 'source-over')
+    timed('brush', () => op(draw))
+    timed('back', () => lay(g, a, clip, tf, 'source-over'))
     // the p5 canvas holds the op at full strength and unclipped, G does not
     stale = true
-    stats.settles++; stats.sync += performance.now() - t0
+    stats.settles++
   }
   // an op that paints the p5 canvas over (a plain ground) takes what it holds into G first
   function wipe() { settle(); stale = true }
@@ -226,7 +304,68 @@ const PB = (() => {
   }
   const rgbOf = c => { const n = parseInt(c.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255] }
   const lum = c => { const [r, gg, b] = rgbOf(c); return (.299 * r + .587 * gg + .114 * b) / 255 }
+  // A covering op, un-mixed on the GPU while the p5 canvas holds the frame:
+  // the frame is copied aside, the op painted on the plain ground and copied
+  // aside too, and one pass writes the frame back with the op's colour laid
+  // over it at the alpha its paint un-mixes to, inside the same neighbourhood
+  // the 2D path reads back (cover2d). Under a clip, a filter or a shadow on G,
+  // or on another canvas, the 2D path runs instead.
+  const UNMIX_V = `#version 300 es
+in vec3 aPosition;
+uniform mat4 uModelViewMatrix;
+uniform mat4 uProjectionMatrix;
+void main() { gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(aPosition, 1.0); }`
+  const UNMIX_F = `#version 300 es
+precision highp float;
+uniform sampler2D uFrame;
+uniform sampler2D uPaint;
+uniform vec3 uCol;
+uniform float uBg;
+uniform float uDen;
+uniform int uCh;
+uniform float uK;
+uniform vec4 uBox;
+out vec4 outColor;
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  vec3 f = texelFetch(uFrame, q, 0).rgb;
+  vec2 xy = gl_FragCoord.xy;
+  if (xy.x < uBox.x || xy.x >= uBox.z || xy.y < uBox.y || xy.y >= uBox.w) { outColor = vec4(f, 1.0); return; }
+  vec3 s = floor(texelFetch(uPaint, q, 0).rgb * 255.0 + 0.5);
+  float v = uCh == 0 ? s.r : uCh == 1 ? s.g : s.b;
+  float a = floor(clamp((v - uBg) / uDen, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
+  outColor = vec4(mix(f, uCol / 255.0, a * uK), 1.0);
+}`
+  let unmix = null
   function cover(g, P, o, k, closed, seed, alpha, clip, tf) {
+    const a = g.globalAlpha * clamp(alpha)
+    if (self.P5_EAGER || g !== mainCtx || clipped || clip || g.filter !== 'none' || g.shadowBlur > 0 && !/^rgba\(.*,\s*0\)$/.test(g.shadowColor)) return cover2d(g, P, o, k, closed, seed, alpha, clip, tf)
+    const col = o.fill || o.ink, bg = lum(col) > .5 ? '#000000' : '#FFFFFF', cv = g.canvas
+    if (mirror !== cv) { settle(); mirror = cv; stale = true }
+    const b = bbox(P), m = Math.ceil(24 + Math.max(b.w, b.h) * .12 + (o.ink ? o.weight * k * 30 : 0))
+    const x0 = Math.max(0, Math.floor(b.x0 - m)), y0 = Math.max(0, Math.floor(b.y0 - m))
+    const x1 = Math.min(cv.width, Math.ceil(b.x1 + m)), y1 = Math.min(cv.height, Math.ceil(b.y1 + m))
+    if (x1 <= x0 || y1 <= y0) return
+    if (!ahead) { if (stale) upload(cv); empty(g); ahead = true }
+    else if (dirty) { upload(cv, true); empty(g) }
+    const frame = timed('cover', () => snapshot('before'))
+    timed('brush', () => { p.push(); p.resetMatrix(); p.background(bg); p.pop(); op(() => { brush.seed(seed); brush.noiseSeed(seed); brushwork(P, o, k / (1280 / W), closed) }) })
+    timed('cover', () => {
+      const paint = snapshot('paint'), C = rgbOf(col), B = rgbOf(bg)
+      let ch = 0; for (let i = 1; i < 3; i++) if (Math.abs(C[i] - B[i]) > Math.abs(C[ch] - B[ch])) ch = i
+      if (!unmix) unmix = p.createShader(UNMIX_V, UNMIX_F)
+      const depth = gl.isEnabled(gl.DEPTH_TEST); gl.disable(gl.DEPTH_TEST)
+      p.push(); p.resetMatrix(); p.shader(unmix)
+      unmix.setUniform('uFrame', frame); unmix.setUniform('uPaint', paint)
+      unmix.setUniform('uCol', C); unmix.setUniform('uBg', B[ch]); unmix.setUniform('uDen', C[ch] - B[ch] || 1); unmix.setUniform('uCh', ch); unmix.setUniform('uK', a)
+      unmix.setUniform('uBox', [x0, cv.height - y1, x1, cv.height - y0])
+      p.noStroke(); p.blendMode(p.BLEND); p.rect(-OUT_W / 2, -OUT_H / 2, OUT_W, OUT_H)
+      p.pop(); p.resetShader()
+      if (depth) gl.enable(gl.DEPTH_TEST)
+    })
+    stats.covers = (stats.covers || 0) + 1
+  }
+  function cover2d(g, P, o, k, closed, seed, alpha, clip, tf) {
     const col = o.fill || o.ink, bg = lum(col) > .5 ? '#000000' : '#FFFFFF', cv = g.canvas
     wipe()
     p.push(); p.resetMatrix(); p.background(bg); p.pop()
