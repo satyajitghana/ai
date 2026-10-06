@@ -116,7 +116,7 @@ const RESOURCES: Resource[] = [
     where: "providers table, no user_id column",
     api: () => ({
       level: "yes",
-      why: "one table for everyone; the list route open to any signed-in user returns rows as stored (providers.py:189-195)",
+      why: "one table for everyone; regular users can see the provider configuration, and it is not redacted",
     }),
     shell: byShell(hostReads("the providers table")),
   },
