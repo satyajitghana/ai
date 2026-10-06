@@ -1,0 +1,204 @@
+---
+title: "FreeVideo: a 66 GB video transformer on an 8 GB card, and the planner that decides where every block lives"
+description: "FreeVideo runs MiniMax H3 through the Video DeltaNet hybrid-attention checkpoint on as little as 8 GB of VRAM and 16 GB of RAM. I read the code and the safetensors headers. The released H3 transformer is 66.28 GB in BF16; 26.02 GB of that is AdaLN projections that a fixed eight-step schedule turns into 0.22 GB of tables, and FP8 takes the rest to 22.55 GB. That still does not fit, so a measured planner streams 432.4 MB blocks from host RAM or disk every step, slices attention into head groups sized to the clip, and keeps eight blocks resident because more bought nothing. Video DeltaNet is the speed lever, not the memory one."
+date: 2026-10-06
+tags:
+  - video-generation
+  - diffusion
+  - inference-optimization
+  - quantization
+  - linear-attention
+  - edge-inference
+  - explainer
+draft: false
+cover: /articles/freevideo-minimax-h3/fig1.jpg
+---
+
+import { VramPlan } from "@/components/articles/freevideo-minimax-h3/vram-plan"
+import { WeightLedger } from "@/components/articles/freevideo-minimax-h3/weight-ledger"
+
+[FreeVideo](https://github.com/FlashML-org/FreeVideo) went open source on 2 October from FlashML-org, the group behind [FreeToken](/articles/freetoken). The pitch went round X as "video generation just moved onto your gaming PC": MiniMax H3 running locally on "as little as 8GB of VRAM and 16GB of RAM", with ComfyUI integration, LoRAs, and acceleration that "adapts to whatever hardware you have." Haocheng Xi, one of its five authors, framed it as MiniMax H3 plus Video DeltaNet. A Japanese repost made the same point: the result comes from combining H3 with Video DeltaNet.
+
+That is a 33-billion-parameter audio-video transformer on a card with 8 GB. I want to know how. So I read the engine at commit `9925fe7`, the Video DeltaNet paper, and the tensor headers of every checkpoint it downloads, without running anything. The short version: no single trick does it. Four separate things shrink or move the bytes, and a planner with 1,142 lines of measured special cases decides where each one goes for every request. Video DeltaNet is real and it matters, but what it buys is speed, not memory.
+
+<RepoCard repo="FlashML-org/FreeVideo" />
+
+<Figure
+  src="/articles/freevideo-minimax-h3/fig1.jpg"
+  alt="The FreeVideo workspace inside ComfyUI: a prompt box on the left with landscape, portrait, square and match-image presets, 1344 by 768 at 10 seconds and 24 fps, two-pass sampling ticked; on the right a generated frame of a giant ringed structure over a reflective desert at sunrise, with tiles reading 78.0 s sampling, 130.7 s request total, 29.4 GiB VRAM peak and 22.5 GiB RAM peak."
+  caption="The FreeVideo creative workspace. This screenshot is from a 32 GB card (29.4 GiB VRAM budget), not an 8 GB one. The engine reports the memory peaks of every request it runs (FreeVideo README)."
+/>
+
+## What MiniMax H3 is, briefly
+
+I covered the base model [when it shipped](/articles/minimax-h3), and FastVideo's four-step distillation of it [in August](/articles/fastvideo-fasth3). The facts that matter here come from the transformer's `config.json` and its safetensors index, all measured:
+
+- 50 transformer blocks plus 2 text-refiner blocks, hidden size 5376, 56 heads of 128 (so Q, K and V are 7168 wide), and a SwiGLU feed-forward of 14336.
+- 66,280,430,080 bytes in BF16. That is 33.14B parameters.
+- A Qwen3-VL-32B text encoder (66.71 GB in BF16) and a video VAE of 10.42 GB whose decoder is itself 36 transformer blocks.
+- Patch size 1×2×2 over a 24-channel latent, compressed 16× in each spatial direction.
+
+FreeVideo's `geometry.py` turns a request into tokens. Frames round up to 17n+5. A 17-frame VAE clip becomes 5 latent frames. At 1344×768 every latent frame is 24×42 = 1,008 tokens. So a 10-second clip is 243 frames, 72 latent frames and 72,576 video tokens. A 14.4-second clip (345 frames) is 102 latent frames and 102,816 tokens. Both counts are hard-coded in the planner's measurement tables, which is how I know they are the ones it was tuned on.
+
+## Why it does not fit: the arithmetic
+
+Start with the weights. 66.28 GB of BF16 against 8 GB is a factor of eight before a single activation exists.
+
+Then the activations, at 102,816 tokens (all reasoned from the shapes above, in BF16):
+
+| Tensor | Shape | Size |
+|---|---|---|
+| One copy of the residual stream | 102,816 × 5,376 | 1.11 GB |
+| Q, K and V for all 56 heads | 3 × 102,816 × 7,168 | 4.42 GB |
+| Feed-forward hidden (gate and up, before SwiGLU) | 102,816 × 28,672 | 5.90 GB |
+| Dense attention scores, one head, if materialized | 102,816² | 21.1 GB |
+
+No sane engine materializes the last row. Flash-style kernels stream it. But the other three are real, and they coexist with the weights of whichever block is running. The VDN paper adds the compute side: in the profiled H3 workload, softmax attention is "more than 85% of denoiser runtime" (reported).
+
+So there are two problems. The memory problem is weights. The time problem is attention. FreeVideo attacks them with different tools.
+
+## Cut one: 26 GB of AdaLN weights become 0.22 GB of tables
+
+The single biggest saving is not quantization. Read block 0's header from the H3 checkpoint and one tensor dwarfs the rest: `adaln_proj.linear.weight`, shape 96,768 × 2,688. That is 260.2M parameters per block, more than the attention (154.1M) or the feed-forward (231.2M). Across 50 blocks it is 26.02 GB in BF16 (reasoned), about 39% of the transformer. This is the "about 13B of the 33B" of modality-specific AdaLN branches MiniMax's card mentions.
+
+Here is the observation that kills it. The input dimension is 2,688, which is `time_embed_dim`. AdaLN modulation in H3 depends on the timestep embedding and nothing else. The output is 96,768 = 3 modalities × 6 vectors × 5,376 channels: a shift, scale and gate for attention and for the feed-forward, per modality. If the sampler always visits the same timesteps, the modulations are constants.
+
+VDN-H3 is an eight-step distilled sampler. Its timesteps are fixed. So `adaln.py` evaluates the original projection once per schedule row, stores the result, and replaces the module with `CachedModulation`, which indexes a buffer by step. The docstring credits the idea to NVIDIA's Sol-H3 AdaLN precompute, and the VDN paper's own serving stack does the same thing. A `ScheduleCursor` checks that each call's timestep equals the stored one and raises if a request changes the schedule.
+
+The prepared tables ship in [`OpenVDN/vdn-minimax-h3-edge`](https://huggingface.co/OpenVDN/vdn-minimax-h3-edge): 50 files of 4,456,040 bytes each, 0.22 GB in total (measured). The model card says the original projections are omitted, "saving approximately 26.02 GB per installation", which matches my arithmetic to the hundredth. What is left of the BF16 transformer is 40.26 GB.
+
+The cost is flexibility, and the card says so. A schedule other than the published ones, or a LoRA that changes the modulation, needs the original projections from a pinned older revision. Ordinary attention and feed-forward LoRAs keep the tables. The four quality levels added in v0.2.0 (Light is 8 steps in two passes, Medium 12, High 16, Max 20) each need their own rows; `policy.adaln_extra_bytes` charges them to VRAM at 3 × 6 × 5,376 × 2 bytes per modality timestep per layer.
+
+## Cut two: FP8 for the seven wide matrices
+
+The second cut is ordinary. FreeVideo's prepared block file is 432,433,052 bytes. Its header lists exactly seven FP8 E4M3 matrices: the original Q, K, V and output projections, a second output projection for the linear branch, and the two feed-forward matrices. Together they are 423.9 MB. Everything else in the block (norms, gates, the linear branch's short convolutions and decay projections) stays in BF16 and adds 8.5 MB. All 50 blocks plus a 0.93 GB root file come to 22.55 GB (measured), which lines up with the "about 22.9 GB" the model card says FreeVideo downloads.
+
+<WeightLedger />
+
+The interesting part is that FP8 is not one code path. `docs/execution-planning.md` and `fp8_gemm.py` pick per architecture:
+
+- **Blackwell (SM120, RTX 50):** per-tensor scales, native FP8 GEMM.
+- **Ada (SM89) and Hopper (SM90):** per-channel (rowwise) scales, native FP8 GEMM. A separate `rowwise/` cache holds these weights.
+- **Ampere (SM80, SM86):** no FP8 tensor cores, so FP8 is storage only. Weights are stored in FP8 and computed in BF16. The memory saving survives; the compute saving does not.
+- **Windows on Ada:** PyTorch 2.13's Windows build leaves out the rowwise CUTLASS kernel. FreeVideo calls cuBLAS's scalar-scale FP8 GEMM into an FP32 accumulator, tiled to 32 MB, and applies the row and column scales in a Triton epilogue. For one shape, the feed-forward up-projection at 2,048 × 5,376 by 5,376 × 28,672, it has a fused Triton kernel that never writes the FP32 accumulator out.
+
+The model card is careful about what this proves. The per-tensor package was checked bit-identical against the full prepared model on a 362-frame request. The rowwise package "adds no new physical Hopper, Ada or Windows benchmark." That is an honest sentence and I wish more model cards had one.
+
+## Cut three: the text encoder never meets the transformer
+
+The Qwen3-VL-32B encoder is 66.71 GB in BF16. FreeVideo installs a community NVFP4 AWQ conversion of it, 15.69 GB. That still does not fit, and it does not need to. The encoder runs in a separate process that exits before the transformer loads. Its only lasting requirement is host memory: the planner refuses any machine with less than 3.6 GiB of RAM budget for it, a figure measured on an H200 after the encoder's checkpoint pages were released. Cached or pre-encoded prompts skip it entirely.
+
+## The rest is placement
+
+After the three cuts, 22.55 GB of transformer still has to pass through an 8 GB card for every one of the eight denoising steps. This is where "adapts its acceleration to whatever hardware you have" lives. It turns out to be a measured policy, not a learned one.
+
+Before every request the planner reads free VRAM, available host memory (including cgroup limits and, on Windows, commit headroom), the GPU's compute capability, and which attention kernels pass an on-device probe. It turns the request into a token count. Then it decides five things.
+
+**1. The head group.** Attention runs on 4, 8 or 16 of the 56 heads at a time, and the QKV projections are sliced to match (`head_chunk.py`). A slice is tokens × heads × 128 × 2 bytes. Four heads at 102,816 tokens is 105 MB per tensor instead of the 4.42 GB above. `policy.py` holds a table of what each group measured beside the resident weights: at 72,576 tokens, 7.69 GiB for four heads, 8.03 for eight, 10.05 for sixteen. The planner picks the widest group that fits. The comments say why it bothers: a wider group is worth 13% to 51% where it fits.
+
+**2. How many blocks stay on the GPU.** `⌊(VRAM budget − activations) / 432.5 MB⌋`, capped at 44, then pulled down to 8 whenever host RAM can hold the rest. The cap and the floor both come from measurements in the source. At a 24 GiB cap, 8 resident blocks ran at 9.20 s/step and 29 ran at 9.24. At 32 GiB, 8 blocks ran at 9.15 and 48 at 9.28. Streaming the remainder moved 19.3 GiB in 0.44 s over a host link measured at 47.7 to 54.1 GB/s. The transfer is not the bottleneck; the resident copies just take memory away from everything else.
+
+**3. Where the other blocks wait.** Non-resident blocks sit in pinned host memory, up to 22 GB, and are copied to the GPU through one or two transfer slots on every step (`offload.py`). A second slot, for prefetch, only appears at a 14 GiB budget or more, with lower thresholds on some Windows and Ampere setups. If host RAM cannot hold them either, a bounded subset stays pinned and the rest is re-read from disk on every step.
+
+**4. Activation staging.** Below a 10 GiB budget, if the activation path does not fit, the residual stream and attention outputs move to pinned host buffers. The code treats this as a last resort. On an 8 GiB card at 243 frames, holding no weights at all and keeping activations on the card ran at 13.49 s/step against 34.76 for staging, the 2.6× the comments keep citing.
+
+**5. The VAE decoder.** Below a 20 GiB budget, `⌊(budget − 3.25 GiB) / 268.6 MB⌋` of its 36 blocks stay resident and the rest stream. Temporal clips decode one at a time, and finished frames leave the GPU before the next clip starts (`decode_stream.py`).
+
+The widget below applies those rules. It is a sketch, and it says where it simplifies. The fitted host-headroom constant is mine, not FreeVideo's. With it, the sketch reproduces every cell of the project's published blocks-in-VRAM grid at the sizes it offers.
+
+<VramPlan />
+
+The point the widget makes is about the bottom-left corner. An 8 GiB card at 10 seconds holds no transformer blocks at all. It keeps only the activation path, about 7.7 GiB, and every one of the 50 blocks crosses PCIe on every step, 21.6 GB of it (reasoned). With 16 GiB of RAM the host cannot keep all of them either, so part of the stack is also re-read from disk each step. The "8 GB + 16 GB" headline describes that configuration. Unlike most low-VRAM claims, including [WanGP's](/articles/vram-is-a-policy), it names the RAM, and the planner refuses the request outright rather than spill when even that is not there.
+
+<Figure
+  src="/articles/freevideo-minimax-h3/fig6.png"
+  alt="A heat-map grid with VRAM from 8 to 32 GiB on the x axis and system memory from 8 to 32 GiB on the y axis, each cell giving the number of transformer blocks held in VRAM. Small cards hold 0 to 3 blocks; large cards with plenty of RAM settle at 8; large cards with little RAM hold up to 39. Dots mark cells that re-read blocks from disk every step, covering the low-RAM, low-VRAM corner."
+  caption="Transformer blocks kept in VRAM for every combination of 8 to 32 GiB of VRAM and host memory, at 1344×768 and 243 frames. Note the plateau at 8 once RAM is plentiful, and the dots where blocks come off the disk every step (FreeVideo, docs/execution-planning.md capacity grid)."
+/>
+
+<Figure
+  src="/articles/freevideo-minimax-h3/fig5.png"
+  alt="A matching heat-map of seconds per sampling step. The 8 GiB VRAM column ranges from 12.6 to 15.1 seconds, worst at 8 GiB of RAM; from about 15 GiB of VRAM with 16 or more GiB of RAM, almost every cell sits near 8.9 to 9.1 seconds."
+  caption="Seconds per sampling step for the same grid, measured on one H200 with VRAM capped by an MPS client limit and RAM by a cgroup. Compute and bandwidth are an H200's throughout, so this isolates the cost of placement, not a consumer card's speed (FreeVideo, docs/execution-planning.md capacity grid)."
+/>
+
+Read the two grids together and the cost of fitting is smaller than I expected. On the H200, going from 32 GiB of VRAM to 8 costs 8.93 → 12.7 s/step with plenty of RAM, and 15.1 with 8 GiB of RAM, where the disk is in the loop (reported). That is 1.4× to 1.7× slower, not 10×. The catch is in the caption: every cell has an H200's compute and host link behind it. A consumer card computes more slowly, which hides transfers better, and has a narrower link, which hides them worse. The RTX 4060 Ti, for one, has an eight-lane PCIe 4.0 link, 16 GB/s nominal, so streaming all 50 blocks takes at least 1.35 s per step (reasoned) where the H200 took a fraction of that.
+
+## Where Video DeltaNet comes in
+
+All of the above is about memory. Video DeltaNet ([paper](https://arxiv.org/abs/2609.20744), Xi et al., UC Berkeley, Impossible and UT Austin, September 2026) is about the 85% of runtime that attention eats. FreeVideo does not train anything; it runs OpenVDN's released [VDN-H3](https://huggingface.co/OpenVDN/vdn-minimax-h3) checkpoint, which adds a linear-attention branch and two LoRA adapters to the frozen H3 backbone.
+
+The split is by temporal distance. Softmax attention stays exact, but only within a window: each query chunk of five latent frames (one VAE chunk) sees itself and its two neighbours, a 15-frame window. Two boundary anchors add global connectivity: every frame sees the first and last latent frames, and those two frames see everything. Text and audio interactions stay fully softmax. Everything else, the distant video context, goes to a linear branch.
+
+<Figure
+  src="/articles/freevideo-minimax-h3/fig2.png"
+  alt="Two attention-pattern grids side by side for a toy sequence of one text token, twenty video tokens in ten two-frame chunks, and one audio token. The softmax grid has a banded diagonal of local video windows, full first and last video rows and columns as boundary anchors, and full text and audio rows and columns. The linear grid fills the remaining off-band video region in blue, with arrows showing a forward scan from the left and a reverse scan from the right."
+  caption="How VDN divides H3's attention. Softmax keeps local windows, boundary anchors, text and audio; linear attention covers distant video with a forward and a reverse scan (Video DeltaNet paper, Figure 2)."
+/>
+
+The linear branch is a delta-rule memory in the family of [Gated DeltaNet](/articles/ltc-gated-delta), run as two scans, one forward and one reverse, so a frame reads a summary of the past before its window and of the future after it. The prompt is folded in too: a text state $S_T$ seeds each scan with $S_T/2$, so the two readouts together count it once.
+
+The part that is new is the update. A language-model delta rule writes one token at a time. A video frame arrives as 1,008 tokens at once, with no natural order. Video Delta Attention makes the frame's new state the solution of one joint least-squares problem. With $\bar S_t$ the decayed state, $k_{t,u}, v_{t,u}$ the keys and values of the frame's tokens and $\beta_{t,u}$ their write strengths:
+
+$$
+S_t = \arg\min_S \tfrac{1}{2}\lVert S - \bar S_t \rVert_F^2 + \tfrac{1}{2}\sum_u \beta_{t,u}\lVert S k_{t,u} - v_{t,u}\rVert_2^2
+$$
+
+which has the closed form
+
+$$
+S_t = (\bar S_t + B_t)(I + A_t)^{-1},\quad A_t = \sum_u \beta_{t,u} k_{t,u} k_{t,u}^\top,\quad B_t = \sum_u \beta_{t,u} v_{t,u} k_{t,u}^\top .
+$$
+
+The inverse is only $d_k \times d_k$, 128 × 128, so it is cheap. It is what lets two tokens with overlapping keys account for each other instead of writing conflicting corrections. The paper also proves that the carried-over part of the state cannot grow from one frame to the next, because the norm of $\mathrm{Diag}(\alpha_t)(I + A_t)^{-1}$ is at most 1. The [linear-attention roundup](/articles/linear-attention-state-roundup) has more on why the shape of that update matters.
+
+<Figure
+  src="/articles/freevideo-minimax-h3/fig3.png"
+  alt="Two block diagrams. Left, the hybrid attention layer: the input feeds a softmax branch and a linear branch; each is multiplied by its own sigmoid gate, the linear branch passes through RMSNorm, each has its own output projection, and the two are summed. Right, the linear branch: Q, K and V from linear projections, a short convolution on K and V, SiLU, L2 normalization on Q and K, a decay alpha and a write strength beta, all feeding Video Delta Attention with a forward and reverse scan, seeded by half the text state."
+  caption="The hybrid layer and its linear branch. Each branch has its own gate and output projection; the feed-forward sublayer is unchanged (Video DeltaNet paper, Figure 3)."
+/>
+
+You can see this directly in FreeVideo's block file. Besides the seven FP8 matrices, it holds `linear_attention.alpha`, `beta_proj`, `output_gate`, the 5×5 spatial and 5-tap temporal `short_conv` filters on K and V, a `softmax_gate`, and the second output projection `to_out_linear`. The branch adds about 43M parameters per block (reasoned).
+
+Here is the honest accounting for memory. The linear state per head is 128 × 128, which is tiny. But flash-style kernels already kept dense attention's memory linear in sequence length, so VDN does not shrink the activation footprint in any way that matters. It makes the call cheaper. The paper's numbers, all reported:
+
+- One full transformer evaluation at 102 latent frames: 35.35 → 11.16 s on one H200 (3.2×) and 16.0 → 6.2 s on one B200 (2.6×).
+- Softmax attention density falls from 42.1% at 42 latent frames to 20.0% at 102, so the gain grows with clip length.
+- With eight-step distillation (DMD2-style, no GAN term, 250 generator steps), one B200 goes from 799.6 s to 49.3 s of denoising for a 14.3-second clip. On eight B200s it takes 6.70 s.
+- On 103 prompts from a third-party set, eight-step VDN-H3 matches or slightly beats 50-step dense H3 on five no-reference quality metrics (differences +0.06 to +1.00). FastH3's four steps land 2.70 to 12.74 points lower.
+
+<Figure
+  src="/articles/freevideo-minimax-h3/fig4.jpg"
+  alt="Top: a first-last-frame-to-video comparison at 14.3 seconds and 768p, a man holding a white cat above a canyon city, split diagonally between dense H3 at 50 steps and VDN-H3 at 8 steps, with six more matched frames. Bottom left: attention latency against video duration, dense H3 rising from about 6 to 31 seconds while VDN stays below 10, with speedups of 1.77x, 2.57x and 3.38x. Bottom right: denoising time on B200 falling from 799.6 s dense to 307.9 s with VDA, 49.3 s with eight steps and 6.70 s on eight GPUs."
+  caption="VDN-H3 against dense H3: matched frames, attention latency by clip length, and the cumulative denoising speedup on B200 (Video DeltaNet paper, Figure 1)."
+/>
+
+Those quality numbers are for VDN-H3 on datacenter GPUs. FreeVideo slices heads, stages buffers and swaps kernels, and its own docs say an out-of-memory retry "can change the floating-point reduction order." FreeVideo publishes no quality metrics of its own for its plans or for its four levels. The gallery shows the levels side by side. That is evidence you can look at, not a measurement.
+
+## Which attention kernel runs
+
+FreeVideo probes attention backends on the device and takes the first that passes: SageAttention 2, PyTorch flash attention, cuDNN, FlashAttention 2, FlashAttention 4 (`attention.py`). Probe results are cached against a hash of the GPU, driver, packages and compute source, so an upgrade re-probes. SageAttention quantizes Q and K internally, so the default consumer path is not bit-identical to the paper's kernels. Each request's `.request.json` records which backend ran, but nothing in the repository measures the quality difference.
+
+## What it costs on real hardware
+
+The README's end-to-end table is for Windows, 1344×768, 10 seconds, two-pass sampling. Two-pass means eight steps at half resolution, a latent upscaler, then three steps at full size. All of these are reported:
+
+| GPU | VRAM + RAM | Time |
+|---|---|---|
+| GeForce RTX 5090 | 32 GB + 64 GB | 122 s |
+| GeForce RTX 5060 Ti | 16 GB + 32 GB | 486 s |
+| GeForce RTX 4060 Ti | 16 GB + 32 GB | 558 s |
+| GeForce RTX 4060 Ti (community report) | 8 GB + 64 GB | 603 s |
+
+The 8 GB row is a community report with 64 GB of RAM, not the 16 GB the headline quotes, so the README itself does not show the exact 8 + 16 configuration end to end. The H200 grid covers it, at 13.8 s per full-resolution step with compute that is not a consumer card's. The 8 GB 4060 Ti being only 8% slower than the 16 GB one is the residency result again. Once the stack is streaming, extra VRAM buys little.
+
+On Apple silicon, the Mac guide reports an M5 with 24 GB of unified memory at about 42 minutes for the same 10-second clip, using ConvRot int8 weights on the M5's tensor units.
+
+## What I would watch
+
+- **The planner is a lookup table of measurements.** Almost every constant in `policy.py` names the card, geometry and peak it was measured at, mostly an H200 under memory caps plus a few Ada and Blackwell consumer cards. A card nobody measured gets extrapolated numbers, backed by a two-retry out-of-memory fallback.
+- **History changes plans.** Completed requests write timings and peaks to `resource-history.sqlite3`. A placement is replaced when the history predicts an alternative at least 2% faster. Two identical requests can therefore run on different plans. That is sensible, but it is worth knowing when you compare timings.
+- **The tables pin the schedule.** Precomputed AdaLN is the largest single saving, and it holds only while the timesteps match the published tables.
+- **The licence travels with the weights.** VDN-H3 inherits MiniMax H3's Community License, which excludes the EU, the UK, South Korea and the US. FreeVideo's code is Apache-2.0. The weights it downloads are not.
+
+So FreeVideo does not fit MiniMax H3 into 8 GB. It deletes a third of the model by noticing that the third depends only on the timestep, stores the rest at a byte per weight, and rents the card one 432 MB block at a time on a plan it has already measured. Video DeltaNet makes each rented step about three times cheaper. The same placement-over-shrinking pattern runs through [FreeToken](/articles/freetoken) and [stable-diffusion.cpp](/articles/stable-diffusion-cpp); [SANA-Video 2.0](/articles/sana-video2) and [MAGI-2](/articles/magi-2-preview) attack the attention bill from the training side, and the [diffusion transformer](/architectures/diffusion-transformer) doc covers what all of them rest on.
