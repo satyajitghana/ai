@@ -173,10 +173,21 @@ function thumbs(list) {
   const man = existsSync(TMAN) ? JSON.parse(readFileSync(TMAN, 'utf8')) : { thumbs: {} }
   for (const slug of list) if (!all.includes(slug)) throw new Error(`no storyboard: data/films/${slug}.json`)
   const files = list.map(slug => { dirFor(out, slug); const f = join(tmp, `${flat(slug)}.json`); writeFileSync(f, JSON.stringify({ ...load(slug), date: articleDate(slug) })); return f })
+  const failed = []
+  const paint = batch => spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'thumb', ...batch, `--out=${out}`, `--workers=${opt.workers || 3}`, ...liveFlag], { encoding: 'utf8', maxBuffer: 1 << 26 })
   for (let i = 0; i < files.length; i += 40) {
-    const r = spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'thumb', ...files.slice(i, i + 40), `--out=${out}`, `--workers=${opt.workers || 3}`, ...liveFlag], { encoding: 'utf8', maxBuffer: 1 << 26 })
-    if (r.status !== 0) throw new Error(r.stderr)
-    for (const line of r.stdout.trim().split('\n').filter(l => l.startsWith('{'))) {
+    let outs = []
+    const r = paint(files.slice(i, i + 40))
+    if (r.status === 0) outs = [r.stdout]
+    else {
+      // one storyboard that throws must not cost the other 39: paint them one by one
+      for (const f of files.slice(i, i + 40)) {
+        const one = paint([f])
+        if (one.status === 0) outs.push(one.stdout)
+        else { failed.push(f); console.error(`  failed: ${f.split(/[\\/]/).pop()}: ${(one.stderr || '').split('\n').find(l => /Error/.test(l)) || ''}`) }
+      }
+    }
+    for (const line of outs.join('\n').trim().split('\n').filter(l => l.startsWith('{'))) {
       const j = JSON.parse(line)
       man.thumbs[j.slug] = { sha: shaOf(j.slug), bytes: j.bytes, style: j.style, scene: j.scene, mascot: j.mascot, tier }
       console.log(`  ${j.slug}  ${j.style}  ${(j.bytes / 1024).toFixed(0)} KB`)
@@ -186,4 +197,5 @@ function thumbs(list) {
   for (const k of Object.keys(man.thumbs).sort()) if (all.includes(k)) sorted[k] = man.thumbs[k]
   writeFileSync(TMAN, JSON.stringify({ note: 'Written by brand-crew/skills/explainer-films/build.mjs --thumbs. Do not edit.', thumbs: sorted }, null, 2) + '\n')
   rmSync(tmp, { recursive: true, force: true })
+  if (failed.length) { console.error(`${failed.length} thumbnail(s) failed`); process.exitCode = 1 }
 }
