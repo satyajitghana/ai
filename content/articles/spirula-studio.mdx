@@ -2,6 +2,7 @@
 title: "Spirula Studio deleted its dependencies instead of wrapping them"
 description: "A 3D Gaussian Splatting pipeline in one binary — camera alignment, masking, normal estimation, training — with no Python, no PyTorch and no COLMAP install. 'All in one pipeline' almost always means vendored components behind a launcher, so I went looking for what was wrapped. It is not: COLMAP became 44,310 lines of Vulkan SfM, PyTorch became a 10,886-line Slang inference runtime, ffmpeg became its own H.264/H.265/AV1 decoders, and SAM 3 runs as compute shaders. What is still borrowed is checkpoints and parameter defaults, credited by name. Also: why the bundle adjustment stays fp64 when fp32 is worth 30%, and what a DJI Osmo 360 .OSV actually goes through."
 date: 2026-09-22
+updated: 2026-10-06
 interest: 5
 helpful: 4
 featured: true
@@ -27,6 +28,13 @@ doing the work.
 
 [Spirula Studio](https://github.com/harry7557558/spirula-studio) has two.
 `glfw` and `imgui`. That is the entire external fetch list.
+
+<Callout type="note">
+**Updated 2026-10-06** for release v2026.10.6, which adds LiDAR scans as an
+input, a region-of-interest editor and faster depth and normal maps for 360
+cameras. What changed, and how the LiDAR path works in the code, is in
+[Update: v2026.10.6](#update-v2026106) at the end.
+</Callout>
 
 <Video
   src="/articles/spirula-studio/pipeline-loop"
@@ -254,6 +262,170 @@ one. This is one stack. Somebody sat down and wrote the SfM, the inference
 runtime, the video decoders and the segmentation model as compute shaders,
 checked each against the thing it replaced to six decimal places, and then
 refused the 30% speedup that would have made the result irreproducible.
+
+## Update: v2026.10.6
+
+Two weeks after I wrote this, release v2026.10.6 shipped. Its changelog leads
+with three things: a region of interest for training, faster depth and normal
+maps for 360 cameras, and LiDAR scans as an input. I cloned the tag (commit
+`b9c8042`) and diffed it against `v2026.9.20`, the last tag before this
+article. That is 86 commits and 776 files changed, +143,316 / −8,341 lines
+(measured, `git diff --shortstat`). Two details from the log matter for the
+"one person" caveat above. Harry Chen wrote 72 of the 86 commits, and eight
+other people wrote the other 14 (measured). The LiDAR feature, the largest
+single commit at +10,604 lines over 54 files, came from an outside contributor
+(PR #101), with Harry Chen as co-author.
+
+The release notes call LiDAR support *"experimental, tested on limited public
+datasets"*. I still have not run the binary. Everything below comes from
+reading the code and the notes committed with it.
+
+### LiDAR: what it accepts
+
+On the dataset screen, a laser scan is an input like photos and videos, and a
+dataset can take several. The formats are:
+
+- **E57**, read by `data/E57Reader.cpp`, 481 lines with *"no libE57Format and
+  no Xerces behind it"*. It walks the file's 1020-of-1024-byte pages and the
+  bit-packed point streams by hand. A file that names any codec except
+  `bitPackCodec`, the only one the standard defines, is refused.
+- **LAS** 1.0–1.4, point formats 0–10, uncompressed. **LAZ is refused** with
+  a message. That is the dependency-deletion habit again: decompressing LAZ
+  would mean taking on LASzip.
+- **PLY**, ASCII or binary, streamed. A `camera` element (PCL, ETH3D, NavVis)
+  gives the scanner's position.
+- **XGRIDS** LCC Studio exports. Their `raw/` folder is already a COLMAP
+  dataset in the LAS file's frame, so it is kept as it is (`--mode keep`).
+
+The committed note draws the whole path as one diagram:
+
+```text
+scan.e57 ──► photographs + their scan poses ─┐   (anchors.json)
+scan.las ──► views rendered from where the   ├─► SfM ─► spirula lidar ─► sparse/0 in the scan frame
+             scanner stood (no photographs)  │          (fit, merge,        + depths/ normals/
+photos / videos ─────────────────────────────┘           seeds, tracks)
+```
+
+*(Spirula Studio, `docs/notes/lidar-alignment.md`, "The pipeline".)*
+
+### LiDAR: how it gets into the reconstruction
+
+The scan does not replace structure from motion. It **re-frames** what SfM
+produces. Four steps do the work.
+
+1. **Anchors.** An anchor is an image whose pose in the scan's frame is
+   already known. Anchors come from the scanner's own photographs, or, for a
+   scan with none, from views of the cloud *rendered* where the scanner stood:
+   E57 station poses, a PLY `camera`, or one position every 2 m along a
+   `.trajectory.las`.
+2. **SfM runs as usual** over everything. The exception is a dataset whose
+   only images are the scanner's own photographs. Then the scanner's poses are
+   used directly and no SfM runs.
+3. **A similarity fit per model.** For each SfM model with anchors, the fit
+   finds a rotation, a translation and a scale. Rotation is the chordal mean
+   of the anchors' relative rotations. Scale and translation come from RANSAC
+   over pairs of anchors, then least squares. Then a point-to-plane ICP pulls
+   the model's points onto the scan, thinned to 2M points, with a 7-parameter
+   Gauss–Newton step. ICP is **refused** if it moves the anchors more than 5%
+   of their spread. The note records a design that was tried and dropped:
+   fitting anchor centres alone (Umeyama) left the rotation 1.9° off on a
+   capture that walked nearly in a line, because the rotation about that line
+   is free. Fitting rotations first got 0.16° (reported).
+4. **Seeds, depth and normals from the scan.** The scan is voxel-thinned to
+   500k points by default. For every image, the scan is rendered into a
+   1600 px depth map through that image's real lens, distortion included. A
+   seed counts as seen by an image when it lies on that depth to within 3% +
+   5 cm. Each seed keeps 12 of the images that see it as its COLMAP track, so
+   the trainer's initial cloud is the **laser's points**, not SfM's. SfM's own
+   points survive only where the scan has nothing, such as sky or anything
+   past the scanner's range. The same renders are written to `depths/` (16-bit
+   millimetres) and `normals/`, **in place of** the monocular MoGe or Metric3D
+   step.
+
+The geometry the scan contributes is **metric**: the output model's
+`gauge.txt` says `metric 1`. The release notes put it as *"recover metric
+scale and compute depth and normal maps"*.
+
+### LiDAR: how training uses it
+
+This part is easy to over-read, so here is what the trainer actually does
+with the scan's three products.
+
+- **The seeds** are used by default. They are the initial Gaussians.
+- **The normal maps** are used by default. `normal_supervision_weight` is
+  0.01 in `config/TrainConfig.h`.
+- **The depth maps are not used** unless you ask. `depth_supervision_weight`
+  defaults to **0**, no preset in the tree sets it, and `TrainerCore` loads
+  depths only when that weight is above zero. When it is on, the loss in
+  `shaders/per_pixel_losses.slang` is a **Pearson correlation** between the
+  rendered depth and the reference. A correlation ignores scale and offset.
+  So inside the loss, a laser's millimetres count for no more than a
+  monocular network's relative depth. The metric part of LiDAR reaches the
+  splats through the frame and the seeds, not through the depth loss
+  (reasoned, from the code).
+
+The note's own training check agrees that this is no quality jump yet. On its
+FJD capture, 7k steps with every 8th image held out, the scan's seeds, normals
+and depth gave held-out PSNR **17.27** and SSIM **0.533**. The same images on
+the unaligned SfM model and its own points gave **17.37** and **0.526**. That
+is *"within this capture's run-to-run noise (about 1 dB)"* (reported). The
+alignment numbers are stronger. On ETH3D courtyard, a merged FARO scan with
+no photographs, the aligned model lands **3.0 cm / 0.11°** from ground truth
+(reported). What LiDAR buys today is a metric, gravity-aligned frame and a
+dense seed cloud. It does not yet buy better pixels.
+
+The note is just as frank about what is missing. **A model with no anchor is
+lost.** On a NavVis capture, the largest SfM model (1,046 images) had no
+anchor and was dropped (reported). Using the scanner's poses as priors inside
+bundle adjustment, which the note calls *"the popular request"*, is listed
+as not done yet.
+
+### Region of interest
+
+The trainer could already keep a run to a region of space (`--roi-region`),
+but the region had to come from a partition or a hand-written JSON. What is
+new is an editor, `app/gui/RoiEditor.cpp` at 2,271 lines (measured). In it you
+build a region from boxes, ellipsoids, cylinders and extruded outlines. Each
+shape is **added**, **cut** or **intersected**, applied in order from top to
+bottom, so "everything except the crowd in the corner" takes one shape. The
+editor has starting points ("cylinder around the subject" finds where the
+cameras' optical axes come closest). The file it saves, `<dataset>/roi/<name>.json`,
+is picked up by the trainer automatically.
+
+The region does not hard-crop the scene. Splats outside it count for
+`roi_outside_weight` (default **1e-4**) when densification picks where to add
+or move splats, and `roi_mask_pixels` (default on) masks each training image
+to what it shows of the region. Coordinates are written at full double
+precision, because a geo-referenced model sits millions of units from its
+origin, where `%.9g` would round them to centimetres.
+
+### "Faster depth and normal maps for 360"
+
+This one is a change of sizing, not a faster kernel (commit `a82d926`). A 360
+frame is too distorted for a depth network, so it is split into overlapping
+pinhole **faces**: a front face plus a ring of seven or eight, depending on
+the lens. Before this
+release each face was sized at the *source frame's* pixel density, so a
+high-resolution fisheye ran roughly as many pixels as it was shot with, in
+pieces. Now each face is sized to the *written map's* density, capped at
+`--max-size` (default 1064), and raised to at least 1,200 patches (MoGe's
+lowest token budget) where the frame has the pixels. In the README's words, a
+high-resolution 360 capture *"costs what its map does, not what its sensor
+does"*. The old sizing is still available as `--face-res source`.
+
+How much faster depends on the camera, and the release gives **no number**.
+The README points to a "Face size" section for the measurement, and no section
+by that name exists at this tag. The README's own vit-large timing shows why
+the lever is large: 260 ms at 616 px, 810 ms at 1064 px and 2,200 ms at 1600 px
+(reported). Cost grows faster than pixel count, so shrinking faces cuts time
+by more than it cuts pixels (reasoned). The same commit also blanks any pixel
+that *any* face called sky (MoGe's mask), so a wrong normal never reaches the
+loss.
+
+No screenshots ship with this release: the GitHub release has binaries and a
+changelog only, and the tag adds no images to the repository. The figure
+earlier in this article is still the current GUI apart from the redesigned home
+screen.
 
 <ChangeMyMind>
 
