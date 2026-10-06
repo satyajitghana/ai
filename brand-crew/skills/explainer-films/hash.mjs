@@ -11,7 +11,8 @@ export const SKILL_DIR = dirname(fileURLToPath(import.meta.url))
 export const ROOT = join(SKILL_DIR, '..', '..', '..')
 
 // Everything that shapes a film: the painter, the styles, the hosts and the
-// scenes, the vendored p5.brush that paints the watercolour style, the page
+// scenes, the p5 tier (engine/p5tier.js), the vendored p5.js and both builds
+// of p5.brush, the page
 // they run in, the renderer's encode and GPU settings, the sound (voice,
 // effects, scores, mix) and the fonts. Not SKILL.md, not this file.
 function engineFiles() {
@@ -50,6 +51,10 @@ export function engineSha(style) {
     h.update(f === 'engine/styles.js' ? stylesSource(style) : readFileSync(join(SKILL_DIR, f)))
     h.update('\0')
   }
+  // the style's own p5-tier code, when it has any: one file per style, so
+  // porting one medium to the p5 tier does not make the other films stale
+  const own = `engine/p5/${style}.js`
+  if (existsSync(join(SKILL_DIR, own))) { h.update(own + '\0'); h.update(readFileSync(join(SKILL_DIR, own))); h.update('\0') }
   const sha = h.digest('hex')
   cached.set(style, sha)
   return sha

@@ -3,12 +3,17 @@
 //   node render.mjs sheet <storyboard.json> --at=0.5,1.2,3 [--every=0.5] [--cols=4] [--w=400] --out=sheet.jpg
 //   node render.mjs strip <storyboard.json> --from=2.0 --to=2.6 [--cols=8] [--w=320] --out=strip.jpg
 //   node render.mjs film  <storyboard.json ...> --out=dir [--workers=2] [--poster=1.6] [--scale=960] [--crf264=32]
-//   node render.mjs thumb <storyboard.json ...> --out=dir [--w=1200] [--q=0.72]
+//   node render.mjs thumb <storyboard.json ...> --out=dir [--w=1200] [--q=0.72] [--full]
 //   node render.mjs lines <storyboard.json ...>
 //   node render.mjs metrics                  (rewrites metrics.json, for the checker)
 //
 // thumb writes <slug>.jpg, 1200x630: the film's first mechanism scene, fully
 // built, with no text chrome, for the article's backdrop and its OG image.
+// --full also writes the frame it is cut from, at full resolution, as
+// <slug>-full.png; sheet and strip take --dump=dir for the same, per frame.
+//
+// Tiers: lite (default), --live and --p5, which paint at 1920x1080; see
+// openPage.
 //
 // film writes <slug>.mp4 (H.264, no audio, animated on twos) and
 // <slug>-poster.webp into --out, and prints one JSON line per film: duration,
@@ -43,12 +48,23 @@ const files = args.slice(1).filter(a => !a.startsWith('--'))
 // --live: the live tier. Every p5.brush shape is painted afresh on every
 // drawing, on a 1920x1080 canvas (the lite tier paints each shape once per film
 // at 1280x720 and reuses it). Set before the engine's scripts run.
+// --p5: the p5 tier. The frame is a real p5.js WEBGL canvas, also 1920x1080,
+// and p5.brush paints every shape straight into it in drawing order
+// (engine/p5tier.js). A style's p5-tier code, when it has any, is its own
+// file, engine/p5/<style>.js, loaded after the engine. --eager hands the
+// frame back to Canvas2D after every brush op (a reference: it must match the
+// default pixel for pixel); --trace prints each op's hand-off with a thumb.
+const P5_DIR = join(HERE, 'engine', 'p5')
 async function openPage(browser) {
-  const page = await browser.newPage({ viewport: opt.live ? { width: 1920, height: 1080 } : { width: 1280, height: 720 } })
+  const big = opt.live || opt.p5
+  const page = await browser.newPage({ viewport: big ? { width: 1920, height: 1080 } : { width: 1280, height: 720 } })
   if (opt.live) await page.addInitScript(() => { self.LIVE_TIER = true; self.TIER_OUT = [1920, 1080] })
+  if (opt.p5) await page.addInitScript(o => { self.P5_TIER = true; self.TIER_OUT = [1920, 1080]; self.P5_EAGER = o.eager; self.P5_TRACE = o.trace }, { eager: !!opt.eager, trace: !!opt.trace })
   page.on('pageerror', e => console.error('page error:', e.message))
   await page.goto(pathToFileURL(join(HERE, 'studio.html')).href)
   await page.evaluate(() => window.READY)
+  if (opt.p5 && existsSync(P5_DIR)) for (const f of readdirSync(P5_DIR).filter(f => f.endsWith('.js')).sort()) await page.addScriptTag({ path: join(P5_DIR, f) })
+  if (opt.p5 && opt.gpu) console.error('p5 tier gpu:', await page.evaluate(() => PB.renderer))
   return page
 }
 const loadSb = f => JSON.parse(readFileSync(f, 'utf8'))
@@ -85,23 +101,25 @@ async function prepMedia(page, sb) {
 async function sheet(page, sb, times, cols, w, out, labels = true) {
   await prepMedia(page, sb)
   const info = await page.evaluate(sb => FILM.load(sb), sb)
-  const data = await page.evaluate(({ times, cols, w, labels }) => {
+  const data = await page.evaluate(({ times, cols, w, labels, dump }) => {
     const h = Math.round(w * 720 / 1280), rows = Math.ceil(times.length / cols)
     const c = document.createElement('canvas'); c.width = cols * w; c.height = rows * (h + (labels ? 22 : 0))
     const g = c.getContext('2d'); g.fillStyle = '#111'; g.fillRect(0, 0, c.width, c.height)
     const src = document.getElementById('c')
-    const ms = []
+    const ms = [], full = []
     times.forEach((t, i) => {
       const a = performance.now(); FILM.frame(t, { blur: true }); ms.push(performance.now() - a)
+      if (dump) full.push(src.toDataURL('image/png'))
       const x = (i % cols) * w, y = Math.floor(i / cols) * (h + (labels ? 22 : 0))
       g.drawImage(src, x, y, w, h)
       if (labels) { g.fillStyle = '#ddd'; g.font = '13px monospace'; g.fillText(t.toFixed(2) + 's', x + 6, y + h + 15) }
     })
-    return { url: c.toDataURL('image/jpeg', .9), ms: ms.reduce((a, b) => a + b, 0) / ms.length, pb: typeof PB !== 'undefined' && PB.stats.bakes ? { ...PB.stats, ms: Math.round(PB.stats.ms) } : undefined }
-  }, { times, cols, w, labels })
+    return { url: c.toDataURL('image/jpeg', .9), full, ms: ms.reduce((a, b) => a + b, 0) / ms.length, msEach: ms.map(Math.round), pb: typeof PB !== 'undefined' && (PB.stats.bakes || PB.stats.ops) ? { ...PB.stats, ms: Math.round(PB.stats.ms), sync: Math.round(PB.stats.sync || 0) } : undefined }
+  }, { times, cols, w, labels, dump: !!opt.dump })
   mkdirSync(dirname(resolve(out)), { recursive: true })
   writeFileSync(out, Buffer.from(data.url.split(',')[1], 'base64'))
-  console.log(JSON.stringify({ out, duration: +info.duration.toFixed(2), frames: times.length, msPerFrame: Math.round(data.ms), pb: data.pb, scenes: info.scenes }))
+  if (opt.dump) { mkdirSync(opt.dump, { recursive: true }); data.full.forEach((u, i) => writeFileSync(join(opt.dump, `${sb.slug}-${times[i].toFixed(3)}.png`), Buffer.from(u.split(',')[1], 'base64'))) }
+  console.log(JSON.stringify({ out, duration: +info.duration.toFixed(2), frames: times.length, msPerFrame: Math.round(data.ms), msEach: data.msEach, pb: data.pb, scenes: info.scenes }))
 }
 
 // H.264 only. x264 with -tune animation beat VP9 on these frames at every
@@ -216,8 +234,11 @@ async function rendererOf(browser) {
 async function launch(cr) {
   // Windows: Chrome on the machine's own GPU through ANGLE's Direct3D 11 backend.
   // There is no Xvfb or llvmpipe there, and SwiftShader would waste the GPU.
+  // The p5 tier hands the frame between Canvas2D and WebGL on every brush
+  // stroke, so there its 2D canvases stay on the GPU too (--cpu2d keeps them on the CPU).
   if (process.platform === 'win32') {
-    const browser = await cr.launch({ executablePath: process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: [...BASE_ARGS, '--use-angle=d3d11'] })
+    const args = opt.p5 && !opt.cpu2d ? BASE_ARGS.filter(a => a !== '--disable-accelerated-2d-canvas') : BASE_ARGS
+    const browser = await cr.launch({ executablePath: process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: [...args, '--use-angle=d3d11'] })
     if (opt.gpu) console.error('gpu:', await rendererOf(browser))
     return browser
   }
@@ -290,17 +311,19 @@ const main = async () => {
       while (queue.length) {
         const sb = loadSb(queue.shift())
         await prepMedia(page, sb)
-        const r = await page.evaluate(({ sb, w, q }) => {
-          const info = FILM.thumb(sb), src = document.getElementById('c'), h = Math.round(w * 630 / 1200)
+        const r = await page.evaluate(({ sb, w, q, full }) => {
+          const t0 = performance.now(), info = FILM.thumb(sb), ms = performance.now() - t0, src = document.getElementById('c'), h = Math.round(w * 630 / 1200)
           const c = document.createElement('canvas'); c.width = w; c.height = h
           const g = c.getContext('2d'), sh = src.width * h / w
           g.imageSmoothingEnabled = info.style !== 'pixel'; g.imageSmoothingQuality = 'high'
           g.drawImage(src, 0, (src.height - sh) / 2, src.width, sh, 0, 0, w, h)
-          return { ...info, url: c.toDataURL('image/jpeg', q) }
-        }, { sb, w, q })
+          return { ...info, ms, url: c.toDataURL('image/jpeg', q), full: full ? src.toDataURL('image/png') : null }
+        }, { sb, w, q, full: !!opt.full })
         const file = join(out, `${sb.slug}.jpg`)
         writeFileSync(file, Buffer.from(r.url.split(',')[1], 'base64'))
-        console.log(JSON.stringify({ slug: sb.slug, file, bytes: statSync(file).size, scene: r.scene, style: r.style, mascot: r.mascot }))
+        if (r.full) writeFileSync(join(out, `${sb.slug}-full.png`), Buffer.from(r.full.split(',')[1], 'base64'))
+        console.log(JSON.stringify({ slug: sb.slug, file, bytes: statSync(file).size, scene: r.scene, style: r.style, mascot: r.mascot, ms: Math.round(r.ms) }))
+        if (opt.trace) console.log(JSON.stringify(await page.evaluate(() => ({ stats: PB.stats, trace: PB.trace }))))
       }
       }))
     } else if (mode === 'film') {
