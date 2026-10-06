@@ -10,6 +10,15 @@ import { cn } from "@/lib/utils"
 
 type Step = { who: string; title: string; text: string; code: string; at: string }
 
+// One hue per actor, the same as the port map uses for the engine and the IO worker.
+const WHO_COLOR: Record<string, string> = {
+  "engine thread": "oklch(0.58 0.15 150)",
+  "IO worker": "oklch(0.62 0.14 65)",
+  "IO worker → host": "oklch(0.62 0.14 65)",
+  "IO worker → OPFS": "oklch(0.62 0.14 65)",
+  "IO worker → engine": "oklch(0.62 0.14 65)",
+}
+
 const STEPS: Step[] = [
   {
     who: "engine thread",
@@ -86,16 +95,18 @@ export function ReadPath() {
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
-        <span className="font-mono text-xs text-muted-foreground">one engine read, end to end · {s.who}</span>
-        <div className="flex gap-1">
+        <span className="font-mono text-xs text-muted-foreground">one engine read, end to end</span>
+        <div className="flex gap-1" role="group" aria-label="Step">
           {STEPS.map((_, k) => (
             <button
               key={k}
               type="button"
               onClick={() => setI(k)}
+              aria-pressed={k === i}
+              aria-label={`Step ${k + 1}: ${STEPS[k].who}`}
               className={cn(
-                "h-6 w-6 rounded-md border font-mono text-xs",
-                k === i ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground",
+                "h-6 w-6 cursor-pointer rounded-md border font-mono text-xs transition-colors",
+                k === i ? "border-foreground bg-foreground text-background" : "text-muted-foreground hover:text-foreground",
               )}
             >
               {k + 1}
@@ -103,17 +114,40 @@ export function ReadPath() {
           ))}
         </div>
       </div>
-      <div className="space-y-3 px-4 py-4">
-        <div className="text-sm font-semibold">{s.title}</div>
+      <div className="space-y-3 px-4 py-4" aria-live="polite">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+          <div className="text-sm font-semibold">{s.title}</div>
+          <span
+            className="rounded-full border px-2 py-0.5 font-mono text-[11px]"
+            style={{ borderColor: WHO_COLOR[s.who], color: WHO_COLOR[s.who] }}
+          >
+            {s.who}
+          </span>
+        </div>
         <p className="text-sm leading-relaxed">{s.text}</p>
-        <pre className="overflow-x-auto rounded-lg bg-muted/50 p-3 font-mono text-xs leading-relaxed">{s.code}</pre>
+        <pre className="overflow-x-auto rounded-lg border bg-muted/50 p-3 font-mono text-xs leading-relaxed">{s.code}</pre>
         <div className="font-mono text-xs text-muted-foreground">{s.at}</div>
       </div>
-      <div className="flex justify-between border-t px-4 py-2">
-        <button type="button" disabled={i === 0} onClick={() => setI(i - 1)} className="font-mono text-xs text-muted-foreground hover:text-foreground disabled:opacity-40">
+      <div className="flex items-center justify-between gap-3 border-t px-4 py-2">
+        <button
+          type="button"
+          disabled={i === 0}
+          onClick={() => setI(i - 1)}
+          className="cursor-pointer py-1 font-mono text-xs text-muted-foreground hover:text-foreground disabled:cursor-default disabled:opacity-40"
+        >
           ← previous
         </button>
-        <button type="button" disabled={i === STEPS.length - 1} onClick={() => setI(i + 1)} className="font-mono text-xs text-muted-foreground hover:text-foreground disabled:opacity-40">
+        <div className="flex flex-1 justify-center gap-1" aria-hidden>
+          {STEPS.map((_, k) => (
+            <span key={k} className={cn("h-1 rounded-full transition-all", k === i ? "w-5 bg-foreground" : "w-2 bg-muted-foreground/30")} />
+          ))}
+        </div>
+        <button
+          type="button"
+          disabled={i === STEPS.length - 1}
+          onClick={() => setI(i + 1)}
+          className="cursor-pointer py-1 font-mono text-xs text-muted-foreground hover:text-foreground disabled:cursor-default disabled:opacity-40"
+        >
           next →
         </button>
       </div>
