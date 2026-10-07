@@ -48,7 +48,7 @@ Config is via env vars — **all optional** (the site runs with none). See
 Content lives in `content/<kind>/*.mdx` (blog, articles, logs, projects, arxiv, snippets,
 notes), validated by `lib/content/schema.ts`. Typed records live in `data/*.ts`. A
 malformed file fails `pnpm validate` and the build. See [`CLAUDE.md`](./CLAUDE.md) for the
-full content contract and [`plans/`](./plans) for the design.
+full content contract and [`roadmap/`](./roadmap) for the design.
 
 ## The crew (brand-crew plugin)
 
