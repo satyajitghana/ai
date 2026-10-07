@@ -364,20 +364,26 @@ function fromClone(id: string, dir: string, label: string): SourceResult {
     .sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name))
     .slice(0, 8)
 
-  // Licence, from the file at the root of the pinned tree.
-  let license: string | undefined
-  let licenseFile: string | undefined
-  for (const rel of files) {
-    if (rel.includes("/")) continue
-    if (!LICENSE_FILE_RE.test(rel)) continue
+  // Licence, from every licence file at the root of the pinned tree, LICENSE
+  // before COPYING. A dual-licensed repo (unsloth: Apache-2.0 in LICENSE,
+  // AGPL-3.0 for Studio in COPYING) lists both; stopping at the first file
+  // sorted COPYING ahead and called the package AGPL.
+  const licenseFiles = files
+    .filter((rel) => !rel.includes("/") && LICENSE_FILE_RE.test(rel))
+    .sort((a, b) => Number(/^copying/i.test(a)) - Number(/^copying/i.test(b)) || a.localeCompare(b))
+  const found: string[] = []
+  const foundFiles: string[] = []
+  for (const rel of licenseFiles) {
     try {
-      license = detectLicense(fs.readFileSync(path.join(dir, rel), "utf8"))
-      licenseFile = rel
+      const id = detectLicense(fs.readFileSync(path.join(dir, rel), "utf8"))
+      foundFiles.push(rel)
+      if (!found.includes(id)) found.push(id)
     } catch {
-      /* unreadable — leave undefined rather than assert a licence */
+      /* unreadable — leave it out rather than assert a licence */
     }
-    break
   }
+  const license = found.length ? found.join(" / ") : undefined
+  const licenseFile = foundFiles.length ? foundFiles.join(", ") : undefined
 
   const data: Partial<RepoCardSnapshot> = {
     license,
