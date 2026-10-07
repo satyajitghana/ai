@@ -21,6 +21,7 @@ import { DISCIPLINES, FAMILIES, type Family } from "@/components/articles/openai
 import notes from "@/data/math-wall/notes.json"
 import { ARTICLE_ANCHORS, REELS, SPEC_TITLES } from "@/data/math-wall/generated"
 import reelManifest from "@/data/.generated/math-reels.json"
+import { BREAKTHROUGH, breakthroughScore, breakthroughTier, type Tier } from "@/lib/math-breakthrough"
 import { mediaUrl } from "@/lib/media"
 import { texToText } from "@/lib/tex-text"
 
@@ -145,6 +146,23 @@ export type MathResult = {
   catalogueUrl: string
   manuscripts: { title: string; url: string }[]
   reel: MathReel | null
+  /** how big a breakthrough it is if the claim holds (lib/math-breakthrough.ts) */
+  breakthrough: MathBreakthrough
+}
+
+export type MathBreakthrough = {
+  /** 0-100, from importance, advance, consequences and surprise */
+  score: number
+  tier: Tier
+  importance: number
+  advance: number
+  consequences: number
+  surprise: number
+  /** 0-3, how far the claim is checked; shown beside the score, never in it */
+  confidence: number
+  why: string
+  /** what improves, and for whom, if it holds */
+  consequence: string
 }
 
 export type MathResultDetail = MathResult & {
@@ -154,6 +172,22 @@ export type MathResultDetail = MathResult & {
   leanExplained: string
   releaseSummary: string
   pages: number | null
+}
+
+function breakthroughOf(id: string): MathBreakthrough {
+  const e = BREAKTHROUGH[id]
+  const score = breakthroughScore(e)
+  return {
+    score,
+    tier: breakthroughTier(score),
+    importance: e.importance,
+    advance: e.advance,
+    consequences: e.consequences,
+    surprise: e.surprise,
+    confidence: e.confidence,
+    why: e.why,
+    consequence: e.consequence,
+  }
 }
 
 function record(f: Family): MathResultDetail {
@@ -192,6 +226,7 @@ function record(f: Family): MathResultDetail {
           date: r.date,
         }
       : null,
+    breakthrough: breakthroughOf(f.id),
     explainer: n.explainer,
     caveats: n.caveats,
     leanDetail: n.lean,
@@ -226,14 +261,19 @@ export type WallTile = {
   k: string
   l: number
   c: string
+  /** breakthrough score, 0-100 */
+  b: number
+  /** confidence, 0-3 */
+  cf: number
   /** reel: [src, poster, captions, seconds] when rendered */
   r: [string, string, string | null, number | null] | null
 }
 
 export function wallTiles(): WallTile[] {
   return FAMILIES.map((f) => {
-    const r = BY_ID.get(f.id)!.reel
-    return { id: f.id, t: BY_ID.get(f.id)!.title, d: f.d, s: f.s, k: f.k, l: f.l, c: f.c, r: r ? [r.src, r.poster, r.captions, r.duration] : null }
+    const rec = BY_ID.get(f.id)!
+    const r = rec.reel
+    return { id: f.id, t: rec.title, d: f.d, s: f.s, k: f.k, l: f.l, c: f.c, b: rec.breakthrough.score, cf: rec.breakthrough.confidence, r: r ? [r.src, r.poster, r.captions, r.duration] : null }
   })
 }
 
@@ -243,4 +283,5 @@ export const mathCounts = () => ({
   leanMain: ALL.filter((r) => r.lean === "main").length,
   leanPart: ALL.filter((r) => r.lean === "part").length,
   manuscripts: ALL.reduce((n, r) => n + r.manuscripts.length, 0),
+  huge: ALL.filter((r) => r.breakthrough.tier === "Huge if true").length,
 })
