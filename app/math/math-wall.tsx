@@ -25,6 +25,7 @@ import {
 } from "@phosphor-icons/react/dist/ssr"
 
 import { FilmPlayer } from "@/components/site/film-player"
+import { ANCHORS, breakthroughTier, MAX, type ScoredDimension, type Tier } from "@/lib/math-breakthrough-scale"
 import type { MathResultDetail, WallTile } from "@/lib/math-wall"
 import { useUrlState } from "@/lib/use-url-state"
 import { cn } from "@/lib/utils"
@@ -85,7 +86,7 @@ type Filters = {
   kind: string
   sig: number
   lean: number
-  sort: "importance" | "number"
+  sort: "score" | "importance" | "number"
 }
 
 // ── the wall ────────────────────────────────────────────────────────────────
@@ -111,7 +112,7 @@ export function MathWall({
       kind,
       sig: SIG.indexOf((p.get("sig") ?? "") as (typeof SIG)[number]),
       lean: LEAN.indexOf((p.get("lean") ?? "") as (typeof LEAN)[number]),
-      sort: p.get("sort") === "number" ? "number" : "importance",
+      sort: p.get("sort") === "number" ? "number" : p.get("sort") === "significance" ? "importance" : "score",
     }
   })
   const set = (key: string, value: string | null) =>
@@ -142,7 +143,9 @@ export function MathWall({
 
   const shown = useMemo(() => {
     const list = tiles.filter((t) => match(t))
-    if (f.sort === "importance") list.sort((a, b) => a.s - b.s || Number(!!b.r) - Number(!!a.r) || a.id.localeCompare(b.id))
+    // biggest breakthrough first; a tie goes to the better-checked claim
+    if (f.sort === "score") list.sort((a, b) => b.b - a.b || b.cf - a.cf || a.s - b.s || a.id.localeCompare(b.id))
+    else if (f.sort === "importance") list.sort((a, b) => a.s - b.s || Number(!!b.r) - Number(!!a.r) || a.id.localeCompare(b.id))
     return list
   }, [tiles, match, f.sort])
 
@@ -335,10 +338,11 @@ export function MathWall({
           <Select
             compact
             label="Sort"
-            value={f.sort === "number" ? "number" : ""}
+            value={f.sort === "number" ? "number" : f.sort === "importance" ? "significance" : ""}
             onChange={(v) => set("sort", v || null)}
             options={[
-              ["", "Most significant first"],
+              ["", "Biggest breakthrough first"],
+              ["significance", "By our coarse grade"],
               ["number", "By number"],
             ]}
           />
@@ -507,6 +511,100 @@ function SigBadge({ s }: { s: number }) {
   )
 }
 
+// The breakthrough score (lib/math-breakthrough-scale.ts): how big a result is
+// if its claim holds. On a poster it sits on the dark reel ground, so its
+// colours are fixed rather than themed.
+const TIER_STYLE: Record<Tier, string> = {
+  "Huge if true": "bg-[#FBBF24] text-black",
+  Major: "bg-white/90 text-black",
+  Solid: "bg-black/60 text-white",
+  Incremental: "bg-black/60 text-white/70",
+}
+
+function ScoreBadge({ b, label }: { b: number; label?: boolean }) {
+  const tier = breakthroughTier(b)
+  return (
+    <span
+      className={cn(
+        "inline-flex items-baseline gap-1 rounded-full px-1.5 py-px font-mono text-[10px] whitespace-nowrap tabular-nums",
+        TIER_STYLE[tier],
+        !label && "backdrop-blur-sm",
+      )}
+      title={`Breakthrough score ${b}/100: ${tier}`}
+    >
+      <span className="font-semibold">{b}</span>
+      {label ? <span>{tier}</span> : null}
+    </span>
+  )
+}
+
+const SCORED: ScoredDimension[] = ["importance", "advance", "consequences", "surprise"]
+
+function Meter({ value, max }: { value: number; max: number }) {
+  return (
+    <span aria-hidden className="flex gap-0.5">
+      {Array.from({ length: max }, (_, i) => (
+        <span key={i} className={cn("h-1.5 w-4 rounded-full", i < value ? "bg-foreground" : "bg-foreground/15")} />
+      ))}
+    </span>
+  )
+}
+
+function Breakthrough({ b, detail }: { b: number; detail: MathResultDetail | null }) {
+  const tier = breakthroughTier(b)
+  const d = detail?.breakthrough
+  return (
+    <section className="mt-6">
+      <h3 className="mb-1.5 font-mono text-[11px] tracking-wide text-muted-foreground uppercase">Breakthrough score</h3>
+      <div className="flex items-baseline gap-2">
+        <span className="font-heading text-3xl font-semibold tabular-nums">{b}</span>
+        <span className="text-sm text-muted-foreground">/ 100</span>
+        <span className={cn("ml-1 rounded-full px-2 py-px font-mono text-[11px]", tier === "Huge if true" ? "bg-[#FBBF24] text-black" : "border")}>
+          {tier}
+        </span>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">How big a result this is if the claim holds. Whether it holds is the Lean status and the caveats below.</p>
+      {d ? (
+        <div className="mt-3 text-sm leading-relaxed">
+          <p>{d.why}</p>
+          <p className="mt-2">
+            <span className="font-medium">If it holds: </span>
+            {d.consequence}
+          </p>
+          <dl className="mt-3 grid gap-1.5">
+            {SCORED.map((k) => (
+              <div key={k} className="grid grid-cols-[7.5rem_4.75rem_1fr] items-center gap-2 text-xs" title={ANCHORS[k].levels[d[k]]}>
+                <dt className="text-muted-foreground">{ANCHORS[k].label}</dt>
+                <Meter value={d[k]} max={MAX[k]} />
+                <dd className="truncate text-muted-foreground">
+                  <span className="sr-only">
+                    {d[k]} of {MAX[k]}:{" "}
+                  </span>
+                  {ANCHORS[k].levels[d[k]]}
+                </dd>
+              </div>
+            ))}
+            <div className="grid grid-cols-[7.5rem_4.75rem_1fr] items-center gap-2 border-t pt-1.5 text-xs" title={ANCHORS.confidence.levels[d.confidence]}>
+              <dt className="text-muted-foreground">Checked</dt>
+              <Meter value={d.confidence} max={MAX.confidence} />
+              <dd className="truncate text-muted-foreground">
+                <span className="sr-only">
+                  {d.confidence} of {MAX.confidence}, not part of the score:{" "}
+                </span>
+                {ANCHORS.confidence.levels[d.confidence]}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      ) : (
+        <div className="mt-3">
+          <Skeleton lines={3} />
+        </div>
+      )}
+    </section>
+  )
+}
+
 // A reel that has not been rendered yet: the reel's dark ground, its family
 // number in the discipline's accent, and a note that says so.
 function ReelPlaceholder({ tile, discipline, accent, large }: { tile: WallTile; discipline: string; accent: string; large?: boolean }) {
@@ -607,7 +705,7 @@ function Tile({
           stop()
           onOpen()
         }}
-        aria-label={`${tile.id}. ${tile.t}. ${discipline}, ${SIG[tile.s]}, ${LEAN_LABEL[tile.l]}${tile.r ? "" : ", video coming"}`}
+        aria-label={`${tile.id}. ${tile.t}. Breakthrough score ${tile.b} of 100, ${breakthroughTier(tile.b)}. ${discipline}, ${SIG[tile.s]}, ${LEAN_LABEL[tile.l]}${tile.r ? "" : ", video coming"}`}
         className="group block rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-4 focus-visible:ring-offset-background"
       >
         <div className="relative aspect-video overflow-hidden rounded-xl border border-black/5 bg-[#0b0d12] shadow-sm transition-transform duration-300 group-hover:-translate-y-0.5 group-hover:shadow-md motion-reduce:transition-none motion-reduce:group-hover:translate-y-0 dark:border-white/10">
@@ -637,6 +735,9 @@ function Tile({
           ) : (
             <ReelPlaceholder tile={tile} discipline={discipline} accent={accent} />
           )}
+          <span className="absolute top-1.5 left-1.5">
+            <ScoreBadge b={tile.b} />
+          </span>
           {tile.r ? (
             <span className="absolute top-1.5 right-1.5 rounded bg-black/55 px-1 font-mono text-[10px] text-white/85 tabular-nums backdrop-blur-sm">
               {tile.id}
@@ -837,6 +938,7 @@ function Panel({
               {tile.t}
             </h2>
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <ScoreBadge b={tile.b} label />
               <span className="rounded-full border px-2 py-px text-[11px]">{kinds[tile.k] ?? tile.k}</span>
               <SigBadge s={tile.s} />
               <LeanBadge l={tile.l} />
@@ -845,6 +947,8 @@ function Panel({
             <Section title="The claim">
               <p>{tile.c}</p>
             </Section>
+
+            <Breakthrough b={tile.b} detail={detail} />
 
             <Section title="Our read">
               {detail ? (

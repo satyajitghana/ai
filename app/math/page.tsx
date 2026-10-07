@@ -103,10 +103,20 @@ export default function Page() {
           </Link>{" "}
           explains what the Lean library does and does not certify.
         </p>
+        <p className="mt-3 leading-7 text-muted-foreground">
+          The number on each tile is our <strong className="font-semibold text-foreground">breakthrough score</strong>,
+          0 to 100: how important the problem is, how far the result moves it, what follows if it holds, and how
+          surprising it is. It measures size, not truth; a 100 with no Lean behind it is huge only if it holds. The
+          wall opens biggest first.
+        </p>
         <dl className="mt-4 flex flex-wrap gap-x-6 gap-y-1 font-mono text-xs text-muted-foreground">
           <div className="flex gap-1.5">
             <dt>families</dt>
             <dd className="text-foreground tabular-nums">{counts.families}</dd>
+          </div>
+          <div className="flex gap-1.5">
+            <dt>huge if true</dt>
+            <dd className="text-foreground tabular-nums">{counts.huge}</dd>
           </div>
           <div className="flex gap-1.5">
             <dt>manuscripts</dt>
