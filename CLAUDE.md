@@ -97,7 +97,7 @@ What none of this fixes is **backlinks**, which come from other people citing th
 - An article's explainer film and thumbnail → `/film <slug>` (**explainer-films**) → `data/films/<slug>.json` + `public/thumbs/<slug>.jpg` (+ `public/films/<slug>.mp4` for filmed articles)
 - An architecture explainer → `content/architectures/<slug>.mdx` (slug from `data/architectures.ts`) + `data/films/architectures/<slug>.json` + `build.mjs --thumbs architectures/<slug>`; pilot: `transformer`
 - A bespoke painted short → **claude-animation-base** (vendored; read its `ANIMATION_GUIDE.md`)
-- A math reel on `/math` (one per openai/math family) → **math-reels** writes `public/films/math/<id>.mp4` + `-poster.webp`; then `pnpm data:math` (`scripts/build-math-reels-data.mts`) records it in `data/math-wall/generated.ts`, since the page never reads `public/`. The wall's records are `lib/math-wall.ts`; agents read `/api/math` and `/api/math/<id>`
+- A video on `/math`, "AI results in mathematics" (one per openai/math family) → the **math-reels** skill writes `public/films/math/<id>.mp4` + `-poster.webp`; then `pnpm data:math` (`scripts/build-math-reels-data.mts`) records it in `data/math-wall/generated.ts`, since the page never reads `public/`. The wall's records are `lib/math-wall.ts` (its reader-facing name is `MATH_COLLECTION`); the open video plays in the site's player (`components/site/film-player.tsx`, which `ArticleFilm` also wraps), tiles stay posters with a hover preview; agents read `/api/math` and `/api/math/<id>`
 
 ## Commands
 - `pnpm dev` — dev server · `pnpm build` — production build · `pnpm start` — serve build

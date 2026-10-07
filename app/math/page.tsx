@@ -7,6 +7,7 @@ import {
   DISCIPLINE_ACCENTS,
   KIND_LABEL,
   MATH_ARTICLE,
+  MATH_COLLECTION,
   MATH_REPO,
   mathCounts,
   mathResults,
@@ -18,13 +19,13 @@ import { absoluteUrl, siteUrl } from "@/lib/site"
 
 import { MathWall } from "./math-wall"
 
-const TITLE = "Math reels"
+const TITLE = MATH_COLLECTION
 const DESCRIPTION =
-  "A filterable wall of short reels, one per result family of OpenAI's openai/math release: 372 claimed theorems, each with the claim as we read it, our verdict, its Lean status and its manuscripts."
+  "Mathematics produced or claimed by AI systems: a short narrated video for each of the 372 result families in OpenAI's openai/math release. Each comes with the claim as we read it, our verdict, its Lean status and its manuscripts, from claimed landmarks to technical lemmas."
 
 export const metadata = seo("/math", TITLE, DESCRIPTION)
 
-// ISO 8601 duration for a reel's VideoObject.
+// ISO 8601 duration for a video's VideoObject.
 const iso = (s: number) => `PT${Math.round(s)}S`
 
 export default function Page() {
@@ -40,7 +41,7 @@ export default function Page() {
     "@type": "CollectionPage",
     "@id": absoluteUrl("/math"),
     url: absoluteUrl("/math"),
-    name: `${TITLE}: openai/math, one reel per claimed result`,
+    name: `${TITLE}: openai/math, one short video per claimed result`,
     description: DESCRIPTION,
     isPartOf: { "@id": `${siteUrl}/#website` },
     author: { "@id": `${siteUrl}/#person` },
@@ -91,7 +92,7 @@ export default function Page() {
           <AgentChip json="/api/math" />
         </div>
         <p className="mt-3 leading-7 text-muted-foreground">
-          One short reel for every result family in OpenAI&apos;s{" "}
+          Mathematics produced or claimed by AI systems: one short narrated video for every result family in OpenAI&apos;s{" "}
           <a className="underline underline-offset-4 hover:text-foreground" href={MATH_REPO}>
             openai/math
           </a>{" "}
@@ -120,7 +121,7 @@ export default function Page() {
             <dd className="text-foreground tabular-nums">{counts.leanPart}</dd>
           </div>
           <div className="flex gap-1.5">
-            <dt>reels so far</dt>
+            <dt>videos so far</dt>
             <dd className="text-foreground tabular-nums">{counts.reels}</dd>
           </div>
         </dl>
