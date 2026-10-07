@@ -2,13 +2,20 @@
 optional narration track.
 
     python audio.py events.json out.wav          the bed (and the voice, if events.json lists it)
-    python audio.py tts --in lines.json --out DIR [--voice af_heart] [--allow-guess]
+    python audio.py tts --in lines.json --out DIR [--voice af_heart] [--speed 1.1] [--allow-guess]
         lines.json = {"107": ["spoken line", ...], ...}. Kokoro-82M on CPU (the
         Windows farm's venv has it); each line is cached as DIR/<hash>.wav, the
         hash taking the voice, the speed and the text as actually said, so an
         unchanged line is never re-voiced. Prints {"107": [{"text", "wav", "sec"}]}.
+        --speed: render.mjs retries a reel at 1.18, then 1.25, when its lines
+        cannot fit 21 s at the default 1.1.
     python audio.py speak "text"                 what the voice will be given (offline)
     python audio.py words --in lines.json        names the voice would guess at (needs misaki)
+    python audio.py lexicon --in lines.json [--out plain-words.txt]
+        every word of the lines, split the way pronounce.mjs splits them: the
+        ones misaki's lexicon says are added to plain-words.txt (the offline
+        check's list of plain English), the ones it does not are printed: add
+        those to pronounce.json (needs misaki)
 
 events.json may carry "voice": [{"t": 0.3, "wav": "DIR/abcd.wav"}]: each line
 is placed at its time and the music is ducked about 10 dB under it.
@@ -39,6 +46,8 @@ VOICE = "af_heart"
 _P = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pronounce.json"), encoding="utf-8"))
 SAY = {k: v for k, v in _P.get("say", {}).items()}
 PHON = {k: v for k, v in _P.get("phonemes", {}).items()}
+# a lowercase entry also covers the word capitalised at the start of a sentence
+PHON.update({k[0].upper() + k[1:]: v for k, v in list(PHON.items()) if k[:1].islower() and k[0].upper() + k[1:] not in PHON})
 _SAY = re.compile(r"(?<![\w])(" + "|".join(re.escape(k) for k in sorted(SAY, key=len, reverse=True)) + r")(?![\w])") if SAY else None
 _PHON = re.compile(r"(?<![\w.])(" + "|".join(re.escape(k) for k in sorted(PHON, key=len, reverse=True)) + r")((?:'|’)s)?(?![\w])") if PHON else None
 
@@ -57,14 +66,18 @@ def speakable(s):
     if _SAY:
         s = _SAY.sub(lambda m: SAY[m.group(1)], s)
     s = re.sub(r"[\[\]{}()<>`_*|\\$^]", " ", s)
+    # a hyphen between letters is a word break for the voice: Kazhdan-Lusztig,
+    # p-adic and non-sofic are said (and looked up) word by word
+    s = re.sub(r"(?<=[^\W\d_])-(?=[^\W\d_])", " ", s)
     if _PHON:
         s = _PHON.sub(_ph, s)
     s = re.sub(r"\)-(?=\w)", ") ", s)
+    s = re.sub(r"\)['’](?=\s|$|[,.;:!?])", ")", s)      # Foulkes' / Connes': the apostrophe is not said
     return re.sub(r"\s+", " ", s).strip()
 
 
-def line_key(voice, text):
-    return hashlib.sha1(json.dumps([voice, SPEED, speakable(text)], ensure_ascii=False).encode()).hexdigest()[:16]
+def line_key(voice, text, speed=SPEED):
+    return hashlib.sha1(json.dumps([voice, speed, speakable(text)], ensure_ascii=False).encode()).hexdigest()[:16]
 
 
 def guessed_names(texts):
@@ -76,6 +89,52 @@ def guessed_names(texts):
             if (t.phonemes is None or "❓" in t.phonemes) and re.search(r"[A-Z0-9]", t.text):
                 out.add(t.text)
     return sorted(out)
+
+
+# The tokens the offline check (pronounce.mjs) looks up: the text after the
+# `say` rewrites and the hyphen rule, before phoneme links. Keep in step with
+# pronounce.mjs words().
+TOKEN = re.compile(r"[^\W\d_][^\W\d_'’]*(?:['’][^\W\d_]+)*")
+
+
+def plain_text(s):
+    s = s.replace("ai.thesatyajit.com", "ai dot the satyajit dot com")
+    s = s.replace("—", ", ").replace("–", " to ").replace("&", " and ").replace("%", " percent")
+    if _SAY:
+        s = _SAY.sub(lambda m: SAY[m.group(1)], s)
+    s = re.sub(r"[\[\]{}()<>`_*|\\$^]", " ", s)
+    return re.sub(r"(?<=[^\W\d_])-(?=[^\W\d_])", " ", s)
+
+
+def base_word(w):
+    return re.sub(r"(['’]s|['’])$", "", w)
+
+
+def lexicon(args):
+    from misaki import en
+    g2p = en.G2P(trf=False, british=False, fallback=None)
+    texts = [l for ls in json.load(open(args.inp, encoding="utf-8")).values() for l in ls]
+    out = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "plain-words.txt")
+    known = set()
+    if os.path.exists(out):
+        known = {w.strip() for w in open(out, encoding="utf-8") if w.strip() and not w.startswith("#")}
+    missing, seen = set(), set()
+    for s in texts:
+        for w in TOKEN.findall(plain_text(s)):
+            b = base_word(w)
+            if b in PHON or len(b) == 1 or b.lower() in known or b in seen:
+                continue
+            seen.add(b)
+            toks = g2p(b)[1]
+            if toks and all(t.phonemes and "❓" not in t.phonemes for t in toks):
+                known.add(b.lower())
+            else:
+                missing.add(b)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("# Plain English the narrator's lexicon (misaki, US) already says, one word a line, lowercased.\n"
+                "# Written by `python audio.py lexicon --in lines.json` on a machine with misaki; read by pronounce.mjs.\n")
+        f.write("\n".join(sorted(known)) + "\n")
+    print("\n".join(sorted(missing, key=str.lower)))
 
 
 def trim(y, sr, thr=0.01):
@@ -96,13 +155,13 @@ def tts(args):
     for rid, lines in todo.items():
         out[rid] = []
         for line in lines:
-            k = line_key(args.voice, line)
+            k = line_key(args.voice, line, args.speed)
             wav = os.path.join(args.out, k + ".wav")
             if not os.path.exists(wav):
                 if pipe is None:
                     from kokoro import KPipeline
                     pipe = KPipeline(lang_code="a")
-                chunks = [a for _, _, a in pipe(speakable(line), voice=args.voice, speed=SPEED)]
+                chunks = [a for _, _, a in pipe(speakable(line), voice=args.voice, speed=args.speed)]
                 y = np.concatenate([c.numpy() if hasattr(c, "numpy") else np.asarray(c) for c in chunks]) if chunks else np.zeros(1, np.float32)
                 write_mono(wav, trim(y, VSR), VSR)
             y, sr = read_mono(wav)
@@ -268,14 +327,16 @@ def main(ev_path, out_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("tts", "words", "speak"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("tts", "words", "speak", "lexicon"):
         ap = argparse.ArgumentParser()
         ap.add_argument("mode"); ap.add_argument("text", nargs="?")
         ap.add_argument("--in", dest="inp"); ap.add_argument("--out"); ap.add_argument("--voice", default=VOICE)
-        ap.add_argument("--allow-guess", action="store_true")
+        ap.add_argument("--allow-guess", action="store_true"); ap.add_argument("--speed", type=float, default=SPEED)
         a = ap.parse_args()
         if a.mode == "speak":
             print(speakable(a.text or ""))
+        elif a.mode == "lexicon":
+            lexicon(a)
         elif a.mode == "words":
             print("\n".join(guessed_names([l for ls in json.load(open(a.inp, encoding="utf-8")).values() for l in ls])))
         else:
