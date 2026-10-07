@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
+import { ARTICLE_LAYOUTS } from "@/components/articles/layouts"
 import { AgentChip } from "@/components/site/agent-chip"
 import { ArticleFilm } from "@/components/site/article-film"
 import { Citation } from "@/components/site/citation"
@@ -69,8 +70,8 @@ export default async function Page({
   const film = getFilm(slug)
   const thumb = getThumb(slug)
 
-  return (
-    <PageShell>
+  const jsonLd = (
+    <>
       <JsonLd data={articleJsonLd(article)} />
       <JsonLd
         data={breadcrumbJsonLd([
@@ -79,6 +80,30 @@ export default async function Page({
           { name: article.title, path: `/articles/${slug}` },
         ])}
       />
+    </>
+  )
+  const endMatter = (
+    <>
+      <RelatedArticles slug={slug} />
+      <Citation title={article.title} slug={slug} date={article.date} />
+      <ShareButtons
+        path={`/articles/${slug}`}
+        title={article.title}
+        className="mt-12 border-t pt-6"
+      />
+    </>
+  )
+
+  // An article that names a `layout:` in its frontmatter gets its own page
+  // shell (components/articles/layouts.ts). Everything else renders below.
+  if (article.layout) {
+    const Layout = ARTICLE_LAYOUTS[article.layout]
+    return <Layout article={article} film={film} Body={Article} jsonLd={jsonLd} endMatter={endMatter} />
+  }
+
+  return (
+    <PageShell>
+      {jsonLd}
       <article>
         <header className="mb-10">
           <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between sm:gap-4">
@@ -113,13 +138,7 @@ export default async function Page({
         </header>
         <Article />
       </article>
-      <RelatedArticles slug={slug} />
-      <Citation title={article.title} slug={slug} date={article.date} />
-      <ShareButtons
-        path={`/articles/${slug}`}
-        title={article.title}
-        className="mt-12 border-t pt-6"
-      />
+      {endMatter}
     </PageShell>
   )
 }

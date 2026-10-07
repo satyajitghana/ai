@@ -83,21 +83,24 @@ function check(s: State): Finding[] {
 
 const CSS = `
 /* Chrome: one type ramp (1, 0.9375, 0.8125, 0.75rem) and one spacing scale
-   (0.25, 0.5, 0.75, 1, 1.5, 2.5rem), per distill.md:51-56. */
-.imp-bench { margin: 2.5rem 0; border-block: 1px solid var(--imp-rule, var(--border)); padding: 1rem 0 1.5rem; }
+   (0.25, 0.5, 0.75, 1, 1.5, 2.5rem), per distill.md:51-56. Set in the page's
+   interface face under a 2px ink rule, the same plate as the page's colophon
+   and rule ledger; corners are 3px like the rest of the page's controls. */
+.imp-bench { margin: 2.5rem 0; font-family: var(--font-sans); border-top: 2px solid var(--foreground); border-bottom: 1px solid var(--imp-rule, var(--border)); padding: 0.75rem 0 1.5rem; }
 .imp-bench-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; }
-.imp-bench-title { font-weight: 650; font-size: 1rem; margin: 0; }
+.imp-bench-title { font-weight: 700; font-size: 1rem; margin: 0; }
 .imp-bench-count { font-variant-numeric: tabular-nums; color: var(--imp-quiet, var(--muted-foreground)); font-size: 0.9375rem; margin: 0; }
 .imp-bench-count b { color: var(--foreground); font-weight: 650; }
 .imp-bench-actions { display: flex; gap: 0.25rem; }
-.imp-bench button.imp-act { font: inherit; font-size: 0.9375rem; padding: 0.25rem 0.75rem; min-height: 2.5rem; border-radius: 6px; border: 1px solid var(--imp-rule, var(--border)); background: transparent; color: var(--foreground); cursor: pointer; }
+.imp-bench button.imp-act { font: inherit; font-size: 0.9375rem; padding: 0.25rem 0.75rem; min-height: 2.5rem; border-radius: 3px; border: 1px solid var(--imp-rule, var(--border)); background: transparent; color: var(--foreground); cursor: pointer; }
 .imp-bench button.imp-act:hover { background: var(--imp-wash, var(--muted)); }
 .imp-bench button.imp-act:focus-visible, .imp-bench summary:focus-visible { outline: 2px solid var(--foreground); outline-offset: 2px; }
 .imp-bench-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; margin-top: 1rem; }
 @media (min-width: 46rem) { .imp-bench-body { grid-template-columns: minmax(0, 21rem) minmax(0, 1fr); } }
 
-/* the specimen: literal colours on purpose, since the rules read literal colours */
-.imp-stage { background: var(--imp-wash, var(--muted)); border-radius: 8px; padding: 1rem; }
+/* the specimen: literal colours on purpose, since the rules read literal colours.
+   It sits on the page's own ground, not in a panel, so it is never a card in a card. */
+.imp-stage { padding: 0; }
 .imp-spec { position: relative; border-radius: 12px; padding: 1.1rem 1.1rem 1rem; border: 1px solid #e3e3e3; color: #1c1c1c; font-family: var(--font-sans); }
 .imp-spec.is-ghost { border-color: #e9e9e9; box-shadow: 0 18px 50px -12px rgb(0 0 0 / 0.22); }
 .imp-spec-k { font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: #6b6b6b; margin: 0 0 0.35rem; }
@@ -131,7 +134,7 @@ const CSS = `
 .imp-switches label { display: flex; gap: 0.5rem; align-items: center; font-size: 0.9375rem; min-height: 2rem; cursor: pointer; }
 .imp-switches input { width: 1rem; height: 1rem; accent-color: var(--foreground); }
 .imp-grounds-row { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-.imp-grounds label { position: relative; display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.9375rem; padding: 0.25rem 0.75rem; min-height: 2.5rem; border-radius: 6px; border: 1px solid var(--imp-rule, var(--border)); cursor: pointer; }
+.imp-grounds label { position: relative; display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.9375rem; padding: 0.25rem 0.75rem; min-height: 2.5rem; border-radius: 3px; border: 1px solid var(--imp-rule, var(--border)); cursor: pointer; }
 .imp-grounds label:has(input:checked) { border-color: var(--foreground); font-weight: 600; }
 .imp-grounds input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .imp-grounds label:has(input:focus-visible) { outline: 2px solid var(--foreground); outline-offset: 2px; }
