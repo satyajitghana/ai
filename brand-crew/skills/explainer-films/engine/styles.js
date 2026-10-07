@@ -355,9 +355,14 @@ const STYLES = (() => {
     },
     over() {},
     quantize(g, w, h) {
+      // memo on the exact colour: keyed on a 5-bit bucket, the bucket took the
+      // answer of whichever pixel reached it first that frame, so a colour near
+      // a tie (a host accent of #57B649 sits 3,580 from one PICO green and 3,558
+      // from the other) flipped with the boiling outline's edge pixels and the
+      // whole fill flashed between the two greens on twos
       const id = g.getImageData(0, 0, w, h), d = id.data, memo = new Map()
       for (let i = 0; i < d.length; i += 4) {
-        const key = (d[i] >> 3) << 10 | (d[i + 1] >> 3) << 5 | (d[i + 2] >> 3)
+        const key = d[i] << 16 | d[i + 1] << 8 | d[i + 2]
         let best = memo.get(key)
         if (best === undefined) {
           let bd = 1e9; best = 0
