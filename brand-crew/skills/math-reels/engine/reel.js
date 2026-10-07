@@ -69,8 +69,11 @@ const LEAN = {
   part: { text: 'Lean: part only', color: K.warn, icon: 'half' },
   none: { text: 'Manuscript only', color: K.mute, icon: 'doc' },
 }
-const DUR = { title: [2, 3, 2.6], object: [6, 9, 8], achievement: [3, 5, 4.4], verify: [2, 3, 2.6], end: [1.2, 2, 1.6] }
-const LIMITS = { short: 44, title: 64, subtitle: 110, heading: 72, text: 96, note: 80, detail: 100, label: 72, context: 110, ourCheck: 80, review: 40, gap: 40 }
+const DUR = { title: [2, 3, 2.6], object: [6, 9, 8], proof: [5, 6, 5.5], achievement: [3, 5, 4.4], verify: [2, 3, 2.6], end: [1.2, 2, 1.6] }
+// defaults when the reel has a proof scene (any explicit dur still wins)
+const DUR_PROOF = { title: 2.5, object: 6, proof: 5.5, achievement: 3.5, verify: 2, end: 1.2 }
+const TOTAL = { plain: [15, 20], proof: [15, 21] }
+const LIMITS = { short: 44, title: 64, subtitle: 110, heading: 72, text: 96, note: 80, detail: 100, label: 72, context: 110, ourCheck: 80, review: 40, gap: 40, plain: 110 }
 
 let ACC = '#6CB6FF', SPEC = null, PLAN = null, ALPHA = 1
 
@@ -81,6 +84,9 @@ const lerp = (a, b, e) => a + (b - a) * e
 const eio = x => (x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2)
 const eout = x => 1 - Math.pow(1 - x, 3)
 const eback = x => { const c = 1.4, d = x - 1; return 1 + (c + 1) * d * d * d + c * d * d }
+// per-item delay of a staggered reveal: never more than base, and the whole
+// reveal fits in 45% of the panel (a 390-node lattice still finishes)
+const per = (base, n, pd) => Math.min(base, .45 * (pd || 8) / Math.max(1, n))
 const bell = x => (x <= 0 || x >= 1 ? 0 : Math.sin(Math.PI * x))
 // a pulse that rises fast and decays: 0 at x<=0, peak near .15, 0 at x>=1
 const flare = x => (x <= 0 || x >= 1 ? 0 : Math.min(1, x / .15) * Math.pow(1 - x, 1.6))
@@ -416,7 +422,7 @@ function background(t, D, lvl) {
 
 // --------------------------------------------------------------- the plan --
 function need(c, msg) { if (!c) throw new Error(`reel ${SPEC && SPEC.id}: ${msg}`) }
-function durOf(name, v) { const [a, b, d] = DUR[name]; if (v == null) return d; need(v >= a && v <= b, `${name}.dur ${v} outside ${a}-${b} s`); return v }
+function durOf(name, v, withProof) { const [a, b, d] = DUR[name]; if (v == null) return withProof ? DUR_PROOF[name] : d; need(v >= a && v <= b, `${name}.dur ${v} outside ${a}-${b} s`); return v }
 
 // when the stamp starts, and when it hits the page (scene-local seconds)
 const STAMP_HIT = .3
@@ -429,14 +435,19 @@ function load(spec) {
   need(KINDS[spec.kind], `kind must be one of ${Object.keys(KINDS).join(', ')}`)
   ACC = DISCIPLINES[spec.discipline]; SPR.clear(); BGP = null
   for (const k of ['title', 'object', 'achievement', 'verify']) need(spec[k], `missing "${k}"`)
-  const order = [['title', spec.title], ['object', spec.object], ['achievement', spec.achievement], ['verify', spec.verify], ['end', spec.end || {}]]
+  const P = !!spec.proof
+  const order = [['title', spec.title], ['object', spec.object], ...(P ? [['proof', spec.proof]] : []), ['achievement', spec.achievement], ['verify', spec.verify], ['end', spec.end || {}]]
   let t = 0; const scenes = []
-  for (const [name, sc] of order) { const d = durOf(name, sc.dur); scenes.push({ name, sc, t0: t, t1: t + d, dur: d }); t += d }
+  for (const [name, sc] of order) { const d = durOf(name, sc.dur, P); scenes.push({ name, sc, t0: t, t1: t + d, dur: d }); t += d }
+  const [tmin, tmax] = TOTAL[P ? 'proof' : 'plain']
+  if (P) need(t >= tmin - 1e-6 && t <= tmax + 1e-6, `total ${t.toFixed(2)} s outside ${tmin}-${tmax} s (${scenes.map(s => `${s.name} ${s.dur}`).join(', ')})${P ? '; with a proof scene, shorten object.dur (default 6)' : ''}`)
+  const S = name => scenes.find(s => s.name === name)
+  if (P) checkProof(spec.proof)
   // panels of the object scene
   const ob = spec.object, panels = ob.panels || (ob.primitive ? [ob] : null)
   need(panels && panels.length >= 1 && panels.length <= 3, 'object needs 1-3 panels (or one primitive)')
   const layout = ob.layout || (panels.length === 1 ? 'single' : 'sequence')
-  const od = scenes[1].dur
+  const od = S('object').dur
   panels.forEach((p, i) => {
     need(PRIM[p.primitive], `unknown primitive "${p.primitive}" (have: ${Object.keys(PRIM).join(', ')})`)
     if (layout === 'sequence') { p._t0 = p.from != null ? p.from : od * i / panels.length; p._t1 = p.until != null ? p.until : (i === panels.length - 1 ? od : (panels[i + 1].from != null ? panels[i + 1].from : od * (i + 1) / panels.length)) }
@@ -447,21 +458,22 @@ function load(spec) {
   })
   ob._panels = panels; ob._layout = layout
   const ac = spec.achievement
-  scenes[2].impacts = stampAt(ac) != null ? [stampAt(ac) + STAMP_HIT] : []
+  S('achievement').impacts = stampAt(ac) != null ? [stampAt(ac) + STAMP_HIT] : []
   CHECKS = {}
   for (const p of panels) if (p.primitive === 'graph') { p._g = null; p._g0 = buildGraph(p, BOX); if (p._g0.cross) CHECKS.crossings = p._g0.cross.length }
   // events for the sound bed: every cut, plus the beats that land something
   const events = scenes.slice(1).map(s => ({ t: +s.t0.toFixed(3), kind: 'cut' }))
-  for (const p of panels) for (const e of (PRIM[p.primitive].events ? PRIM[p.primitive].events(p) : [])) if (e.t <= p._t1 - p._t0 + .3) events.push({ t: +(scenes[1].t0 + p._t0 + e.t).toFixed(3), kind: e.kind })
-  events.push({ t: +(scenes[2].t0 + 1.35).toFixed(3), kind: 'land' })
-  if (stampAt(ac) != null) events.push({ t: +(scenes[2].t0 + stampAt(ac) + STAMP_HIT - .02).toFixed(3), kind: 'stamp' })
-  events.push({ t: +(scenes[3].t0 + .45).toFixed(3), kind: 'badge' })
+  for (const p of panels) for (const e of (PRIM[p.primitive].events ? PRIM[p.primitive].events(p) : [])) if (e.t <= p._t1 - p._t0 + .3) events.push({ t: +(S('object').t0 + p._t0 + e.t).toFixed(3), kind: e.kind })
+  if (P) for (const e of proofEvents(spec.proof, S('proof').dur)) events.push({ t: +(S('proof').t0 + e.t).toFixed(3), kind: e.kind })
+  events.push({ t: +(S('achievement').t0 + 1.35).toFixed(3), kind: 'land' })
+  if (stampAt(ac) != null) events.push({ t: +(S('achievement').t0 + stampAt(ac) + STAMP_HIT - .02).toFixed(3), kind: 'stamp' })
+  events.push({ t: +(S('verify').t0 + .45).toFixed(3), kind: 'badge' })
   events.sort((a, b) => a.t - b.t)
   PLAN = { scenes, duration: t, panels, events }
   checkText(spec)
   fitLayout(spec)
   buildBackground()
-  const o = scenes[1]
+  const o = S('object')
   return { id: spec.id, duration: +t.toFixed(3), scenes: scenes.map(s => ({ name: s.name, t0: +s.t0.toFixed(3), t1: +s.t1.toFixed(3) })), events, posterT: +(o.t1 - .6).toFixed(3), checks: CHECKS }
 }
 
@@ -507,13 +519,14 @@ function fitSize(html, size, maxW, min, what) {
   return s
 }
 function fitLayout(spec) {
+  if (spec.plain) spec._plainSize = fitSize(richW(spec.plain), 25, 1090, 19, 'plain')
   const ac = spec.achievement
   if (ac.form === 'status') {
     const lines = ac.statement || []
     ac._sizes = lines.map((tx, i) => fitSize(rich(`$${tx}$`), lines.length > 1 ? 44 : 52, 1120, 28, `achievement.statement.${i}`))
   } else if (ac.before && ac.after) {
     ac.before._size = fitSize(rich(`$${ac.before.tex}$`), 52, 470, 30, 'achievement.before.tex')
-    ac.after._size = fitSize(rich(`$${ac.after.tex}$`), 60, 520, 32, 'achievement.after.tex')
+    ac.after._size = fitSize(rich(`$${ac.after.tex}$`), 60, 495, 32, 'achievement.after.tex')
   }
   const ob = spec.object, n = ob._panels.length
   ob._panels.forEach((p, i) => {
@@ -529,12 +542,12 @@ function fitLayout(spec) {
 const BOX = { x: 96, y: 128, w: 1088, h: 448 }
 let CHECKS = {}
 // Cuts: how scene k hands over to scene k+1, and the overlap around the cut.
-const TRANS = ['wipe', 'push', 'push', 'dissolve']
+const TRANS_IN = { object: 'wipe', proof: 'push', achievement: 'push', verify: 'push', end: 'dissolve' }
 const TR_PRE = .3, TR_POST = .45
 // Camera per scene: focal point and how far it pushes in over the scene.
-const CAM = { title: [380, 300, .028], object: [640, 352, .034], achievement: [640, 330, .028], verify: [640, 300, .022], end: [640, 340, .02] }
+const CAM = { title: [380, 300, .028], object: [640, 352, .034], proof: [640, 350, .03], achievement: [640, 330, .028], verify: [640, 300, .022], end: [640, 340, .02] }
 // pattern strength per scene: the background recedes while the maths is on
-const BGL = { title: 1, object: .6, achievement: .75, verify: .85, end: 1 }
+const BGL = { title: 1, object: .6, proof: .55, achievement: .75, verify: .85, end: 1 }
 // the shared, continuous camera drift (px)
 const drift = t => [7 * Math.sin(t * .23 + .7) + 3 * Math.sin(t * .41 + 2.1), 4.5 * Math.sin(t * .19 + 1.3) + 2 * Math.sin(t * .37)]
 
@@ -565,7 +578,7 @@ function frame(t) {
     let a = 1, m = camera(s, lt, D), clip = null
     if (k === 0) a *= eout(seg(lt, 0, .55))
     else {
-      const p = seg(t, s.t0 - TR_PRE, s.t0 + TR_POST), ty = TRANS[k - 1]
+      const p = seg(t, s.t0 - TR_PRE, s.t0 + TR_POST), ty = TRANS_IN[s.name]
       if (ty === 'wipe') { if (p < 1) { const xw = lerp(-140, W + 140, eio(p)); clip = [[-20, -20], [xw + 110, -20], [xw - 110, H + 20], [-20, H + 20]]; wipe = { xw, p } } }
       // the incoming scene arrives in the back half of the overlap, so text
       // never sits on text at half strength
@@ -573,7 +586,7 @@ function frame(t) {
       else a *= eio(seg(p, .3, 1))
     }
     if (!last) {
-      const p = seg(t, s.t1 - TR_PRE, s.t1 + TR_POST), ty = TRANS[k]
+      const p = seg(t, s.t1 - TR_PRE, s.t1 + TR_POST), ty = TRANS_IN[scenes[k + 1].name]
       if (p > 0) {
         if (ty === 'wipe') { const xw = lerp(-140, W + 140, eio(p)); clip = [[xw + 110, -20], [W + 20, -20], [W + 20, H + 20], [xw - 110, H + 20]]; a *= 1 - .5 * p; m = mul(about(640, 360, 1 + .03 * eio(p)), m) }
         else if (ty === 'push') { a *= 1 - eio(seg(p, 0, .6)); m = mul(about(640, 360, 1 + .07 * eio(p)), m) }
@@ -657,12 +670,15 @@ const SCENES = {
   },
 
   object(sc, lt, dur) {
-    if (sc.heading) { const he = seg(lt, .1, .8); L('ob.h', richW(sc.heading), { x: 96, y: 100, ay: .5, size: 23, color: K.soft, weight: 520, op: he > 0 ? 1 : 0, st: { p: he, spread: .6, dy: 6 } }) }
+    // with a plain-words line on top (HUD), the heading and the stage move down
+    const plainOff = SPEC.plain ? 44 : 0
+    if (sc.heading) { const he = seg(lt, .1, .8); L('ob.h', richW(sc.heading), { x: 96, y: 100 + plainOff, ay: .5, size: plainOff ? 20 : 23, color: K.soft, weight: 520, op: he > 0 ? 1 : 0, st: { p: he, spread: .6, dy: 6 } }) }
     const panels = sc._panels, lay = sc._layout
     panels.forEach((p, i) => {
       let box = BOX
       if (lay === 'split') { const gw = 48, w = (BOX.w - gw * (panels.length - 1)) / panels.length; box = { x: BOX.x + i * (w + gw), y: BOX.y, w, h: BOX.h } }
       if (sc.heading) box = { ...box, y: box.y + 14, h: box.h - 14 }
+      if (plainOff) box = { ...box, y: box.y + plainOff, h: box.h - plainOff }
       // the last panel holds through the scene's exit; the others hand over
       // to the next with an overlap: out by scaling up, in from slightly small
       const end = p._last || lay !== 'sequence' ? Infinity : p._t1 + .3
@@ -760,6 +776,11 @@ const SCENES = {
 // Fixed to the screen (no camera): the object scene's captions.
 const HUDS = {
   object(sc, lt, dur) {
+    if (SPEC.plain) {
+      const p = seg(lt, .05, .9), e = eout(seg(lt, 0, .4))
+      bloom(() => { g.beginPath(); g.rect(84, 86, 3, 30 * e); fill(ACC, e) }, .6)
+      L('ob.plain', richW(SPEC.plain), { x: 100, y: 101, ay: .5, size: SPEC._plainSize || 25, color: K.ink, weight: 520, op: p > 0 ? 1 : 0, st: { p, spread: .55, dy: 6 } })
+    }
     const beats = sc.beats || []
     beats.forEach((b, i) => {
       const nxt = i + 1 < beats.length ? beats[i + 1].at : Infinity
@@ -833,6 +854,325 @@ function stamp(kind, cx, cy, lt, scale) {
   const [x1, y1] = at(-24), [x2, y2] = at(12)
   L('st.c', 'CLAIMED', { x: x1, y: y1, ax: .5, ay: .5, size: 14 * scale, weight: 700, ls: '0.3em', color: ACC, op: a * .85, scale: k, rot })
   L('st.w', esc(word), { x: x2, y: y2, ax: .5, ay: .5, size: 40 * scale, weight: 760, ls: '0.14em', color: ACC, op: a, scale: k, rot, glow: .3 + .7 * fl })
+}
+
+// ------------------------------------------------------------ proof scene --
+// Optional. "How it's proved (simplified)": the key idea of the proof as one
+// of a fixed set of archetypes, each an animated template driven by a few
+// labels, plus 2-4 plain-language steps shown as captions. The steps pace the
+// animation: archetype k-th stage starts when step k starts.
+const ARCHETYPES = ['counterexample', 'construction', 'squeeze', 'amplify', 'reduction', 'contradiction', 'induction', 'probabilistic', 'monotone', 'counting', 'correspondence', 'local-to-global', 'cancellation', 'rearrange']
+const PROOF_BOX = { x: 96, y: 150, w: 1088, h: 400 }
+function checkProof(pr) {
+  need(ARCHETYPES.includes(pr.archetype), `proof.archetype must be one of ${ARCHETYPES.join(', ')}`)
+  need(Array.isArray(pr.steps) && pr.steps.length >= 2 && pr.steps.length <= 4, 'proof.steps: 2-4 steps')
+  pr.steps.forEach((st, i) => { const tx = typeof st === 'string' ? st : st.text; need(tx, `proof.steps.${i} needs text`); const n = tx.replace(/\$[^$]+\$/g, 'x').replace(/==|\*\*/g, '').length; need(n <= 72, `proof.steps.${i} is ${n} characters, limit 72 (aim for 60): "${tx}"`) })
+}
+// start time of step i (scene-local)
+function stepAt(pr, i, dur) {
+  const st = pr.steps[i], n = pr.steps.length
+  if (st && typeof st === 'object' && st.at != null) return st.at
+  return .35 + i * (dur - 1.1) / n
+}
+function proofEvents(pr, dur) { return pr.steps.map((_, i) => ({ t: stepAt(pr, i, dur) + .2, kind: i === pr.steps.length - 1 ? 'land' : 'tick' })) }
+SCENES.proof = function (sc, lt, dur) {
+  const he = eout(seg(lt, 0, .5))
+  const [hw] = measure('pf.h', esc(sc.label || "How it's proved"), { cls: 'caps', size: 16 })
+  L('pf.h', esc(sc.label || "How it's proved"), { x: 96 - 10 * (1 - he), y: 100, ay: .5, cls: 'caps', size: 16, color: ACC, op: he, glow: .25 })
+  rrect(96 + hw + 14, 100 - 13, 108, 26, 13); stroke(K.faint, 1.2, he)
+  L('pf.s', 'simplified', { x: 96 + hw + 14 + 54, y: 100, ax: .5, ay: .5, cls: 'caps', size: 12, color: K.mute, op: he })
+  const d = sc.data || {}, at = i => stepAt(sc, Math.min(i, sc.steps.length - 1), dur) + (i >= sc.steps.length ? 1.2 : 0)
+  ARCH[sc.archetype](d, lt, PROOF_BOX, at, sc.steps.length, dur)
+  // every archetype is a schematic of the idea, never data
+  if (sc.archetype !== 'cancellation' && d.illustrative !== false) ill(PROOF_BOX, he)
+}
+HUDS.proof = function (sc, lt, dur) {
+  const n = sc.steps.length
+  // step dots
+  for (let i = 0; i < n; i++) {
+    const a0 = stepAt(sc, i, dur), on = seg(lt, a0, a0 + .3), x = W / 2 - (n - 1) * 14 + i * 28
+    dot(x, 594, 4, on > 0 ? ACC : K.faint, eout(seg(lt, 0, .4)))
+    if (on > 0 && on < 1) ring(x, 594, 4 + 8 * eout(on), ACC, 1.2, 1 - on)
+  }
+  sc.steps.forEach((st, i) => {
+    const tx = typeof st === 'string' ? st : st.text
+    const a0 = stepAt(sc, i, dur), nx = i + 1 < n ? stepAt(sc, i + 1, dur) : Infinity
+    const out = isFinite(nx) ? 1 - eio(seg(lt, nx - .25, nx)) : 1, p = seg(lt, a0, a0 + .5)
+    if (p <= 0 || out <= 0) return
+    L('pf.st' + i, richW(tx), { x: W / 2, y: 640 - 6 * (1 - out), ax: .5, ay: .5, w: 1060, align: 'center', size: 28, color: K.ink, lh: 1.25, op: out, weight: 480, st: { p, spread: .5, dy: 8 } })
+  })
+}
+// small helpers for the archetypes
+const tick = (x, y, r, c, e) => { if (e <= 0) return; bloom(() => { ring(x, y, r, c, 1.8, e); polyline([[x - r * .42, y + r * .02], [x - r * .1, y + r * .34], [x + r * .46, y - r * .32]], e, c, 2.4, e) }, .5) }
+const cross = (x, y, r, c, e) => { if (e <= 0) return; bloom(() => { polyline([[x - r, y - r], [x + r, y + r]], seg(e, 0, .5), c, 3, 1); polyline([[x + r, y - r], [x - r, y + r]], seg(e, .5, 1), c, 3, 1) }, .8) }
+const tag = (key, html, x, y, c, e, o = {}) => L(key, html, { x, y: y + 6 * (1 - e), ax: .5, ay: o.ay != null ? o.ay : 0, size: o.size || 19, color: c, op: e, weight: o.weight || 500, w: o.w, align: o.w ? 'center' : '' })
+const ill = (box, e) => L('pf.ill', 'illustrative', { x: box.x + box.w, y: box.y + box.h + 8, ax: 1, cls: 'caps', size: 11, color: K.mute, op: .9 * e })
+function arrowTo(x0, y0, x1, y1, c, e, w = 2) {
+  if (e <= 0) return
+  const xe = lerp(x0, x1, e), ye = lerp(y0, y1, e)
+  bloom(() => { line(x0, y0, xe, ye, c, w, 1); if (e > .2) arrowHead(xe, ye, Math.atan2(y1 - y0, x1 - x0), 11, c, e) }, .6)
+  if (e < 1) pen(xe, ye, c, 1, 12)
+}
+const ARCH = {
+  // the object builds, every case checks out, then one breaks: red flare + label
+  counterexample(d, lt, B, at) {
+    const n = d.items || 7, bad = d.breakAt != null ? d.breakAt : n - 1, cy = B.y + B.h * .45
+    const sp = Math.min(130, (B.w - 80) / n), x0 = B.x + B.w / 2 - sp * (n - 1) / 2, r = Math.min(34, sp * .32)
+    for (let i = 0; i < n; i++) {
+      const t0 = at(0) + i * .12, e = seg(lt, t0, t0 + .4); if (e <= 0) continue
+      const x = x0 + i * sp, isBad = i === bad
+      if (i) line(x - sp + r, cy, x - r, cy, K.faint, 1.5, eout(e))
+      const ce = eout(seg(lt, at(1) + (isBad ? .6 : i * .08), at(1) + (isBad ? 1 : i * .08 + .4)))
+      bloom(() => { ring(x, cy, r * eback(e), isBad && ce > 0 ? K.bad : K.soft, 2, 1); if (!isBad) { g.beginPath(); g.arc(x, cy, r * eback(e), 0, 7); fill(K.ok, .12 * ce) } }, isBad ? .6 * ce : 0)
+      if (!isBad) tick(x, cy - r - 22, 9, K.ok, ce)
+      else if (ce > 0) {
+        const fl = flare(seg(lt, at(1) + .6, at(1) + 1.8))
+        glowDot(x, cy, 90, K.bad, .5 * fl + .12 * ce)
+        cross(x, cy, r * .5, K.bad, ce)
+        const pr = seg(lt, at(1) + .6, at(1) + 1.3); if (pr < 1) ring(x, cy, r + 40 * eout(pr), K.bad, 2, 1 - pr)
+        tag('pf.cx', rich(d.label || 'fails here'), x, cy + r + 22, K.bad, ce, { weight: 600, size: 22 })
+      }
+      if (d.labels && d.labels[i]) tag('pf.cl' + i, rich(d.labels[i]), x, cy + r + 56, K.mute, eout(e), { size: 16 })
+    }
+    if (d.caption) tag('pf.cc', rich(d.caption), B.x + B.w / 2, B.y + 10, K.soft, eout(seg(lt, at(0), at(0) + .5)), { size: 21 })
+  },
+  // pieces fly in and snap into place, each labelled with its role
+  construction(d, lt, B, at, n) {
+    const P = d.pieces || [{ label: 'piece' }, { label: 'piece' }, { label: 'piece' }], k = P.length
+    const pw = Math.min(220, (B.w - 60) / k - 16), ph = 110, gap = 16, tw = k * pw + (k - 1) * gap, x0 = B.x + (B.w - tw) / 2, y = B.y + B.h * .35
+    const R = rng(parseInt(SPEC.id, 10) + 99)
+    P.forEach((pc, i) => {
+      const t0 = at(Math.min(i, n - 1)) + (i >= n ? .5 * (i - n + 1) : 0), e = seg(lt, t0, t0 + .65); if (e <= 0) return
+      const fx = (R() - .5) * 500, fy = -160 - R() * 120, ro = (R() - .5) * .8, m = eio(e)
+      const x = x0 + i * (pw + gap), c = tone(pc.tone || (i === k - 1 ? 'accent' : 'soft'))
+      g.save(); g.translate(x + pw / 2 + fx * (1 - m), y + ph / 2 + fy * (1 - m)); g.rotate(ro * (1 - m))
+      bloom(() => { rrect(-pw / 2, -ph / 2, pw, ph, 12); fill(c, .14); stroke(c, 2, 1) }, flare(seg(lt, t0 + .55, t0 + 1.3)) * .9)
+      g.restore()
+      if (m > .98) { const sn = seg(lt, t0 + .6, t0 + 1.1); if (sn < 1) { rrect(x - 8 * sn, y - 8 * sn, pw + 16 * sn, ph + 16 * sn, 14); stroke(c, 1.4, .8 * (1 - sn)) } }
+      L('pf.pc' + i, rich(pc.label), { x: x + pw / 2 + fx * (1 - m), y: y + ph / 2 + fy * (1 - m), ax: .5, ay: .5, size: 21, color: K.ink, op: eout(e), w: pw - 16, align: 'center', lh: 1.15 })
+      if (pc.role) tag('pf.pr' + i, rich(pc.role), x + pw / 2, y + ph + 14, c, eout(seg(lt, t0 + .5, t0 + .9)), { size: 17, w: pw + 10 })
+    })
+    if (d.result) {
+      const t0 = at(n) - .6, e = eout(seg(lt, t0, t0 + .6)), tr = eio(seg(lt, t0, t0 + .9))
+      bloom(() => traceRect(x0 - 18, y - 18, tw + 36, ph + 36 + 50, 18, tr, ACC, 2, e), .6)
+      tag('pf.res', rich(d.result), B.x + B.w / 2, y + ph + 84, ACC, e, { size: 23, weight: 600 })
+    }
+  },
+  // upper and lower bounds close in on a value; the old gap visibly shrinks
+  squeeze(d, lt, B, at, n) {
+    const lo = d.min != null ? d.min : 0, hi = d.max != null ? d.max : 1, x0 = B.x + 60, x1 = B.x + B.w - 60, y = B.y + B.h * .55
+    const X = v => x0 + (v - lo) / (hi - lo) * (x1 - x0)
+    const ae = eio(seg(lt, at(0), at(0) + .7)); line(x0, y, lerp(x0, x1, ae), y, K.soft, 2, .9)
+    const side = (o, key, i, dirUp) => {
+      if (!o) return null
+      const t0 = at(i), e = eout(seg(lt, t0 - .2, t0 + .3)), m = eio(seg(lt, t0, t0 + 1.4))
+      const v = lerp(o.from != null ? o.from : o.v, o.v, m), x = X(v), c = tone(o.tone || (dirUp ? 'cool' : 'accent'))
+      if (e <= 0) return null
+      bloom(() => { g.beginPath(); g.moveTo(x + (dirUp ? -10 : 10), y - 26); g.lineTo(x, y - 26); g.lineTo(x, y + 26); g.lineTo(x + (dirUp ? -10 : 10), y + 26); stroke(c, 3, e) }, .7)
+      if (m > 0 && m < 1) glowDot(x, y, 22, c, .6)
+      L('pf.' + key, rich(o.label || ''), { x, y: dirUp ? y + 40 : y - 40, ax: .5, ay: dirUp ? 0 : 1, size: 20, color: c, op: e, w: 260, align: 'center', lh: 1.2 })
+      return { x, e }
+    }
+    const lw = side(d.lower, 'lo', d.lowerStep != null ? d.lowerStep : 1, false), up = side(d.upper, 'up', d.upperStep != null ? d.upperStep : 0, true)
+    if (lw && up) { g.beginPath(); g.rect(Math.min(lw.x, up.x), y - 22, Math.abs(up.x - lw.x), 44); fill(ACC, .1 * Math.min(lw.e, up.e)) }
+    if (d.target) {
+      const t0 = at(n - 1) + .9, e = eout(seg(lt, t0, t0 + .5)), x = X(d.target.v), fl = flare(seg(lt, t0, t0 + 1.2))
+      if (e > 0) { bloom(() => dot(x, y, 7 * eback(seg(lt, t0, t0 + .4)), ACC, 1), 1); glowDot(x, y, 60, ACC, .5 * fl); tag('pf.tg', rich(d.target.label || ''), x, y + 96, ACC, e, { size: 23, weight: 600 }) }
+    }
+    if (d.illustrative !== false) ill(B, ae)
+  },
+  // a small saving is copied inside itself; zooming out as it compounds
+  amplify(d, lt, B, at, n) {
+    const k = d.k || 2, levels = Math.min(d.levels || 3, 4), cx = B.x + B.w / 2, cy = B.y + B.h * .45
+    // level L appears at step min(L, n-1)
+    const lvT = Lv => at(Math.min(Lv, n - 1)) + (Lv >= n ? .6 * (Lv - n + 1) : 0)
+    let shown = 0; for (let Lv = 0; Lv < levels; Lv++) if (lt >= lvT(Lv)) shown = Lv
+    const zoomP = clamp((lt - lvT(0)) / Math.max(.1, lvT(levels - 1) + 1 - lvT(0)))
+    const unit = 120 / Math.pow(k, eio(zoomP) * (levels - 1))     // the base block's size, shrinking as we zoom out
+    const size = Lv => unit * Math.pow(k, Lv) * (1 + .18 * (Math.pow(k, Lv) > 1 ? 1 : 0))
+    const draw = (x, y, Lv, e) => {
+      if (Lv === 0) { bloom(() => { rrect(x - unit / 2, y - unit / 2, unit, unit, Math.max(2, unit * .12)); fill(ACC, .55 * e); stroke(ACC, 1.5, e) }, .5); return }
+      const s = size(Lv - 1) * 1.18
+      for (let i = 0; i < k; i++) for (let j = 0; j < k; j++) draw(x + (i - (k - 1) / 2) * s, y + (j - (k - 1) / 2) * s, Lv - 1, e)
+    }
+    const e0 = eout(seg(lt, lvT(0), lvT(0) + .5))
+    for (let Lv = shown; Lv >= 0; Lv--) {
+      const e = eout(seg(lt, lvT(Lv), lvT(Lv) + .6)); if (e <= 0) continue
+      if (Lv === shown) draw(cx, cy, Lv, e)
+      const s = size(Lv) * 1.18 * (Lv ? 1 : .9)
+      if (Lv) { const tr = eio(seg(lt, lvT(Lv), lvT(Lv) + .8)); bloom(() => traceRect(cx - s / 2, cy - s / 2, s, s, 8, tr, K.soft, 1.2, .6 * (Lv === shown ? 1 : .5)), .3) }
+    }
+    const copies = Math.pow(k * k, shown), ce = e0
+    L('pf.am', `<span style="color:${ACC}">${copies}</span>${copies === 1 ? ' block' : ' copies'}`, { x: B.x + 10, y: B.y + 4, cls: 'mono', size: 34, color: K.soft, op: ce, scale: 1 + .1 * flare(seg(lt, lvT(shown), lvT(shown) + .4)) })
+    if (d.unit) L('pf.amu', rich(d.unit), { x: B.x + 10, y: B.y + 52, size: 19, color: K.mute, op: ce })
+    if (d.label) tag('pf.aml', rich(d.label), cx, B.y + B.h - 10, ACC, eout(seg(lt, at(n - 1) + .4, at(n - 1) + .9)), { size: 22, weight: 600 })
+  },
+  // a chain of problems, each reducing to the next; arrows light in turn
+  reduction(d, lt, B, at, n) {
+    const bx = d.boxes || ['problem', 'easier problem', 'solved'], k = bx.length, gap = 70
+    const bw = Math.min(260, (B.w - gap * (k - 1)) / k), tw = k * bw + (k - 1) * gap, x0 = B.x + (B.w - tw) / 2, y = B.y + B.h * .4, bh = 100
+    bx.forEach((lab, i) => {
+      const t0 = i === 0 ? at(0) : at(Math.min(i, n - 1)) + (i >= n ? .5 : 0) + .4, e = eout(seg(lt, t0, t0 + .5)); if (e <= 0) return
+      const x = x0 + i * (bw + gap), last = i === k - 1, c = last ? ACC : K.soft, fl = flare(seg(lt, t0, t0 + 1))
+      bloom(() => { rrect(x, y + 10 * (1 - e), bw, bh, 14); fill(c, .1 + .1 * fl); stroke(c, 2, e) }, last ? .6 : .2 + .4 * fl)
+      L('pf.rb' + i, rich(lab), { x: x + bw / 2, y: y + bh / 2 + 10 * (1 - e), ax: .5, ay: .5, w: bw - 20, align: 'center', size: 21, color: K.ink, op: e, lh: 1.15 })
+      if (i) { const ae = eio(seg(lt, t0 - .45, t0 + .05)); arrowTo(x - gap + 8, y + bh / 2, x - 8, y + bh / 2, ACC, ae); if (d.arrow) tag('pf.ra' + i, rich(d.arrow), x - gap / 2, y + bh / 2 + 16, K.mute, ae, { size: 15 }) }
+    })
+  },
+  // assume a smallest bad case; it yields a smaller one; it cracks
+  contradiction(d, lt, B, at, n) {
+    const cx = B.x + B.w * .38, cy = B.y + B.h * .45, r = 82
+    const e0 = eout(seg(lt, at(0), at(0) + .6))
+    const blob = (x, y, rr, c, e, crack) => {
+      const pts = Array.from({ length: 60 }, (_, i) => { const th = 2 * Math.PI * i / 60; const q = rr * (1 + .08 * Math.sin(3 * th + 1) + .05 * Math.sin(5 * th)); return [x + q * Math.cos(th), y + q * Math.sin(th)] })
+      g.beginPath(); pts.forEach((q, i) => (i ? g.lineTo(...q) : g.moveTo(...q))); g.closePath(); fill(c, .12 * e)
+      bloom(() => polyline([...pts, pts[0]], 1, c, 2.2, e), .4)
+      if (crack > 0) bloom(() => polyline([[x - rr * .1, y - rr * 1.05], [x + rr * .12, y - rr * .4], [x - rr * .15, y + rr * .05], [x + rr * .2, y + rr * .5], [x, y + rr * 1.05]], crack, K.bad, 2.6, 1), 1)
+    }
+    const cr = seg(lt, at(n - 1), at(n - 1) + .5), split = eio(seg(lt, at(n - 1) + .4, at(n - 1) + 1))
+    if (e0 > 0) {
+      if (split > 0) { g.save(); g.beginPath(); g.rect(0, 0, cx, H); g.clip(); g.translate(-18 * split, 6 * split); g.rotate(-.04 * split); blob(cx, cy, r, K.soft, e0 * (1 - .4 * split), cr); g.restore(); g.save(); g.beginPath(); g.rect(cx, 0, W, H); g.clip(); g.translate(18 * split, 6 * split); g.rotate(.04 * split); blob(cx, cy, r, K.soft, e0 * (1 - .4 * split), cr); g.restore() }
+      else blob(cx, cy, r, K.soft, e0, cr)
+      tag('pf.ca', rich(d.assume || 'the smallest bad case'), cx, cy + r + 20, K.soft, e0, { size: 19 })
+    }
+    if (n > 2 || d.smaller !== false) {
+      const t1 = at(1), e1 = eout(seg(lt, t1 + .3, t1 + .8)), x2 = B.x + B.w * .7
+      if (e1 > 0) { arrowTo(cx + r + 16, cy, x2 - 58, cy, K.soft, eio(seg(lt, t1, t1 + .5))); blob(x2, cy, 44, K.warn, e1, 0); tag('pf.cs', rich(d.smaller || 'an even smaller one'), x2, cy + 64, K.warn, e1, { size: 19 }) }
+    }
+    if (cr > 0) {
+      const fl = flare(seg(lt, at(n - 1) + .3, at(n - 1) + 1.4)); glowDot(cx, cy, 150, K.bad, .45 * fl)
+      tag('pf.ci', rich(d.impossible || 'impossible'), B.x + B.w / 2, B.y + 4, K.bad, eout(seg(lt, at(n - 1) + .5, at(n - 1) + 1)), { size: 34, weight: 700 })
+    }
+  },
+  // the same step repeats, each time one level up, and the levels stack
+  induction(d, lt, B, at, n) {
+    const levels = d.levels || 5, bw = Math.min(150, (B.w - 100) / levels), bh = 46, x0 = B.x + (B.w - levels * bw) / 2, yb = B.y + B.h - 40
+    for (let i = 0; i < levels; i++) {
+      const t0 = i === 0 ? at(0) : at(Math.min(1, n - 1)) + (i - 1) * Math.max(.25, (at(n - 1) - at(Math.min(1, n - 1)) + .6) / (levels - 1)), e = seg(lt, t0, t0 + .45); if (e <= 0) continue
+      const x = x0 + i * bw, h = bh * (i + 1), drop = 60 * (1 - eout(e)), c = i === 0 ? K.ok : ACC
+      bloom(() => { rrect(x + 4, yb - h - drop, bw - 8, h, 8); fill(c, .18); stroke(c, 2, eout(e)) }, .4 * flare(seg(lt, t0 + .3, t0 + 1)))
+      L('pf.in' + i, rich(d.labels && d.labels[i] ? d.labels[i] : (i === 0 ? (d.base || 'start') : `$${i === levels - 1 ? '\\cdots' : (d.var || 'n') + '=' + (i + 1)}$`)), { x: x + bw / 2, y: yb + 10, ax: .5, size: 17, color: i === 0 ? K.ok : K.soft, op: eout(e) })
+      if (i) { const ae = eio(seg(lt, t0 - .1, t0 + .35)); arrowTo(x - bw * .3, yb - h + bh * .6 - 18, x + 6, yb - h - 4, K.mute, ae, 1.4) }
+    }
+    if (d.step) tag('pf.ist', rich(d.step), B.x + B.w / 2, B.y + 4, ACC, eout(seg(lt, at(Math.min(1, n - 1)), at(Math.min(1, n - 1)) + .5)), { size: 22, weight: 600 })
+  },
+  // random samples jitter, then settle; their average crosses a line
+  probabilistic(d, lt, B, at, n) {
+    const N = d.samples || 70, R = rng(parseInt(SPEC.id, 10) * 13 + 5), x0 = B.x + 80, x1 = B.x + B.w - 80, yb = B.y + B.h - 50
+    const thr = d.threshold != null ? d.threshold : .62, mean = d.mean != null ? d.mean : .7
+    const settle = eio(seg(lt, at(1), at(1) + 1.6)), e0 = eout(seg(lt, at(0), at(0) + .6))
+    const cols = 24, counts = new Array(cols).fill(0); let sum = 0
+    for (let i = 0; i < N; i++) {
+      const u1 = R(), u2 = R(), z = Math.sqrt(-2 * Math.log(u1 + 1e-9)) * Math.cos(2 * Math.PI * u2)
+      const v = clamp(mean + .13 * z, 0, .999), col = Math.floor(v * cols), hgt = counts[col]++
+      sum += v
+      const tx = x0 + (col + .5) / cols * (x1 - x0), ty = yb - 10 - hgt * 13
+      const rx = x0 + R() * (x1 - x0), ry = B.y + 20 + R() * (B.h - 100)
+      const j = (1 - settle) * 8, x = lerp(rx, tx, settle) + j * Math.sin(lt * 7 + i), y = lerp(ry, ty, settle) + j * Math.cos(lt * 6 + i * 1.3)
+      dot(x, y, 4.5, K.cool, .85 * e0 * seg(lt, at(0) + i * .01, at(0) + i * .01 + .3))
+    }
+    line(x0, yb, x1, yb, K.faint, 1.4, e0)
+    const tx = x0 + thr * (x1 - x0), te = eout(seg(lt, at(0) + .3, at(0) + .8)); line(tx, B.y + 10, tx, yb, K.warn, 1.6, te, [6, 6])
+    tag('pf.pt', rich(d.thresholdLabel || 'threshold'), tx, B.y - 12, K.warn, te, { size: 17 })
+    const me = eout(seg(lt, at(n - 1), at(n - 1) + .5)), mv = lerp(.3, sum / N, eio(seg(lt, at(n - 1), at(n - 1) + 1.2))), mx = x0 + mv * (x1 - x0)
+    if (me > 0) { bloom(() => line(mx, B.y + 30, mx, yb, ACC, 2.4, me), .8); tag('pf.pm', rich(d.label || 'average'), mx, B.y + 34, ACC, me, { size: 19, weight: 600 }); if (mv > thr) glowDot(mx, yb, 40, ACC, .5 * flare(seg(lt, at(n - 1) + .8, at(n - 1) + 1.8))) }
+    if (d.illustrative !== false) ill(B, e0)
+  },
+  // a quantity that only goes down, step after step, until it hits a floor
+  monotone(d, lt, B, at, n) {
+    const x0 = B.x + 80, x1 = B.x + B.w - 120, y0 = B.y + 20, y1 = B.y + B.h - 40, floor = d.floor != null ? d.floor : .18
+    const ae = eio(seg(lt, at(0), at(0) + .6)); line(x0, y1, lerp(x0, x1, ae), y1, K.soft, 1.6, .9); line(x0, y1, x0, lerp(y1, y0, ae), K.soft, 1.6, .9)
+    if (d.ylabel) L('pf.my', rich(d.ylabel), { x: x0 + 10, y: y0 - 6, size: 18, color: K.mute, op: ae })
+    const fy = y1 - floor * (y1 - y0); line(x0, fy, x1, fy, K.warn, 1.4, ae, [6, 6]); tag('pf.mf', rich(d.floorLabel || 'floor'), x1 + 50, fy - 10, K.warn, ae, { size: 17 })
+    const steps = 9, R = rng(parseInt(SPEC.id, 10) + 3); let v = .92; const pts = [[x0, y1 - v * (y1 - y0)]]
+    for (let i = 1; i <= steps; i++) { v = floor + (v - floor) * (.45 + .3 * R()); const x = lerp(x0, x1, i / steps); pts.push([x, pts[pts.length - 1][1]]); pts.push([x, y1 - v * (y1 - y0)]) }
+    const f = eio(seg(lt, at(1), at(n - 1) + .8)); let tip = null
+    bloom(() => { tip = polyline(pts, f, ACC, 3, 1) }, .7)
+    if (tip && f < 1) pen(tip[0], tip[1], ACC, 1, 14)
+    if (d.label) tag('pf.ml', rich(d.label), x0 + 90, y0 + 4, ACC, ae, { size: 19, weight: 600 })
+    if (f >= 1) glowDot(pts[pts.length - 1][0], pts[pts.length - 1][1], 30, ACC, .5 * flare(seg(lt, at(n - 1) + .8, at(n - 1) + 1.8)))
+    if (d.illustrative !== false) ill(B, ae)
+  },
+  // items drop into boxes one by one; with more items than boxes one overflows
+  counting(d, lt, B, at, n) {
+    const nb = d.boxes || 4, ni = d.items || nb + 1, bw = Math.min(150, (B.w - 80) / nb - 30), gap = 30, tw = nb * bw + (nb - 1) * gap, x0 = B.x + (B.w - tw) / 2, yb = B.y + B.h - 60, bh = 120
+    const e0 = eout(seg(lt, at(0), at(0) + .5)), cnt = new Array(nb).fill(0)
+    for (let b = 0; b < nb; b++) { const x = x0 + b * (bw + gap); g.beginPath(); g.moveTo(x, yb - bh); g.lineTo(x, yb); g.lineTo(x + bw, yb); g.lineTo(x + bw, yb - bh); stroke(K.soft, 2, e0) }
+    const span = Math.max(.2, (at(n - 1) + .6 - at(1)) / ni)
+    let over = -1
+    for (let i = 0; i < ni; i++) {
+      const b = i < nb ? i : (d.overflowInto != null ? d.overflowInto : 0), t0 = at(1) + i * span, e = seg(lt, t0, t0 + .45); if (e <= 0) continue
+      const k = cnt[b]++, x = x0 + b * (bw + gap) + bw / 2, ty = yb - 26 - k * 46, y = lerp(B.y - 20, ty, eio(e)) - 12 * bell(seg(e, .8, 1))
+      if (k > 0) over = b
+      bloom(() => dot(x, y, 18, k > 0 ? K.bad : K.cool, eout(e)), k > 0 ? .6 : .2)
+    }
+    if (over >= 0) { const t0 = at(1) + (ni - 1) * span + .45, oe = eout(seg(lt, t0, t0 + .5)), x = x0 + over * (bw + gap); bloom(() => { rrect(x - 8, yb - bh - 8, bw + 16, bh + 16, 12); stroke(K.bad, 2, oe) }, .8); tag('pf.co', rich(d.label || 'two in one box'), x + bw / 2, yb + 14, K.bad, oe, { size: 21, weight: 600 }) }
+    if (d.boxLabel) tag('pf.cb', rich(d.boxLabel), B.x + B.w / 2, B.y - 14, K.mute, e0, { size: 18 })
+  },
+  // two objects side by side; matching parts linked by arrows
+  correspondence(d, lt, B, at, n) {
+    const Lf = d.left || ['a', 'b', 'c'], Rt = d.right || ['A', 'B', 'C'], pairs = d.pairs || Lf.map((_, i) => [i, i])
+    const xl = B.x + B.w * .2, xr = B.x + B.w * .8, rows = Math.max(Lf.length, Rt.length), yy = (i, m) => B.y + 40 + (i + .5) * (B.h - 60) / m
+    const col = (arr, x, keyp, t0, c) => arr.forEach((lab, i) => { const e = eout(seg(lt, t0 + i * .08, t0 + i * .08 + .4)); if (e <= 0) return; const y = yy(i, arr.length); rrect(x - 110, y - 22, 220, 44, 10); fill(c, .08 * e); stroke(c, 1.5, e); L(keyp + i, rich(lab), { x, y, ax: .5, ay: .5, size: 19, color: K.ink, op: e }) })
+    col(Lf, xl, 'pf.cl', at(0), K.soft); col(Rt, xr, 'pf.cr', at(0) + .3, ACC)
+    if (d.leftTitle) tag('pf.clt', rich(d.leftTitle), xl, B.y - 6, K.soft, eout(seg(lt, at(0), at(0) + .5)), { size: 18 })
+    if (d.rightTitle) tag('pf.crt', rich(d.rightTitle), xr, B.y - 6, ACC, eout(seg(lt, at(0) + .3, at(0) + .8)), { size: 18 })
+    const t1 = at(Math.min(1, n - 1)), span = Math.max(.15, (at(n - 1) + .4 - t1) / pairs.length)
+    pairs.forEach(([a, b], i) => { const ae = eio(seg(lt, t1 + i * span, t1 + i * span + .5)); arrowTo(xl + 114, yy(a, Lf.length), xr - 118, yy(b, Rt.length), ACC, ae, 1.6) })
+    if (d.label) tag('pf.cpl', rich(d.label), B.x + B.w / 2, B.y + B.h + 6, ACC, eout(seg(lt, at(n - 1) + .5, at(n - 1) + 1)), { size: 22, weight: 600 })
+  },
+  // patches, each checked, then stitched into the whole
+  'local-to-global'(d, lt, B, at, n) {
+    const c = d.cols || 3, r = d.rows || 2, pw = Math.min(150, (B.w - 200) / c), ph = Math.min(110, (B.h - 120) / r), cx = B.x + B.w / 2, cy = B.y + B.h * .45
+    const stitch = eio(seg(lt, at(n - 1), at(n - 1) + 1)), spread = 26 * (1 - stitch)
+    for (let i = 0; i < r; i++) for (let j = 0; j < c; j++) {
+      const k = i * c + j, t0 = at(0) + k * .1, e = eout(seg(lt, t0, t0 + .4)); if (e <= 0) continue
+      const x = cx + (j - c / 2) * (pw + spread) + spread / 2, y = cy + (i - r / 2) * (ph + spread) + spread / 2
+      rrect(x, y, pw, ph, 8 * (1 - stitch) + 1); fill(K.cool, .1 * e); stroke(stitch > .9 ? ACC : K.soft, 1.5, e)
+      const ce = eout(seg(lt, at(1) + k * .12, at(1) + k * .12 + .35)); tick(x + pw / 2, y + ph / 2, 12, K.ok, ce * (1 - stitch))
+    }
+    if (stitch > 0) { const tw = c * pw, th = r * ph, x0 = cx - tw / 2, y0 = cy - th / 2; bloom(() => traceRect(x0 - 6, y0 - 6, tw + 12, th + 12, 10, stitch, ACC, 2.4, 1), .8); tag('pf.lg', rich(d.label || 'so it holds everywhere'), cx, y0 + th + 26, ACC, eout(seg(lt, at(n - 1) + .6, at(n - 1) + 1.1)), { size: 22, weight: 600 }) }
+    if (d.patchLabel) tag('pf.lp', rich(d.patchLabel), cx, B.y - 6, K.soft, eout(seg(lt, at(0), at(0) + .5)), { size: 18 })
+  },
+  // matching terms flash, are struck out and fade; what is left lands
+  cancellation(d, lt, B, at, n) {
+    need(d.tex, 'cancellation needs data.tex with \\term{name}{...} tags and data.cancel: [[a, b], ...]')
+    const cx = B.x + B.w / 2, cy = B.y + B.h * .4
+    const el = L('pf.eq', texHTML(d.tex, true), { x: cx, y: cy, ax: .5, ay: .5, size: d.size || 44, color: K.ink, op: 1, st: { sel: TERMS, p: seg(lt, at(0), at(0) + .8), spread: .6, dy: 12 } })
+    const T = termRects(el), w = el.offsetWidth, h = el.offsetHeight, ox = cx - w / 2, oy = cy - h / 2
+    const pairs = d.cancel || [], t1 = at(Math.min(1, n - 1)), span = Math.max(.4, (at(n - 1) - t1 + .2) / Math.max(1, pairs.length))
+    pairs.forEach((pr, i) => {
+      const t0 = t1 + i * span, hl = seg(lt, t0, t0 + .3), st = eio(seg(lt, t0 + .3, t0 + .6)), fd = seg(lt, t0 + .7, t0 + 1.1)
+      const c = [K.hot, K.cool, K.warn, K.bad][i % 4]
+      pr.forEach(nm => {
+        const r = T[nm]; need(r, `cancellation: no \\term{${nm}}{...} in data.tex`)
+        if (hl > 0) { const col = c; if (r.el._c !== col) { r.el.style.color = col; r.el._c = col } }
+        const op = (1 - .62 * fd).toFixed(3); if (r.el._o !== op) { r.el.style.opacity = op; r.el._o = op }
+        if (st > 0) bloom(() => line(ox + r.x - 2, oy + r.y + r.h * .8, ox + r.x - 2 + (r.w + 4) * st, oy + r.y + r.h * .2, c, 2.6, 1 - fd * .6), .7)
+      })
+    })
+    if (d.result) { const t0 = at(n - 1) + .6, e = eout(seg(lt, t0, t0 + .5)); L('pf.res', texHTML(d.result, true), { x: cx, y: cy + 110 + 10 * (1 - e), ax: .5, ay: .5, size: d.size || 44, color: ACC, op: e, glow: .4 * e }) }
+    if (d.label) tag('pf.cal', rich(d.label), cx, cy + 170, K.soft, eout(seg(lt, at(n - 1) + .9, at(n - 1) + 1.4)), { size: 20 })
+  },
+  // a shape is cut into pieces that move and re-form into another
+  rearrange(d, lt, B, at, n) {
+    const k = d.pieces || 4, cx = B.x + B.w / 2, cy = B.y + B.h * .45, W0 = Math.min(480, B.w * .5), H0 = 150, sw = W0 / k
+    const cut = eio(seg(lt, at(1) - .2, at(1) + .4)), mv = eio(seg(lt, at(Math.min(2, n - 1)) - .1, at(Math.min(2, n - 1)) + 1.1)), e0 = eout(seg(lt, at(0), at(0) + .5))
+    const cols = d.to === 'square' ? Math.ceil(Math.sqrt(k)) : 1, rowsN = Math.ceil(k / cols)
+    for (let i = 0; i < k; i++) {
+      // start: a row of strips; end: strips turned and stacked
+      const sx = cx - W0 / 2 + i * sw + sw / 2 + (i - (k - 1) / 2) * 10 * cut, sy = cy
+      const ci = i % cols, ri = Math.floor(i / cols)
+      const ex = cx + (ci - (cols - 1) / 2) * (H0 + 6), ey = cy + (ri - (rowsN - 1) / 2) * (sw + 6)
+      const x = lerp(sx, ex, mv), y = lerp(sy, ey, mv), rot = Math.PI / 2 * mv
+      g.save(); g.translate(x, y); g.rotate(rot)
+      const c = [ACC, K.cool, K.warn, K.ok, K.hot][i % 5]
+      bloom(() => { rrect(-sw / 2, -H0 / 2, sw, H0, 4); fill(c, .22 * e0); stroke(c, 1.8, e0) }, .3 * flare(seg(lt, at(Math.min(2, n - 1)) + 1, at(Math.min(2, n - 1)) + 1.8)))
+      g.restore()
+    }
+    if (cut > 0 && mv < .1) for (let i = 1; i < k; i++) { const x = cx - W0 / 2 + i * sw + (i - k / 2) * 10 * cut - 5 * cut; line(x, cy - H0 / 2 - 14, x, cy + H0 / 2 + 14, K.hot, 1.5, cut * (1 - mv * 10), [5, 5]) }
+    if (d.label) tag('pf.rl', rich(d.label), cx, B.y + B.h - 20, ACC, eout(seg(lt, at(n - 1) + .7, at(n - 1) + 1.2)), { size: 22, weight: 600 })
+  },
 }
 
 // ------------------------------------------------------------- primitives --
@@ -1079,7 +1419,7 @@ PRIM.graph = {
     }
     // nodes pop in with an overshoot
     G.nodes.forEach((N, i) => {
-      const st = (G.nodeStagger != null ? G.nodeStagger : .04) * i, e = seg(lt, st, st + .45)
+      const st = per(G.nodeStagger != null ? G.nodeStagger : .04, G.nodes.length, pd) * i, e = seg(lt, st, st + .45)
       if (e <= 0) return
       const c = tone(N.tone || 'ink'), r = G.r * eback(e), a = eout(e) * ne
       dot(N.x, N.y, r, K.bg, a); ring(N.x, N.y, r, c, 2, a)
@@ -1227,9 +1567,9 @@ function segX(ax, ay, bx, by, cx, cy, dx, dy) {
 // Grids: a matrix of cells with blocks; the A x B = C sweep; a 3-way tensor.
 PRIM.grid = {
   events(p) { return p.preset === 'matmul' ? [{ t: (p.sweepAt || .8) + (p.sweep || 3.6), kind: 'land' }] : [] },
-  draw(p, lt, box, key) {
+  draw(p, lt, box, key, pd) {
     if (p.preset === 'matmul') return matmul(p, lt, box, key)
-    if (p.preset === 'tensor') return tensor(p, lt, box, key)
+    if (p.preset === 'tensor') return tensor(p, lt, box, key, pd)
     const R = p.rows, Cn = p.cols
     const cs = Math.min((box.w - 40) / Cn, (box.h - 60) / R, 64)
     const gx = box.x + (box.w - cs * Cn) / 2, gy = box.y + (box.h - cs * R) / 2 + 10
@@ -1237,7 +1577,7 @@ PRIM.grid = {
     ;(p.cells || []).forEach(([r, c, t]) => { tones[r + ',' + c] = t || 'accent' })
     // cells come up as a diagonal light bar sweeps across them
     for (let r = 0; r < R; r++) for (let c = 0; c < Cn; c++) {
-      const st = .2 + (r + c) * (p.stagger != null ? p.stagger : .04), e = eout(seg(lt, st, st + .4))
+      const st = .2 + (r + c) * per(p.stagger != null ? p.stagger : .04, R + Cn, pd), e = eout(seg(lt, st, st + .4))
       if (e <= 0) continue
       const tn = tones[r + ',' + c], lb = flare(seg(lt, st, st + .7))
       rrect(gx + c * cs + 2, gy + r * cs + 2, cs - 4, cs - 4, 5)
@@ -1310,7 +1650,7 @@ function matmul(p, lt, box, key) {
     L(`${key}.ct`, `${prods}<span style="color:${K.mute}"> of ${NP} products</span>`, { x: box.x + box.w / 2, y: y0 + gw + 40, ax: .5, cls: 'mono', size: 24, color: prods === NP ? ACC : K.ink, op: ce, scale: 1 + .08 * fin, glow: prods === NP ? .3 + .7 * fin : 0 })
   }
 }
-function tensor(p, lt, box, key) {
+function tensor(p, lt, box, key, pd) {
   const [a, b, c] = p.dims || [3, 3, 3]
   const s = p.cell || Math.min(box.h / (a + b + c) * 1.9, 84)
   const yaw = (p.yaw != null ? p.yaw : .62) + (p.spin ? lt * .05 : .03 * Math.sin(lt * .5))
@@ -1327,7 +1667,7 @@ function tensor(p, lt, box, key) {
   const cells = (p.cells || []).map((q, i) => ({ q, i, d: proj(q[0] + .5, q[1] + .5, q[2] + .5)[2] }))
   cells.sort((u, v) => v.d - u.d)
   for (const { q, i } of cells) {
-    const at = (p.cellAt != null ? p.cellAt : .8) + i * (p.cellStagger != null ? p.cellStagger : .18), ce = eout(seg(lt, at, at + .4)); if (ce <= 0) continue
+    const at = (p.cellAt != null ? p.cellAt : .8) + i * per(p.cellStagger != null ? p.cellStagger : .18, cells.length, pd), ce = eout(seg(lt, at, at + .4)); if (ce <= 0) continue
     const [x, y] = proj(q[0] + .5, q[1] + .5, q[2] + .5), r = s * .36 * eback(seg(lt, at, at + .4)), fl = flare(seg(lt, at, at + .8))
     const hex = () => { g.beginPath(); g.moveTo(x, y - r); g.lineTo(x + r * .9, y - r * .45); g.lineTo(x + r * .9, y + r * .55); g.lineTo(x, y + r); g.lineTo(x - r * .9, y + r * .55); g.lineTo(x - r * .9, y - r * .45); g.closePath() }
     bloom(() => { hex(); fill(tone(q[3] || 'accent'), .8 * ce) }, .2 + .7 * fl)
@@ -1446,7 +1786,7 @@ PRIM.shape = {
 
 // Venn diagrams of two or three sets, with shaded regions and members.
 PRIM.venn = {
-  draw(p, lt, box, key) {
+  draw(p, lt, box, key, pd) {
     const n = p.sets.length; need(n === 2 || n === 3, 'venn: 2 or 3 sets')
     const R = Math.min(box.w, box.h) * (n === 2 ? .36 : .27), cx = box.x + box.w / 2, cy = box.y + box.h / 2 - (n === 3 ? R * .2 : 0)
     const C = n === 2 ? [[cx - R * .58, cy], [cx + R * .58, cy]] : [[cx - R * .58, cy - R * .32], [cx + R * .58, cy - R * .32], [cx, cy + R * .68]]
@@ -1474,20 +1814,21 @@ PRIM.venn = {
       const [lx, ly, lax, lay] = i === 0 ? [C[0][0] - R * .74, C[0][1] - R * .8, 1, 1] : i === 1 ? [C[1][0] + R * .74, C[1][1] - R * .8, 0, 1] : [C[2][0] + R * .78, C[2][1] + R * .8, 0, 0]
       L(`${key}.l${i}`, rich(s.label), { x: lx, y: ly, ax: lax, ay: lay, size: 23, color: c, op: seg(e, .5, 1), weight: 560 })
     })
-    ;(p.members || []).forEach((m, i) => { const at = m.at != null ? m.at : 2.5 + i * .25, e = seg(lt, at, at + .35); if (e <= 0) return; const x = box.x + m.x * box.w, y = box.y + m.y * box.h, c = tone(m.tone || 'ink'), pr = seg(lt, at, at + .6); bloom(() => dot(x, y, 4.5 * eback(e), c), .4); if (pr < 1) ring(x, y, 4 + 14 * eout(pr), c, 1.3, .6 * (1 - pr)); if (m.label) L(`${key}.m${i}`, rich(m.label), { x: x + 9, y, ay: .5, size: 18, color: K.soft, op: eout(e) }) })
+    ;(p.members || []).forEach((m, i) => { const at = m.at != null ? m.at : 2.5 + i * per(.25, p.members.length, pd), e = seg(lt, at, at + .35); if (e <= 0) return; const x = box.x + m.x * box.w, y = box.y + m.y * box.h, c = tone(m.tone || 'ink'), pr = seg(lt, at, at + .6); bloom(() => dot(x, y, 4.5 * eback(e), c), .4); if (pr < 1) ring(x, y, 4 + 14 * eout(pr), c, 1.3, .6 * (1 - pr)); if (m.label) L(`${key}.m${i}`, rich(m.label), { x: x + 9, y, ay: .5, size: 18, color: K.soft, op: eout(e) }) })
   },
 }
 
 // Sequences: terms or digits in boxes, revealed in turn, some marked.
 PRIM.sequence = {
-  draw(p, lt, box, key) {
+  draw(p, lt, box, key, pd) {
     const items = p.items, n = items.length
     const perRow = p.perRow || Math.min(n, 12), rows = Math.ceil(n / perRow)
     const bw = Math.min((box.w - 40) / perRow - 10, 84), bh = Math.min(bw, 72), gap = 10
     const tw = perRow * (bw + gap) - gap, x0 = box.x + (box.w - tw) / 2, y0 = box.y + (box.h - rows * (bh + 24)) / 2 + 20
+    const sstep = per(p.stagger != null ? p.stagger : .12, n, pd)
     const marks = p.marks || {}
     items.forEach((it, i) => {
-      const st = (p.at || .3) + i * (p.stagger != null ? p.stagger : .12), e = eout(seg(lt, st, st + .35)); if (e <= 0) return
+      const st = (p.at || .3) + i * sstep, e = eout(seg(lt, st, st + .35)); if (e <= 0) return
       const r = Math.floor(i / perRow), c = i % perRow, x = x0 + c * (bw + gap), y = y0 + r * (bh + 24) + 8 * (1 - e)
       const mk = marks[i], mt = mk ? (typeof mk === 'string' ? { tone: mk } : mk) : null
       const mAt = mt ? (mt.at != null ? mt.at : st + .5) : 0
@@ -1502,7 +1843,7 @@ PRIM.sequence = {
       L(`${key}.i${i}`, rich(String(it)), { x: x + bw / 2, y: y + bh / 2, ax: .5, ay: .5, cls: 'mono', size: Math.min(28, bh * .42), color: mt && me > .5 ? mc : K.ink, op: e, scale: k, glow: mt ? .4 * me : 0 })
       if (p.index) L(`${key}.x${i}`, rich(p.index.replace('#', i + (p.index0 || 0))), { x: x + bw / 2, y: y + bh + 6, ax: .5, cls: 'mono', size: 15, color: K.mute, op: e })
     })
-    if (p.ellipsis) { const e = eout(seg(lt, (p.at || .3) + n * (p.stagger || .12), (p.at || .3) + n * (p.stagger || .12) + .4)); L(key + '.el', rich('$\\cdots$'), { x: x0 + tw + 22, y: y0 + (rows - 1) * (bh + 24) + bh / 2, ay: .5, size: 30, color: K.mute, op: e }) }
+    if (p.ellipsis) { const e = eout(seg(lt, (p.at || .3) + n * sstep, (p.at || .3) + n * sstep + .4)); L(key + '.el', rich('$\\cdots$'), { x: x0 + tw + 22, y: y0 + (rows - 1) * (bh + 24) + bh / 2, ay: .5, size: 30, color: K.mute, op: e }) }
     if (p.caption) L(key + '.cap', rich(p.caption), { x: box.x + box.w / 2, y: y0 + rows * (bh + 24) + 24, ax: .5, size: 21, color: K.mute, op: eout(seg(lt, .6, 1.1)) })
   },
 }
@@ -1700,7 +2041,7 @@ function relation(R, T, ox, oy, w, h, cx, cy, lt, at, key) {
 // A tree of dependencies: what the main theorem rests on, built bottom-up.
 PRIM.tree = {
   events(p) { return [{ t: (p.at || .3) + (p._depth || 3) * .7 + .4, kind: 'land' }] },
-  draw(p, lt, box, key) {
+  draw(p, lt, box, key, pd) {
     if (!p._lay) {
       const byId = Object.fromEntries(p.nodes.map(N => [N.id, { ...N, kids: [] }]))
       let root = null
@@ -1723,7 +2064,7 @@ PRIM.tree = {
       p._lay = { nodes: Object.values(byId), depth }
     }
     const { nodes, depth } = p._lay
-    const at = p.at || .3, T = N => at + (depth - N.d) * .7
+    const at = p.at || .3, lv = per(.7, depth + 1, pd), T = N => at + (depth - N.d) * lv
     // branches grow from each node up to its parent, a light at the tip
     for (const N of nodes) for (const k of N.kids) {
       const e = eio(seg(lt, T(k) + .3, T(k) + .9)); if (e <= 0) continue
@@ -1776,4 +2117,4 @@ async function ready() {
   return true
 }
 window.READY = ready()
-window.REEL = { load, frame, get plan() { return PLAN }, DISCIPLINES, PATTERNS, KINDS, LEAN, DUR, LIMITS }
+window.REEL = { load, frame, get plan() { return PLAN }, DISCIPLINES, PATTERNS, KINDS, LEAN, DUR, DUR_PROOF, LIMITS, ARCHETYPES }
