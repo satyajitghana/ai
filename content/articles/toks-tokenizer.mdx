@@ -1,0 +1,240 @@
+---
+title: "toks: an exact tokenizer built from certified shortcuts"
+description: "Actual Computer's toks returns Hugging Face's exact token ids 13-151x faster on one core, with its hot loops in hand-written NEON and AVX2. I read the whole repository. Most of the speed comes from never running BPE on a piece at all: a static table answers four pieces in five, and every shortcut is either computed by the real algorithm at load or covered by a written proof. The merge loop that is left is the bottleneck. Its own speed table also shows where the launch post overclaims: gigatoken wins about half of the replays, and the 151x is partly Hugging Face slowing down on whole files."
+date: 2026-10-06
+tags:
+  - tokenization
+  - performance
+  - kernels
+  - benchmarks
+  - licensing
+cover: /articles/toks-tokenizer/fig2.png
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Reads toks end to end: why exact BPE hinges on merge order, the proof behind each shortcut, the asm loop, and where its own table undercuts the launch post."
+topic: tools-infra
+kind: tool
+level: practitioner
+runsOn: cpu
+licence: BUSL-1.1
+---
+
+import { MergeOrder } from "@/components/articles/toks-tokenizer/merge-order"
+import { SpeedCells } from "@/components/articles/toks-tokenizer/speed-cells"
+
+This is the third fast tokenizer this site has covered in three months. [Gigatoken](/articles/gigatoken) in July replaced the pre-tokenizer regex with a SIMD scanner and cached every word it had seen. Hugging Face's [tokenizers v1 release candidate](/articles/tokenizers-v1-combinatorial-bpe) in September rebuilt its own engine and got 7-54x on my machine. Now Actual Computer has released [toks](https://github.com/actual-computer/toks), announced on X as "the best tokenizer on earth and the first tokenizer designed for the quadrillion-token era", with a [launch post](https://actual.inc/company/blog/introducing-toks) that says 13x to 151x faster than Hugging Face `tokenizers` 0.23.2 on one core, the same ids, and most of the work in hand-written assembly.
+
+I expected the story to be the assembly. There is a lot of it: 4,121 lines for x86-64 and 4,098 for arm64, two independent implementations of the same kernels. What I found after reading the repository end to end is that the assembly is worth about 2x, and the rest of the lead comes from a decision made above it. toks runs real BPE on very few pieces. Everything else is answered by a table or a shortcut, and each shortcut ships with either a load-time computation by the reference algorithm or a written argument that it gives the same ids. The interesting engineering is in those arguments. The part that is still slow, by toks's own profile, is the plain merge loop on pieces its tables miss.
+
+<RepoCard repo="actual-computer/toks" />
+
+## Exact means the same merge order
+
+Byte-level BPE looks like it should have one right answer per word. It does not. The right answer is defined by a procedure: start from bytes, repeatedly merge the adjacent pair with the lowest rank in the merge list, ties to the leftmost, stop when no adjacent pair has a merge. Change the order in which you apply the same merges and you can land on different tokens, all of them valid vocabulary entries, and the model will see ids it was never trained on in that context.
+
+That sounds like a corner case until you look at real files. Hugging Face's conversions of tiktoken vocabularies (Llama 3, o200k, GLM 5.3, Llama 4) list every split of a token, 280k to 446k merges for 128k to 200k tokens, so the same string can be produced by several merges at different ranks. The stepper below uses a table of eleven merges built to have that property. Rank 7 makes `·the` again, a string rank 5 already made, so its merged id (11) is older than the id rank 6 produces (`ther`, 12).
+
+<MergeOrder />
+
+On the piece `·ther`, Hugging Face's rule merges `t h`, then `th e`, then `the r` (rank 6), and stops at `[·, ther]`. If you use the merged token's id as the priority, `· the` wins because 11 is less than 12, and you get `[·the, r]`. Leftmost-first and longest-match get that answer too. On `other`, rank order gives `[o, ther]` while leftmost-first and longest-match both find the single token `other`. Three plausible fast paths, three ways to be wrong.
+
+The id-as-priority shortcut is worth a closer look because toks uses it. If merged ids rise strictly with rank, comparing ids is the same as comparing ranks, and the merge loop skips one dependent load (`rank2id[rank]`) per merge. toks only turns that on (`TOKS_TF_IDS_AS_RANK`) when the compiler has checked the condition on the file. `docs/kernels.md` §5 counts why it stays off for the tiktoken conversions: on the four files, 49.6k to 72.2k merges produce an id below one of their own parts, and 5.4k to 5.9k tokens have two merges sharing a middle token, such as `(ĠĠĠ, Ġ)` and `(Ġ, ĠĠĠ)`, both making `ĠĠĠĠ`. On the symbols `[ĠĠĠ, Ġ, ĠĠĠ]`, Hugging Face takes the lower-ranked of the two and the id rule takes the leftmost, and the ids differ. The doc ends that paragraph with "no certificate, rank2id stays". That sentence sums up the whole codebase. A shortcut goes in only when it can be shown to be exact, and the showing is written down.
+
+## Most pieces never reach BPE
+
+A tokenizer call in toks runs five stages, the same five Hugging Face runs: find added tokens (`<|eot_id|>` and friends), normalize, pre-tokenize into pieces, turn each piece into ids, post-process. The kernels have names: K1 finds added tokens, K3 is the pre-tokenizer scanner, K5 dispatches pieces, K6 is BPE on one piece. K5 is where the time is decided, because it decides which pieces K6 ever sees.
+
+`docs/bench/stages.md` breaks down a cold 4 KiB pass of Llama 3 over English prose on a GB10 core. I find this table more useful than any speed chart in the repo:
+
+| what happens to a piece | share of pieces |
+|---|---:|
+| one byte, answered from `byte2id` | 10.6% |
+| static table hit (2-15 bytes) | 79.3% |
+| dynamic cache hit | 1.5% |
+| short miss: real BPE in K6 | 8.5% |
+| over 15 bytes | 0.06% |
+
+Four pieces in five are a single probe of a static "words" table built when the tokenizer loads. The 8.5% that miss are where the time goes: K6's short misses were 51% of the cold time in that run (and 43% in a later run, after the piece dictionary below went in). A short miss costs about six merges at roughly 22 ns each.
+
+The words table holds every vocabulary token of 2 to 15 bytes that its two-bucket hashing can seat, keyed on the raw bytes, with up to four ids as the value. The value is the detail that matters. It is computed by running K6's C implementation on the token's bytes at load time, never assumed to be "the token whose string this is". That distinction is not pedantic: 532 of Llama 3's 126,153 tokens of 2 to 15 bytes do not BPE back to themselves from their own bytes, and GLM 5.3 has 792 such tokens. A table that mapped every token's string to its own id would be wrong on exactly those, and toks's tests break loudly if K5 ever skips the lookup for them.
+
+The free slots then take a piece dictionary: 131,072 common pieces that are not single tokens, such as `" Bingley"` (which Llama 3 encodes as `" Bing"` + `"ley"`), counted from enwik8, LLVM 21's headers and four Python packages, each valued the same way. That moved Llama 3's table from 107,383 to 129,684 entries and cost about 9 ms of load time (178.5 to 187 ms). The source text is English prose and code, so it helps English and code most, which matches the multilingual and CJK cells staying flat in their measurements.
+
+So my first correction to the gigatoken story. That article, and gigatoken's README, put the bottleneck in the regex. Once the regex is gone, the profile moves: in toks's cold runs, K1 and K3 together are 6-17% of the time, and the merges on pieces the tables miss are the biggest stage on every English cell.
+
+## The scanner: a regex compiled away
+
+toks never runs a regex engine for the patterns that matter. The compiler compares the `tokenizer.json` pattern string byte for byte against the strings it knows (GPT-2, cl100k, Qwen's variants, o200k, DeepSeek V3's three-step split, and a handful more), and maps a match onto a scanner template whose rules are written out as ordered alternatives A1-A10 in `docs/kernels.md` §3. A pattern it does not recognise goes to a generic engine that is exact and slower.
+
+The asm scanner classifies 64 bytes at a time into bitmasks, one bit per byte: letters, digits, whitespace, newlines, apostrophes, non-ascii. The ascii-letter test in the AVX2 scanner (`src/asm/x86_64/k3_avx2.inc:181-190`) is ten instructions:
+
+```asm
+        vpor    ymm2, ymm0, ymmword ptr [rip + SYM(k3a2_c20)]
+        vpor    ymm3, ymm1, ymmword ptr [rip + SYM(k3a2_c20)]
+        vpaddb  ymm2, ymm2, ymmword ptr [rip + SYM(k3a2_c05)]
+        vpaddb  ymm3, ymm3, ymmword ptr [rip + SYM(k3a2_c05)]
+        vpcmpgtb ymm2, ymm2, ymmword ptr [rip + SYM(k3a2_c65)]
+        vpcmpgtb ymm3, ymm3, ymmword ptr [rip + SYM(k3a2_c65)]
+        vpmovmskb esi, ymm2
+        vpmovmskb ecx, ymm3
+        shl     rcx, 32
+        or      rsi, rcx
+```
+
+OR-ing `0x20` folds `A-Z` onto `a-z`. Adding `0x05` moves `0x61..0x7A` to `0x66..0x7F`, the top of the signed byte range, and pushes every byte at or above `0x7B` into the negatives. One signed compare against `0x65` is then true for exactly the 52 ascii letters. Four instructions per 32 bytes, and the result lands in a 64-bit register as one bit per byte. Piece starts are then boolean algebra on those masks: a punctuation run starts where a P byte follows a non-P byte, computed as `andn` of the mask against itself shifted by one. Non-ascii bytes take a slower atom-by-atom path with a shortcut for CJK leads.
+
+None of this is new in kind. Gigatoken's scanner and Hugging Face v1's `bitcannon` do the same class of thing, and toks's README credits gigatoken's scanners as the inspiration. What toks adds is the paperwork: each template's rules are spelled out, and the variants that are easy to get wrong are written down twice. Qwen 3.5-3.8's pattern lets marks extend letter runs while the letter-prefix class still admits them, and the doc prints both regex strings with a warning underneath: `the letter prefix class does NOT exclude \p{M}`.
+
+## The loop that's left
+
+For the 8.5% that reach K6, the algorithm is the one everybody uses for short words, and toks's NEON kernel says so in its own header (`src/asm/arm64/k6_neon.S:39-42`): the lineage is Hugging Face's `word.rs`, "tiktoken and gigatoken's short cores (a rank per position, min scan, refresh the two neighbours)" and Actual's earlier tokenizer, tok v1, with "new here: the rest-scan overlapped with the probes, the scalar xor/min-tree probe, NID/PID."
+
+The core trick is a packed key. Each position holds `prio << shift | pos`, so a single unsigned minimum over the array finds the lowest-priority pair and breaks ties to the leftmost position, which is exactly Hugging Face's order. The C version (`src/core/k6_c.c:51-55`), which is also the scalar tier and the oracle the asm is diffed against:
+
+```c
+    for (;;) {                                             /* bound: n - 1 merges, then one more scan */
+        uint32_t k = K6_NONE;
+        for (uint32_t i = 0; i < n; i++) { k = key[i] < k ? key[i] : k; }   /* bound: n */
+        if (k == K6_NONE) { break; }
+        uint32_t pos = k & (K6_SHORT - 1u), nid = bpe_mt_id(mt, k >> K6_SHIFT), r = nx[pos], rn = nx[r], l = pv[pos];
+```
+
+After a merge only three keys change: the merged position, its dead right neighbour, and its left neighbour. The two new pairs need a merge-table probe each, and the next round's minimum scan runs while those probes are in flight. In AVX2 the scan for longer pieces is `vpminud` over 32-byte rows (`src/asm/x86_64/k6_avx2.S:154-164`):
+
+```asm
+        vmovdqu ymm0, ymmword ptr [rbp]         /* longer: vpminud over 32-byte rows */
+        vpminud ymm0, ymm0, ymmword ptr [rbp + 32]
+        lea     rax, [r12 + 15]
+        and     rax, -16
+        shl     rax, 2                          /* 4 P bytes */
+        mov     edx, 64
+        jmp     76f
+73:
+        vpminud ymm0, ymm0, ymmword ptr [rbp + rdx]
+        vpminud ymm0, ymm0, ymmword ptr [rbp + rdx + 32]
+        add     rdx, 64
+```
+
+The merge table is open addressing with 8-slot, 64-byte buckets, so a probe is one cache line and two `vpcmpeqq`. On NEON the probe stays scalar on purpose: the header says an xor-and-min tree over four `ldp` loads is "~15 cycles shorter than a neon reduction" on a chain where every merge waits for the previous probe. In the asm, pieces over 128 bytes switch to Hugging Face's heap, with one improvement: the pair at a position can only grow, and one priority names one pair, so a stale heap entry is detected by comparing it to the current priority at that position, with no re-probe.
+
+Where does a short miss spend its ~101 ns? The repo times each stage by building variants that stop early (`docs/kernels.md` §5): for Llama 3 English misses, 27 ns of entry and premerge walk, 5 ns of records, 13 ns of round one, 56 ns of merge loop. Each merge is a dependent hash probe into a table bigger than L2. That is the wall. Their own target for English prose is 600 MB/s per core cold; the cold runs measured 277, about 0.46 of it, and `docs/bench/stages.md` concludes the floor "needs a ~4x faster exact bpe for short first-occurrence pieces, or far fewer of them".
+
+What I respect most in this section of the docs is the list of things they built, measured and threw out. A dense grid of priorities for every pair of ids below 1,024 gave 5.9-8.3% on English cold and lost up to 3.3% on o200k CJK, which missed their "no cell below -0.5%" bar. An AVX-512 version of the probe measured -1 to 2%, "below any rent, so the avx512 tier calls the avx2 kernel". Their predecessor, tok v1, used SVE2 and AVX-512; toks uses neither, and beats it in all 180 new-prompt cells they measured. A branch-free short path lost 1.5-3%, because the branches it removed were well predicted and the selects put loads in series. Most performance write-ups only report what worked; this one reports every losing experiment with a link to its raw log.
+
+## A shortcut has to come with a proof
+
+The premerge is the shortcut I would point a colleague at. In Chinese text nearly every character is three bytes, and BPE spends its first two merges on each character putting its own bytes back together. toks starts a 2- or 3-byte UTF-8 character as one symbol, its token, when a load-time table says that is safe.
+
+Safe has a precise meaning. Starting from the character's token instead of its bytes skips the merges inside the character. Those merges could, in principle, have interleaved with a merge across the character's edge that changes the outcome. For each character token, the builder runs the character's own BPE and records which neighbouring bytes could produce an outside merge with a priority low enough to win while the character is still in pieces. Those become "risk bits" for the byte before and the byte after. At encode time, a character is premerged only when neither neighbour's bit is set. `docs/kernels.md` §5.1 then gives a three-step argument that run A (from bytes) and run B (premerged) end in the same state, and the test suite includes mutants that drop each part of the risk computation and must fail.
+
+On their Chinese bench text, 88.6% of Llama 3's multibyte characters start premerged, each saving 1.77 merges. The same certificate is reused for two-byte ascii pairs on English words, which cut Llama 3's short misses from 5.98 to 3.14 merges a piece.
+
+`toks_split_points`, the function toks_par is built on, works the same way. A cut is certified by a predicate over a window of atoms around it (the longest added token plus 16 bytes each side), never by encoding both halves and checking. The rules are short. For o200k, rule O2 is: the atom before the cut is a digit and the atom after is not; digit groups tile a run from its start, so a boundary is guaranteed there. Because the predicate reads only that window, a certified cut stays certified for any text appended after it. That is what makes it usable for streaming and incremental documents, and the doc says so.
+
+## Reading the speed table
+
+The launch post leads with this chart:
+
+<Figure
+  src="/articles/toks-tokenizer/fig1.png"
+  alt="Bar chart titled Tokenizer speed on one CPU core: MB/s of English prose in 4 KiB chunks on one NVIDIA GB10 core. toks about 264 to 282 MB/s, tiktoken about 29 to 33, Hugging Face about 3.7 to 5.4, for Llama 3, GLM 5.3, Qwen 3.8, gpt-oss and Kimi K3, with multiples of 8.1x to 9.7x over tiktoken and 50x to 76x over Hugging Face."
+  caption="English prose, fresh text in 4 KiB chunks, one GB10 core: toks against tiktoken 0.14.0 and Hugging Face tokenizers 0.23.2. Gigatoken, the closest competitor in the repository's own table, is not on this chart (Actual Computer launch post)."
+/>
+
+The numbers on it are right; I checked every bar against `docs/bench/e2e.md`. What the chart leaves out is the tool toks actually races. The README calls gigatoken "the fastest tokenizer we know of" and puts it in every chart; the blog chart drops it. The README's dot plot has all four:
+
+<Figure
+  src="/articles/toks-tokenizer/fig2.png"
+  alt="Dot plot of one-thread MB/s on a GB10 Cortex-X925 core, cold, 4 KiB chunks, log scale, for 11 tokenizers across English prose, code, multilingual and CJK text. toks is the rightmost dot in every row; gigatoken is next, then tiktoken, then hf tokenizers far to the left."
+  caption="Every tokenizer and corpus on one GB10 core, fresh text in 4 KiB chunks, commit 245cc5c. toks is rightmost in every row; gigatoken sits between toks and tiktoken (toks README)."
+/>
+
+The widget below holds the full headline table from `docs/bench/e2e.md`: three machines, 4 KiB calls or whole files, four corpora, eleven tokenizers. Flip to "replay" to see the state the launch post doesn't show.
+
+<SpeedCells />
+
+Four things stand out once you click around.
+
+On fresh text in 4 KiB calls, toks's lead over gigatoken is large, 2x to 10x: Llama 3 English on GB10 is 269.8 against 65.7 MB/s, and Llama 3 CJK is 147.5 against 19.1. Part of that is the definition of cold. A fresh scratch per call empties toks's dynamic cache and memo, while the static words table built at load stays. Gigatoken gets a fresh state per call, and its speed comes from a cache it learns as it goes, so cold costs it everything. On whole files, where gigatoken's cache fills during the call, the gap closes to 1.25-2x: Llama 4 code on GB10 is 524.5 against 261.6 MB/s. Both states are fair descriptions of a workload. Short chat requests to a fresh worker look like the first; a dataset job looks like the second. toks also wins the "pass" state (a scratch that has seen other text first) in 83, 82 and 84 of 85 cells on the three machines, which I would call the serving case.
+
+The 151x is Llama 4 on code, whole file, GB10: toks 524.5 MB/s against Hugging Face's 3.46. The same cell in 4 KiB chunks has Hugging Face at 5.21 and the ratio at 88.84x. Hugging Face 0.23.2 gets slower when handed a 0.6 MB string in one call, and that slowdown is a good share of the top of the range. The bottom, 13x, is Gemma 4 on multilingual text, a SentencePiece-style model on a different code path.
+
+Replays are a different story. Warm means the same text a second time, each tool with its own default cache: toks's 4 MiB segment memo and 2 MiB piece cache against gigatoken's 512 MiB. toks wins 43, 49 and 50 of 85 cells on the three machines. When a 4 KiB chunk fits the memo, toks answers it at 5.1-19.2 GB/s, which is a lookup, not tokenization, and the README says as much. When it doesn't (multilingual text, and whole files outside code), gigatoken's much larger cache wins. The launch post's "faster than anything else, in every condition, for every model" is contradicted by its own repository: 252 of 255 cold cells, not all of them, and about half of the replays.
+
+The comparison everyone will make next is against Hugging Face's own rewrite. Every multiple in toks's tables is against 0.23.2. Hugging Face's v1 release candidate came out on 21 September; on Hugging Face's benchmark, v1 ran at 139.6 MB/s against gigatoken's 137.2 on an M4 Max, and I measured 7-54x over 0.23.2 through the Python bindings. Nothing in the toks repository mentions v1. I have not run toks against it. My expectation is that toks's lead over v1 will look like its lead over gigatoken, single digits on fresh text, not like 50x, but that is a guess from two different harnesses.
+
+One more caveat on the method, which is good. hf and tiktoken run from Python as they ship, one `encode` call per chunk; toks runs from C. At 4 KiB, Hugging Face spends about 760 µs per call at 5.4 MB/s, so a few microseconds of Python overhead do not move it. Every toks cell is checked against the reference's ids by sha-256 outside the timer, and a mismatch voids the cell.
+
+<Figure
+  src="/articles/toks-tokenizer/fig3.png"
+  alt="Two heatmaps of toks cold MB/s divided by hf tokenizers MB/s, 11 tokenizers by 4 corpora, for GB10 and Threadripper 9970X. Every cell is above 1; English and code cells sit between 26x and 124x, multilingual and CJK between 14x and 36x."
+  caption="toks fresh-text throughput over Hugging Face tokenizers 0.23.2, 4 KiB chunks, one thread, GB10 (NEON) and Threadripper 9970X (AVX2). Code gains most; multilingual and CJK, where more pieces miss the static table, gain least (toks README)."
+/>
+
+The asm itself is worth a median 2.14x over toks's own portable C on GB10 and 2.63x on Zen 5, in all 88 cells. The C tier alone beats gigatoken cold in 47 of 85 cells on GB10. Read together, those say the table-first design gets toks level with gigatoken, and the hand-written kernels double it.
+
+## Eight cores and certified cuts
+
+`toks_par_encode` splits one input at certified cut points, encodes the parts on a small pool, and returns exactly the ids of one serial call. Two design choices are worth knowing. Calls under 16 KiB never leave the calling thread. Above that, a cost model measured on the pool's own machine (wake latency of 2-250 µs from deep idle, join cost, per-byte encode cost) picks the most workers that keep modelled efficiency at or above 75%. Workers claim units from one atomic cursor, with smaller units at the tail so nobody waits on a big last chunk.
+
+<Figure
+  src="/articles/toks-tokenizer/fig4.png"
+  alt="Line chart of toks_par_encode MB/s against threads 1, 2, 4 and 8 for one 16 MiB enwik8 input with Llama 3, on GB10 Cortex-X925 cores and one Zen 5 CCD. At 8 threads toks reaches 1,608 MB/s on GB10 and 1,804 MB/s on Zen 5, against flat reference lines for tiktoken (30.3 and 35.1 MB/s) and hf tokenizers (5.36 and 6.46 MB/s) on one thread."
+  caption="One 16 MiB input, Llama 3, new text on a warm pool: 1,608 MB/s on 8 GB10 cores (7.19x serial) and 1,804 MB/s on 8 Zen 5 cores (5.74x), commit b6eca5f. The flat lines are one-thread tiktoken and Hugging Face (toks README)."
+/>
+
+Those are the 1.6 and 1.8 GB/s from the announcement, and the chart is honest about what it compares: the dashed lines are one-thread tiktoken and Hugging Face, not their parallel modes. `docs/bench/par.md` has those too, and gigatoken's parallel API beside them. On 8 GB10 cores and 16 MiB of 4 KiB documents, toks did 1,842 MB/s, gigatoken 1,257, tiktoken's `encode_batch` 78 and Hugging Face's 38 (at commit 6a82fc6). It is not a clean sweep. On one 16 MiB document with two workers, gigatoken was ahead, 445 to 382 MB/s, and on 64 MiB inputs, where enwik8 is too short to avoid half the text being replayed, gigatoken's cache wins.
+
+One thing I only found in `docs/split.md`: some tokenizers get no cuts at all. Kimi K3's tiktoken wrapper cuts text every 400,000 code points and every 25,000 whitespace characters, counted from the start of the call, so a cut in the middle would move those boundaries. toks refuses to split it and encodes one Kimi K3 document serially, exactly. Batches of documents still go wide.
+
+## What it refuses, and what is still open
+
+"A tokenizer toks can't reproduce exactly is refused at load, with the missing feature named." I counted 119 places in `src/core` that return `TOKS_E_UNSUPPORTED`, each with a reason string: `"model dropout (not 0.0)"`, since BPE dropout is random by design; `"normalizer Replace Regex"`; `"pre_tokenizer ByteLevel add_prefix_space=true"`; `"added token: all-whitespace lstrip token beside rstrip tokens (hf panics)"`. That last one is a nice touch: where the oracle crashes, toks declines rather than invents an answer.
+
+The census in `docs/coverage.md` covers the top 500 text-generation and top 100 embedding models on the Hub and finds toks loads 98.40% of them by downloads, 98.00% on compiled fast paths. The launch post rounds that to "99%+". Most of the rest ship only a slow-tokenizer file, a bare `vocab.txt` or a SentencePiece `.model`.
+
+Parity is tested at release on each tier and host. The 0.3 release report lists 217,388 to 221,783 id cases per model per tier (encode in three added-token modes, decode, streaming decode) plus 95,385 to 97,584 pre-tokenizer piece cases, all with 0 diffs, on NEON, AVX2 and the portable C tier, for ten tokenizers; Kimi K3 was checked against its own reference over 166,284 texts. Those are a seeded sample, every 7th case of the quick set. The design notes also cite contract checks of 13.2M scanner cases and 1.2M BPE pieces against Hugging Face.
+
+The same report lists 10 items as UNMET, and I would read them before deploying. The fuzzing budget is 6.8-7.2 CPU-hours per entry point against a target of 24. A formal-proof package for the JSON readers and compiler exists in their private history but not in this release. There is no check yet that a reserved control token cannot be produced from plain text. And the speed table was measured at the release candidate 245cc5c, one small Unigram change before the release commit. A project that publishes its own unmet gates is easier to trust than one that doesn't, but they are unmet.
+
+Two practical notes from the code. Loading compiles every table from `tokenizer.json` each time: 187 ms for Llama 3, about 330 ms for o200k, with no saved image yet. Llama 3's tables are about 19 MB and gpt-oss's about 31 MB, per loaded tokenizer.
+
+## The licence counts every token you process
+
+toks is under the Business Source License 1.1, which is source-available, not open source. Production use is free if your organisation processes fewer than 10^15 tokens in any rolling twelve months. Each version becomes Apache-2.0 four years after its first public release; for 0.3.0 that is 5 October 2030. The grant (`LICENSE:10-21`) is wider in scope than the tweet suggests:
+
+```text
+Additional Use Grant: You may make production use of the Licensed Work,
+                      provided that you, together with your affiliates,
+                      process in total fewer than 1,000,000,000,000,000
+                      (10^15, one quadrillion) tokens in any rolling
+                      twelve-month period. The count is your organization's
+                      total token processing: every token that you and your
+                      affiliates process across all of your systems, by any
+                      software or service, not only tokens processed with
+                      the Licensed Work. A token is a unit of input or output
+                      as counted by the tokenizer or model that processes it.
+```
+
+The threshold counts every token your organisation and its affiliates process anywhere, through any software, not only tokens that pass through toks. Spread over a year, the line is about 32 million tokens a second around the clock, so almost everyone is under it. A large inference provider is over it whether toks tokenizes one request or all of them. Contributions also come with a sign-off that lets Actual relicense them, which is what keeps the commercial and Apache sides consistent.
+
+I have no objection to the model, and four years is shorter than most BUSL change dates.
+
+## Would I use it
+
+For a C or C++ inference engine on arm64 or x86-64, yes, behind a feature flag and after running its parity suite on my own tokenizer files. The C ABI is small (`include/toks.h`, caller-owned scratch, nothing allocated after load, no threads in the core), and an exact tokenizer that refuses what it cannot do is the right failure mode. The memo is a real win for chat serving, where each turn re-sends the conversation. For a Python dataset pipeline, the comparison I would run first is against Hugging Face v1, which is a `pip install` away and Apache-licensed; if v1 is close enough, I would stay there.
+
+For most people, tokenization was never the bottleneck. A Llama 3 tokenizer at 270 MB/s per core turns a 4 KiB prompt into ids in about 15 µs. What toks shows, more than any single number, is how to make a fast path exact: every shortcut is computed by the reference algorithm or argued in writing, every losing experiment is recorded, and the slow part, a dependent hash probe per merge on pieces its tables miss, is named as the slow part. Anyone writing a merge loop can use the packed `prio << 5 | pos` key and the premerge argument without touching the licence.
+
+In the replies to the announcement, @jrysana wrote that Rysana has had a faster compatible BPE tokenizer for about two years, on one core and on many. I found nothing public to test that against, so I can't check it.
+
+## How I checked
+
+I shallow-cloned `actual-computer/toks` at `2b1c94f` (6 October 2026) and read the kernels, the C core, the docs, the release report and the benchmark logs; every line I quote has its file and line number. I did not build or run it. All throughput numbers are Actual Computer's, read from `docs/bench/e2e.md`, `docs/bench/par.md`, `docs/bench/stages.md` and the README, and the widget's data is a copy of the headline tables in `e2e.md` (measured at 245cc5c). I checked the launch post's and the chart's numbers against those tables, recounted the gigatoken tallies per machine, and found the 151x and 13x cells by scanning all 264 asm-tier ratios. The asm line counts are `wc -l` over `src/asm/x86_64` and `src/asm/arm64`; the 119 refusal sites are a grep for `TOKS_E_UNSUPPORTED` in `src/core`. The toy table in the stepper is mine, built to reproduce the failure `docs/kernels.md` describes; I checked its outputs with a short Python script. The Hugging Face v1 numbers come from [the site's earlier article](/articles/tokenizers-v1-combinatorial-bpe); the comparison of toks against v1 is my expectation, not a measurement. The X thread and replies came through the fxtwitter mirror.
