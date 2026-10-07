@@ -124,6 +124,53 @@ function voiceLines(spec, speed) {
   if (r.status !== 0) throw new Error(`audio.py tts failed for ${spec.id}: ${r.stderr || r.error}`)
   return JSON.parse(r.stdout.trim().split('\n').pop())[spec.id]
 }
+// Async twins of voiceLines/bed: spawnSync would block every worker's event
+// loop while one reel is voiced or mixed, so N workers would take turns.
+function runPy(argv) {
+  return new Promise((res, rej) => {
+    const c = spawn(PY(), argv, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let so = '', se = ''
+    c.stdout.on('data', d => (so += d)); c.stderr.on('data', d => (se += d))
+    c.on('error', rej); c.on('close', code => res({ status: code, stdout: so, stderr: se }))
+  })
+}
+async function voiceLinesAsync(spec, speed) {
+  const tmp = mkdtempSync(join(tmpdir(), 'math-reels-tts-')), inp = join(tmp, 'lines.json')
+  writeFileSync(inp, JSON.stringify({ [spec.id]: spec.voice.map(l => l.text) }))
+  const r = await runPy([join(HERE, 'audio.py'), 'tts', '--in', inp, '--out', VCACHE(), '--voice', opt.voice || 'af_heart', '--speed', String(speed)])
+  rmSync(tmp, { recursive: true, force: true })
+  if (r.status !== 0) throw new Error(`audio.py tts failed for ${spec.id}: ${r.stderr}`)
+  return JSON.parse(r.stdout.trim().split('\n').pop())[spec.id]
+}
+async function prepareVoiceAsync(spec) {
+  if (!spec.voice || opt['no-voice']) return { spec, voice: null }
+  const { errs, warns } = checkVoice(spec)
+  if (errs.length) throw new Error(`${spec.id}: ${errs.join('; ')}`)
+  let fit, secs, wavs = null, speed, first = null
+  for (speed of SPEEDS) {
+    const got = await voiceLinesAsync(spec, speed); secs = got.map(x => x.sec); wavs = got.map(x => x.wav)
+    fit = fitVoice(spec, secs)
+    if (!fit.errs.length) break
+    first ||= fit.errs
+  }
+  if (fit.errs.length) throw new Error(`${spec.id}: ${first.join('; ')} (and still at speed ${speed})`)
+  return { spec: applyDurs(spec, fit.durs), voice: { source: 'kokoro', speed, secs, wavs, changed: fit.changed, total: fit.total, warns } }
+}
+// Voice every line of every reel up front, in N processes that each load
+// Kokoro once; the per-reel calls then only read the cache.
+async function prevoice(list, n) {
+  const specs = list.map(f => loadSpec(f)).filter(s => s.voice && s.voice.length)
+  if (!specs.length) return
+  const groups = Array.from({ length: Math.max(1, Math.min(n, specs.length)) }, () => ({}))
+  specs.forEach((s, i) => { groups[i % groups.length][s.id] = s.voice.map(l => l.text) })
+  const tmp = mkdtempSync(join(tmpdir(), 'math-reels-prevoice-'))
+  const t0 = Date.now()
+  const rs = await Promise.all(groups.map((g, i) => { const inp = join(tmp, `g${i}.json`); writeFileSync(inp, JSON.stringify(g)); return runPy([join(HERE, 'audio.py'), 'tts', '--in', inp, '--out', VCACHE(), '--voice', opt.voice || 'af_heart', '--speed', String(SPEED0)]) }))
+  rmSync(tmp, { recursive: true, force: true })
+  const bad = rs.filter(r => r.status !== 0)
+  if (bad.length) throw new Error('prevoice failed: ' + bad.map(r => r.stderr.split('\n').slice(-3).join(' ')).join(' | '))
+  console.error(`prevoiced ${specs.length} reels in ${groups.length} processes, ${((Date.now() - t0) / 1000).toFixed(0)} s`)
+}
 function prepareVoice(spec, real) {
   if (!spec.voice || opt['no-voice']) return { spec, voice: null }
   const { errs, warns } = checkVoice(spec)
@@ -157,13 +204,13 @@ const shot = async (page, t, type = 'jpeg') => {
 }
 
 // ---------------------------------------------------------------- audio --
-function bed(spec, info, dir, voice) {
+async function bed(spec, info, dir, voice) {
   if (opt['no-audio']) return null
   const py = PY()
   const ev = join(dir, `${spec.id}-events.json`), wav = join(dir, `${spec.id}.wav`)
   writeFileSync(ev, JSON.stringify({ id: spec.id, duration: info.duration, events: info.events, ...(voice ? { voice } : {}) }))
-  const r = spawnSync(py, [join(HERE, 'audio.py'), ev, wav], { encoding: 'utf8' })
-  if (r.status !== 0) throw new Error(`audio.py failed for ${spec.id}: ${r.stderr || r.error}`)
+  const r = await runPy([join(HERE, 'audio.py'), ev, wav])
+  if (r.status !== 0) throw new Error(`audio.py failed for ${spec.id}: ${r.stderr}`)
   return wav
 }
 
@@ -171,7 +218,7 @@ function bed(spec, info, dir, voice) {
 const write = (stream, buf) => new Promise(res => (stream.write(buf) ? res() : stream.once('drain', res)))
 async function reel(page, file, out, tmp) {
   const raw = loadSpec(file), sha = reelSha(raw)
-  const prep = prepareVoice(raw, !opt['no-audio'])
+  const prep = opt['no-audio'] ? prepareVoice(raw, false) : await prepareVoiceAsync(raw)
   const spec = prep.spec
   const info = await loadInto(page, spec)
   const n = Math.round(info.duration * FPS)
@@ -180,7 +227,7 @@ async function reel(page, file, out, tmp) {
     placed = placeVoice(info.scenes, spec, prep.voice.secs)
     writeFileSync(join(out, `${spec.id}.vtt`), vtt(placed))
   }
-  const wav = bed(spec, info, tmp, placed && prep.voice.wavs ? placed.map(p => ({ t: p.t, wav: prep.voice.wavs[p.i] })) : null)
+  const wav = await bed(spec, info, tmp, placed && prep.voice.wavs ? placed.map(p => ({ t: p.t, wav: prep.voice.wavs[p.i] })) : null)
   const mp4 = join(out, `${spec.id}.mp4`)
   const ff = spawn(opt.ffmpeg || 'ffmpeg', ['-v', 'error', '-y', '-f', 'image2pipe', '-framerate', String(FPS), '-c:v', 'mjpeg', '-i', '-',
     ...(wav ? ['-i', wav, '-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '96k', '-ac', '2'] : ['-an']),
@@ -270,6 +317,7 @@ const main = async () => {
       const out = opt.out || 'public/films/math'; mkdirSync(out, { recursive: true })
       const tmp = mkdtempSync(join(tmpdir(), 'math-reels-'))
       const queue = [...files], workers = Math.max(1, Math.min(+(opt.workers || 1), queue.length))
+      if (!opt['no-audio'] && !opt['no-prevoice']) await prevoice(files, Math.max(1, +(opt['tts-procs'] || opt.workers || 1)))
       try {
         await Promise.all(Array.from({ length: workers }, async () => {
           const page = await openPage(browser)
