@@ -179,7 +179,7 @@ push to master → GitHub Action social-publish
 
 ## 4. Backlinks
 
-`plans/02-seo.md` has the manual playbook. What can be automated on top of it:
+`roadmap/02-seo.md` has the manual playbook. What can be automated on top of it:
 
 1. **Canonical cross-posts** to dev.to and Hashnode (Medium by import) from the
    same publish Action: one backlink per flagship article, canonical preserved.
