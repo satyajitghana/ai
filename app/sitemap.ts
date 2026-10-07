@@ -22,6 +22,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     "/articles/scoring",
     "/models",
     "/architectures",
+    "/math",
     "/logs",
     "/arxiv",
     "/publications",
