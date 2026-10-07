@@ -64,7 +64,15 @@ export function need(spec, secs) {
   return out
 }
 
-// Lengthen scenes to fit the voice. Returns { durs, changed, errs }.
+// When lengthening pushes the reel past TOTAL_MAX, time is taken back from
+// scenes with slack, in this order, never below the scene's minimum or below
+// what its own lines need. The object scene is never shortened: its panels,
+// beats and slides are timed in the spec.
+export const RECLAIM = ['end', 'verify', 'title', 'achievement', 'proof']
+
+// Lengthen scenes to fit the voice, then reclaim slack if the total runs
+// over. Returns { durs, changed, total, errs }; errs is non-empty only when
+// the lines cannot fit at all (the render then fails that reel cleanly).
 export function fitVoice(spec, secs) {
   const errs = [], changed = {}
   const durs = sceneDurations(spec), req = need(spec, secs)
@@ -76,8 +84,17 @@ export function fitVoice(spec, secs) {
       else { changed[s] = [durs[s], nd]; durs[s] = nd }
     }
   }
-  const total = Object.values(durs).reduce((a, b) => a + b, 0)
-  if (total > TOTAL_MAX + 1e-6) errs.push(`with the voice the reel is ${total.toFixed(2)} s, over ${TOTAL_MAX} s; shorten lines or other scenes (${Object.entries(durs).map(([k, v]) => `${k} ${v}`).join(', ')})`)
+  const sum = () => +Object.values(durs).reduce((a, b) => a + b, 0).toFixed(2)
+  for (const s of RECLAIM) {
+    const over = sum() - TOTAL_MAX
+    if (over <= 1e-6) break
+    if (durs[s] == null) continue
+    const floor = Math.max(DUR[s][0], req[s] != null ? Math.ceil(req[s] * 10 - 1e-6) / 10 : 0)
+    const nd = +Math.max(floor, durs[s] - Math.ceil(over * 10 - 1e-6) / 10).toFixed(2)
+    if (nd < durs[s] - 1e-9) { changed[s] = [changed[s] ? changed[s][0] : durs[s], nd]; durs[s] = nd }
+  }
+  const total = sum()
+  if (total > TOTAL_MAX + 1e-6) errs.push(`with the voice the reel is ${total.toFixed(2)} s, over ${TOTAL_MAX} s even with every other scene at its minimum; shorten lines or object.dur (${Object.entries(durs).map(([k, v]) => `${k} ${v}`).join(', ')})`)
   if (total < TOTAL_MIN - 1e-6) errs.push(`the reel is ${total.toFixed(2)} s, under ${TOTAL_MIN} s`)
   return { durs, changed, total: +total.toFixed(2), errs }
 }
