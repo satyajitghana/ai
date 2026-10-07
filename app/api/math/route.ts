@@ -10,7 +10,7 @@ export const dynamic = "force-static"
 export function GET() {
   return Response.json({
     about:
-      "AI results in mathematics: a short narrated video (field `reel`, with WebVTT captions) for each of the 372 result families of OpenAI's openai/math release, results produced or claimed by AI systems. Every entry is a CLAIM from an unrefereed release; significance, kind and verdict are our reading, Lean status is what the release's own docs say (not re-run).",
+      "AI breakthroughs in mathematics: a short narrated video (field `reel`, with WebVTT captions) for each of the 372 result families of OpenAI's openai/math release, results produced or claimed by AI systems. Every entry is a CLAIM from an unrefereed release; significance, kind and verdict are our reading, Lean status is what the release's own docs say (not re-run).",
     page: absoluteUrl("/math"),
     article: absoluteUrl(MATH_ARTICLE),
     repository: MATH_REPO,

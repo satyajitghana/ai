@@ -483,7 +483,7 @@ export function GET() {
       }),
       "/api/math": get({
         id: "listMathResults",
-        summary: "AI results in mathematics: openai/math result families, with videos",
+        summary: "AI breakthroughs in mathematics: openai/math result families, with videos",
         description:
           "Every result family of OpenAI's openai/math release (372) as shown on /math: our significance, kind and verdict, the release's Lean status, the claim as we read it, manuscript links pinned to a commit, a link to the section of our article that covers it, and its short narrated video (`reel`: mp4, poster, captions) when one has been rendered. Each entry's `detail` is the full record.",
         schema: { type: "object", required: ["commit", "counts", "results"], properties: { commit: { type: "string" }, counts: { type: "object" }, results: { type: "array", items: { type: "object" } } } },

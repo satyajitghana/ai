@@ -1,4 +1,4 @@
-// The records behind /math, "AI results in mathematics": one short narrated
+// The records behind /math, "AI breakthroughs in mathematics": one short narrated
 // video (a "reel" internally, made by brand-crew/skills/math-reels) per result
 // family of openai/math (372). Composed at import time from four committed
 // sources:
@@ -35,7 +35,7 @@ export const MATH_COMMIT: string = notes.commit
  * checked in Lean. The URL (/math), /api/math and the math-reels skill keep
  * their names.
  */
-export const MATH_COLLECTION = "AI results in mathematics"
+export const MATH_COLLECTION = "AI breakthroughs in mathematics"
 
 const VOICED = (reelManifest as { reels: Record<string, { hasVoice?: boolean }> }).reels
 
