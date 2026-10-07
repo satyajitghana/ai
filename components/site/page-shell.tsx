@@ -11,7 +11,7 @@ export function PageShell({
   children,
 }: {
   title?: string
-  lede?: string
+  lede?: React.ReactNode
   agentPath?: { md?: string; json?: string }
   className?: string
   children: React.ReactNode

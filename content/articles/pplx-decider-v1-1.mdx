@@ -1,0 +1,227 @@
+---
+title: "pplx-decider v1.1: the causal mask comes off in 16 layers, and your state is billed once per question"
+description: "Perplexity's pplx-decider-v1.1-27b tops Hugging Face's new Decision Index 0.3 at 62.75, 2.54 points clear of second place and outside the 0.9-point tie band. I read the repository's weights by HTTP range request, its training config and code, the board's data files and the Decisions API docs. The checkpoint is Qwen3.8-27B with the vocabulary head and MTP block removed and 255 rows of that head kept as the readout: 26.09B parameters, a full fine-tune that moved every projection by about 0.24 to 0.63% and the vision tower almost not at all. The one architectural change from v1 is a forward hook that removes the causal mask from the 16 full-attention layers, so the state is read with the question in view. That same change rules out a KV cache, so the shipped server runs one complete prompt per question and bills the state each time: the docs' own 367-token example reproduces exactly that way. The win is real where it matters most, on the private tests nobody can train on; on public benchmarks alone Torchcast leads. The '250k context' is the base model's window; training stopped at 8,192 tokens. Third on the vision board, and v1 now costs the same $0.02."
+date: 2026-10-06
+tags:
+  - calibration
+  - benchmarks
+  - multimodal
+  - qwen
+  - linear-attention
+  - fine-tuning
+draft: false
+rating:
+  novelty: 1
+  verification: 3
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 1
+  reach: 2
+  unique: 3
+  why: "Weight diffs, the code and a token recount show what v1.1 changed (a noncausal mask in 16 layers) and what it costs: the state billed per question."
+topic: llm-architecture
+kind: model
+level: practitioner
+runsOn: workstation
+licence: Apache-2.0
+---
+
+import { LayerMask } from "@/components/articles/pplx-decider-v1-1/layer-mask"
+import { QuestionBill } from "@/components/articles/pplx-decider-v1-1/question-bill"
+import { BoardWeights } from "@/components/articles/pplx-decider-v1-1/board-weights"
+
+Perplexity's [launch post](https://x.com/perplexitydevs/status/2107519531711418597) makes four claims in two posts. pplx-decider-v1.1-27b "scores the highest on the new @huggingface Decision Index 0.3 benchmark". It "costs half as much as v1, at \$0.02 per million input tokens". It has "a 250k context window and supports text and image input". And it is open weights.
+
+The reply that made me open the files was not about any of those. One person who had tried the API wrote: "you don't say that we can't ask 10 questions simultaneously and that it increases the latency per question." It is a claim about how the model reads a request, and it is checkable. The Decisions API docs say the opposite in spirit: "as many questions as you need about the same content in one request." Both can be true, and the repository says which way.
+
+This site has already covered the decision-model category: [Agr](/articles/agr-decision-model) showed a decision model reading answers through its base model's own output layer, [the llama.cpp piece](/articles/llamacpp-decision-models) traced what "one forward pass" means per question, and [what decision models cannot do](/articles/what-decision-models-cannot-do) mapped the limits. I won't repeat those. This one is about what is specific to pplx-decider v1.1: what Perplexity changed between v1 and v1.1, what that change costs you per request, and whether "highest on 0.3" survives a look at the board's data.
+
+<ModelCard repo="perplexity-ai/pplx-decider-v1.1-27b" note="Qwen3.8-27B (revision 1d4bf0f) with the vocabulary head and MTP block removed: 26,085,330,160 backbone parameters in bf16 across 11 shards plus a 255 x 5,120 readout (1,305,600), counted from the safetensors headers. Full fine-tune, 626,033 rows, one epoch. Noncausal attention in the 16 full-attention layers. Apache-2.0; training and serving code under source/." />
+
+## What is in the repository
+
+Perplexity shipped more than weights. Next to the 11 shards sit `decision_config.json`, a `release-manifest.json` with a checksum for every file, `training/config.json`, `training/data-manifest.json`, the Slurm script the run used, an evaluation file and the whole `autojev` package the model was trained and evaluated with. The README says `model.py` "is copied byte-for-byte from the evaluated training run", and `evaluation/checkpoint-verification.json` records that the uploaded checkpoint reproduces the run's development-set logits with a maximum difference of 0.0 and zero changed answers. For a decision model, that is the most useful thing a release can include: the exact code that produced the number.
+
+Two small oddities in the card read like an internal release note that went public unedited. The usage section asks for "authenticated Hugging Face access to this private repository", and the release manifest says `"private": true`. The repository is public and not gated. The board's entry, meanwhile, still says "Repo access by request". Neither matters once you have the files.
+
+### 27B, minus two heads
+
+I summed the safetensors headers of all three repositories involved: v1.1, v1 and the base, `Qwen/Qwen3.8-27B` at the revision the config pins.
+
+| | Qwen3.8-27B | pplx-decider v1 and v1.1 |
+| --- | ---: | ---: |
+| Language-model layers (64) and final norm | 24,353,201,664 | 24,353,201,664 |
+| Input embeddings | 1,271,398,400 | 1,271,398,400 |
+| Vision tower and merger | 460,730,096 | 460,730,096 |
+| Output layer (`lm_head`, 248,320 rows) | 1,271,398,400 | gone |
+| Multi-token-prediction block | 424,699,392 | gone |
+| Decision readout (255 rows) | none | 1,305,600 |
+| **Total** | **27,781,427,952** | **26,086,635,760** |
+
+So "27b" is the base model's name. The checkpoint is 26.09B including the readout. The board lists v1.1 at 27.8B served parameters, which is the base model's count, not this one's. Qwen's MTP block exists to draft tokens for [speculative decoding](/articles/hauhaucs-qwen-fastmtp); a model that never generates has no use for it, and dropping it is right.
+
+The readout is the interesting removal. `model.py:243-245` builds it on a fresh run by copying 255 rows out of Qwen's `lm_head`, the rows of the answer codes `A` to `Z` and then two-letter codes like `AA`, kept only when the tokenizer makes them one token:
+
+```python
+# source/src/autojev/model.py:243-245
+self.readout = torch.nn.Linear(config.hidden_size, MAX_OPTIONS, bias=False, dtype=dtype)
+with torch.no_grad():
+    self.readout.weight.copy_(original.lm_head.weight[self.token_ids])
+```
+
+I checked that the shipped readout is still those rows. Against the base model's `lm_head` rows for `A` to `Z`, read by byte range, v1.1's readout differs by a median of 0.30% and its smallest cosine similarity is 0.99999. v1's differs by 0.11%. It is the same trick Agr uses, with one difference: Qwen does not tie its output layer to its embeddings, so Perplexity could cut the head out and train it on its own. The probability of option `C` is still, structurally, Qwen's next-token logit for the letter `C`, restricted to the options that exist and divided by a temperature.
+
+### What the fine-tune touched
+
+The card says "full fine-tune", and `optim.py` is an AdamW that keeps fp32 master weights and moments in host memory, which is how you fine-tune 26B parameters on eight GPUs without sharding the optimizer. A full fine-tune leaves no adapter to inspect, so I fetched the first 512 KiB of 24 tensors from each of the three repositories and compared them value by value.
+
+- Every language-model projection moved, in every layer I sampled (0, 3, 31, 32, 62, 63). In v1.1 the relative change, ‖v1.1 − base‖ / ‖base‖ over the slice, runs 0.24% to 0.63%, and 27% to 59% of the bf16 values are unchanged. In v1 the same tensors moved 0.06% to 0.21%.
+- The final `norm` and the Gated DeltaNet decay parameter `A_log` in layer 0 are bit-identical to Qwen's in both versions.
+- The vision tower barely moved. Its transformer blocks differ by at most 0.015%, with 95% to 99.7% of values identical; the merger by 0.005%. Only the patch embedding moved like a language layer, 0.26%.
+- v1.1 is not v1 trained further. The distance from v1.1 to v1 (0.26% to 0.65% on the same projections) is slightly larger than from v1.1 to the base, which is what two independent runs from the same start look like. The training config agrees: `"initial_checkpoint": null`, and the run directory is called `autojev-27b-scratch-glmfiltered-full-20261004`.
+
+The vision result has a plain explanation in the data manifest: of 626,033 training rows, `image_retention_rows` is 1,000. The model that is sold as multimodal learned its decisions almost entirely from text, and reads images with Qwen's vision tower nearly as Qwen shipped it.
+
+## The one change: a mask, removed in a quarter of the layers
+
+The v1-to-v1.1 diff of `model.py` is mostly reformatting. Two things are new: a `pooling` option, which the checkpoint sets to `last`, the same as v1, and a 29-line function at lines 28-56, `enable_noncausal_full_attention()`. It is a forward pre-hook on the text model that replaces the attention masks before every call:
+
+```python
+# source/src/autojev/model.py:36-53 (abridged)
+if kwargs.get("past_key_values") is not None or kwargs.get("use_cache"):
+    raise ValueError("Noncausal classification does not support a KV cache")
+...
+kwargs["attention_mask"] = {
+    "full_attention": padding[:, None, None, :].bool(),
+    "linear_attention": create_recurrent_attention_mask(
+        config=module.config, inputs_embeds=embeddings, attention_mask=padding,
+    ),
+}
+```
+
+To see why that is a precise surgical change, you need Qwen3.8's layout. The [27B is a hybrid](/articles/qwen3-8-open-weights): of its 64 layers, every fourth is ordinary softmax attention (`full_attention` in `config.json`, 24 query heads, 4 KV heads), and the other 48 are Gated DeltaNet, a linear-attention recurrence that carries a fixed-size state from token to token. A recurrence is causal by construction; token 100 cannot read token 200 because token 200 has not been folded in yet. Softmax attention is causal only because a mask says so.
+
+The hook keeps the recurrent layers' mask and gives the full-attention layers a padding-only mask. In those 16 layers every token can now attend to every other token in the prompt, forward and backward.
+
+The prompt is laid out in a fixed order (`decision_messages()`, `model.py:93-111`): a system line, then `State:`, then `Question:`, then `Options:` with one `A: …` line per option, then "Return only the letter code of the best option.", then the assistant turn with an empty think block. The answer is read from the hidden state of the very last token.
+
+In a causal model, every state token is encoded before the model has seen the question. Whatever a token in the middle of a contract computes about itself, it computes without knowing whether you are about to ask about the termination clause or the governing law. Only the final token, at the end, gets to look back over everything, and it has to retrieve the right evidence from representations that were built blind. With the mask lifted, from layer 3 onward the state tokens can attend to the question and the option lines; every fourth layer, they get to reread the document knowing what will be asked of it. It is the old argument for [bidirectional encoders](/architectures/encoder-bert) in classification, applied to 16 layers of a decoder.
+
+<LayerMask />
+
+The card is direct about where v1.1's gains come from: "Most of the gains are driven by the lifting of the causal mask and training on more data". The run changed both at once, so the release cannot tell you how much each is worth. v1 trained on 73,000 curated rows and was picked at update 200 of 286. v1.1 trained one full epoch over 626,033 rows, 2,446 updates at an effective batch of 256, learning rate 2e-6, cross-entropy only (`brier_weight` 0). The Slurm script sets `HF_HOME` to a directory named `autojev-attention-ablation-20261002`, so an ablation that separates the two was probably run. Its numbers are not in the repository.
+
+Two smaller consequences of the mask are worth stating. Option order still matters: the recurrent layers and the rotary positions are both ordered, so the [order effect](/articles/what-decision-models-cannot-do) does not go away, though in the full-attention layers option `A` can now see option `D` and vice versa. And nothing about the readout changed; the answer is still one softmax over the codes that exist, divided by a fitted temperature.
+
+## What the mask costs: one prompt per question
+
+The first line of the hook is the price. "Noncausal classification does not support a KV cache." In a causal model the state's keys and values do not depend on anything after the state, so you can compute them once and branch several questions off them. Agr's masked branches and llama.cpp's slot copying both rely on exactly that. Once state tokens attend to the question, the state's representation in layer 3 and above is a function of the question. A different question means a different state encoding, from layer 3 up. There is nothing to share except the first three recurrent layers.
+
+So the server does the honest thing and runs every question as its own complete prompt:
+
+```python
+# source/src/autojev/server.py:199-212
+rows: list[DecisionInput] = [
+    {"state": body.state, "question": question, "images": list(body.images)} for question in questions.values()
+]
+...
+for start in range(0, len(rows), 8):
+    batch = model.prepare(rows[start : start + 8])
+    ...
+    input_tokens += batch.input_tokens
+```
+
+Each row carries the whole state and every image; rows run eight at a time; and `input_tokens`, which becomes `usage.input_tokens`, is the sum over rows.
+
+I wanted to know whether the hosted API does the same, without an API key. The docs' quickstart publishes a full request and its response: a 29-token review, three questions (a yes/no, a three-way choice, a three-level score) and `"input_tokens": 367`. I rebuilt the three prompts with the repository's own `decision_messages()` logic, its `chat_template.jinja` and its `tokenizer.json`. They come to 116, 132 and 119 tokens. The sum is 367, to the token. Each prompt is 68 tokens of fixed wrapper, the 29-token state, and the question's own instruction and option lines; three times 68 plus 29, plus the 76 tokens of the three questions, is 367.
+
+So the hosted API bills, and almost certainly runs, the shipped code path. The reply was right in substance. You can put 128 questions in one request, and they come back in one response, but no work is shared between them, and the state is paid for once per question.
+
+<QuestionBill />
+
+At \$0.02 per million input tokens the dollars are small. Ten questions about a 2,000-token document come to about 21,000 billed tokens, \$0.00042 per request; reading the state once would be about 2,500. What the repetition costs is latency and headroom. The request limit is "Under 262,144, counting `state`, images, and every question". If that limit counts what `usage` counts, which is how the docs describe images ("Image tokens count toward `usage.input_tokens` and the input limit like text"), then 128 questions leave room for a state of under 2,000 tokens. I could not test that without a key. Images make it sharper: the docs put an image at about 1,000 tokens per megapixel, up to 2,048 tokens each, and every question reads every image again.
+
+The board's latency figures show the per-request cost on one RTX PRO 6000, one request at a time: v1.1's median is 104.1 ms and its p95 835.4 ms, against v1's 101.4 and 1,052.5. So the mask did not make a single request slower. It made questions about the same content stop being cheaper together than apart.
+
+## "250k context"
+
+The base model's `max_position_embeddings` is 262,144, and the API accepts requests up to that size; the docs even give timings, "about 190,000 tokens took 14 seconds". So the 250k is real as an input limit.
+
+The training config says something else. `max_length` is 8,192 and so is `token_budget`; v1 used the same. Nothing longer than 8,192 tokens was trained on, and the bundled `prepare()` refuses a longer question branch outright: "Question branch exceeds the 8192-token limit; no input was truncated." (`model.py:264-285`). The hosted service clearly runs a looser limit than the shipped default. Whether the fine-tune's decisions hold up at 100,000 tokens of state is not something any published number measures; the Decision Index is mostly short requests, and v1.1's own board run left 22 requests unsupported. I would treat the 250k as the window the API accepts, not a length the model was taught to decide over.
+
+## Calibration: the temperature fell from 2.21 to 1.01
+
+Both checkpoints store one scalar temperature, fitted on a held-out split after training. v1's is 2.2076, fitted on 3,500 rows: its raw logits were overconfident enough to need halving. v1.1's is 1.0087, fitted on 983 rows: after a full epoch of cross-entropy on 626,033 decisions, its logits come out almost at the right scale on their own. The same thing happened to Agr, whose fine-tune took its stock Gemma readout from a temperature near 9 to about 1.2.
+
+`checkpoint-verification.json` gives v1.1's development-set numbers: 1,497 rows, accuracy 0.904, expected calibration error 0.0159, Brier 0.139. Its reliability bins are mostly tight; above 0.93 confidence, 1,038 answers are right 98.2% of the time. One bin is not: the 43 answers given at 53% to 60% confidence were right 37.2% of the time. A small bin, but thresholds usually sit right there.
+
+Two cautions. That set is Perplexity's own development split, the same distribution as training. And the Decision Index, which measured v1's calibration error on its own sample at 0.0178, has `"calibration": null` for v1.1. There is no independent calibration number for this checkpoint yet. One reply put it well: replay a labelled sample of your traffic through both versions before swapping, because "a cheaper model with shifted probabilities can silently break your thresholds". A temperature that moved from 2.21 to 1.01 is exactly that kind of shift.
+
+## Checking "the highest on Decision Index 0.3"
+
+<Figure
+  src="/articles/pplx-decider-v1-1/fig1.jpg"
+  alt="Bar chart of the Decision Index board, full score, all sizes. pplx-decider-v1.1-27b is first at 62.8. A bracket marked tied spans Fastino's GliDE (28B) 60.2, Jev 60.1, Torchcast Decision 27B 59.9 and deck31b (Gemma 4 31B) 59.0. Further tied groups follow: Kev 27B 58.8 to Surogate Rune 57.4, then GEV-26B-Decide 56.2 to Bespoke Nimble 9B v3 54.7. Legend: Jev reference, full fine-tune, LoRA, inference technique, head or adapter. Note at top right: tied, within 1.3 points of the group's first model."
+  caption="The chart from the launch post: the Decision Index board on its Full score, with v1.1 first and alone. The tie band printed here, 1.3 points, is not the one the board settled on the same day, 0.9; the ranking does not change. (Perplexity launch post, from the Decision Index Space.)"
+/>
+
+The card and the launch post quote two different numbers. The card's 61.56 is Decision Index 0.2.1, and the evaluation file in the repository says so: `"edition": "0.2.1"`, run by Perplexity, `"upload": false`. The post's claim is about 0.3, which went live the same afternoon, and the board's data puts v1.1 at 62.75.
+
+0.3 is a different kind of index, and that is why the claim means more than a 0.2.1 lead would. The changelog in `methodology.json` gives the formula: "Full score = 0.20 × public + 0.50 × private tests of the same skills + 0.30 × private tasks from new domains." The public part is the old 37-benchmark index, rebuilt (GSM8K rebuilt, ForecastBench retired, WinoGrande moved to Knowledge). The private parts are fresh tests of the same competencies and decision tasks from new domains, kept off the Hub. Because the three parts spread models differently, each private part is put on the public scale using 21 untuned stock models: a model one standard deviation above the stock average on a private part gets the public score that sits one standard deviation above the stock average there. "Most of the score comes from tests nobody can train on, so a public-only advantage counts for little."
+
+I recomputed v1.1's score from `data/v03.json`. Its raw private scores are 61.1 (same skills) and 55.57 (new domains). With the board's equating constants (public mean 23.5 and spread 16.54; same-skill 24.27 and 16.35; new-domain 23.68 and 12.29), they become 60.75 and 66.42, and 0.20 × 62.25 + 0.50 × 60.75 + 0.30 × 66.42 is 62.75. The number checks.
+
+So does "highest". v1.1 is first of 111 open entrants and Jev, 2.54 points ahead of Fastino's GLiDE at 60.21, with Jev third at 60.11. The board treats models within 0.9 points of a group's first as tied; v1.1 is the only entrant in its group. Against the 0.2.1 board, the card's "outperforming Jev by more than 3.5 points" is 61.56 against 57.91, a margin of 3.65; on 0.3 it is 2.64.
+
+Where the lead comes from is the part worth knowing. Sorted by each part alone:
+
+- Public benchmarks only: Torchcast Decision 27B is first at 65.1; v1.1 is second at 62.25.
+- Private tests of the same skills: v1.1 is first at 61.1, ahead of GLiDE at 59.49.
+- Private tasks from new domains: v1.1 is first at 55.57, by 0.08 over Kev 27B (55.49) and 0.59 over Jev.
+
+Torchcast's public score is 7.35 points above its equated same-skill score; v1.1's is 1.50 above, Jev's 0.30. That gap is what 0.3 was built to discount. v1.1 wins on the parts nobody can tune against, which is the strongest form the claim could take. The slider below re-weights the board's own numbers. v1.1 stays first at any public weight below about 60%, and leads by 2.23 with the public part removed entirely.
+
+<BoardWeights />
+
+One caveat belongs next to that: the private sets are private, so I cannot check them, only the arithmetic on top of them. The new-domain part is also stretched the most by equating (its stock spread is 12.29 against the public 16.54, a factor of about 1.35), so small raw differences there become larger points; v1.1's 0.08-point raw edge over Kev on new domains becomes 0.11 equated.
+
+<Figure
+  src="/articles/pplx-decider-v1-1/fig2.jpg"
+  alt="Decision Index 0.3 share card: 111 open models, 37-benchmark index, 110,201 decisions each. Full score bar chart of open reproductions of Jev: Perplexity Decider v1.1 62.8, Fastino GLiDE no-thinking 60.2, Jev 60.1, Torchcast Decision 27B 59.9, deck31b (Gemma 4 31B) 59.0, Kev 27B 58.8, Quyet-1.0-Large 58.7, down to JPT-35B-A3B 51.4, plus 91 more. Footer: suite v0.3, Jev jev-1.13.0, 1 x NVIDIA RTX PRO 6000, not affiliated with TypeSafe AI."
+  caption="The board's own card for 0.3: 111 open models, 110,201 decisions each, scored on one RTX PRO 6000. (Decision Index Space, og.png.)"
+/>
+
+### What moved between v1 and v1.1
+
+Per benchmark, against v1's 0.2.1 board run, v1.1's own 0.2.1 evaluation is up on 30 of 38 counted benchmarks and down on 7, with HLE at zero for both. The biggest gains are PhishNChips (19.9 to 46.3), POP909 (37.3 to 55.5), CRUXEval (60.2 to 77.2), WinoGrande (70.3 to 84.8), MuSR (39.3 to 53.5) and iSarcasmEval (49.0 to 62.7), all chance-corrected skill. The one large loss is When2Call, 75.6 to 65.1, which is why the Tools area did not move (79.3 to 78.88) while every other area rose by five points or more. The public per-benchmark scores on the 0.3 board match Perplexity's own evaluation file on 41 of 42 benchmarks; the exception is GSM8K, which 0.3 rebuilt.
+
+Against Jev, v1.1 is ahead on 25 of the 38 and behind on 13. One reply called it "crushes Jev on nearly all benchmarks"; the 13 include every hard-reasoning set. GPQA Diamond is 41.5 against Jev's 71.4, MMLU-Pro 67.4 against 80.5, BBH 76.8 against 89.7. v1.1 wins on reading-and-judging tasks (VAST, iSarcasmEval, FinEntity, RAGTruth) and on retrieval, which is consistent with what it was trained on: 84.7% of its rows came from [tasksource](https://github.com/sileod/tasksource), 349 sources of NLI, sentiment, stance, toxicity and classification. A multiple-choice exam needs knowledge the backbone either has or does not, and a decision fine-tune does not add it.
+
+For the record, I checked the training sources by name against the 38 counted benchmarks. None of them is in the data manifest by name; the nearest are WANLI (not ANLI) and winodict and winowhy (not WinoGrande). A name check is not a contamination audit, and the private parts of 0.3 make the question matter less, since v1.1 leads there too.
+
+### Against what this site has covered
+
+[Agr](/articles/agr-decision-model) is not on the 0.3 board; its 58.15 was Command Code's own 0.2.1 run. On 0.2.1 terms v1.1's 61.56 is 3.4 points higher, and the two are the same kind of thing: a large open base read through its own output layer at single-token codes. They differ in how much the fine-tune did. Agr's beat its untrained base, read the same way, by 0.82. On 0.3, simple-jev on the untrained Qwen3.8-27B scores 51.79, and v1.1 scores 10.96 more. The readouts differ, so that is not a clean control the way Agr's was, but it is a different order of effect.
+
+Kev 27B is sixth at 58.78, and its new-domain score is within 0.08 of v1.1's. Decider chat on stock Gemma 4 31B is ninth at 57.62.
+
+## "Multimodal"
+
+The board added a vision board in 0.3: 0.5 × public vision benchmarks plus 0.5 × private tests of the same skills. v1.1 is on it, "ran through the checkpoint's own decision model, which accepts images", and it is third of 19 at 63.2, behind Doccy Health's Solomon v1.1 at 67.66 and Xor 1.2 at 64.3. A stock Qwen3.5-397B, read through an API from its generated letter, scores 63.44 as a reference. Given 1,000 image rows in training and a vision tower that moved by hundredths of a percent, that is roughly what I would expect: v1.1 reads images the way Qwen3.8 does, with a decision head trained on text.
+
+It does accept images, and through the API they work as the docs describe. "Multimodal" is accurate. "Highest" was a text claim.
+
+## The price
+
+The API changelog announced the Decisions API with v1: "Input costs \$0.04 per million tokens." v1.1 is \$0.02, so "half as much as v1" is true of v1's launch price. The pricing page today lists both models at \$0.02. If you are on v1, you got the price cut without switching. Output tokens are free and there is no per-request fee, so the per-question repetition above is the only multiplier on the bill.
+
+## What I would do with it
+
+If your decisions are one or two questions about short content, v1.1 is the strongest open decision model I know of on the evidence that is hardest to game, it is Apache 2.0, the API is cheap, and the repository lets you run exactly what was evaluated on a single 96 GB card (the README asks for "roughly 49 GiB of weights plus working memory"). If you ask many questions about one long document, measure the latency first, because each question is a full pass over the document; a layout that shares the state, like Agr's, will be cheaper even if it scores lower. If you need long inputs, test at your length, because nothing published covers decisions past 8,192 tokens. And if you are moving from v1, refit your thresholds: the temperature halved, and the only calibration number for v1.1 is Perplexity's own.
+
+The mask is the idea worth taking away. Decision models are classifiers wearing a language model's clothes, and v1.1 is the first in this wave to give a quarter of its layers the bidirectional view a classifier wants. It paid for that with the one property every other design in the category was built around: reading the state once.
+
+## How I checked
+
+Sources were read on 7 October 2026. From [perplexity-ai/pplx-decider-v1.1-27b](https://huggingface.co/perplexity-ai/pplx-decider-v1.1-27b) at `3b45dea` and [perplexity-ai/pplx-decider-v1-27b](https://huggingface.co/perplexity-ai/pplx-decider-v1-27b) at `5117a6c`: every small file, including the cards, `NOTICE`, `config.json`, `decision_config.json`, `release-manifest.json`, `training/config.json`, `training/data-manifest.json`, `training/train.sbatch`, `evaluation/*.json` and `source/src/autojev/*.py` (line numbers above are from v1.1). Parameter counts are sums over the safetensors headers of all 11 shards and `readout.safetensors`, and of the 18 shards of [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) at `1d4bf0f`. Weight differences are over the first 512 KiB of each of 24 sampled tensors, fetched by HTTP range request and decoded from bf16; readout rows were compared with the base `lm_head` rows of the same token ids. The 367-token check rebuilt the quickstart's three prompts with the v1.1 repository's prompt logic, `chat_template.jinja` and `tokenizer.json`, using the `tokenizers` and `jinja2` libraries; I ran no model code. Board figures are from the [Decision Index Space](https://huggingface.co/spaces/multimodalart/jev-decision-index) at commit `6ceab83`: `data/v03.json`, `data/index.json`, `data/index-v0.2.1.json`, `data/vision.json` and `data/methodology.json`. API facts are from Perplexity's [Decisions API docs](https://docs.perplexity.ai/docs/decisions/quickstart), its API reference, pricing page and changelog. The launch thread and its first page of replies were read through the fxtwitter mirror. I did not run the model or call the API; I could not check the private test sets, the hosted service's real context handling, or the ablation that would separate the mask's effect from the data's.

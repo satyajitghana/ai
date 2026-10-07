@@ -1,0 +1,497 @@
+---
+title: "Marin 535B-A23B: the half of a training run nobody usually shows you"
+description: "Marin's open 535B-total, 23B-active MoE has passed the halfway mark of an 18T-token run, and the team logged every change they made on the way: a MuonH norm bug an outsider found in week one, an attention gate that quietly shut itself in the early layers and earned a mid-run weight decay, a transport swap and new kernels that took MFU from 21% to 27% with expert drops near zero, a data-mixture swap, and a scaling-ladder forecast that referees all of it. I read the code, the issues and the W&B report to see what each change was, why it was made, and what it cost."
+date: 2026-10-06
+tags:
+  - mixture-of-experts
+  - pretraining
+  - training
+  - scaling-laws
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Walks Marin 535B's mid-run changelog through its issues and code: the MuonH axes bug left in, the shut attention gate, and what the MFU gain really came from."
+topic: training-rl
+kind: model
+level: research
+runsOn: datacenter
+licence: Apache-2.0
+---
+
+import { RunTimeline } from "@/components/articles/marin-535b/run-timeline"
+import { Hyperball } from "@/components/articles/marin-535b/hyperball"
+import { GateDial } from "@/components/articles/marin-535b/gate-dial"
+
+Most model releases show you the end. A loss curve that bends politely, a table of benchmarks, a
+paragraph about "infrastructure challenges" that tells you nothing. What happens between step 0 and
+the press release, the bug reports and the half-measures and the nights someone stares at a norm
+plot, stays inside the lab.
+
+Percy Liang's [thread](https://x.com/percyliang/status/2107502164902031487) from this morning is
+the opposite. Marin's 535B-A23B mixture-of-experts run "has crossed the halfway mark", and instead of
+a teaser he posted the changelog: an optimizer bug scare, an attention norm that went off trend, a
+mid-run weight decay, kernel work that took MFU from 21% to 27%, a data-mixture swap, and a loss
+forecast the run is being held to. Every item links to a GitHub issue or a W&B chart.
+
+I went in expecting a summary. What I found was the lab notebook itself. The issues hold ablation
+tables, per-head gate statistics, layer-skip experiments, and long exchanges with people outside
+the team. Some of the analysis is posted by the team's coding agents; Marin's `AGENTS.md`
+requires agent comments to start with a robot emoji, and a lot of them do. This article walks
+through what they changed mid-run and why, checked against the code at commit
+[`8baa0a4`](https://github.com/marin-community/marin/tree/8baa0a48711e6f22940440bca79a79e6d8ffcdb5).
+My view up front: the individual fixes are ordinary. The decisions around them, and especially the
+ones where they decided *not* to change anything, are the part worth studying.
+
+<RepoCard repo="marin-community/marin" />
+
+<Figure
+  src="/articles/marin-535b/fig1.jpg"
+  alt="W&B chart of training cross-entropy loss against training progress. The hero run's segments (Original, Attention gate + router WD, Ragged A2A EP, New data mix, PDL off, Padding routing, SM100 FA4 + mask-free MLP) form one low curve ending just past 0.5; above it, scaling-ladder runs at widths d512 to d2048 on H100 and GB200 run to 1.0, with a step up near 0.8 where their data mixture changes."
+  caption="Training loss for the hero (bottom, coloured by segment) and the scaling-ladder rungs above it. Each colour change on the hero is one of the mid-run changes below (Percy Liang's thread, W&B report)."
+/>
+
+## What is actually being trained
+
+The model lives in `experiments/grug/moe_hero_ep/`, and the hero's spec is one dataclass,
+`HERO_MODEL` in `heuristic.py`. It is a 48-layer transformer at width 6,144 where every layer's MLP
+is a mixture of experts: 384 routed experts of width 3,072, eight chosen per token, plus two shared
+experts that every token goes through. The routed experts run in a 3,072-wide *latent* space: each
+token is projected down to half width, normalised, sent to its experts, and projected back up after
+the weighted combine. The launcher's table counts 535B total and 23B active parameters (the hero
+issue gives 535.3B and 22.76B).
+
+Attention has 48 heads of dimension 128, sliding-window (2,048) on three layers out of four and
+full-causal on every fourth and on the last. Two details from the attention path matter later.
+Each head's output is multiplied by a learned gate, and nearly every matrix in the model is trained
+with an optimizer that pins its norm.
+
+The run is 390,251 steps of 11,264 sequences of 4,096 tokens: 46,137,344 tokens a step and 18.0T
+in total, on 11 GB200 NVL72 racks with 64 GPUs per rack doing the work: 704 GPUs, with the
+experts split 64 ways inside each rack and the racks running as data-parallel replicas. The team
+budgeted roughly a hundred days for it.
+
+If MoE routing or expert parallelism is new to you, my [Mixture of Experts, from
+scratch](/articles/mixture-of-experts-from-scratch) builds the router and the dispatch, and
+[Olmo-core 3](/articles/olmo-core-3) covers the parallelism axes a run like this has to pick from.
+The whole mid-run changelog fits on the run's own step axis; the sections below take the entries one
+at a time.
+
+<RunTimeline />
+
+## A sphere for every matrix
+
+Marin trains with MuonH. If you know [Muon](/articles/muon-optimizer), the first half is familiar:
+take the momentum of a matrix's gradient, run five quintic Newton-Schulz iterations so that no
+singular direction dominates, and use the result as the update direction. The H is for
+*hyperball*. Instead of adding the update and letting the weight's norm wander, MuonH moves the
+weight along the update and then rescales it back onto the sphere it started on. The norm of every
+MuonH matrix is fixed at initialisation for the whole run.
+
+The step itself is seven lines of `experiments/grug/moe_hero_ep/optimizer.py`:
+
+```python
+# optimizer.py:76-82, the path for 3-D and 4-D stacked parameters
+axes = tuple(range(1, param.ndim))
+param_norm = jnp.sqrt(jnp.sum(jnp.square(param), axis=axes, keepdims=True))
+update_norm = jnp.sqrt(jnp.sum(jnp.square(update), axis=axes, keepdims=True))
+new_param = param - learning_rate * update * param_norm / jnp.maximum(update_norm, 1e-10)
+new_param = _pin_sharding(new_param, param)  # correct the sharded norm reduction (issue #8073)
+new_param_norm = jnp.sqrt(jnp.sum(jnp.square(new_param), axis=axes, keepdims=True))
+return new_param / jnp.maximum(new_param_norm, 1e-10) * param_norm - param
+```
+
+The step size is `learning_rate` times the weight's own norm, so the learning rate is a fraction of
+the weight, and the last line forces the new weight back to the old norm. With norms pinned, the
+optimizer cannot grow its way out of trouble, which is the point: weight decay becomes unnecessary
+for these matrices, and the hero issue says so directly ("no decoupled weight decay"). The health
+check posted on August 20 shows it working. Every MuonH parameter's norm reads the same at
+its minimum, maximum and average: 268 for `w_q`, 2,624 for each expert bank.
+
+Look at `axes`, though. The layers are stacked for `jax.lax.scan`, so the routed experts are one 4-D
+array, `[layers, experts, d_in, d_out]`, or `[48, 384, 3072, 3072]`. Axis 0 is the layer, so
+`range(1, 4)` reduces over experts *and* matrix dimensions. The norm being preserved is the norm of
+all 384 experts of a layer together. Newton-Schulz, meanwhile, runs on each expert separately
+(`_newtonschulz_4d_distributed` flattens layers times experts and orthogonalises each 3,072 by
+3,072 matrix).
+
+[Issue #8621](https://github.com/marin-community/marin/issues/8621), opened on August 24 in the
+run's first week by GitHub user jamt9000, spotted exactly this. Its argument: the code was written
+for 3-D `[experts, d_in, d_out]` shapes, where axes `(1, 2)` really are one matrix, and when experts
+moved into a 4-D stack the same line silently started treating a whole layer as one ball. Each
+expert can now grow or shrink as long as the layer total holds. Percy's thread calls this Linus's
+law at work: multiple people read the code once the run was public, and one of them found a line
+that a closed lab's reviewers had every chance to miss.
+
+The widget makes the difference concrete. It is a toy with six experts, but the mechanism is the
+real one.
+
+<Hyperball />
+
+The response is the part I would copy. Larry Dial, who runs the hero, replied the same day that it
+was unintentional, but that the learning-rate tuning and the whole scaling ladder had been run with
+exactly this behaviour, and earlier tests across four scales had shown no harm. Changing the
+optimizer would make the hero a different recipe from the one its forecast was fitted on. So they
+measured instead. A rerun of the smallest ladder rung with a per-expert norm finished at 3.018
+Paloma macro loss against 3.015 for the per-layer version, about 0.1%, inside noise. Then they
+looked at the hero's own checkpoint.
+
+<Figure
+  src="/articles/marin-535b/fig2.png"
+  alt="Grid of nine histograms of per-expert Frobenius norms at step 12,000, for the gate, up and down projections. Across all 48 layers the norms cluster tightly near 19 with coefficient of variation about 0.04. In layer 0 they spread from about 11 to 30, CV about 0.21. In layer 40 they sit in a single bar, CV about 0.01."
+  caption="Routed-expert weight norms at step 12,000. Across all layers the spread is tight (CV about 0.04), layer 40 barely moves (CV 0.01), and layer 0 is where experts have traded norm (CV 0.21 to 0.23) (issue #8621)."
+/>
+
+At step 12,000 the experts in layer 40 had a coefficient of variation of 0.010 in their norms,
+essentially per-expert behaviour. Layer 0 had spread to 0.205 on the gate projection. The deep
+layers act as if each expert had its own ball; only the first few layers use the freedom. Larry's
+read is that the dynamic is mostly self-stabilising: Newton-Schulz gives every expert an update of
+the same scale, so an expert with a smaller norm sees a larger relative step and tends to grow back.
+The risk would be a feedback loop driving some expert to zero, so they agreed to check checkpoints
+every 6,000 steps. On August 31 the issue says "Dynamic looks stable", and the line on
+`optimizer.py:76` is still `range(1, param.ndim)` today.
+
+I think that is the correct call, and the reasoning is the transferable bit. A bug in the optimizer
+is only a bug relative to the recipe your forecasts were made with. Fixing it mid-run swaps an
+untested recipe for a tested one. The issue also raised a question I had not thought about: Muon
+treats any matrix-shaped tensor as a matrix, so whether you pack 384 experts or 48 attention heads
+into one array changes the optimizer's dynamics without changing the forward pass at all.
+
+## The one knob nobody pinned
+
+If every MuonH matrix has a fixed norm, where does scale go when the model wants more of it? The
+optimizer has three groups (`GrugMoeMuonHConfig.create_mask`): MuonH for the matrices, AdamH for the
+output head, and plain Adam for a small free set. That free set is the token embeddings, the norm
+gains, the short-convolution kernels, the router weight and bias, and `attn_gate`. Plain Adam, no
+hyperball and, at launch, no weight decay.
+
+`attn_gate` is the headwise attention gate. It is a `[6144, 48]` matrix per layer, initialised to
+zero, and used like this (`model.py:663-665`):
+
+```python
+# Headwise gating: sigmoid(x @ attn_gate) produces one scalar per head.
+gate = 2 * jax.nn.sigmoid(jnp.einsum("bsd,dn->bsn", x, self.attn_gate))[..., None]
+attn_out = gate * attn_out
+```
+
+At zero the gate is exactly 1 for every head, so it starts as a no-op. The model can learn to turn a
+head down (toward 0) or up (toward 2) depending on the token. A gate like this exists to let a head
+abstain cleanly, rather than dumping attention onto some sink token when it has nothing useful to
+add.
+
+On August 31, Larry opened [issue #8818](https://github.com/marin-community/marin/issues/8818). The
+norm of `attn_gate` on the hero had left the ladder's trend about 1% into the run. The ladder rungs
+settled between roughly 5 and 20; the hero was past 80 by 2.6% of training, and still climbing.
+
+<Figure
+  src="/articles/marin-535b/fig3.png"
+  alt="Chart of the attn_gate parameter norm over the first 2.6% of training. Four scaling-ladder runs (d768, d1024, d1536, d2048) rise slowly and flatten between about 5 and 20. The hero run jumps to about 20 almost immediately, plateaus, then climbs steadily past 80 by 2.6% of the run."
+  caption="The attention-gate norm in the first 2.6% of training: the hero (blue) against the four ladder rungs. The ladder predicts a plateau; the hero kept climbing (issue #8818)."
+/>
+
+What follows in that issue is the best mid-run debugging I have read in public. They pulled the
+step-42,000 gate tensor and computed per-head norms: whole-tensor L2 of 229.94, per-head norms from
+0.87 to 12.2, concentrated in layers 1 to 5. Then they asked what the gate actually does at layer 0,
+where the gate's input is a fixed function of the token embedding, so every vocabulary entry has one
+48-head gate vector.
+
+<Figure
+  src="/articles/marin-535b/fig4.png"
+  alt="Three histograms for the layer-0 attention gate at step 42,000. Left: of 6.16 million token-head gates, almost all sit near 0; 98.3% are below 0.05. Middle: per head, only 0.11 to 0.33% of the vocabulary opens the gate above 1. Right: only 546 of 128,256 tokens have any head open."
+  caption="Layer 0's attention gate at step 42,000, evaluated for every token in the 128,256-entry vocabulary: mean 0.013, and only 546 tokens open any head (issue #8818)."
+/>
+
+The gate was shut. 98.3% of the 6.16M token-head gates sat below 0.05; the mean was 0.013. Only 546
+of 128,256 tokens (0.43%) opened any head at all, and those were almost all reserved special tokens
+and junk: undecodable byte fragments, spam strings, rare foreign subwords. Ordinary English sat at
+a gate of roughly zero. The large norm meant saturation: the model had pushed the sigmoid into its flat tail to switch
+layer-0 attention off, rather than using it to modulate.
+
+That looks alarming, and the first comment says so. The second round of experiments is why I trust
+the team. They skipped whole layers on the step-42,000 checkpoint: dropping the first 10 layers took
+dropless macro loss from 2.093 to 6.584, worse than dropping the last 10 (5.455). Zeroing only the
+attention in layers 0 to 9 cost +0.705; in layers 38 to 47, +0.343. So the early attention was alive and
+contributing, at a tiny scale (residual contributions grow roughly a hundredfold with
+depth in their plots), and downstream layers had been trained around those small contributions.
+Larry's summary in the issue: "output scale does not correspond to impact."
+
+His working theory was that `attn_gate` had been co-opted as a per-layer output-scale knob, a job
+the RMSNorm on the attention input was supposed to do, "perhaps partially because matrices are under
+hyperball". I find that persuasive. In a model where nearly every matrix's norm is nailed down, the
+handful of free parameters are where scale has to go. The router weight, the other per-block matrix
+that plain Adam trains, had the same off-ladder growth.
+
+<Figure
+  src="/articles/marin-535b/fig5.png"
+  alt="Two charts against run progress. Top: attn_gate norm, where the hero climbs steeply to about 240 by 12% of the run while the four ladder rungs stay below about 30. Bottom: router weight norm, where the hero climbs to about 1,200 by 12% while the ladder rungs flatten between about 200 and 420."
+  caption="The attention gate (top) and the MoE router weight (bottom), hero against ladder, at about 12% of the run. Both are trained by plain Adam with no norm constraint, and both left the ladder's trend (issue #8818)."
+/>
+
+None of it showed in the loss. The forecast at step 44,000 had the hero *ahead* of its prediction.
+So the question became whether to intervene at all, and how hard. The issue lists five candidate
+fixes, from a hard floor on the gate to a learnable bias, and calls all of them "probably not
+effective as-is". Weight decay on the two free matrices was the low-risk one. They ran it on two
+ladder rungs first:
+
+| run (d1024, finished) | decayed | Paloma macro | Δ vs baseline |
+|---|---|---:|---:|
+| baseline | nothing | 2.7799 | |
+| gate only | `attn_gate` | 2.7797 | −0.0002 |
+| gate + router | `attn_gate`, router | 2.7777 | −0.0022 |
+
+Everything inside about 0.002, which is noise. Weight decay was not going to make the model better.
+The argument for it was keeping the two parameters learnable later in training, when the learning
+rate is small and a saturated sigmoid passes almost no gradient.
+
+How gentle the decay had to be came from a different experiment, the one behind the widget below. On the step-48,000 checkpoint they scaled every gate logit by a constant before the sigmoid.
+Shrinking the logits relaxes every gate toward 1, which is what weight decay does to the gate over
+time, only all at once.
+
+<GateDial />
+
+A 20% cut cost 0.010. A 40% cut took loss from 2.0875 to 2.7852, and at 60% the model collapsed.
+The gate was load-bearing, so the decay had to be gentle enough for the rest of the network to
+adapt as it shrank. Larry's estimate was that 0.03 would still halve the norms over about 9,000
+steps; they shipped something more conservative.
+
+The change went in at step 58,014: decoupled decay of 0.02 on `attn_gate` and the router weight
+only, annealed linearly to zero at the last step. The implementation (`optimizer.py:108-130`) is
+worth reading for how it was made safe to drop into a live run:
+
+```python
+# optimizer.py:123-127, inside _scale_by_adam_gate_router_decay
+step = state.count
+updates, next_state = adam.update(updates, state, params)
+wd = weight_decay * jnp.clip(1.0 - step / total_steps, 0.0, None)
+mask = _gate_router_decay_mask(params)
+updates = jax.tree.map(lambda u, p, keep: u + wd * p if keep else u, updates, params, mask)
+```
+
+The coefficient reads Adam's own step counter, so resuming a checkpoint written without decay picks
+up the right value with no new optimizer state. At step 58,014 that is 0.02 times (1 − 58,014 /
+390,251), about 0.017. Setting the flag to zero leaves the update byte-for-byte unchanged, per
+[PR #8833](https://github.com/marin-community/marin/pull/8833), which is what you want from a
+change you might need to roll back.
+
+<Figure
+  src="/articles/marin-535b/fig6.jpg"
+  alt="Chart of the attn_gate norm over the whole run so far. The original hero segment climbs steeply from 0 to about 270 by 15% of training. After the weight-decay segment begins, the curve is nearly flat, rising only to about 300 by 55%. The ladder runs stay near 10 to 25 across the full run."
+  caption="The attention-gate norm over the run so far. The weight decay at 15% did not pull the norm down; it stopped the climb (Percy Liang's thread, W&B report)."
+/>
+
+Read the chart honestly: the decay did not bring the gate back to the ladder's range. Reading it off
+the chart, the norm was near 270 when the decay switched on and around 300 at the halfway mark. It
+"dampened the growth", in Percy's words, which is all it was meant to do.
+
+One more thread in that issue is worth knowing about. A researcher from another group training
+ultra-sparse MoEs linked their write-up on lower-layer experts that stop learning early, and pointed
+at the hero's own per-layer gradients: the routed experts in layer 0 had gradients 200 to 430 times
+smaller than layers 5 to 19. Larry agreed those two layers' routed experts probably are not
+contributing, and declined to intervene: two layers of routed experts are about 4% of the routed
+parameters, and by their own scaling data doubling routed parameters is worth about 20% more
+tokens, so the loss is marginal. It goes on the list for after the run.
+
+## 21% to 27% MFU without stopping the run
+
+The second big theme is throughput, and it is a story about expert parallelism. Each rack holds the
+384 experts six to a GPU across 64 GPUs, so every MoE layer is two all-to-all exchanges: tokens go
+out to whichever GPUs own their eight experts, and results come back.
+
+The run launched on a hand-rolled transport the team calls *fixed pooled-wave*. Every buffer has a
+compile-time size: each GPU packs its outgoing rows into one fixed pool, and each receiver has room
+for 1.15 times its expected share of rows, filled in three waves. Static shapes make XLA happy and
+avoid a separate metadata exchange. The price is that anything past capacity is dropped: the token
+skips that expert. At launch, roughly 3% of expert assignments were dropped.
+
+<Figure
+  src="/articles/marin-535b/fig7.png"
+  alt="W&B chart of moe/drop_fraction against step. The Original segment spikes to 0.1 at the start, settles near 0.03, and continues through the Attention gate + router WD segment. From the Ragged A2A EP segment at about 82,000 steps onward the line sits at zero."
+  caption="Fraction of expert assignments dropped. About 3% under pooled-wave; near zero after the switch to ragged all-to-all (Percy Liang's thread, W&B report)."
+/>
+
+At step 81,716 they switched to a reworked *ragged* all-to-all ([PR
+#8549](https://github.com/marin-community/marin/pull/8549)): one variable-size transfer per (peer,
+local expert) pair, rows arriving already grouped by expert, the local experts run in two chunks,
+QuACK's SM100 grouped GEMMs for the expert MLP, and XLA's device-initiated NCCL kernel for the
+exchange. In the PR's one-rack A/B, restored from a real hero checkpoint, ragged dropped 0.018% of
+assignments against 2.67% for pooled-wave and used 12 GiB less device memory at peak (137.9 vs
+149.9 GiB).
+
+The thread's "21 to 23 MFU" leaves something out. In that same A/B the two transports
+were *tied* on MFU: 22.87 against 22.71, inside run-to-run spread. The README credits about 0.4 MFU
+to keeping fp32 weights on the device, which ragged's lower memory made possible. I could not
+decompose the rest of the production jump from public data. The honest summary is that ragged
+bought near-dropless routing and headroom; the MFU came along with the memory.
+
+<Figure
+  src="/articles/marin-535b/fig8.png"
+  alt="W&B chart of throughput/mfu against step. The Original and Attention gate + router WD segments sit near 21. Ragged A2A EP at about 82,000 steps sits near 23. PDL off, New data mix and Padding routing sit near 24. The SM100 FA4 + mask-free MLP segment from about 146,000 steps sits near 26 to 27."
+  caption="MFU by segment: about 21 at launch, about 23 after the transport swap, 24 to 27 after the Blackwell attention kernels and the mask-free expert MLP (Percy Liang's thread, W&B report)."
+/>
+
+The next entry is the one I enjoyed most. At step 108,778 the team disabled PDL to work around
+"intermittent hangs". PDL is programmatic dependent launch, a CUDA feature that lets the next kernel
+start its setup while the previous one finishes, with an explicit wait before it reads the previous
+kernel's output. The comment above `_QUACK_USE_PDL = False` in
+`lib/levanter/src/levanter/grug/_moe/quack_moe_cute.py:32-38` explains the hang:
+
+```python
+# Programmatic dependent launch is off for every QuACK GEMM here. QuACK 0.6.4 only executes
+# `griddepcontrol.wait` in its TMA-load and CLC-scheduler warps; the MMA and epilogue warps decode
+# their work tiles from `cu_seqlens` in global memory before any wait, so under PDL they can read
+# the group boundaries before the preceding kernel's writes are visible. The ragged EP hero hangs
+# in #8870 are CTAs whose MMA and epilogue warps retired on such a stale decode while the load
+# warp kept working. Measured cost of PDL off on the six-GEMM expert MLP is within noise.
+_QUACK_USE_PDL = False
+```
+
+In a grouped GEMM over experts, `cu_seqlens` says where each expert's rows begin and end. Some warps
+waited for the previous kernel; others read those offsets without waiting, saw stale group
+boundaries, and retired while the load warp was still working, so the block never finished. My
+reading is that this race only bites when group sizes change every step, which pooled-wave's fixed
+per-expert buffers never did and the ragged transport does on every layer. Note also step 121,638, "fix checkpoint crashing": unglamorous,
+and a 100-day run on 704 GPUs is in large part a checkpointing problem.
+
+At step 146,139 came the jump to 27: native SM100 FlashAttention-4 kernels, and a "mask-free"
+ragged expert MLP. The receive buffer has a static size with padding at the end; the kernel
+interface in `ep_ragged_all_to_all.py` distinguishes physical group sizes from active ones, noting
+that "segment-driven kernels can omit inactive rows", so the expert MLP no longer computes over
+padding it then masks away. I am reading that off the code; I did not profile the run. For the
+attention side, [FlashAttention-3](/articles/flash-attention-3) covers what the previous generation
+of kernels did on Hopper.
+
+MFU from 21% to 27% is 29% more tokens per second. A back-of-envelope with my own segment averages
+(21 until step 81,716, about 23.5 until 146,139, 27 after that, assuming it holds) says the run
+finishes in about 84% of the wall-clock it would have taken at 21% throughout. On a budget of
+roughly a hundred days, that is a couple of weeks back, earned without a restart.
+
+## Changing the data at a quarter of the way
+
+At step 108,000 the hero switched data mixtures. The pool is clustered into 40 topics times five
+quality buckets, and the mixture is a schedule of weights over those 200 cells
+(`harrier_mix_2026_08_18.json`). The repo's mixture log has the shares:
+
+| topic | phase 1 (to 27.7%) | phase 2 (to 80%) | phase 3 (cooldown) |
+|---|---:|---:|---:|
+| Performance logs and low-level code | 9.0% | 10.6% | 11.4% |
+| Command-line agent transcripts | 1.3% | 6.0% | 6.6% |
+| General software and web code | 7.9% | 4.5% | 3.1% |
+| Natural-science research | 8.8% | 6.9% | 11.3% |
+| History, literature, heritage | 6.9% | 3.7% | 3.7% |
+| Mathematics problems and proofs | 4.3% | 1.8% | 1.4% |
+| Law, courts, regulation | 1.1% | 3.6% | 2.9% |
+
+Agent transcripts went up almost fivefold. Generic web code, history and math went down. Phase 3 is
+planned for step 312,192 and pushes natural science and the top quality bucket (Q4, from 22.9% to
+28.0% of the mix).
+
+The evidence for the swap came from a ladder of its own ([issue
+#9126](https://github.com/marin-community/marin/issues/9126)). They retrained H100 rungs with the
+switch and compared final held-out bits per byte against the original ladder. The d1536 rung, the
+largest finished, came in 0.72% lower on Paloma bits per byte, which they translate to a 1.20x
+compute-equivalent speedup: the old mixture needs 20% more compute to match it. Fifteen of sixteen
+Paloma subsets improved; Wikipedia got slightly worse.
+
+<Figure
+  src="/articles/marin-535b/fig9.png"
+  alt="Sixteen small log-log plots, one per Paloma subset, of bits per byte against training compute. Each shows the original ladder as a blue line and the mixture-swap runs as brown diamonds, labelled with compute-equivalent speedups such as 1.20x, 1.13x and 1.15x. The large brown diamond at the right of each plot is the measured d1536 final."
+  caption="The mixture-swap ladder against the original across sixteen Paloma subsets. Each label is a compute-equivalent speedup; the macro figure at d1536 is 1.20x (issue #9126)."
+/>
+
+The W&B report notes the side effect: "Slightly higher train loss from harder to predict dataset."
+So nobody should be watching the training loss of a run like this. Change the data and the
+training loss changes meaning. The yardstick has to be a fixed held-out set, which is what the
+forecast below uses.
+
+## The forecast is the referee
+
+Everything above was judged against one thing: a scaling ladder trained before the hero launched.
+`launch_scaling_ladder.py` trains the identical recipe at widths 768, 1,024, 1,536 and 2,048, with
+the same 384 experts, top-8, transport, optimizer and data schedule, and the same 791 tokens per
+active parameter. The team fits `L = 1.5 + A·C^−α` on dropless Paloma macro loss separately at every
+5% of training, so the hero has a predicted value at each point of its run, not only the end. The
+fit predicts 2.039 at 100%.
+
+<Figure
+  src="/articles/marin-535b/fig10.png"
+  alt="Log-log plot of dropless Paloma macro loss minus 1.5 against training compute, from 1e18 to 1e24 FLOPs. Dots for the four ladder rungs at each 5% of training are coloured from purple (early) to yellow (late), with a fitted line per percentile. Red dots extrapolate each fit to hero compute, ending in a star labelled hero at 100%: 2.039."
+  caption="One power-law fit per 5% of training across the ladder rungs, extrapolated to the hero's compute. The star is the pre-registered prediction for the end of the run (issue #8435)."
+/>
+
+This is a long extrapolation, and the hero issue is candid about it. The largest rung is 9.2e21 FLOPs
+and the hero is 2.7e24, about 290 times more compute. The d2048 rung crashed at 81% and was not
+resumed, to give the hero more time. The fit assumes 4K context and an unchanged mixture for the
+whole run, neither of which will be true. Their defence is a precedent: the earlier 67B-A2B run's
+pre-registered and retroactive fits each landed within about 0.6% of its target. And their check of
+the method on the ladder itself: extrapolating each finished rung from its 60-80% window predicted
+its own final loss within about 0.003 to 0.004.
+
+The issue says the ladder costs about 1% of total compute. The four GB200 rungs in the launcher's
+docstring add up to about 1.1e22 FLOPs, about 0.4% of the hero, so the 1% presumably includes the
+H100 rungs and reruns. Either way it is cheap insurance. It is what let Larry say, about the gate,
+that loss was "on track" and mean something checkable.
+
+<Figure
+  src="/articles/marin-535b/fig11.jpg"
+  alt="Chart of Paloma macro loss against training step from 0 to 390,000. The hero's actual segments, coloured as in the other charts, descend from 2.4 at the start to about 2.13 near step 210,000. Two dashed forecast lines from the ladder, a swap-adjusted forecast and a no-swap counterfactual, run from 2.39 at step 20,000 down to about 2.03 at 390,000; the actual curve sits below the forecast early and meets it from about step 150,000."
+  caption="Held-out Paloma macro loss against the ladder's forecast, with an adjustment for the data swap. The hero ran ahead of the forecast early and has tracked it since (Percy Liang's thread, W&B report)."
+/>
+
+The hero has tracked it. At step 44,000 the issue recorded 2.271 against a predicted 2.326 at 10%,
+partly because the hero takes more steps than the ladder rungs at the same fraction. By the halfway
+mark the actual curve sits on the swap-adjusted forecast. Percy's word for it is "generally on
+trend", with a crossed-fingers emoji, which is the correct level of confidence for a run with
+another 195,000 steps and a context extension ahead of it.
+
+## What I'd take from it
+
+Look at the list of things the team chose not to change. The MuonH axes bug: measured, left in. The
+early-layer routed experts with near-dead gradients: noted, deferred to after the run. A proposal to
+compute the router in more accurate arithmetic, which changed the top-8 order for about 9% of tokens
+on a restored checkpoint and cost 1.5-2% throughput: the recommendation in the hero issue was to keep
+the current arithmetic for this run and ablate it in a fresh one. Every intervention that did happen
+was either invisible to the model (kernels, transport, checkpoints), backed by ladder data (the
+mixture), or minimal and reversible (a decay that reads its own step counter and anneals to zero).
+
+That discipline only works because the forecast exists. Without a pre-registered prediction, every
+weird norm plot is an argument about vibes. With one, the question becomes "is loss still on the
+line", and most of the time the answer is to log it and keep training.
+
+What comes next is harder. Context extension from 4K to 8K tokens is planned, and a one-rack
+measurement from the step-180,000 checkpoint found 8K costs 1.6% of tokens per second and raises the
+dropped-assignment fraction 4.5 times, from 1.9e-4 to 8.3e-4. Small numbers, but drops are what the
+whole pooled-wave era was about, and 16K was worse (16 times the drops). The ladder never trained at
+longer context, so for that stretch the forecast loses its authority.
+
+Percy's last post in the thread says the project is about opening "the dynamic process of discovery
+- the process knowledge of how to make hypotheses, what to monitor, how to react to experimental
+results". After reading the issues, I believe that is what is on offer here. The weights, when they come, will be one
+more open MoE. Issue #8818 is a better document on how to watch a large run than anything I have
+read from a closed lab.
+
+## How I checked
+
+I read Percy Liang's thread and its replies through the fxtwitter mirror and downloaded its images.
+I shallow-cloned `marin-community/marin` at `8baa0a4` and read `experiments/grug/moe_hero_ep/`
+(`optimizer.py`, `grugmuon_hero.py`, `model.py`, `heuristic.py`, `hero_recipe.py`,
+`launch_scaling_ladder.py`, `README.md`, `trigger_hero.sh`), the ragged all-to-all and QuACK kernel
+wrappers under `lib/levanter/src/levanter/grug/`, and `docs/reports/hero-mixture-log.md`. I read
+issues #8435, #8621, #8818 and #9126 and PRs #8549 and #8833 with their comments through the GitHub
+API, and rendered the W&B report in headless Chromium to get its phase list (the charts themselves
+come from the thread). The figures are the thread's images, attachments from the issues, and the
+ladder plots committed at `d23e6e9`.
+
+Numbers about the run (MFU, drops, losses, norms, ablation tables) are the team's; I did not run
+anything. Arithmetic that is mine: tokens per step and total, the 704-GPU count, step percentages,
+the decay coefficient at step 58,014, 2.7e24 over 9.2e21, the ladder's share of compute from the
+docstring's table, and the wall-clock estimate, which assumes 27% MFU holds and uses my own segment
+averages. Two things I could not check: what the "Padding routing" segment in the W&B legend
+changed (the report's phase list does not name it; the model does count padding tokens skipped by
+routing), and how much of the 21-to-23 MFU step came from the transport rather than the memory it
+freed. The gate norms at 15% and 55% of the run are read off a chart.

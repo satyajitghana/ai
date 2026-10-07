@@ -1,4 +1,6 @@
 import { problemSchema } from "@/lib/api-error"
+import { KIND_IDS, LEVEL_IDS, RUNS_ON_IDS, TOPIC_IDS } from "@/data/taxonomy"
+import { RUBRIC_KEYS, TIERS } from "@/lib/content/rating"
 import { siteUrl } from "@/lib/site"
 
 // Machine-readable spec of the JSON API so agents can auto-discover it
@@ -118,6 +120,78 @@ const S = {
       url: { type: "string", format: "uri" },
       readingTimeMins: { type: "integer" },
     },
+  },
+  Article: {
+    allOf: [
+      { $ref: "#/components/schemas/ContentSummary" },
+      {
+        type: "object",
+        description:
+          "An article with its editorial metadata and the signals computed from it. Every field below is present on every record; it is null while an article is unrated. `kind` stays the content kind (\"articles\"); the article's own kind is `articleKind`.",
+        properties: {
+          featured: { type: "boolean" },
+          rating: {
+            type: ["object", "null"],
+            description: "Eight rubric dimensions scored 0–3 (3 is rare; corpus means sit near 1.5) and a one-line `why`.",
+            properties: {
+              ...Object.fromEntries(RUBRIC_KEYS.map((k) => [k, { type: "integer", minimum: 0, maximum: 3 }])),
+              why: { type: "string", maxLength: 160 },
+            },
+          },
+          topic: { type: ["string", "null"], enum: [...TOPIC_IDS, null] },
+          articleKind: { type: ["string", "null"], enum: [...KIND_IDS, null] },
+          level: { type: ["string", "null"], enum: [...LEVEL_IDS, null] },
+          runsOn: {
+            type: ["string", "null"],
+            enum: [...RUNS_ON_IDS, null],
+            description: "Smallest hardware the subject runs on, ordered browser < phone < cpu < consumer-gpu < workstation < datacenter; or api / none.",
+          },
+          licence: { type: ["string", "null"], description: "SPDX id, or proprietary | mixed | source-available | non-commercial | custom | unlicensed | n/a." },
+          score: { type: ["number", "null"], minimum: 0, maximum: 100, description: "Weighted rubric (normalised to 100) plus an evidence bonus of at most 6." },
+          tier: {
+            type: ["object", "null"],
+            description: "Percentile band over rated articles: Essential top 10%, High next 20%, Notable 30%, Solid 25%, Niche 15%.",
+            properties: {
+              id: { type: "string", enum: TIERS.map((t) => t.id) },
+              label: { type: "string" },
+              level: { type: "integer", minimum: 1, maximum: 5 },
+            },
+          },
+          rank: { type: ["integer", "null"], minimum: 1, description: "1 = highest score among rated articles." },
+          lenses: {
+            type: ["object", "null"],
+            description: "Sort keys, higher first: must-read, run-it, learn, new, deep.",
+            additionalProperties: { type: "number" },
+          },
+          highlights: {
+            type: "array",
+            items: { type: "string" },
+            description: "Up to three plain-language highlights derived from the rating's strongest answers (e.g. \"Checked against the source\"), the same words the site shows. Empty when unrated or nothing scores above 1. Methodology: /articles/scoring.",
+          },
+          facts: {
+            type: "object",
+            description: "Read off the page itself, never hand-entered.",
+            properties: {
+              words: { type: "integer" },
+              readingTimeMins: { type: "integer" },
+              figures: { type: "integer" },
+              interactives: { type: "integer" },
+              film: { type: "boolean" },
+              citations: { type: "integer" },
+              cards: { type: "integer" },
+              measured: { type: "integer" },
+              inbound: { type: "integer" },
+              lastUpdated: { type: "string", format: "date" },
+            },
+          },
+          signal: {
+            type: ["object", "null"],
+            deprecated: true,
+            description: "Older 1–5 signal { interest, helpful, score, level, label, source }. `level` and `label` come from the tier when rated (source \"tier\"), else from interest + helpful (source \"legacy\"). interest, helpful and score (their 2–10 sum) are null for an article that only carries `rating`. Prefer `tier` and the top-level `score`.",
+          },
+        },
+      },
+    ],
   },
   ContentDetail: {
     allOf: [
@@ -343,8 +417,8 @@ export function GET() {
       "/api/articles": get({
         id: "listArticles",
         summary: "Long-form articles and explainers",
-        description: "The site's flagship writing — paper explainers and model deep-dives, each with original interactive diagrams. Summaries only; fetch the body from the `.md` twin.",
-        schema: arrayOf("ContentSummary"),
+        description: "The site's flagship writing — paper explainers and model deep-dives, each with original interactive diagrams — with each article's rating, topic, kind, level, hardware, licence, 0–100 score, percentile tier, lens keys and page facts. Newest first; sort by `lenses` or `score` to match /articles. Fetch a body from the `.md` twin.",
+        schema: arrayOf("Article"),
         tags: ["content"],
       }),
       "/api/posts": get({

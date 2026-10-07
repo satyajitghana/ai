@@ -10,6 +10,8 @@
 import { createMcpHandler } from "mcp-handler"
 import { z } from "zod"
 
+import { KIND_IDS, LEVEL_IDS, RUNS_ON_IDS, TOPIC_IDS } from "@/data/taxonomy"
+
 import {
   askSatyajitPayload,
   getHealthPayload,
@@ -20,6 +22,7 @@ import {
   getResumePayload,
   json,
   listPapersPayload,
+  listArticlesPayload,
   listPatentsPayload,
   listPostsPayload,
   listProjectsPayload,
@@ -64,6 +67,24 @@ const handler = createMcpHandler(
         inputSchema: {},
       },
       async () => listProjectsPayload()
+    )
+
+    server.registerTool(
+      "list_articles",
+      {
+        title: "List articles",
+        description:
+          "Long-form articles with their editorial rating and computed signals: topic, kind (as articleKind), level, runsOn, licence, an 8-dimension 0–3 rubric with a one-line why, a 0–100 score, a percentile tier (Essential/High/Notable/Solid/Niche), lens sort keys and page facts (figures, interactives, measured, film, citations, inbound links). Ordered by a lens: must-read (score), run-it, learn, new, deep, or newest. Unrated articles carry nulls and sort last. Optional filters: topic, kind, level, runsOn (a hardware ceiling: browser < phone < cpu < consumer-gpu < workstation < datacenter; api matches api only), limit. Fetch a body from the `markdown` URL.",
+        inputSchema: {
+          lens: z.enum(["must-read", "run-it", "learn", "new", "deep", "newest"]).optional(),
+          topic: z.enum(TOPIC_IDS).optional(),
+          kind: z.enum(KIND_IDS).optional(),
+          level: z.enum(LEVEL_IDS).optional(),
+          runsOn: z.enum(RUNS_ON_IDS).optional(),
+          limit: z.number().int().positive().optional(),
+        },
+      },
+      async (args) => listArticlesPayload(args)
     )
 
     server.registerTool(

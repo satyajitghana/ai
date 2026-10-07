@@ -36,7 +36,12 @@ voice, correct and self-contained, that passes `pnpm validate`.
 6. **DUAL-NATIVE RULE**: always write full prose + static math/figure alongside any
    interactive component, so the `.md` variant and `llms-full.txt` stay complete. An
    interactive viz must never be the only carrier of an idea.
-7. Hand the draft to **voice-editor**, then **content-validator** (`pnpm validate`).
+7. **Rate it** once the body is done: `rating` (8 dimensions, 0–3, stingy — 3 is rare)
+   plus `why`, `topic`, `kind`, `level`, `runsOn`, `licence`, per the "Rating" section of
+   `/new-article` and the anchors in `lib/content/rating.ts`. Never write a score or tier;
+   they are computed. An edit that changes what the page shows (new measurements,
+   interactives, figures) re-rates it.
+8. Hand the draft to **voice-editor**, then **content-validator** (`pnpm validate`).
 
 ## Validation & PR policy
 - The article MUST pass `pnpm validate` before shipping.

@@ -1,0 +1,762 @@
+---
+title: "EmbeddingGemma 2: the encoders are optional, the text model is not"
+description: "Google DeepMind's EmbeddingGemma 2 puts text, code, images, video and audio into one 768-dimensional space with 740M parameters, under Apache 2.0. I read the safetensors header, the transformers code and the processors. The 740M is real (744,371,992 in the file): a 271M text encoder that every input passes through, plus a 168M vision tower and a 306M audio tower that only turn pictures and sound into tokens for it. 'Modular' means those two towers can be left unbuilt, and a text embedding comes out the same either way. The audio tower is byte-for-byte Gemma 4 E2B's. The 'twice its size' line holds against the models Google picked, but on Google's own audio chart a sub-1B model (non-commercial) sits higher, the code chart plots EmbeddingGemma 2 about two points below its own card, and the 327 seconds of audio and 58 video frames are context arithmetic that the shipped processors cut to 30 seconds and 32 frames by default."
+date: 2026-10-06
+updated: 2026-10-06
+tags:
+  - retrieval
+  - multimodal
+  - on-device
+  - benchmarks
+  - small-models
+draft: false
+cover: /articles/embeddinggemma-2/fig1.png
+rating:
+  novelty: 2
+  verification: 3
+  runnable: 3
+  explains: 2
+  takeaway: 3
+  durability: 2
+  reach: 2
+  unique: 3
+  why: "Recounts EmbeddingGemma 2 to 744M from its header, hashes its audio tower as Gemma 4's, and finds the 30 s and 32-frame defaults behind the 327 s claim."
+topic: multimodal
+kind: model
+level: practitioner
+runsOn: phone
+licence: Apache-2.0
+---
+
+import { BudgetPlanner } from "@/components/articles/embeddinggemma-2/budget-planner"
+import { MrlDial } from "@/components/articles/embeddinggemma-2/mrl-dial"
+
+Sundar Pichai's post called EmbeddingGemma 2 a "lightweight, modular 740M parameter form factor"
+that handles text, code, images, video and audio. The word I didn't understand was *modular*. A
+multimodal embedding model is usually either one big network that reads everything, or a set of
+separate towers glued together by a contrastive loss. "Modular" could mean either, and the two
+behave very differently when you try to put one on a phone.
+
+So I read the files. The [model card](https://huggingface.co/google/embeddinggemma-2), the
+safetensors header (fetched with two HTTP range requests, no weights downloaded), the
+`embedding_gemma2` model code in transformers, the processors that turn a JPEG or a WAV into
+tokens, and Google's three launch posts. The short version: every input, whatever it started as,
+ends up as a sequence of 512-wide vectors fed through one small text encoder, and that encoder is
+the only part you can't remove. The vision and audio towers are front ends. And the audio front
+end turned out to be something I didn't expect: it is Gemma 4's audio encoder, unchanged, down to
+the byte.
+
+|  |  |
+|---|---|
+| Weights | [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2), one 1.49 GB bf16 `model.safetensors` |
+| Licence | Apache 2.0 (EmbeddingGemma 1 shipped under the Gemma terms) |
+| Output | 768 dimensions, Matryoshka cuts at 512, 256, 128 |
+| Context | 8,192 tokens shared by every modality |
+| Launch posts | [Google blog](https://blog.google/innovation-and-ai/technology/developers-tools/embeddinggemma-2), [developer guide](https://developers.googleblog.com/en/embeddinggemma-2-the-developer-guide/), [AI Edge post](https://developers.googleblog.com/google-ai-edge-with-embeddinggemma-2) |
+| Paper | none yet; the closest is [EmbeddingGemma 1's report](https://arxiv.org/abs/2509.20354) |
+
+<ModelCard
+  repo="google/embeddinggemma-2"
+  claimed="740M"
+  note="The header holds 744,371,992 parameters: 271.0M text, 167.8M vision, 305.6M audio."
+/>
+
+## What is in the 744 million
+
+The safetensors header is a JSON index of every tensor with its shape. Summing them gives
+744,371,992 parameters, all bf16. The Hub's own counter says 744,371,512. The 480 missing are
+scalars: the audio tower stores a minimum and maximum for the input and output of every clipped
+linear layer, 40 per conformer layer across 12 layers, each a zero-dimensional tensor that the
+Hub's counter skips. Either way, 740M is a fair rounding.
+
+Grouped by which module the tensor belongs to:
+
+| Module | Parameters | What it is |
+|---|---:|---|
+| `language_model.embed_tokens` | 134,217,728 | the vocabulary table, 262,144 tokens x 512 |
+| `language_model.ple`, `embedding_projection`, final norm | 6,685,696 | per-layer input projection, and the 512 to 768 output head |
+| `language_model.layers` (24) | 130,099,224 | the transformer |
+| `vision_tower` + `embed_vision` | 167,757,824 | 16-layer ViT, 768 wide, and a 768 to 512 projection |
+| `audio_tower` + `embed_audio` | 305,611,520 | 12-layer conformer, 1,024 wide, and a 1,536 to 512 projection |
+
+That matches the card's own split to within rounding: a 130M transformer, a 140M "embedder", a
+170M vision encoder and a 300M audio encoder. Two things stood out.
+
+Half of the text model is one lookup table. The 262,144-token vocabulary times a 512-wide
+embedding is 134.2M of the 271.0M. The transformer that does the actual reading is 24 layers of
+about 5.25M each (6.3M for the four global-attention layers, which have wider heads). This is the
+usual shape for a small Gemma: a huge multilingual vocabulary on a narrow model.
+
+And the audio tower is the largest single module in the file, bigger than the whole text model.
+If you want audio, you are carrying 306M parameters for it.
+
+## An image is 280 words the vocabulary does not have
+
+The mechanism is easiest to see in `EmbeddingGemma2Model.forward`. The processor writes the text
+with a placeholder for every piece of media: `<|image|>`, `<|video|>`, `<|audio|>`. It then
+expands each placeholder into as many placeholder tokens as the media will produce, wrapped in
+begin and end markers. The model embeds the text tokens normally, runs each tower, projects its
+output to 512 dimensions, and overwrites the placeholder slots with those vectors:
+
+```python
+# transformers/models/embedding_gemma2/modeling_embedding_gemma2.py:797-799
+inputs_embeds = inputs_embeds.masked_scatter(
+    image_mask.to(inputs_embeds.device), image_features.to(inputs_embeds.device)
+)
+```
+
+After that line, the text encoder can't tell a word from a patch of a flamingo. It sees one
+sequence of 512-wide vectors and reads all of it with the same 24 layers. Google's own diagram
+draws it that way, with the encoders feeding a single box labelled 270M:
+
+<Figure
+  src="/articles/embeddinggemma-2/fig1.png"
+  alt="Diagram: text and code inputs go straight into a blue box labelled EmbeddingGemma 2 (270M); images and video pass first through a green Vision Encoder (170M), audio through a purple Audio Encoder (300M), both inside a dashed frame labelled Modular Encoders, and then into the same 270M box. Below, a grid shows the output space: a flamingo photo, a flamingo video and the text 'The pink or reddish...' sit close together, while an audio clip saying 'This is a car' and a code snippet sit far apart."
+  caption="Every modality ends in the same 270M text model; the vision and audio encoders sit in front of it, inside a frame Google labels 'Modular Encoders' (Google developer guide, architecture figure)."
+/>
+
+How many slots each piece of media takes is decided by the towers.
+
+Images go through a 16-layer ViT with 16-pixel patches. Its output is pooled three by three, so
+each output token stands for nine patches. At the default budget of 280 tokens an image gets up to
+2,520 patches, roughly an 800 x 800 picture at its own aspect ratio. The budget can be set
+anywhere from 70 to 1,120, the same ladder Gemma 4 uses, which I covered in
+[the Gemma 4 piece](/articles/gemma-4). Video is the same tower run on frames, sampled at one per
+second, at 140 tokens a frame.
+
+Audio is resampled to 16 kHz mono and turned into 128-bin log-mel frames every 10 ms. Two
+stride-2 convolutions shrink that by four, so one audio token covers 40 ms: 25 tokens a second.
+The conformer's attention is chunked and local (`attention_chunk_size: 12`,
+`attention_context_left: 13`, `attention_context_right: 0` in the config): a token attends within
+its own 12-token chunk, 480 ms, plus about half a second of the past, and never past the end of
+its chunk. It was built to stream. Any
+understanding of a whole clip has to come from the text encoder, which sees every audio token at
+once.
+
+The text encoder itself is a Gemma 4-style stack turned bidirectional. The attention class sets
+`self.is_causal = False` (line 331) and the masks come from `create_bidirectional_mask`. Five
+sliding-window layers alternate with one global layer, 24 in all. The config says
+`sliding_window: 512` while the card says 1,024, and both are right: the bidirectional window
+lets a token see 512 positions on each side, about 1,024 in total. The global layers use one
+key-value head (multi-query attention) with 512-wide heads; the local ones use two key-value heads
+with 256-wide heads.
+
+The last step is the one that makes it an embedding model. The final hidden states are normalised
+and projected from 512 to 768 per token, then `sentence-transformers` takes the mean over every
+position, prompt included (`include_prompt: true` in `1_Pooling/config.json`), and L2-normalises
+it. The code comments why projecting before pooling is allowed:
+
+```python
+# modeling_embedding_gemma2.py:504-505
+# Projecting per token is equivalent to projecting after mean pooling
+self.embedding_projection = nn.Linear(config.hidden_size, config.embedding_dim, bias=False)
+```
+
+A linear map commutes with an average, so it costs more compute but gives the same vector. That
+head is one 512 x 768 matrix with no bias. EmbeddingGemma 1 used two dense layers after pooling,
+768 up to 3,072 and back down to 768, according to [its report](https://arxiv.org/abs/2509.20354).
+The new model is narrower inside (512 against 768) and has a simpler head.
+
+Mean pooling has a consequence worth stating plainly. The embedding is an average over positions,
+and a default image is 280 positions while a caption is twenty. Attention mixes them all before
+the average, so a 280-to-20 split is not a 93% share of the meaning, but the media does dominate
+the arithmetic. I come back to this when budgeting the context window below.
+
+## Per-layer embeddings without the lookup table
+
+One detail in the text encoder took me a while, and it is the most interesting design choice in
+the file.
+
+Gemma 3n and the small Gemma 4 models use per-layer embeddings (PLE): besides the normal embedding
+table, every token id also looks up a small extra vector for every layer, from a second, very
+large table, and each layer mixes its slice into the residual stream. It is how Gemma 4 E2B keeps
+5B parameters on disk and runs like a 2.3B model, as I explained in
+[the Gemma 4 article](/articles/gemma-4). The catch, for an embedding model fed images and audio,
+is that a soft token has no token id. There is nothing to look up for a patch of a flamingo.
+
+EmbeddingGemma 2 keeps the per-layer signal and drops the table. The per-layer inputs are
+computed from the input embeddings themselves, through one linear layer:
+
+```python
+# modeling_embedding_gemma2.py:193-200 (EmbeddingGemma2TextPLE)
+def forward(self, inputs_embeds):
+    per_layer_projection = self.per_layer_model_projection(inputs_embeds) * self.per_layer_model_projection_scale
+    per_layer_projection = per_layer_projection.reshape(
+        *inputs_embeds.shape[:-1], self.num_hidden_layers, self.hidden_size_per_layer_input,
+    )
+    return self.per_layer_projection_norm(per_layer_projection)
+```
+
+The class docstring calls it "projection-only PLE: the signal is derived from `inputs_embeds`
+alone, with no token-identity lookup". The projection is 512 to 24 x 512, which is the 6.29M
+`per_layer_model_projection` in the header. Each layer then gates its slice in with a small
+bottleneck after attention and the MLP (`hidden_states * per_layer_input` at line 224).
+
+This works the same for a word and an image patch, because both arrive as a 512-wide vector
+before the projection. It also explains part of why the text model is 271M and not several
+billion: there is no per-layer table to carry. I'd read it as a requirement of native
+multimodality more than a cost trick, though Google doesn't say which.
+
+## Modular means the front end, not the model
+
+Now the word from the post. In `EmbeddingGemma2Model.__init__`, each tower is built only if its
+config exists:
+
+```python
+# modeling_embedding_gemma2.py:646
+self.vision_tower = AutoModel.from_config(config.vision_config) if config.vision_config is not None else None
+```
+
+Pass `config_kwargs={"vision_config": None, "audio_config": None}` to `SentenceTransformer` and
+neither tower nor its projection is constructed; the loader is told to ignore their weights
+(`_keys_to_ignore_on_load_unexpected`, line 637). What is left is the 271M text encoder. Add
+vision for 440M, audio for 570M, both for 740M. Those are the card's four configurations, and the
+header sums agree with them.
+
+The part that matters for an index: a text input never touches either tower. The placeholder masks
+are empty, the `masked_scatter` calls are skipped, and the same 24 layers run on the same token
+embeddings. So a text embedding from the 270M configuration is the same vector as one from the
+full model, and the developer guide says exactly that: "Embeddings you have already computed do
+not need to be re-computed." You can index a document store with the small configuration on a
+laptop today and add photos to the same index later with the full one.
+
+What you can't do is drop the text encoder. An image embedding is the mean of the text encoder's
+output over the image's soft tokens. There is no vision-only embedding path, and the vision tower
+alone produces nothing you can compare. "Modular" here means a model with swappable front ends
+and one shared reader, not a set of independent towers.
+
+## The audio encoder is Gemma 4's, byte for byte
+
+The launch blog says EmbeddingGemma 2 "shares its text tokenizer and audio encoder" with Gemma 4,
+so that the two can run together "with a lower combined total memory footprint". The developer
+guide softens that to sharing the "audio encoder architecture". Those are different claims: one
+means the same code, the other means the same weights you could load once.
+
+I checked the weights. Safetensors stores each tensor as a contiguous byte range listed in the
+header, so I fetched the same tensors from `google/embeddinggemma-2` and `google/gemma-4-E2B`
+with range requests and hashed them. All 36 audio tensors I sampled, three from each of the 12
+conformer layers (attention projections, convolution input projections and the clipping bounds),
+plus the tower's output projection, were byte-identical. They are also identical in
+`gemma-4-E2B-it` and `gemma-4-E4B`. The tokenizer vocabulary is the same 262,144 entries in the
+same order.
+
+The vision tower is a different story. Same shapes, different bytes: none of the eight vision
+tensors I sampled matched Gemma 4 E2B's. So the vision encoder was trained for embeddings, and the
+audio encoder was either frozen throughout or never trained here at all, with only the 1,536 to
+512 projection (`embed_audio`) and the text encoder learning to read it.
+
+Two practical consequences. If you run Gemma 4 E2B for generation and EmbeddingGemma 2 for
+retrieval on the same device, the 305M audio tower can, in principle, be loaded once; whether a
+runtime does that is up to the runtime, and I couldn't check what LiteRT does. And EmbeddingGemma
+2's audio understanding is bounded by what Gemma 4's speech encoder already captures, which is
+mostly speech. That fits the benchmark numbers below.
+
+## How it was trained, as far as the files say
+
+There is no EmbeddingGemma 2 paper. The model card covers data (web text in over 140 languages,
+code, images, video, speech and sounds, paired cross-modal samples, a January 2025 cutoff) and
+nothing about the loss or the stages. So what follows is partly inference, and I'll mark it.
+
+EmbeddingGemma 1's report describes the recipe that this almost certainly builds on: a
+noise-contrastive loss over in-batch negatives with harder negatives weighted up, a spread-out
+regulariser that penalises squared dot products between unrelated embeddings in a batch, a loss
+that matches the student's embeddings to Gemini Embedding's, Matryoshka versions of those losses
+applied to nested prefixes of the vector, a large pre-finetuning stage on unlabelled pairs, a
+finetuning stage with hard negatives on several mixtures, and a final model that averages the
+checkpoints from those mixtures. The card's task prefixes (`task: search result | query: `) are
+the same family as EmbeddingGemma 1's, and the blog says EmbeddingGemma 2 is "built from the same
+technology as Gemini Embedding models".
+
+For the multimodal part, the contrastive loss itself doesn't care what the positives are. A batch
+can pair a spoken question with a passage, a caption with a photo, or a text query with a video,
+and InfoNCE pulls each matched pair together and pushes the rest apart. I walked through that
+loss, and the two failure modes a shared index has (the right concept in the wrong modality, and
+a modality gap that clusters captions with captions), in
+[the Ovis-Embedding article](/articles/ovis-embedding).
+
+What the files do tell me: the audio tower didn't move, the vision tower did, the text encoder is
+a new 512-wide network rather than EmbeddingGemma 1's 768-wide one, and MRL is trained in: the card
+says so, and its truncation table degrades gently down to 256, which plain truncation of an
+untrained vector would not. The AI Edge post adds that
+quantization-aware training produced the int4 and int8 versions. Everything else about the
+recipe, including whether a Gemini Embedding teacher was used for images and audio, I couldn't
+check.
+
+## Spending the window
+
+The card advertises an 8,192-token context "capable of processing minutes of audio or video", and
+a table: about 29 images, 58 video frames or 327 seconds of audio. Those are 8,192 divided by 280,
+140 and 25. They describe the window, not what the shipped preprocessing will actually feed it.
+
+The video processor in transformers has `max_frames = 32` and `overflow_strategy = "uniform"`
+(`video_processing_embedding_gemma2.py:192-193`). Hand it two minutes of video at one frame per
+second and it keeps 32 frames spread evenly, one every 3.75 seconds. The audio side goes through
+Gemma 4's feature extractor, whose `__call__` defaults to `max_length=480_000` samples with
+truncation on, which is 30 seconds at 16 kHz. A five-minute recording becomes its first 30
+seconds. Both caps can be overridden, and the LiteRT runtime streams audio in its own way, but the
+default `model.encode({"audio": ...})` path is what most people will run first. I couldn't run it
+to confirm the end-to-end behaviour, so treat this as a reading of the code with a test to do,
+not a measured result.
+
+There is also a third number in the repo's own `processor_config.json`, `audio_seq_length: 280`,
+which caps the token count reported by `_compute_audio_num_tokens` (the helper serving engines
+call to reserve placeholder slots) at 280 tokens, 11.2 seconds. The class default is 750. I don't
+know which value vLLM ends up using; if long audio fails to embed there, this is where I'd look.
+
+None of this is a defect. A single vector is a poor summary of five minutes of anything, and
+Google's own Video Moments Finder demo indexes chunks of a video, not the whole file. The
+practical rule is to chunk long media yourself, a few seconds of audio or a handful of frames per
+embedding, and let the index hold many vectors per file.
+
+The planner below adds up a single input. It also shows the share of positions each modality
+contributes to the final mean, which is where interleaved inputs get surprising.
+
+<BudgetPlanner />
+
+In numbers: text costs one token per subword, an image its budget plus two marker tokens, a video
+frame 142, and an audio clip 25 per second plus two. A product listing with a 40-token
+description and two photos at the default budget is 604 tokens, about 7% of them text. Add 20
+seconds of video and it is 3,444 tokens and the text is about 1%. If the words matter, I'd embed
+the description on its own as well and keep both vectors, or lower the vision budget to 70 for
+the photos in an interleaved input.
+
+## The benchmark claims
+
+The card's headline table, all at 768 dimensions and full precision:
+
+| Benchmark | Metric | EmbeddingGemma 2 | EmbeddingGemma 1 |
+|---|---|---:|---:|
+| MTEB multilingual v2 | mean over tasks | 61.36 | 61.15 |
+| MTEB code v1 | nDCG@10 | 78.68 | 68.76 |
+| MIEB lite | mean over task types | 64.64 | – |
+| MMEB v2 image | Hit@1 | 57.28 | – |
+| MMEB v2 visual documents | nDCG@5 | 67.84 | – |
+| MMEB v2 video | Hit@1 | 50.67 | – |
+| MSEB retrieval | MRR@10 | 69.54 | – |
+| MAEB | mean over tasks | 49.39 | – |
+
+Text is flat: 61.36 against 61.15 is a 0.21-point gain, which the blog fairly calls matching.
+Code is where the text model improved, by 9.92 points, the "14%" in the developer guide
+(9.92 / 68.76 is 14.4%). For scale on text, Qwen3-Embedding-0.6B's own card reports 64.33 on MTEB
+multilingual and 70.70 on MTEB English v2 against EmbeddingGemma 2's 61.36 and 68.46. Qwen's is a
+600M text-only model against a 271M text path, so I don't read it as a loss, but EmbeddingGemma 2
+isn't the strongest small text embedder; its case is that the same index takes pictures and sound.
+
+The "outperforms some specialist models more than twice its size" line comes from three charts in
+the launch blog, each scoring models against size on a log axis. I read every dot's value off
+its pixel position against the tick marks, which is good to about half a point.
+
+<Figure
+  src="/articles/embeddinggemma-2/fig2.png"
+  alt="Scatter plot titled Massive Text Embedding Benchmark (Code), mean score against model size on a log axis from 125M to 8B. EmbeddingGemma 2 is a blue dot near 270M at about 77, on a dotted frontier line from multilingual-e5-small (about 53) to Qwen3-Embedding-8B (about 81). Below and to the right: Qwen3-Embedding-0.6B about 75, pplx-embed-v1-4b about 77, inf-retriever-v1-1.5b about 67, embeddinggemma-300m about 67, granite-embedding-311m about 63."
+  caption="MTEB code against model size. EmbeddingGemma 2 is plotted at its 270M text configuration (Google launch blog, MTEB code chart)."
+/>
+
+On code the chart places EmbeddingGemma 2 at its text size, near 270M, and its nearest rivals are
+Qwen3-Embedding-0.6B (about 75.3) and inf-retriever-v1-1.5b (about 67.0). One oddity: the blue dot
+sits at about 76.7, not the card's 78.68, and EmbeddingGemma 1's dot sits at about 66.7 against
+its card value of 68.76. The gray dots line up with published values (Qwen3-Embedding-0.6B reads
+about 75.3 against the 75.41 in Qwen's own README), so the axis is fine. Both Gemma dots are about two points low, which looks like the
+chart and the table came from different evaluation runs. The table is the better number to quote,
+and either way the ranking on the chart doesn't change.
+
+<Figure
+  src="/articles/embeddinggemma-2/fig3.png"
+  alt="Scatter plot titled Massive Image Embedding Benchmark (Lite), mean score over task types against model size. EmbeddingGemma 2 at about 64.5 near 700M. LCO-Embedding-Omni-3B is the only point higher, about 65.6. Below: jina-embeddings-v5-omni-small about 61.4, ebind-full about 55.3, BidirLM-Omni-2.5B-Embedding about 55.5, siglip-so400m-patch14-384 about 53.3, siglip-base-patch16-512 about 50.5, jina-embeddings-v5-omni-nano about 49.7, VLM2Vec-LoRA about 44.6. A footnote marks starred models as image and text only."
+  caption="MIEB lite against model size; starred models handle only image and text (Google launch blog, MIEB chart)."
+/>
+
+On images the claim holds cleanly. EmbeddingGemma 2 reads about 64.5, which matches the card's
+64.64. jina-embeddings-v5-omni-small, 1.63B parameters by its own header count and so 2.2 times
+EmbeddingGemma 2, reads about 61.4. BidirLM-Omni-2.5B reads about 55.5, VLM2Vec-LoRA about 44.6.
+Only LCO-Embedding-Omni-3B, about four times the size, is higher, by about one point.
+
+<Figure
+  src="/articles/embeddinggemma-2/fig4.png"
+  alt="Scatter plot titled Massive Audio Embedding Benchmark, mean score against model size. A dotted frontier runs from larger_clap_general (about 34) through EmbeddingGemma 2 (about 48.6, near 700M), jina-embeddings-v5-omni-nano (about 51, near 1B), BidirLM-Omni-2.5B-Embedding (about 53) to LCO-Embedding-Omni-7B (about 56). Below the frontier: e5-omni-3B about 48, Qwen2-Audio-7B about 35, MuQ-MuLan-large about 28, Qwen2.5-Omni-3B about 24."
+  caption="MAEB against model size; starred models handle only audio and text (Google launch blog, MAEB chart)."
+/>
+
+Audio is where I'd push back. EmbeddingGemma 2 reads about 48.6 (card: 49.39) and does beat
+e5-omni-3B (about 48.1), Qwen2-Audio-7B (about 34.8) and Qwen2.5-Omni-3B (about 23.6), all well
+over twice its size. But the blog also says it "achieves leading scores among sub-1B multimodal
+embedders" on MAEB, and its own chart shows jina-embeddings-v5-omni-nano above it at about 51.
+That model's header holds 985,984,512 parameters, under a billion. It is licensed CC-BY-NC-4.0,
+so if "leading" quietly means "leading among models you can ship commercially", the claim
+survives. As written, it doesn't, on Google's own figure.
+
+The pattern across the three charts is consistent with the audio tower being Gemma 4's speech
+encoder: strong on code and images, where the trainable parts did the work, and mid-pack on
+general audio, where the encoder was inherited.
+
+## Shorter vectors
+
+Matryoshka training means the first 512, 256 or 128 numbers of the 768-dimensional vector are
+themselves a usable embedding, once renormalised. The card's truncation table shows how much each
+benchmark keeps.
+
+<MrlDial />
+
+The cost is uneven. At 256 dimensions every benchmark keeps at least 95% of its full score, and
+storage drops threefold: a million vectors go from 3.07 GB to 1.02 GB in float32, or 1.54 GB to
+512 MB in bfloat16. At 128 the text rows keep 94% to 96% of their scores (multilingual text goes
+from 61.36 at full width to 57.89 cut), but the multimodal average, MMEB v2 overall, falls from
+59.01 at full width to 45.65 cut, about 77%, and MSEB spoken retrieval from 69.54 to 56.71. The
+card's own advice is "128d is best suited to text-only workloads", and the numbers back it.
+
+Two small inconsistencies in the launch material. The AI Edge post says MRL cuts index footprints
+"by up to 8x"; 768 to 128 is 6x, which is what the card and the main blog say. And the card's
+re-normalisation warning is worth taking seriously: a cut vector is no longer unit length, and
+cosine scores on unnormalised prefixes still look plausible while ranking worse.
+
+## On a phone
+
+The [LiteRT bundles](https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm) use
+quantization-aware training: int4 per-channel for the transformer and the embedding table, int8 for
+the vision encoder, and a mix of int2, int4 and int8 for the audio encoder. The downloads are 165
+MB for text only, 388 MB for text and vision, and 485 MB for everything.
+
+The AI Edge post gives per-image vision latency across devices. The text-only number on the
+LiteRT card is the one I find most useful: 8.3 ms on a Pixel 11 Pro's TPU and 41.8 ms on an
+iPhone 18 Pro's CPU, both for a 128-token input.
+
+<Figure
+  src="/articles/embeddinggemma-2/fig5.jpg"
+  alt="Table with columns Platforms, Accelerators, Representative Devices, Latency (ms), Images per sec. CPU: iPhone 18 Pro 191 ms, MacBook M5 Pro 151 ms, Raspberry Pi 5 1761 ms. GPU: iPhone 18 Pro 69.8 ms, MacBook M5 Pro 37.3 ms, Nvidia Jetson Nano 485 ms. NPU: Pixel 11 Pro XL 48.9 ms, Dell XPS 16 49.8 ms, Arduino VENTUNO Q 135 ms."
+  caption="Per-image vision embedding latency at a 70-token vision budget, across CPU, GPU and NPU (Google AI Edge launch post, latency table)."
+/>
+
+Note the 70-token budget in that table: a quarter of the default. The LiteRT bundles only expose
+70 and 140 soft tokens per image, so the on-device model is running images at lower resolution
+than the benchmark table, which was measured at full precision with default settings. I couldn't
+find on-device quality numbers at 70 tokens.
+
+The memory figures don't line up across sources. The blog says "~191MB active RAM for text-only
+weights and ~567MB for the full multimodal model" on a Pixel 11 Pro. The LiteRT card's Pixel 11
+Pro row reports 112 MB and 127.5 MB, but it measures CPU memory only and says accelerator memory
+is excluded. The S26 Ultra on CPU reports 334 MB and 811 MB. I'd budget from the CPU rows for
+your own platform, not the headline.
+
+## Using it
+
+The card's calls, put together the way I'd start a text index. I haven't run this here; it is
+assembled from the card's and the developer guide's own examples, and needs
+`sentence-transformers` 6.1.0 or later.
+
+```python
+import torch
+from sentence_transformers import SentenceTransformer
+
+# bf16 or fp32 only: the card says fp16 overflows and returns NaN or degraded vectors
+dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+
+# Text and code only: the vision and audio towers are never built (271M parameters)
+model = SentenceTransformer(
+    "google/embeddinggemma-2",
+    config_kwargs={"vision_config": None, "audio_config": None},
+    model_kwargs={"torch_dtype": dtype},
+    truncate_dim=256,
+)
+
+files = {"pool.py": "def mean_pool(h, mask):\n    return (h * mask[..., None]).sum(1) / mask.sum(1, keepdim=True)"}
+
+# Documents: format the title yourself; prompt_name="Document" would write "title: none"
+docs = [f"title: {name} | text: {code}" for name, code in files.items()]
+doc_emb = model.encode(docs, normalize_embeddings=True)
+
+# Queries: the task prefix matters, and queries and documents must share a width
+q_emb = model.encode("average token states ignoring padding", prompt_name="CodeRetrieval", normalize_embeddings=True)
+print(model.similarity(q_emb, doc_emb))
+```
+
+Later, the same index takes photos and recordings from the full model, without re-embedding the
+text:
+
+```python
+full = SentenceTransformer("google/embeddinggemma-2", model_kwargs={"torch_dtype": dtype}, truncate_dim=256)
+
+photo = full.encode({"image": "IMG_0412.jpg"}, normalize_embeddings=True)    # no text prefix for media
+memo = full.encode({"audio": "memo_16k_mono.wav"}, normalize_embeddings=True)  # chunk long audio first
+listing = full.encode({
+    "text": "Waterproof trail shoe. <|image|> Grip test on wet rock: <|video|>",
+    "image": "shoe.jpg",
+    "video": "grip.mp4",
+}, normalize_embeddings=True)
+```
+
+The prefixes are listed in `config_sentence_transformers.json`: `SearchQuery`, `QuestionAnswering`,
+`FactChecking`, `CodeRetrieval`, `Classification`, `Clustering`, `SentenceSimilarity` and
+`Document`. Retrieval is asymmetric (a query prefix on one side, `title: … | text: …` on the
+other); classification and similarity put the same prefix on both. Media go in without a prefix.
+Because the pooling includes the prompt, the prefix changes the vector; mixing prefixed and
+unprefixed text in one index is a quiet way to lose recall.
+
+## Half a gigabyte, and which half
+
+A few hours after launch Unsloth posted that EmbeddingGemma 2 "runs locally on 0.5GB RAM", in the
+same breath as "740M parameter ... combines a 270M text model with vision (170M) + audio (300M)",
+and linked [its own GGUFs](https://huggingface.co/unsloth/embeddinggemma-2-GGUF) and
+[a guide](https://unsloth.ai/docs/models/embeddinggemma-2). Read together, that sounds like the
+whole multimodal model in half a gigabyte. I wanted to know which configuration the number
+belongs to, so I read the GGUF headers of both repos the same way I read the safetensors one:
+range requests for the first few megabytes, then a parse of every tensor's name, shape and type.
+
+The [ggml-org conversion](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF), made by the
+same people who merged EmbeddingGemma 2 support into llama.cpp (pull request 30054, merged on
+launch day), has four files: a text model in BF16 and Q8_0, and an `mmproj` in BF16 and Q8_0.
+Unsloth's repo has those four with byte-identical tensors (same 413 and 963 tensor lists, same
+types, the last 4 MB of each pair hash the same; the files differ by 64 to 96 bytes of name
+metadata), plus three "UD" text quants, Q4_K_XL, Q5_K_XL and Q6_K_XL, and F16 copies of both
+files. That is the whole difference.
+
+| File | Size | What is inside |
+|---|---:|---|
+| text, UD-Q4_K_XL (Unsloth) | 175.7 MB | 271,002,648 params; Q4_K almost everywhere |
+| text, UD-Q5_K_XL (Unsloth) | 210.1 MB | Q5_K, with Q6_K on `attn_v` and `ffn_down` in 12 of the 24 layers |
+| text, UD-Q6_K_XL (Unsloth) | 248.8 MB | Q6_K throughout |
+| text, Q8_0 (both) | 309.9 MB | Q8_0, the per-layer projection kept in BF16 |
+| text, BF16 (both) | 558.0 MB | unquantised |
+| mmproj, Q8_0 (both) | 554.8 MB | 473,369,344 params: vision 167.4M, audio 304.8M, two projections 1.2M |
+| mmproj, BF16 (both) | 982.1 MB | unquantised |
+
+The text file is exactly the 271M path from the safetensors header: token table, 24 blocks, the
+projection-only PLE (`per_layer_model_proj`, 512 x 12,288) and the 512-to-768 output head, stored
+as `output.weight`. There is no per-layer token table in it, which confirms the reading above from
+a second, independent implementation; llama.cpp's graph comments the function "this model has no
+per-layer token embeddings, the per-layer inputs come only from the projection". The header also
+answers the window question from earlier: it stores `sliding_window = 1024`, and llama.cpp's
+symmetric mask divides it by two, masking anything more than 512 positions away on either side.
+Same window, written down two ways.
+
+Two things in the files surprised me. About 15.8 MB of every text GGUF, 9% of the Q4 file, is
+not weights at all: it is the header, holding the 262,144-token vocabulary and 514,906 BPE merges.
+And the Q4_K_XL is less exotic than the "UD" label suggests. Every large matrix, the embedding
+table included, is plain Q4_K; what gets more bits are the small pieces, the per-layer gate and
+projection in every block (Q8_0), the PLE projection (Q5_K) and the output head (Q6_K). For a
+model whose last step is one 512 x 768 matrix that every embedding passes through, protecting
+that matrix is the sensible choice. The quantisation was calibrated with an importance matrix
+over 230 chunks of a text file (`quantize.imatrix.dataset = data/calib.txt` in the metadata),
+which is fine for a text index and says nothing either way about how image or audio tokens fare,
+since images and audio pass through the same quantised blocks.
+
+On the multimodal side there is only one mmproj, and it holds both towers. I checked what
+llama.cpp does with that: `clip_init` builds a vision context if the file has a vision encoder
+and an audio context if it has an audio encoder, with no switch to skip either (the only
+exception in the code is Gemma 3n). So the four configurations from the model card collapse to
+two in this runtime, text only or everything. The 440M "text and vision" setup doesn't exist in
+GGUF form; you carry the 305M audio tower whether you use it or not. The smallest mmproj is Q8_0,
+and even that one is 70.5 MB of F32, most of it the vision tower's 768 x 10,240 x 2 position
+table (62.9 MB), upcast from the BF16 it was stored in.
+
+### The arithmetic for 0.5 GB
+
+For an embedding model llama.cpp builds no KV cache (`build_attn_inp_no_cache` in the
+`gemma-embedding2` graph): every input is read once, in one batch. So the memory is the weights
+plus whatever the forward pass needs at once, and the forward pass has one large resident:
+the per-layer inputs. They are computed for every position before the first layer runs and kept
+until the last, 24 layers x 512 values x 4 bytes, which is 49,152 bytes per token.
+
+At the 2,048-token context Unsloth's guide uses, that tensor is 100.7 MB. Add the 175.7 MB Q4
+file, and the scratch for one layer (the 2,048-wide feed-forward activations are about 34 MB; the
+global layers' attention scores, if flash attention is off, are 4 heads x 2,048 x 2,048 x 4 bytes,
+67 MB), and the total comes out around 0.4 GB. So for text and code, at that context, "0.5 GB" is
+believable. At the full 8,192 tokens the per-layer inputs alone are 402.7 MB, and a text-only Q4
+run is already past half a gigabyte before anything else.
+
+With pictures and sound it isn't close. The smallest files that can embed an image are the Q4
+text model plus the Q8_0 mmproj, 730.5 MB on disk before a single activation. The figure that
+does fit the full model is Google's own: about 567 MB of active RAM for the full multimodal model
+on a Pixel 11 Pro, but that is the LiteRT bundle, whose audio encoder is partly int2, not a GGUF.
+
+So I'd read Unsloth's 0.5 GB as true of the 271M text configuration at a modest context, and of
+Google's LiteRT build for the whole model. Through Unsloth's own files, the whole model needs
+about 0.73 GB before it starts. These are sums from the headers and the graph code; I didn't run
+llama.cpp here, so the scratch sizes are an estimate of what its allocator holds, not a
+measurement.
+
+One more thing the repo contains that I wouldn't use: F16 copies of both files. The model card
+says EmbeddingGemma 2's activations exceed float16's range and come back as NaN or silently
+degraded, and Unsloth's own guide repeats "Do not use FP16". In ggml's CPU path an F16 weight
+matrix is multiplied against activations converted to F16, so the F16 GGUF is the one file where
+that warning plausibly applies. Take BF16 or Q8_0.
+
+### Running it
+
+Unsloth's llama.cpp recipe serves text and code only. The part worth copying is the flags:
+
+```bash
+# unsloth.ai/docs/models/embeddinggemma-2, "Run EmbeddingGemma 2 GGUFs in llama.cpp"
+./llama.cpp/build/bin/llama-server \
+  --model "embeddinggemma2-gguf/embeddinggemma-2-UD-Q4_K_XL.gguf" \
+  --alias embeddinggemma2 \
+  --embeddings \
+  --pooling mean \
+  --ctx-size 2048 \
+  --batch-size 2048 \
+  --ubatch-size 2048 \
+  --parallel 1 \
+  --host 127.0.0.1 \
+  --port 8080
+```
+
+`--pooling mean` matches the sentence-transformers pooling; the GGUF also carries
+`pooling_type = 1`, which is mean. The three sizes have to move together because a non-causal
+model can't split one input across batches: every token attends to every other, so an input has
+to fit in one physical batch. And the server does nothing about prompts. The guide's request
+writes them by hand, `task: search result | query: ...` for the query and `title: none | text: ...`
+for the document, and that is required: as noted above, the prompt is part of the mean.
+
+The guide's closing hint is honest about the rest: "For images, video or audio, use a runtime
+with explicit support for those encoders and their processor files." I didn't check whether
+llama-server's embeddings endpoint feeds an mmproj today. If you need media embeddings outside
+Python, LiteRT is the path Google tested.
+
+Unsloth also wired EmbeddingGemma 2 into Unsloth Desktop as the embedding model for its
+document chat. The settings screenshot in the guide labels it "Not downloaded · 135 MB". That
+matches none of the files: the smallest GGUF is 175.7 MB and the safetensors is 1.49 GB. I
+couldn't find which artefact it refers to.
+
+<Figure
+  src="/articles/embeddinggemma-2/fig6.png"
+  alt="Unsloth Desktop settings, General tab, Documents and RAG section. The Embedding model dropdown is set to google/embeddinggemma-2, with the note 'Hugging Face model or local path used to index and search your documents. Default is unsloth/bge-small-en-v1.5.' Below: 'Not downloaded · 135 MB', a Download button, and 'Only affects newly indexed documents. Re-upload existing ones after changing the model.'"
+  caption="Choosing EmbeddingGemma 2 as Unsloth Desktop's document embedder; changing it only affects newly indexed files (Unsloth EmbeddingGemma 2 guide, settings screenshot)."
+/>
+
+That last line in the screenshot is the right instinct, and it leads into the fine-tuning part.
+
+## Fine-tuning moves every modality at once
+
+Unsloth's guide trains the text model with LoRA. It saves the text-only configuration first, then
+loads it in 4-bit and attaches adapters to every attention and MLP projection:
+
+```python
+# unsloth.ai/docs/models/embeddinggemma-2, "Prepare the model"
+model = FastSentenceTransformer.from_pretrained(
+    model_name = "embeddinggemma2-text",
+    max_seq_length = 1024,
+    dtype = torch.bfloat16,
+    load_in_4bit = True,
+    load_in_16bit = False,
+    full_finetuning = False,
+)
+
+model = FastSentenceTransformer.get_peft_model(
+    model,
+    r = 16,
+    target_modules = [
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    lora_alpha = 32,
+    lora_dropout = 0,
+    bias = "none",
+    use_gradient_checkpointing = "unsloth",
+    random_state = 3407,
+    task_type = "FEATURE_EXTRACTION",
+)
+```
+
+Training is sentence-transformers' `SentenceTransformerTrainer` with
+`MultipleNegativesRankingLoss`, which is the in-batch-negatives contrastive loss from the training
+section above, a no-duplicates batch sampler (so a repeated query never becomes its own negative),
+`bf16=True` and the query and document prefixes applied to the training columns. The guide's
+advice to hold out queries and compare before and after is the part people skip and shouldn't.
+
+Two remarks on the recipe. Loading a 271M model in 4-bit saves about 0.4 GB of weights, which is
+small next to the activations at a training batch; the text notebook's own log puts peak reserved
+memory at 11.3 GB on a T4. Plain 16-bit LoRA costs little more here and trains against the weights
+you will actually deploy. And the adapters don't reach the per-layer gates, the PLE projection or
+the 512-to-768 head, which is fine for adapting a domain.
+
+The bigger point follows from the architecture. An image embedding is the text encoder's average
+over the image's soft tokens, and so is an audio one. LoRA on `q_proj` through `down_proj` of the
+text model therefore changes the vector for every photo and recording too, even though the
+training data was only text. The "embeddings you have already computed do not need to be
+re-computed" property from the modular section holds for adding towers, not for training the
+reader: after a fine-tune, everything in the index has to be re-embedded, and the image-text
+alignment has been nudged by a loss that never saw an image. If the index is mixed, train on
+mixed pairs, or keep the fine-tuned model for text and test cross-modal recall before swapping it
+in.
+
+Unsloth does have mixed-pair notebooks. The image one trains on 3,000 Flickr8k images with five
+captions each and tests on the Flickr30k 1K split, adding `finetune_vision_layers = True` so the
+vision tower gets adapters too; the audio one trains on Clotho clips with
+`finetune_audio_layers = True`. Note what the second does to the claim about sharing an audio
+encoder with Gemma 4: once those adapters are merged, the tower is no longer byte-identical to
+Gemma 4 E2B's, and a runtime that loads it once for both models can no longer do so.
+
+None of the three notebooks shows an EmbeddingGemma 2 result yet. The image and audio ones have no
+saved outputs. The text one does, but they come from the earlier model: its log reads "Fast
+Gemma3 patching" with transformers 4.57.3, and "Trainable parameters = 13,074,432 of 315,937,536".
+Rank-32 LoRA on EmbeddingGemma 1's 24 layers (768 wide, 1,152 MLP) is 8,355,840 parameters, and
+its two dense head layers, 768 x 3,072 each, add 4,718,592; together that is exactly the
+13,074,432. The NDCG@10 of 0.9267 before and 0.9351 after on the medical set are EmbeddingGemma 1
+numbers, in a notebook titled for EmbeddingGemma 2.
+
+## What else the launch blog says
+
+A few things in [Google's launch post](https://blog.google/innovation-and-ai/technology/developers-tools/embeddinggemma-2/)
+I haven't covered. EmbeddingGemma 1 passed 20 million downloads, which is the context for a
+second version. The 8K window is four times EmbeddingGemma 1's. Besides LiteRT there is a
+MediaPipe Decision Task API for classification and routing on top of the embeddings, and a
+Foresight app that pairs EmbeddingGemma 2 retrieval with Gemma 4 generation, which is where the
+shared-audio-encoder argument would pay off. The blog lists day-one support in transformers,
+sentence-transformers, MLX, vLLM, llama.cpp, SGLang, Ollama, LM Studio, transformers.js and
+Qdrant, and points to Unsloth for fine-tuning. Omar Sanseviero's launch post summed up the
+release as "Modular, going from 270m to 740m parameters", which after reading the llama.cpp
+loader I'd amend to: in GGUF, 271M or 744M, nothing in between.
+
+## What I'd do with it
+
+I'd use it for a personal or on-device index of mixed media: notes, screenshots, photos, voice
+memos, a codebase. The text-first workflow is the real feature. Start with the 271M configuration
+at 256 dimensions, which is small and keeps 98% to 99% of its text scores and about 97% on code, and add the vision
+tower when images show up, without touching what is already indexed.
+
+I wouldn't pick it for a text-only search service where model size doesn't matter; there are
+stronger text embedders at 600M. I'd test general-audio retrieval on my own data before relying
+on it, since the audio tower is a speech encoder that didn't train here and MAEB is its weakest
+benchmark. And I'd chunk long video and audio deliberately rather than trust the 8,192-token
+window, because the default preprocessing already does a cruder version of that for you, silently.
+
+Related reading on the site: [Gemma 4](/articles/gemma-4) for the backbone family and per-layer
+embeddings, [SigLIP 2](/articles/siglip-2-coreml) for how a contrastive image-text tower is
+trained and what a Core ML port of one measures, [Ovis-Embedding](/articles/ovis-embedding) for
+the 3B omni embedder that reads its vector off the last token instead of averaging, and
+[jev-semgrep](/articles/search-by-meaning) for the case against cosine similarity as a search
+primitive at all.
+
+## How I checked
+
+- **Parameters.** Read the `model.safetensors` header from the Hub with two range requests (8
+  bytes for the length, then the 171,296-byte JSON), summed every tensor's shape, and grouped by
+  module prefix. Compared with the Hub API's `safetensors.total`.
+- **Shared weights.** Fetched individual tensors' byte ranges from `google/embeddinggemma-2` and
+  from `google/gemma-4-E2B`, `gemma-4-E2B-it` and `gemma-4-E4B`, and compared SHA-1 hashes: 36
+  audio tensors and the audio output projection (all identical), eight vision tensors and the
+  vision patch projection (all different). Compared the two `tokenizer.json` vocabularies entry by
+  entry.
+- **Mechanism.** Read `modeling_embedding_gemma2.py`, `processing_embedding_gemma2.py` and
+  `video_processing_embedding_gemma2.py` from transformers' main branch as of 6 October 2026, plus
+  Gemma 4's `feature_extraction_gemma4.py`, and the repo's `config.json`,
+  `processor_config.json`, `1_Pooling/config.json` and `config_sentence_transformers.json`. Line
+  numbers above refer to those files on that date. I did not run the model.
+- **Charts.** Located each dot's centre in the launch blog's 1,000-pixel chart images and
+  interpolated between the y-axis tick marks. Checked the axis against Qwen3-Embedding-0.6B's
+  published MTEB code score. Parameter counts for jina-embeddings-v5-omni-nano and -small come from
+  the Hub API's header totals.
+- **GGUFs.** Parsed the header of every file in `unsloth/embeddinggemma-2-GGUF` and
+  `ggml-org/embeddinggemma-2-GGUF` from range requests (the text headers are 15.8 MB, the mmproj
+  ones under 60 KB), summed parameters and bytes per quantisation type, and hashed the last 4 MB of
+  each file that both repos ship. Read llama.cpp's `src/models/gemma-embedding2.cpp`, the symmetric
+  window mask in `llama-hparams.h` and `clip_init` in `tools/mtmd/clip.cpp` at the merge commit of
+  pull request 30054. Compared `unsloth/embeddinggemma-2` with `google/embeddinggemma-2`: the
+  safetensors and tokenizer have the same LFS hashes, so it is a mirror.
+- **Unsloth guide and notebooks.** Read the guide's Markdown and the three EmbeddingGemma 2
+  notebooks in `unslothai/notebooks`, including their saved outputs, and checked the text
+  notebook's trainable-parameter count against EmbeddingGemma 1's shapes. I ran none of them.
+- **Not checked.** Anything about the training recipe beyond what the files imply; on-device
+  quality at 70 vision tokens; whether vLLM or LiteRT apply the 280-token or the 750-token audio
+  cap; the 191 MB and 567 MB memory figures; the real resident memory of llama.cpp with these
+  GGUFs (the 0.4 GB is a sum, not a reading); whether llama-server embeds images or audio through
+  an mmproj; what the 135 MB in Unsloth Desktop refers to.
