@@ -19,6 +19,7 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { dirname, join, resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { checkVoice, DUR_PROOF } from './voice.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..', '..', '..')
@@ -42,10 +43,10 @@ if (opt.reviews) for (const f of readdirSync(opt.reviews).filter(f => f.endsWith
 
 const KINDS = ['proof', 'disproof', 'counterexample', 'improved-bound', 'partial', 'conditional']
 const LEAN = ['main', 'part', 'none']
-const DUR = { title: [2, 3, 2.6], object: [6, 9, 8], achievement: [3, 5, 4.4], verify: [2, 3, 2.6], end: [1.2, 2, 1.6] }
+const DUR = { title: [2, 3, 2.6], object: [6, 9, 8], proof: [5, 6, 5.5], achievement: [3, 5, 4.4], verify: [2, 3, 2.6], end: [1.2, 2, 1.6] }
 const PRIMS = ['numberline', 'graph', 'grid', 'plot', 'shape', 'venn', 'sequence', 'equation', 'tree']
 // fields whose text a viewer reads (paths are matched on their last key)
-const SHOWN = new Set(['short', 'title', 'subtitle', 'heading', 'text', 'label', 'note', 'tex', 'context', 'detail', 'ourCheck', 'caption', 'highlight', 'done', 'inLabel', 'outLabel', 'xlabel', 'ylabel', 'axisLabel', 'gap'])
+const SHOWN = new Set(['short', 'title', 'subtitle', 'heading', 'text', 'label', 'note', 'tex', 'context', 'detail', 'ourCheck', 'caption', 'highlight', 'done', 'inLabel', 'outLabel', 'xlabel', 'ylabel', 'axisLabel', 'gap', 'plain', 'steps', 'labels', 'role', 'boxes', 'assume', 'smaller', 'impossible', 'result', 'unit', 'step', 'base', 'thresholdLabel', 'floorLabel', 'patchLabel', 'boxLabel', 'leftTitle', 'rightTitle', 'left', 'right'])
 
 let bad = 0
 for (const f of files) {
@@ -60,9 +61,13 @@ for (const f of files) {
   if (fam && DISC[fam.d] !== s.discipline) errs.push(`discipline "${s.discipline}" but the catalogue says "${DISC[fam.d]}"`)
   if (!KINDS.includes(s.kind)) errs.push(`kind must be one of ${KINDS.join(', ')}`)
   for (const k of ['title', 'object', 'achievement', 'verify']) if (!s[k]) errs.push(`missing ${k}`)
+  // a proof scene or a voice allows 21 s; the scene defaults shrink with a proof
   let total = 0
-  for (const [k, [a, b, d]] of Object.entries(DUR)) { const v = (s[k] || {}).dur ?? d; if (v < a || v > b) errs.push(`${k}.dur ${v} outside ${a}-${b}`); total += v }
-  if (total < 15 || total > 20.001) errs.push(`total ${total.toFixed(2)} s outside 15-20 s`)
+  const P = !!s.proof, longer = P || !!s.voice
+  for (const [k, [a, b, d]] of Object.entries(DUR)) { if (k === 'proof' && !P) continue; const v = (s[k] || {}).dur ?? (P ? DUR_PROOF[k] : d); if (v < a || v > b) errs.push(`${k}.dur ${v} outside ${a}-${b}`); total += v }
+  if (total < 15 || total > (longer ? 21.001 : 20.001)) errs.push(`total ${total.toFixed(2)} s outside 15-${longer ? 21 : 20} s${s.voice ? ' (before the voice lengthens any scene; render.mjs plan reports the fitted total)' : ''}`)
+  { const v = checkVoice(s); errs.push(...v.errs); warns.push(...v.warns) }
+  if (s.plain && !/[a-z]/.test(s.plain)) errs.push('plain must be a sentence')
   const panels = s.object && (s.object.panels || (s.object.primitive ? [s.object] : []))
   if (!panels || !panels.length) errs.push('object needs a primitive or panels')
   else for (const p of panels) if (!PRIMS.includes(p.primitive)) errs.push(`unknown primitive ${p.primitive}`)

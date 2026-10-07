@@ -1,22 +1,148 @@
-"""Music bed for a math reel: a calm ambient pad plus gentle ticks on events.
+"""Sound for a math reel: a calm ambient pad, gentle ticks on events, and an
+optional narration track.
 
-    python audio.py events.json out.wav
+    python audio.py events.json out.wav          the bed (and the voice, if events.json lists it)
+    python audio.py tts --in lines.json --out DIR [--voice af_heart] [--allow-guess]
+        lines.json = {"107": ["spoken line", ...], ...}. Kokoro-82M on CPU (the
+        Windows farm's venv has it); each line is cached as DIR/<hash>.wav, the
+        hash taking the voice, the speed and the text as actually said, so an
+        unchanged line is never re-voiced. Prints {"107": [{"text", "wav", "sec"}]}.
+    python audio.py speak "text"                 what the voice will be given (offline)
+    python audio.py words --in lines.json        names the voice would guess at (needs misaki)
+
+events.json may carry "voice": [{"t": 0.3, "wav": "DIR/abcd.wav"}]: each line
+is placed at its time and the music is ducked about 10 dB under it.
 
 events.json = {"id": "107", "duration": 19.2, "events": [{"t": 2.6, "kind": "cut"}, ...]}
 (render.mjs writes it from REEL.load). Kinds: cut (scene change), tick (a
 marker lands), land (the result lands), stamp (the claim stamp), badge
 (verification badge).
 
-No narration and nothing sampled: every sound is synthesized here from sine
+Nothing sampled: every musical sound is synthesized here from sine
 partials and filtered noise, seeded by the family id, so a spec always sounds
 the same. Ideas follow explainer-films/audio.py (pads, one-pole filters,
 synthesized effects), but nothing is imported from it: that file is hashed
 into every explainer film's freshness check. Needs numpy only.
 """
-import json, sys, wave
+import argparse, hashlib, json, os, re, sys, wave
 import numpy as np
 
 SR = 48000
+VSR = 24000          # Kokoro's rate
+SPEED = 1.1          # as explainer-films: Kokoro at 1.0 is slow for a reel
+VOICE = "af_heart"
+
+
+# ---------------------------------------------------------------- speech
+# Copied from explainer-films/audio.py (not imported: that file is hashed into
+# every explainer film), with a math table instead of the model-name one.
+_P = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pronounce.json"), encoding="utf-8"))
+SAY = {k: v for k, v in _P.get("say", {}).items()}
+PHON = {k: v for k, v in _P.get("phonemes", {}).items()}
+_SAY = re.compile(r"(?<![\w])(" + "|".join(re.escape(k) for k in sorted(SAY, key=len, reverse=True)) + r")(?![\w])") if SAY else None
+_PHON = re.compile(r"(?<![\w.])(" + "|".join(re.escape(k) for k in sorted(PHON, key=len, reverse=True)) + r")((?:'|’)s)?(?![\w])") if PHON else None
+
+
+def _ph(m):
+    w, poss = m.group(1), m.group(2)
+    ph = PHON[w]
+    if poss:
+        ph += "s" if ph[-1] in "ptkfθ" else "z"
+    return f"[{w}{poss or ''}](/{ph}/)"
+
+
+def speakable(s):
+    s = s.replace("ai.thesatyajit.com", "ai dot the satyajit dot com")
+    s = s.replace("—", ", ").replace("–", " to ").replace("&", " and ").replace("%", " percent")
+    if _SAY:
+        s = _SAY.sub(lambda m: SAY[m.group(1)], s)
+    s = re.sub(r"[\[\]{}()<>`_*|\\$^]", " ", s)
+    if _PHON:
+        s = _PHON.sub(_ph, s)
+    s = re.sub(r"\)-(?=\w)", ") ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def line_key(voice, text):
+    return hashlib.sha1(json.dumps([voice, SPEED, speakable(text)], ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def guessed_names(texts):
+    from misaki import en
+    g2p = en.G2P(trf=False, british=False, fallback=None)
+    out = set()
+    for s in texts:
+        for t in g2p(speakable(s))[1]:
+            if (t.phonemes is None or "❓" in t.phonemes) and re.search(r"[A-Z0-9]", t.text):
+                out.add(t.text)
+    return sorted(out)
+
+
+def trim(y, sr, thr=0.01):
+    idx = np.where(np.abs(y) > thr)[0]
+    if not len(idx):
+        return y
+    a, b = max(0, idx[0] - int(.03 * sr)), min(len(y), idx[-1] + int(.08 * sr))
+    return y[a:b]
+
+
+def tts(args):
+    todo = json.load(open(args.inp, encoding="utf-8"))
+    names = guessed_names([l for lines in todo.values() for l in lines]) if not args.allow_guess else []
+    if names:
+        sys.exit("The voice does not know how to say: " + ", ".join(names) + ". Add them to pronounce.json (or pass --allow-guess).")
+    os.makedirs(args.out, exist_ok=True)
+    pipe, out = None, {}
+    for rid, lines in todo.items():
+        out[rid] = []
+        for line in lines:
+            k = line_key(args.voice, line)
+            wav = os.path.join(args.out, k + ".wav")
+            if not os.path.exists(wav):
+                if pipe is None:
+                    from kokoro import KPipeline
+                    pipe = KPipeline(lang_code="a")
+                chunks = [a for _, _, a in pipe(speakable(line), voice=args.voice, speed=SPEED)]
+                y = np.concatenate([c.numpy() if hasattr(c, "numpy") else np.asarray(c) for c in chunks]) if chunks else np.zeros(1, np.float32)
+                write_mono(wav, trim(y, VSR), VSR)
+            y, sr = read_mono(wav)
+            out[rid].append({"text": line, "wav": wav, "sec": round(len(y) / sr, 3)})
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def write_mono(path, y, sr):
+    pcm = np.clip(np.asarray(y, np.float64), -1, 1)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+        w.writeframes((pcm * 32767).astype("<i2").tobytes())
+
+
+def read_mono(path):
+    with wave.open(path, "rb") as w:
+        sr, n, ch = w.getframerate(), w.getnframes(), w.getnchannels()
+        y = np.frombuffer(w.readframes(n), "<i2").astype(np.float64) / 32767
+    if ch > 1:
+        y = y.reshape(-1, ch).mean(1)
+    return y, sr
+
+
+def voice_track(lines, n):
+    """The narration at SR, placed at its times; and a 0..1 'someone is talking' envelope."""
+    v = np.zeros(n)
+    for l in lines:
+        y, sr = read_mono(l["wav"])
+        if sr != SR:
+            y = np.interp(np.arange(int(len(y) * SR / sr)) * sr / SR, np.arange(len(y)), y)
+        place(v, y, float(l["t"]))
+    a = np.abs(v)
+    peak = np.max(a) or 1
+    v *= 10 ** (-3 / 20) / peak                      # speech peaks at -3 dBFS
+    # envelope: 150 ms lookahead/hold, smoothed both ways so the duck breathes
+    k = int(.15 * SR)
+    talk = (onepole(a, .9995) > .02 * peak).astype(float)
+    talk = np.convolve(talk, np.ones(k) / k, "same")
+    talk = np.clip(onepole(talk[::-1], .9993)[::-1] * 1.6, 0, 1)
+    return v, talk
 
 
 def midi(n):
@@ -127,7 +253,12 @@ def main(ev_path, out_path):
     peak = np.max(np.abs(st)) or 1
     rms = np.sqrt(np.mean(st ** 2)) or 1
     gain = min(.6 / peak, 10 ** (-22 / 20) / rms)  # quiet: peak at most -4.4 dBFS, RMS about -22 dBFS
-    pcm = np.clip(st * gain, -1, 1)
+    st = st * gain
+    if spec.get("voice"):
+        v, talk = voice_track(spec["voice"], n)
+        duck = 1 - (1 - 10 ** (-10 / 20)) * talk     # music about 10 dB under speech
+        st = st * duck[:, None] + v[:, None]
+    pcm = np.clip(st, -.98, .98)
     with wave.open(out_path, "wb") as w:
         w.setnchannels(2)
         w.setsampwidth(2)
@@ -137,6 +268,19 @@ def main(ev_path, out_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) > 1 and sys.argv[1] in ("tts", "words", "speak"):
+        ap = argparse.ArgumentParser()
+        ap.add_argument("mode"); ap.add_argument("text", nargs="?")
+        ap.add_argument("--in", dest="inp"); ap.add_argument("--out"); ap.add_argument("--voice", default=VOICE)
+        ap.add_argument("--allow-guess", action="store_true")
+        a = ap.parse_args()
+        if a.mode == "speak":
+            print(speakable(a.text or ""))
+        elif a.mode == "words":
+            print("\n".join(guessed_names([l for ls in json.load(open(a.inp, encoding="utf-8")).values() for l in ls])))
+        else:
+            tts(a)
+    elif len(sys.argv) == 3:
+        main(sys.argv[1], sys.argv[2])
+    else:
         sys.exit(__doc__)
-    main(sys.argv[1], sys.argv[2])

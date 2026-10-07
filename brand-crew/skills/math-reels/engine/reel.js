@@ -439,8 +439,8 @@ function load(spec) {
   const order = [['title', spec.title], ['object', spec.object], ...(P ? [['proof', spec.proof]] : []), ['achievement', spec.achievement], ['verify', spec.verify], ['end', spec.end || {}]]
   let t = 0; const scenes = []
   for (const [name, sc] of order) { const d = durOf(name, sc.dur, P); scenes.push({ name, sc, t0: t, t1: t + d, dur: d }); t += d }
-  const [tmin, tmax] = TOTAL[P ? 'proof' : 'plain']
-  if (P) need(t >= tmin - 1e-6 && t <= tmax + 1e-6, `total ${t.toFixed(2)} s outside ${tmin}-${tmax} s (${scenes.map(s => `${s.name} ${s.dur}`).join(', ')})${P ? '; with a proof scene, shorten object.dur (default 6)' : ''}`)
+  const [tmin, tmax] = TOTAL[P || spec.voice ? 'proof' : 'plain']
+  if (P || spec.voice) need(t >= tmin - 1e-6 && t <= tmax + 1e-6, `total ${t.toFixed(2)} s outside ${tmin}-${tmax} s (${scenes.map(s => `${s.name} ${s.dur}`).join(', ')})${P ? '; with a proof scene, shorten object.dur (default 6)' : ''}`)
   const S = name => scenes.find(s => s.name === name)
   if (P) checkProof(spec.proof)
   // panels of the object scene
@@ -2117,4 +2117,15 @@ async function ready() {
   return true
 }
 window.READY = ready()
-window.REEL = { load, frame, get plan() { return PLAN }, DISCIPLINES, PATTERNS, KINDS, LEAN, DUR, DUR_PROOF, LIMITS, ARCHETYPES }
+// Labels drawn this frame that poke out of the 1280x720 frame (more than 2 px),
+// for render.mjs frame --check: text the camera or a layout would crop.
+function offstage() {
+  const out = []
+  for (const [k, e] of pool) {
+    if (!used.has(k) || e.style.display === 'none' || +e.style.opacity < .05 || k === '_fit') continue
+    const r = e.getBoundingClientRect()
+    if (r.width && (r.left < -2 || r.top < -2 || r.right > W + 2 || r.bottom > H + 2)) out.push({ key: k, x: Math.round(r.left), y: Math.round(r.top), r: Math.round(r.right), b: Math.round(r.bottom), text: e.textContent.slice(0, 40) })
+  }
+  return out
+}
+window.REEL = { load, frame, offstage, get plan() { return PLAN }, DISCIPLINES, PATTERNS, KINDS, LEAN, DUR, DUR_PROOF, LIMITS, ARCHETYPES }
