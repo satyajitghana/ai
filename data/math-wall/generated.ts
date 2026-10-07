@@ -3,24 +3,4102 @@
 // Do not hand-edit; re-run the script after rendering a reel.
 
 /** Families with a rendered reel (public/films/math/<id>.mp4 + <id>-poster.webp). */
-export const REELS: Record<string, { duration: number | null; width: number | null; height: number | null; date: string }> = {}
+export const REELS: Record<string, { duration: number | null; width: number | null; height: number | null; date: string }> = {
+  "100": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "101": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "102": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "103": {
+    "duration": 20.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "104": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "105": {
+    "duration": 20.5,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "106": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "107": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "108": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "109": {
+    "duration": 20.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "110": {
+    "duration": 20.5,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "111": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "112": {
+    "duration": 20.5,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "113": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "114": {
+    "duration": 20.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "115": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "116": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "117": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "118": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "119": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "120": {
+    "duration": 20.1,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "121": {
+    "duration": 20.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "122": {
+    "duration": 20.3,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "124": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "125": {
+    "duration": 20.3,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "126": {
+    "duration": 20.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "127": {
+    "duration": 19.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "128": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "129": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "130": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "131": {
+    "duration": 20.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "132": {
+    "duration": 20.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "133": {
+    "duration": 20.5,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "134": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "135": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "136": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "137": {
+    "duration": 19.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "138": {
+    "duration": 20.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "139": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "140": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "141": {
+    "duration": 20.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "142": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "143": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "144": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "145": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "146": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "147": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "148": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "149": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "150": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "151": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "152": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "153": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "154": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "155": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "156": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "157": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "158": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "159": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "160": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "161": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "162": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "164": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "165": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "166": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "167": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "168": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "169": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "170": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "171": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "172": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "173": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "174": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "175": {
+    "duration": 20.1,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "176": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "177": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "178": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "179": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "180": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "181": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "182": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "183": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "184": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "185": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "186": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "187": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "188": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "189": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "190": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "191": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "192": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "193": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "194": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "195": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "196": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "197": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "198": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "199": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "200": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "201": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "202": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "203": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "204": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "205": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "206": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "207": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "208": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "209": {
+    "duration": 20,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "210": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "211": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "212": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "213": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "214": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "215": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "216": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "217": {
+    "duration": 19.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "218": {
+    "duration": 19.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "219": {
+    "duration": 20.1,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "220": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "221": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "222": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "223": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "224": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "225": {
+    "duration": 20.1,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "226": {
+    "duration": 19.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "227": {
+    "duration": 20.3,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "228": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "229": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "230": {
+    "duration": 20.1,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "231": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "232": {
+    "duration": 19.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "233": {
+    "duration": 20,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "234": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "235": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "236": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "237": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "238": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "239": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "240": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "241": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "242": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "243": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "244": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "245": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "246": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "247": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "248": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "249": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "250": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "251": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "252": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "253": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "254": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "255": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "256": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "257": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "258": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "259": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "260": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "261": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "262": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "263": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "264": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "265": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "266": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "267": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "268": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "269": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "270": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "271": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "272": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "273": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "274": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "275": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "276": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "277": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "278": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "279": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "280": {
+    "duration": 19.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "281": {
+    "duration": 20.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "282": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "283": {
+    "duration": 19.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "284": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "285": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "286": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "287": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "288": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "289": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "290": {
+    "duration": 20,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "291": {
+    "duration": 20,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "292": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "293": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "294": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "295": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "296": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "297": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "298": {
+    "duration": 19.6,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "299": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "300": {
+    "duration": 20.1,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "301": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "302": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "303": {
+    "duration": 20.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "304": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "305": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "306": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "307": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "308": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "309": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "310": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "311": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "312": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "313": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "314": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "315": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "316": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "317": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "318": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "319": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "320": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "321": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "322": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "323": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "324": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "325": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "326": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "327": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "328": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "329": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "330": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "331": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "332": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "333": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "334": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "335": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "336": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "337": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "338": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "339": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "340": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "341": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "342": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "343": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "344": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "345": {
+    "duration": 20.3,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "346": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "347": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "348": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "349": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "350": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "351": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "352": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "353": {
+    "duration": 20,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "354": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "355": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "356": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "357": {
+    "duration": 20,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "358": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "359": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "360": {
+    "duration": 19.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "361": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "362": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "363": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "364": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "365": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "366": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "367": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "368": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "369": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "370": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "371": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "372": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "373": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "374": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "375": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "376": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "377": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "001": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "002": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "003": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "004": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "005": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "006": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "007": {
+    "duration": 19.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "008": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "009": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "010": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "011": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "012": {
+    "duration": 20,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "013": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "014": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "015": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "016": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "017": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "018": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "019": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "020": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "021": {
+    "duration": 20.1,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "022": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "023": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "024": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "025": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "026": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "027": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "028": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "029": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "030": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "031": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "032": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "033": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "034": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "035": {
+    "duration": 20.5,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "036": {
+    "duration": 19.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "037": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "038": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "039": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "040": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "041": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "042": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "043": {
+    "duration": 19.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "044": {
+    "duration": 19.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "046": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "047": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "048": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "049": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "050": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "051": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "052": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "053": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "054": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "055": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "056": {
+    "duration": 19.4,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "057": {
+    "duration": 20.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "058": {
+    "duration": 20,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "059": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "060": {
+    "duration": 19.5,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "062": {
+    "duration": 19.2,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "063": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "064": {
+    "duration": 20,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "065": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "066": {
+    "duration": 19.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "067": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "068": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "069": {
+    "duration": 19.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "071": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "072": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "073": {
+    "duration": 20.9,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "074": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "075": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "076": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "077": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "078": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "079": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "080": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "081": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "082": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "083": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "084": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "085": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "086": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "087": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "088": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "089": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "090": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "091": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "092": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "093": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "094": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "095": {
+    "duration": 21,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "096": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "097": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "098": {
+    "duration": 20.7,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  },
+  "099": {
+    "duration": 20.8,
+    "width": 1280,
+    "height": 720,
+    "date": "2026-10-07"
+  }
+}
 
 /** Reel spec titles, for families that have a spec. */
 export const SPEC_TITLES: Record<string, { short?: string; title?: string; subtitle?: string }> = {
+  "100": {
+    "short": "Cylinder coverings below the half-area bound",
+    "title": "Cylinder coverings below the half-area bound",
+    "subtitle": "Claim: cylinders can cover a regular tetrahedron with total cross-section below half its smallest shadow"
+  },
+  "101": {
+    "short": "The simplex conjecture for $L_K$",
+    "title": "The simplex has the largest isotropic constant",
+    "subtitle": "Claim: in every dimension, $L_K$ is at most the simplex’s value, with equality only for simplices"
+  },
+  "102": {
+    "short": "The Unique Games Conjecture",
+    "title": "The Unique Games Conjecture",
+    "subtitle": "Claim: telling 99%-satisfiable from 1%-satisfiable Unique Games apart is NP-hard"
+  },
+  "103": {
+    "short": "$\\mathsf L = \\mathsf{RL} = \\mathsf{BPL}$",
+    "title": "Exact derandomization of logarithmic space",
+    "subtitle": "Claim: $\\mathsf L = \\mathsf{RL} = \\mathsf{BPL}$, coin flips never help log-space machines with bounded error"
+  },
+  "104": {
+    "short": "Mean-payoff games in quasipolynomial time",
+    "title": "Quasipolynomial algorithms for mean-payoff games",
+    "subtitle": "Claim: mean-payoff, stochastic and parity games solved deterministically in $2^{O((\\log L)^2)}$ bit operations"
+  },
+  "105": {
+    "short": "Perfect completeness for 2-to-1 games",
+    "title": "Perfect completeness for 2-to-1 games",
+    "subtitle": "Claim: Khot's 2-to-1 Games Conjecture holds with perfect completeness, for every fixed soundness $\\delta$"
+  },
+  "106": {
+    "short": "Colouring three-colourable graphs",
+    "title": "Hardness of colouring three-colourable graphs",
+    "subtitle": "Claim: NP-hard to tell 3-colourable graphs from graphs with no independent set of $\\delta n$ vertices"
+  },
   "107": {
     "short": "Matrix multiplication, $\\omega \\le 9/4$",
     "title": "Matrix multiplication with exponent at most $9/4$",
     "subtitle": "Claim: two $n \\times n$ complex matrices multiply in $O(n^{9/4+\\varepsilon})$ operations"
+  },
+  "108": {
+    "short": "A cubic permanent–determinant bound",
+    "title": "A cubic permanent–determinant lower bound",
+    "subtitle": "Claim: writing the $m \\times m$ permanent as a determinant, even in the limit, needs size $\\Omega(m^3)$"
+  },
+  "109": {
+    "short": "Integer multiplication below $n \\log n$",
+    "title": "Integer multiplication below $n \\log n$",
+    "subtitle": "Claim: one multitape Turing machine multiplies $n$-bit integers in $O(n(\\log n)^{1-\\kappa})$, $\\kappa = 2^{-182}$"
+  },
+  "110": {
+    "short": "Randomized $k$-server at $O(\\log^2 k)$",
+    "title": "Optimal-order randomized $k$-server on every metric",
+    "subtitle": "Claim: a randomized online policy is $O(\\log^2(k+1))$-competitive on every metric space, finite or not"
+  },
+  "111": {
+    "short": "One-sample matroid prophet inequalities",
+    "title": "One-sample matroid prophet inequalities",
+    "subtitle": "Claim: one past sample per element earns a constant fraction of the optimum on every matroid"
+  },
+  "112": {
+    "short": "Depth-three circuits beyond $2^{c\\sqrt n}$",
+    "title": "Beyond the square-root exponent for depth-three circuits",
+    "subtitle": "Claim: a polynomial-time language whose $n$-bit slice needs $2^{\\omega(\\sqrt n)}$ gates in OR–AND–OR circuits"
+  },
+  "113": {
+    "short": "Counting perfect matchings in any graph",
+    "title": "Approximate counting of perfect matchings",
+    "subtitle": "Claim: a polynomial-time randomized scheme counts the perfect matchings of any graph within $1 \\pm \\varepsilon$"
+  },
+  "114": {
+    "short": "Counting common bases of two matroids",
+    "title": "Approximate counting of common matroid bases",
+    "subtitle": "Claim: a polynomial-time randomized scheme counts the common bases of two matroids given by oracles"
+  },
+  "115": {
+    "short": "Contingency tables with arbitrary margins",
+    "title": "Sampling and counting contingency tables",
+    "subtitle": "Claim: exact uniform sampling of integer tables with any row and column sums, in expected polynomial time"
+  },
+  "116": {
+    "short": "Black-box noncommutative identity testing",
+    "title": "Uniform black-box noncommutative identity testing",
+    "subtitle": "Claim: one explicit matrix tuple of dimension at most $2ns^2$ catches every nonzero size-$s$ formula"
+  },
+  "117": {
+    "short": "Uniform Sparsest Cut: no constant factor",
+    "title": "Uniform sparsest cut: hardness and SDP gaps",
+    "subtitle": "Claim: approximating Uniform Sparsest Cut within any fixed constant factor is NP-hard"
+  },
+  "118": {
+    "short": "Bin packing: unbounded configuration-LP gaps",
+    "title": "Bin packing and unbounded configuration-LP gaps",
+    "subtitle": "Claim: the optimum can exceed the configuration LP by any constant number of bins"
+  },
+  "119": {
+    "short": "The Courtade–Kumar conjecture",
+    "title": "The Courtade–Kumar and Hellinger conjectures",
+    "subtitle": "Claim: among Boolean functions of noisy bits, a single coordinate keeps the most information"
+  },
+  "120": {
+    "short": "Maximum matching in almost-linear time",
+    "title": "Almost-linear-time maximum matching in general graphs",
+    "subtitle": "Claim: a maximum matching in any graph in $(n+m)^{1+o(1)}$ time, with success probability at least $2/3$"
+  },
+  "121": {
+    "short": "$(1+\\varepsilon)$ edit distance, almost linear",
+    "title": "Almost-linear approximation of edit distance",
+    "subtitle": "Claim: edit distance within any fixed factor $1+\\varepsilon$ in $N^{1+o(1)}$ expected time"
+  },
+  "122": {
+    "short": "Trace reconstruction: superpolynomial",
+    "title": "Quantitative trace-reconstruction bounds",
+    "subtitle": "Claim: recovering an arbitrary $n$-bit string from random-deletion traces needs $n^{\\Omega(\\log\\log n)}$ traces"
+  },
+  "124": {
+    "short": "Three machines, unit jobs: in P",
+    "title": "Polynomial-time scheduling on three identical machines",
+    "subtitle": "Claim: unit jobs with any precedence constraints are scheduled optimally on three machines in polynomial time"
+  },
+  "125": {
+    "short": "k-median at exactly $1 + 2/e$",
+    "title": "The metric k-median approximation threshold",
+    "subtitle": "Claim: a deterministic $(1 + 2/e + \\varepsilon)$-approximation for metric k-median, matching the known hardness"
+  },
+  "126": {
+    "short": "No small SDP for perfect matching",
+    "title": "Exponential semidefinite complexity of perfect matching",
+    "subtitle": "Claim: every exact semidefinite lift of the perfect matching polytope has size $2^{\\Omega(n)}$"
+  },
+  "127": {
+    "short": "The Gotsman–Linial bound",
+    "title": "Average sensitivity of polynomial threshold functions",
+    "subtitle": "Claim: a degree-$d$ threshold function on $n$ bits has average sensitivity at most $8d\\sqrt n$"
+  },
+  "128": {
+    "short": "Shortest common superstring within 2",
+    "title": "A factor-two approximation for shortest common superstring",
+    "subtitle": "Claim: a polynomial-time algorithm always finds a common superstring at most twice the optimal length"
+  },
+  "129": {
+    "short": "Sakoda–Sipser: exponential state costs",
+    "title": "Exponential state costs for two-way automata",
+    "subtitle": "Claim: two-way deterministic automata need exponentially many states to simulate one-way nondeterministic ones"
   },
   "130": {
     "short": "Exact Fourier transforms below $n \\log n$",
     "title": "Exact Fourier transforms below $n \\log n$",
     "subtitle": "Claim: the length-$n$ DFT in $O\\big(n(\\log n)^{1-10^{-13}}\\big)$ operations, in exact complex arithmetic"
   },
+  "131": {
+    "short": "Switch chain: rapid mixing, every sequence",
+    "title": "Rapid mixing of graph switches for every degree sequence",
+    "subtitle": "Claim: the edge-switch chain mixes within $2n^8$ steps for every graphical degree sequence"
+  },
+  "132": {
+    "short": "Block sensitivity beats sensitivity squared",
+    "title": "A superquadratic separation of sensitivity and block sensitivity",
+    "subtitle": "Claim: Boolean functions with $\\mathrm{bs}(f) \\ge s(f)^\\alpha$ for a fixed $\\alpha > 2$"
+  },
+  "133": {
+    "short": "The complexity of Weisfeiler–Leman",
+    "title": "The computational complexity of Weisfeiler–Leman refinement",
+    "subtitle": "Claim: deciding $k$-WL equivalence needs $n^{\\Omega(k)}$ time unconditionally, and is EXPTIME-complete with $k$ as input"
+  },
+  "134": {
+    "short": "Generalized star height at most three",
+    "title": "Generalized star height at most three",
+    "subtitle": "Claim: every regular language has a generalized regular expression with at most three nested stars"
+  },
+  "135": {
+    "short": "Homogeneous depth-five circuits for IMM",
+    "title": "Homogeneous depth-five lower bounds for matrix products",
+    "subtitle": "Claim: iterated matrix multiplication needs $n^{\\Theta(\\sqrt n)}$ gates in homogeneous depth-five circuits"
+  },
+  "136": {
+    "short": "A quasilinear PCP theorem for PPAD",
+    "title": "A quasilinear PCP theorem for PPAD",
+    "subtitle": "Claim: End-of-Line reduces, with $N(\\log N)^{O(1)}$ blow-up, to circuits that survive a fraction of bad gates"
+  },
+  "137": {
+    "short": "One-tape time in $T^{2/5}$ space",
+    "title": "One-tape time simulation in two-fifths-power space",
+    "subtitle": "Claim: $T$ steps of a one-tape machine can be simulated in $O(T^{2/5}\\,\\mathrm{polylog}\\, T)$ space"
+  },
+  "138": {
+    "short": "Subset Sum in $O(2^{0.49n})$",
+    "title": "Subset Sum in $O(2^{0.49n})$ time",
+    "subtitle": "Claim: worst-case Subset Sum on $n$ integers in $O(2^{0.49n})$ randomized time, below meet-in-the-middle"
+  },
+  "139": {
+    "short": "Log-concave sampling in $d^\\varepsilon$ queries",
+    "title": "Subpolynomial query complexity for log-concave sampling",
+    "subtitle": "Claim: $C_\\varepsilon d^\\varepsilon$ gradient queries suffice to sample a well-conditioned log-concave density"
+  },
+  "140": {
+    "short": "Memory–sample bounds for Gaussian regression",
+    "title": "Memory–sample lower bounds for noiseless regression",
+    "subtitle": "Claim: a streaming learner with $A d^2$ bits needs $\\Omega_A(d \\log(1/\\varepsilon))$ exact Gaussian measurements"
+  },
+  "141": {
+    "short": "$\\exists\\mathbb{R}$ in the counting hierarchy",
+    "title": "Existential real sentences in the counting hierarchy",
+    "subtitle": "Claim: the existential theory of the reals lies in $\\mathsf C_{26}\\mathsf P$, a fixed level of the counting hierarchy"
+  },
+  "142": {
+    "short": "Deterministic factoring over $\\mathbb{F}_p$",
+    "title": "Deterministic polynomial factorization over prime fields",
+    "subtitle": "Claim: deterministic polynomial-time factoring over $\\mathbb{F}_p$ without GRH, resting on a companion family"
+  },
+  "143": {
+    "short": "Hilbert's 16th: uniform limit-cycle bounds",
+    "title": "Hilbert's sixteenth problem: a uniform bound on limit cycles",
+    "subtitle": "Claim: for each degree $d$ there is a finite $B(d)$ bounding the limit cycles of every degree-$d$ planar field"
+  },
+  "144": {
+    "short": "Banach's simple Lebesgue spectrum",
+    "title": "Banach's simple Lebesgue-spectrum problem",
+    "subtitle": "Claim: a smooth volume-preserving map of the 3-torus whose single orbit $f \\circ T^n$ is an orthonormal basis"
+  },
+  "145": {
+    "short": "Rokhlin's multiple-mixing problem",
+    "title": "Rokhlin's multiple-mixing problem",
+    "subtitle": "Claim: every invertible mixing transformation of any probability space is mixing of every order"
+  },
+  "146": {
+    "short": "Positive entropy for the standard map",
+    "title": "Positive metric entropy for the standard map",
+    "subtitle": "Claim: past some $k_0$, every Chirikov standard map has positive metric entropy for area"
+  },
+  "147": {
+    "short": "The near-boundary Birkhoff conjecture",
+    "title": "The near-boundary Birkhoff conjecture",
+    "subtitle": "Claim: a smooth convex billiard with a continuous collar of caustics at its boundary is an ellipse"
+  },
+  "148": {
+    "short": "The dimension of self-similar measures",
+    "title": "The entropy-rate dimension formula for self-similar measures",
+    "subtitle": "Claim: on the line, $\\dim_H \\mu = \\min\\{1, h_{\\mathrm{RW}}/\\chi\\}$ for every self-similar measure, exact overlaps allowed"
+  },
+  "149": {
+    "short": "Permanence for mass-action networks",
+    "title": "Classwise permanence for weakly reversible mass-action systems",
+    "subtitle": "Claim: in every weakly reversible mass-action network, species stay bounded and away from zero, uniformly"
+  },
+  "150": {
+    "short": "Irrational triangle billiards are ergodic",
+    "title": "Weak mixing of triangular billiards with an irrational angle",
+    "subtitle": "Claim: in every triangle with an angle irrational to $\\pi$, the billiard flow is ergodic and weakly mixing"
+  },
+  "151": {
+    "short": "A $C^1$ counterexample to Shub's conjecture",
+    "title": "A $C^1$ counterexample to the entropy conjecture",
+    "subtitle": "Claim: a $C^1$ self-map with zero topological entropy whose homology grows like $2^n$"
+  },
+  "152": {
+    "short": "Zero entropy, no smooth model",
+    "title": "Zero entropy does not guarantee a smooth positive-volume model",
+    "subtitle": "Claim: an ergodic zero-entropy system that no smooth volume-preserving map on any compact manifold realizes"
+  },
+  "153": {
+    "short": "Singular Bernoulli convolutions beyond Pisot",
+    "title": "Non-Pisot singularity for Bernoulli convolutions",
+    "subtitle": "Claim: $\\nu_\\lambda$ is singular whenever $1/\\lambda$ is a quartic Salem number in $(1,2)$"
+  },
+  "154": {
+    "short": "Pointwise multiple ergodic averages",
+    "title": "Pointwise multiple ergodic averages for mixing transformations",
+    "subtitle": "Claim: for every mixing $T$, multiple ergodic averages converge almost everywhere, for any number of functions"
+  },
+  "155": {
+    "short": "Periodic tiling fails in $\\mathbb Z^3$",
+    "title": "A tile in $\\mathbb Z^3$ with no periodic tiling",
+    "subtitle": "Claim: a finite tile tiles $\\mathbb Z^3$ by translations but never periodically, so the conjecture fails at $d = 3$"
+  },
+  "156": {
+    "short": "Borsuk's conjecture fails in $d = 9$",
+    "title": "Borsuk's conjecture fails in dimension nine",
+    "subtitle": "Claim: the rank-one projectors $uu^\\top$, $u \\in \\mathbb R^4$, cannot be cut into 10 pieces of smaller diameter"
+  },
+  "157": {
+    "short": "Hadwiger's conjecture, disproved on paper",
+    "title": "Hadwiger's conjecture fails, even fractionally",
+    "subtitle": "Claim: large graphs with $\\alpha(G) \\le 2$ have $\\chi_f(G) > h(G)$; separately, $\\chi_{\\text{list}}(G) \\le C\\,h(G)$"
+  },
+  "158": {
+    "short": "The plane is not five-colourable",
+    "title": "The plane cannot be coloured with five colours",
+    "subtitle": "Claim: every 5-colouring of $\\mathbb R^2$ has two points at distance 1 in one colour, so $6 \\le \\chi(\\mathbb R^2) \\le 7$"
+  },
+  "159": {
+    "short": "$\\textsf{Erd\\H{o}s}$ reciprocal-sum conjecture",
+    "title": "Divergent reciprocal sums force long progressions",
+    "subtitle": "Claim: if $\\sum_{a \\in A} 1/a = \\infty$, then $A$ has arithmetic progressions of every finite length"
+  },
+  "160": {
+    "short": "Van der Waerden numbers, superexponential",
+    "title": "Van der Waerden numbers grow superexponentially",
+    "subtitle": "Claim: $W_r(k) > k^{c\\,k \\lfloor \\log_2 r \\rfloor}$ for all large $k$ and every $r \\ge 2$, two colours included"
+  },
+  "161": {
+    "short": "Sidorenko's conjecture is false",
+    "title": "A counterexample to Sidorenko's conjecture",
+    "subtitle": "Claim: a bipartite pattern with 35 vertices and 66 edges is rarer in some graph than in a random one"
+  },
+  "162": {
+    "short": "Ryser's conjecture fails",
+    "title": "Counterexamples to Ryser's covering conjecture",
+    "subtitle": "Claim: intersecting $(q+1)$-partite hypergraphs with covering number $q+1$, for every large prime $q$"
+  },
+  "164": {
+    "short": "Hindman's sums and products",
+    "title": "Hindman's finite sums and products conjecture",
+    "subtitle": "Claim: every finite colouring of $\\mathbb N$ has $m$-element sets whose subset sums and products all share one colour"
+  },
   "165": {
     "short": "Crossing numbers of $K_n$ and $K_{m,n}$",
     "title": "The crossing number of $K_n$ is $Z(n)$",
     "subtitle": "Claim: the Harary–Hill formula holds for every $n$, and Zarankiewicz's for every $K_{m,n}$"
+  },
+  "166": {
+    "short": "Distinct distances in every dimension",
+    "title": "Distinct distances in every dimension $d \\ge 3$",
+    "subtitle": "Claim: $n$ points in $\\mathbb R^d$ determine at least $c_d\\,n^{2/d}$ distinct distances, sharp up to the constant"
+  },
+  "167": {
+    "short": "Unit and pinned distances in the plane",
+    "title": "Unit distances below $n^{4/3}$, and pinned distances",
+    "subtitle": "Claim: $n$ planar points have $O(n^{\\beta})$ unit-distance pairs for some $\\beta < 4/3$"
+  },
+  "168": {
+    "short": "Kazhdan–Lusztig combinatorial invariance",
+    "title": "The poset determines the Kazhdan–Lusztig polynomial",
+    "subtitle": "Claim: isomorphic Bruhat intervals, in any Coxeter systems, have equal Kazhdan–Lusztig polynomials"
+  },
+  "169": {
+    "short": "Shareshian–Wachs $e$-positivity",
+    "title": "Chromatic quasisymmetric functions are $e$-positive",
+    "subtitle": "Claim: for every natural unit interval graph, each elementary coefficient lies in $\\mathbb N[q]$"
+  },
+  "170": {
+    "short": "The log exponent of $r(s,t)$",
+    "title": "Sharp log exponents for off-diagonal Ramsey numbers",
+    "subtitle": "Claim: $r(s,t) = t^{s-1}/(\\log t)^{s-2+o(1)}$ for every fixed $s \\ge 5$"
+  },
+  "171": {
+    "short": "Hypercube Ramsey numbers are linear",
+    "title": "The Ramsey number of the cube $Q_n$ is $O(2^n)$",
+    "subtitle": "Claim: $R(Q_n) \\le C\\,2^n$ for an absolute constant $C$, so $R(Q_n) = \\Theta(2^n)$"
+  },
+  "172": {
+    "short": "Euclidean Ramsey sets, classified",
+    "title": "A classification of Euclidean Ramsey configurations",
+    "subtitle": "Claim: a finite point set is Ramsey exactly when a tensor condition over its coordinate field holds"
+  },
+  "173": {
+    "short": "Seymour's second-neighbourhood conjecture",
+    "title": "Seymour's second-neighbourhood conjecture",
+    "subtitle": "Claim: every oriented graph has a vertex with at least as many vertices at distance two as at distance one"
+  },
+  "174": {
+    "short": "Strong thin spanning trees",
+    "title": "Strong thin trees, built in polynomial time",
+    "subtitle": "Claim: every $k$-edge-connected multigraph has a spanning tree using at most a $C/k$ share of every cut"
+  },
+  "175": {
+    "short": "Talagrand's threshold conjectures",
+    "title": "Talagrand's expectation-threshold conjectures",
+    "subtitle": "Claim: fractional and integral expectation thresholds differ by at most a universal factor"
+  },
+  "176": {
+    "short": "The second Kahn–Kalai conjecture",
+    "title": "The second Kahn–Kalai conjecture",
+    "subtitle": "Claim: $G(n,p)$ contains $H$ once $p \\ge C\\,p_E(n,H)(1 + \\log_2 h)$, with $h$ the edges of $H$"
+  },
+  "177": {
+    "short": "Coboundary expanders in every dimension",
+    "title": "Bounded-degree coboundary expanders in every dimension",
+    "subtitle": "Claim: for every $d \\ge 3$, large $d$-dimensional complexes with bounded degree and uniform $\\mathbb F_2$ coboundary expansion"
+  },
+  "178": {
+    "short": "Deterministic Ramanujan graphs, every degree",
+    "title": "Deterministic nonbipartite Ramanujan graphs in every degree",
+    "subtitle": "Claim: for each $d \\ge 3$, an algorithm builds a $d$-regular Ramanujan graph on every large even $n$"
+  },
+  "179": {
+    "short": "Circulant Hadamard and Barker sequences",
+    "title": "Circulant Hadamard matrices exist only in orders 1 and 4",
+    "subtitle": "Claim: Ryser's 1963 conjecture holds, so Barker sequences exist exactly at lengths 2, 3, 4, 5, 7, 11, 13"
+  },
+  "180": {
+    "short": "Barnette's Hamiltonian-cycle conjecture",
+    "title": "Barnette's conjecture: a Hamiltonian cycle, always",
+    "subtitle": "Claim: every cubic bipartite planar 3-connected graph has a Hamiltonian cycle"
+  },
+  "181": {
+    "short": "Linear cycle decompositions",
+    "title": "Every graph splits into $O(n)$ cycles and edges",
+    "subtitle": "Claim: the edges of any $n$-vertex graph partition into at most $Cn$ simple cycles and single edges"
+  },
+  "182": {
+    "short": "Square-difference-free sets: a power saving",
+    "title": "A power saving for square-difference-free sets",
+    "subtitle": "Claim: a set in $\\{1, \\dots, N\\}$ with no square difference has at most $C N^{1-c}$ elements"
+  },
+  "183": {
+    "short": "Halving lines: a power saving",
+    "title": "A power saving for planar halving lines",
+    "subtitle": "Claim: $n$ points with no three collinear have at most $C n^{4/3-\\varepsilon}$ halving lines"
+  },
+  "184": {
+    "short": "Clique-free graphs: AEKS and AKS",
+    "title": "Clique-free graphs behave like triangle-free ones",
+    "subtitle": "Claim: $K_r$-free graphs have independent sets of size $c_r\\,n \\log d / d$, and need $O(\\Delta/\\log\\Delta)$ colours"
+  },
+  "185": {
+    "short": "Infinite matroid intersection fails",
+    "title": "Infinite matroid intersection and packing/covering fail",
+    "subtitle": "Claim: two self-dual matroids on a countable set admit no packing/covering partition and no intersection"
+  },
+  "186": {
+    "short": "Sharp thresholds for graph properties",
+    "title": "Graph properties jump within $(\\log n)^{-2}$",
+    "subtitle": "Claim: symmetric monotone graph properties go from $\\varepsilon$ to $1-\\varepsilon$ in an edge-density window $O((\\log n)^{-2})$"
+  },
+  "187": {
+    "short": "Snaky in 21 Maker moves",
+    "title": "Maker builds Snaky in 21 moves",
+    "subtitle": "Claim: on the empty infinite grid, Maker forces the Snaky hexomino within 21 of its own moves"
+  },
+  "188": {
+    "short": "Random triangle removal: the constant",
+    "title": "The sharp terminal leave in random triangle removal",
+    "subtitle": "Claim: deleting random triangles from $K_n$ leaves about $n^{3/2}/(2\\sqrt 2)$ edges"
+  },
+  "189": {
+    "short": "Cycle–clique Ramsey numbers",
+    "title": "Cycle–clique Ramsey numbers, all of them",
+    "subtitle": "Claim: $R(C_m, K_n) = (m-1)(n-1) + 1$ for every $m \\ge n \\ge 3$, except $R(C_3, K_3) = 6$"
+  },
+  "190": {
+    "short": "Ordered matrix removal is not polynomial",
+    "title": "Polynomial removal fails for ordered binary matrices",
+    "subtitle": "Claim: one fixed $66 \\times 66$ zero–one pattern has no polynomial ordered removal bound"
+  },
+  "191": {
+    "short": "Heilbronn triangles: a power gain",
+    "title": "A power improvement for the Heilbronn triangle problem",
+    "subtitle": "Claim: $n$ points in the unit square with every triangle of area at least $n^{-2+c}$"
+  },
+  "192": {
+    "short": "The square-root degree bound fails",
+    "title": "Boolean functions beat the square-root degree bound",
+    "subtitle": "Claim: for every $C > 0$ some Boolean $f$ has $\\sum_i \\hat f(\\{i\\}) > C\\sqrt{\\deg f}$"
+  },
+  "193": {
+    "short": "Serre's intersection multiplicity, $\\chi > 0$",
+    "title": "Serre's intersection multiplicities are always positive",
+    "subtitle": "Claim: $\\chi(M,N) > 0$ over every regular local ring, including ramified mixed characteristic"
+  },
+  "194": {
+    "short": "Lech's conjecture, $e(R) \\le e(S)$",
+    "title": "Lech's conjecture: multiplicity never drops along a flat map",
+    "subtitle": "Claim: for every flat local map $R \\to S$ of Noetherian local rings, $e(R) \\le e(S)$"
+  },
+  "195": {
+    "short": "No small Cohen–Macaulay module",
+    "title": "A domain with no small Cohen–Macaulay module",
+    "subtitle": "Claim: a 3-dimensional complete normal local domain over $\\mathbb{C}$ with no f.g. module of full depth"
+  },
+  "196": {
+    "short": "Kaplansky's zero-divisor conjecture fails",
+    "title": "Kaplansky's zero-divisor conjecture fails",
+    "subtitle": "Claim: a torsion-free group $G$ and nonzero $\\alpha, \\beta \\in \\mathbb{F}_2[G]$ with $\\alpha\\beta = 0$"
+  },
+  "197": {
+    "short": "Kaplansky's direct finiteness fails",
+    "title": "A group algebra where $ab = 1$ but $ba \\ne 1$",
+    "subtitle": "Claim: a torsion-free group $G$ and $a, b \\in \\mathbb{F}_2[G]$ with $ab = 1 \\ne ba$, so $G$ is not sofic"
+  },
+  "198": {
+    "short": "The finitistic dimension can be infinite",
+    "title": "The finitistic dimension conjecture fails",
+    "subtitle": "Claim: a finite-dimensional algebra over $\\mathbb{C}$ with modules of finite but unbounded projective dimension"
+  },
+  "199": {
+    "short": "Auslander–Reiten, Tachikawa, Nakayama fail",
+    "title": "Auslander–Reiten, Tachikawa and Nakayama conjectures fail",
+    "subtitle": "Claim: over $k = \\mathbb{F}_2(q,H_1,H_2)$, rigid non-projective modules break a whole family of conjectures"
+  },
+  "200": {
+    "short": "Eisenbud–Green–Harris and lex-plus-powers",
+    "title": "Eisenbud–Green–Harris and lex-plus-powers, in characteristic 0",
+    "subtitle": "Claim: the lex-plus-powers ideal has every Hilbert function, with the largest graded Betti numbers"
+  },
+  "201": {
+    "short": "Kurosh's problem for division rings",
+    "title": "Kurosh's problem fails for division rings",
+    "subtitle": "Claim: a division ring algebraic over its centre, generated by two elements, yet infinite-dimensional"
+  },
+  "202": {
+    "short": "Alperin's weight conjecture, every block",
+    "title": "Alperin's weight conjecture for every block of every group",
+    "subtitle": "Claim: $l(B)$ equals the number of $B$-weights, for every $p$-block, without the classification"
+  },
+  "203": {
+    "short": "Donovan's conjecture",
+    "title": "Donovan's conjecture: finitely many Morita classes of blocks",
+    "subtitle": "Claim: blocks with defect groups of bounded order fall into finitely many Morita classes, for every $p$"
+  },
+  "204": {
+    "short": "Saturation for $\\mathrm{Spin}(2n)$",
+    "title": "Tensor saturation for the even spin groups",
+    "subtitle": "Claim: for $\\mathrm{Spin}(2n)$, an invariant that appears after scaling weights by $N$ already appears unscaled"
+  },
+  "205": {
+    "short": "Saxl's conjecture",
+    "title": "Saxl's conjecture: the staircase tensor square has everything",
+    "subtitle": "Claim: the tensor square of the staircase representation of $S_n$ contains every irreducible"
+  },
+  "206": {
+    "short": "Finite lattice representation fails",
+    "title": "A finite lattice that is no finite algebra's congruence lattice",
+    "subtitle": "Claim: some finite lattice is not $\\mathrm{Con}(A)$ for any finite algebra $A$; representability is undecidable"
+  },
+  "207": {
+    "short": "The Bass trace conjecture, every group",
+    "title": "The Bass trace conjecture for every discrete group",
+    "subtitle": "Claim: traces of idempotents over $\\ell^1(G)$ see only finite-order elements; for torsion-free $G$, only 0 and 1"
+  },
+  "208": {
+    "short": "Symmetric tensor categories in char $p$",
+    "title": "Finite symmetric tensor categories fibre over Verlinde ones",
+    "subtitle": "Claim: in characteristic $p$, each finite symmetric tensor category has a fibre functor to some $\\mathrm{Ver}_{p^n}$"
+  },
+  "209": {
+    "short": "Gersten's conjecture fails integrally",
+    "title": "Gersten's conjecture fails for ramified regular local rings",
+    "subtitle": "Claim: explicit regular local rings $A$ of mixed characteristic $(0,5)$ where $K_3(A) \\to K_3(\\mathrm{Frac}\\,A)$ has a kernel"
+  },
+  "210": {
+    "short": "Foulkes' conjecture for sixth powers",
+    "title": "Foulkes' conjecture for $a = 6$, and quadratic stabilization",
+    "subtitle": "Claim: $\\mathrm{Sym}^6(\\mathrm{Sym}^b V)$ embeds in $\\mathrm{Sym}^b(\\mathrm{Sym}^6 V)$ for every $b \\ge 6$"
+  },
+  "211": {
+    "short": "Random planar maps: surfaces and trees",
+    "title": "The geometric phase diagram of random planar maps",
+    "subtitle": "Claim: FK planar maps converge to CLE-decorated Liouville quantum gravity for $q < 4$, and to a tree for $q > 4$"
+  },
+  "212": {
+    "short": "No bigeodesics in planar first passage",
+    "title": "Planar first-passage percolation has no bigeodesics",
+    "subtitle": "Claim: with iid random edge times on $\\mathbb Z^2$, no doubly infinite fastest route exists, almost surely"
+  },
+  "213": {
+    "short": "$\\theta(p_c) = 0$ on quasi-transitive graphs",
+    "title": "No percolation at criticality on every quasi-transitive graph",
+    "subtitle": "Claim: at $p_c$ there is no infinite cluster, on $\\mathbb Z^3$ and on every quasi-transitive graph with $p_c < 1$"
+  },
+  "214": {
+    "short": "$p_c < p_u$ on nonamenable graphs",
+    "title": "The Benjamini–Schramm nonuniqueness conjecture",
+    "subtitle": "Claim: on every nonamenable quasi-transitive graph, $p_c < p_u$: some $p$ has infinitely many infinite clusters"
+  },
+  "215": {
+    "short": "Polyakov's mass gap for 2D $O(n)$ models",
+    "title": "Polyakov's mass gap and the $O(3)$ continuum limit",
+    "subtitle": "Claim: 2D $O(n)$ spin correlations decay exponentially at every temperature, for every $n \\ge 3$"
+  },
+  "216": {
+    "short": "The XY model: BKT fine structure",
+    "title": "Critical and near-critical XY scaling and BKT universality",
+    "subtitle": "Claim: critical XY correlations decay as $r^{-1/4}(\\log r)^{1/8}$, with the BKT essential singularity"
+  },
+  "217": {
+    "short": "Low-temperature SK fluctuations",
+    "title": "The low-temperature Sherrington–Kirkpatrick fluctuation law",
+    "subtitle": "Claim: for every $\\beta > 1$, $\\mathrm{Var}\\log Z_n \\sim c_\\beta n^{1/3}$, with a nondegenerate limit law"
+  },
+  "218": {
+    "short": "Ising universality under weak disorder",
+    "title": "Conformal universality for weak and random-bond Ising models",
+    "subtitle": "Claim: weakly perturbed and weakly disordered 2D Ising models keep conformally invariant critical limits"
+  },
+  "219": {
+    "short": "GOE statistics for random regular graphs",
+    "title": "GOE bulk universality for random regular graphs",
+    "subtitle": "Claim: for every fixed degree $d \\ge 3$, eigenvalue spacings of a random $d$-regular graph follow the GOE"
+  },
+  "220": {
+    "short": "Random walk in random environment: speed",
+    "title": "Random walk in random environment: escape implies speed",
+    "subtitle": "Claim: in $d \\ge 2$, a walk in an iid uniformly elliptic environment that escapes in a direction has positive speed"
+  },
+  "221": {
+    "short": "Mézard–Parisi for diluted spin glasses",
+    "title": "The Mézard–Parisi formula for diluted spin glasses",
+    "subtitle": "Claim: for even-arity Poisson-diluted Ising models, the free energy is $\\inf_r \\Phi_r$, as conjectured in 2004"
+  },
+  "222": {
+    "short": "Perceptron jamming exponents",
+    "title": "Perceptron free energies and microscopic jamming exponents",
+    "subtitle": "Claim: the full-RSB jamming exponents of the spherical perceptron, certified to seven digits"
+  },
+  "223": {
+    "short": "Cardy on $\\mathbb Z^2$ and FK interfaces",
+    "title": "Square-lattice FK interfaces and Cardy's formula",
+    "subtitle": "Claim: critical square-lattice FK interfaces converge to $\\mathrm{SLE}_\\kappa$ for every $q \\le 4$"
+  },
+  "224": {
+    "short": "Voronoi percolation obeys Cardy",
+    "title": "Critical universality for Poisson–Voronoi percolation",
+    "subtitle": "Claim: Cardy's formula holds for critical planar Poisson–Voronoi percolation, averaged over the tessellation"
+  },
+  "225": {
+    "short": "The six-vertex model's Gaussian free field",
+    "title": "A Gaussian free field for the balanced six-vertex model",
+    "subtitle": "Claim: six-vertex heights converge to a Gaussian free field with squared multiplier $1/\\arcsin(c/2)$, for $0 < c \\le 2$"
+  },
+  "226": {
+    "short": "Double dimers become $\\mathrm{CLE}_4$",
+    "title": "The double-dimer loop ensemble converges to $\\mathrm{CLE}_4$",
+    "subtitle": "Claim: overlaying two random domino tilings gives loops that converge, as curves, to nested $\\mathrm{CLE}_4$"
+  },
+  "227": {
+    "short": "SK Glauber dynamics across $\\beta = 1$",
+    "title": "Critical SK dynamics across the temperature transition",
+    "subtitle": "Claim: Glauber dynamics for the SK spin glass has a dimension-free spectral gap for every $\\beta < 1$"
+  },
+  "228": {
+    "short": "Phase transition for a radial potential",
+    "title": "Continuum phase transitions for radial pair potentials",
+    "subtitle": "Claim: radial pair potentials in $\\mathbb R^3$ whose free energy has a kink at one $\\beta_c$, over a range of densities"
+  },
+  "229": {
+    "short": "Exact reconstruction thresholds on trees",
+    "title": "Exact three- and four-state reconstruction thresholds on trees",
+    "subtitle": "Claim: for three colours, and for ferromagnetic four-state Potts, the Kesten–Stigum bound $d\\lambda^2 > 1$ is exact"
+  },
+  "230": {
+    "short": "The exact Hausdorff gauge of SLE",
+    "title": "Exact Hausdorff gauges for SLE",
+    "subtitle": "Claim: $r^d(\\log\\log 1/r)^{(2-d)/2}$ is the exact Hausdorff gauge of $\\mathrm{SLE}_\\kappa$, $d = 1 + \\kappa/8$"
+  },
+  "231": {
+    "short": "The free spanning forest is a factor of IID",
+    "title": "The free uniform spanning forest is a factor of IID",
+    "subtitle": "Claim: on every infinite, connected, locally finite graph, one rule builds the free forest from iid labels"
+  },
+  "232": {
+    "short": "Lipschitz heights on the triangular lattice",
+    "title": "Gaussian fields for triangular-lattice Lipschitz heights",
+    "subtitle": "Claim: random Lipschitz heights on the triangular lattice converge to the Gaussian free field"
+  },
+  "233": {
+    "short": "The critical Ashkin–Teller limit",
+    "title": "The joint critical Ashkin–Teller current limit",
+    "subtitle": "Claim: at Ashkin–Teller criticality, heights and current clusters converge jointly to GFF structures"
+  },
+  "234": {
+    "short": "Orthogonally invariant spin glasses",
+    "title": "Orthogonally invariant Ising spin glasses at every temperature",
+    "subtitle": "Claim: an explicit formula for the free energy at every temperature, for couplings $O^{\\mathsf T} D O$ with Haar $O$"
+  },
+  "235": {
+    "short": "Random $k$-SAT: variance and computability",
+    "title": "Limiting random SAT thresholds, sharp variance and computability",
+    "subtitle": "Claim: the random $k$-SAT threshold index has variance of order $n$, and the 3-SAT threshold is a computable real"
+  },
+  "236": {
+    "short": "Factor-of-IID Ising on trees, exactly",
+    "title": "The exact factor-of-IID threshold for free Ising spins on trees",
+    "subtitle": "Claim: the free Ising state on the $d$-regular tree is a factor of IID exactly when $\\tanh\\beta \\le 1/\\sqrt{d-1}$"
+  },
+  "237": {
+    "short": "The 3/4 exponent for self-avoiding walk",
+    "title": "The three-quarter exponent for honeycomb self-avoiding walk",
+    "subtitle": "Claim: a uniform $n$-step self-avoiding walk on the honeycomb lattice has diameter $n^{3/4+o(1)}$"
+  },
+  "238": {
+    "short": "The Thorp shuffle mixes in $\\Theta(\\log N)$",
+    "title": "Optimal logarithmic mixing of the Thorp shuffle",
+    "subtitle": "Claim: the Thorp shuffle on $N = 2^d$ cards mixes in $\\Theta(d)$ shuffles, from any starting order"
+  },
+  "239": {
+    "short": "Symmetric sign matrices: singular at rate $(1/2)^n$",
+    "title": "Sharp singularity rates for symmetric random sign matrices",
+    "subtitle": "Claim: a random symmetric $\\pm 1$ matrix is singular with probability $(1/2 + o(1))^n$"
+  },
+  "240": {
+    "short": "Shelah's eventual categoricity",
+    "title": "Shelah's eventual categoricity conjecture, in ZFC",
+    "subtitle": "Claim: an AEC categorical in one large enough cardinal is categorical in every larger one"
+  },
+  "241": {
+    "short": "Rigidity of the Turing degrees",
+    "title": "The Turing degrees have no nontrivial symmetry",
+    "subtitle": "Claim: every automorphism of the Turing degrees, ordered by $\\le_T$, is the identity"
+  },
+  "242": {
+    "short": "Single-fold Diophantine representations",
+    "title": "Diophantine sets with exactly one witness",
+    "subtitle": "Claim: every computably enumerable set has a polynomial representation with exactly one witness per member"
+  },
+  "243": {
+    "short": "Choiceless polynomial time is not P",
+    "title": "Choiceless polynomial time does not capture P",
+    "subtitle": "Claim: a polynomial-time query on finite structures that choiceless polynomial time with counting can't define"
+  },
+  "244": {
+    "short": "The Partition Principle without Choice",
+    "title": "The Partition Principle does not imply Choice",
+    "subtitle": "Claim: if ZF is consistent, so is ZF with the Partition Principle and the failure of Choice"
+  },
+  "245": {
+    "short": "Weak implies strong normalization",
+    "title": "Weak normalization implies strong normalization",
+    "subtitle": "Claim: in every pure type system, if every legal term has a normal form, every reduction terminates"
+  },
+  "246": {
+    "short": "Cannon's conjecture",
+    "title": "Cannon's conjecture",
+    "subtitle": "Claim: a hyperbolic group whose boundary is the 2-sphere acts geometrically on hyperbolic 3-space"
+  },
+  "247": {
+    "short": "A finitely presented infinite periodic group",
+    "title": "An infinite, finitely presented periodic group",
+    "subtitle": "Claim: a finitely presented infinite group in which every element has finite order"
+  },
+  "248": {
+    "short": "Thompson's group $F$ is not amenable",
+    "title": "Thompson's group $F$ is not amenable",
+    "subtitle": "Claim: $F$ admits no left-invariant mean on bounded functions"
+  },
+  "249": {
+    "short": "Eilenberg–Ganea fails",
+    "title": "A counterexample to the Eilenberg–Ganea conjecture",
+    "subtitle": "Claim: a finitely generated group of cohomological dimension 2 with no 2-dimensional classifying space"
+  },
+  "250": {
+    "short": "The Boone–Higman conjecture",
+    "title": "The Boone–Higman conjecture",
+    "subtitle": "Claim: a finitely generated group has solvable word problem iff it embeds in a finitely presented simple group"
+  },
+  "251": {
+    "short": "Dixmier's unitarizability problem",
+    "title": "Unitarizable groups are exactly the amenable ones",
+    "subtitle": "Claim: a discrete group is amenable iff every uniformly bounded representation is similar to a unitary one"
+  },
+  "252": {
+    "short": "A hyperbolic group, not residually finite",
+    "title": "A hyperbolic group that is not residually finite",
+    "subtitle": "Claim: a torsion-free hyperbolic group that is neither residually finite nor linear over any field"
+  },
+  "253": {
+    "short": "A finitely presented simple amenable group",
+    "title": "An infinite finitely presented simple amenable group",
+    "subtitle": "Claim: one infinite group that is finitely presented, simple and amenable at once"
+  },
+  "254": {
+    "short": "The $K(\\pi,1)$ conjecture for Artin groups",
+    "title": "The $K(\\pi,1)$ conjecture for every Artin group",
+    "subtitle": "Claim: for every finite Coxeter matrix, the Salvetti complex is a classifying space for its Artin group"
+  },
+  "255": {
+    "short": "QI rigidity of polycyclic groups",
+    "title": "Polycyclic groups are recognized by their large-scale shape",
+    "subtitle": "Claim: a group quasi-isometric to a virtually polycyclic group is itself virtually polycyclic"
+  },
+  "256": {
+    "short": "Kervaire's conjecture, and Howie's",
+    "title": "Kervaire's conjecture, and equations over groups",
+    "subtitle": "Claim: adding one generator and one relation never kills a nontrivial group"
+  },
+  "257": {
+    "short": "A hyperbolic group that is not CAT(0)",
+    "title": "A hyperbolic group with no geometric CAT(0) action",
+    "subtitle": "Claim: a hyperbolic group that acts geometrically on no proper CAT(0) space, in any dimension"
+  },
+  "258": {
+    "short": "Gersten's conjecture for one-relator groups",
+    "title": "Gersten's conjecture for one-relator groups",
+    "subtitle": "Claim: a one-relator group with no Baumslag–Solitar subgroup is hyperbolic"
+  },
+  "259": {
+    "short": "A group without fixed price",
+    "title": "A group whose actions have different costs",
+    "subtitle": "Claim: a finitely generated group with two free measure-preserving actions of different cost"
+  },
+  "260": {
+    "short": "Spacetime Penrose inequality",
+    "title": "The spacetime Penrose inequality, in every dimension",
+    "subtitle": "Claim: mass is at least that of a Schwarzschild black hole with the same minimum enclosing area, for all $n \\ge 3$"
+  },
+  "261": {
+    "short": "Anderson model: $d \\ge 3$ and $d = 2$",
+    "title": "Delocalization in three dimensions, localization in two",
+    "subtitle": "Claim: weak disorder leaves a.c. spectrum on $\\mathbb Z^d$, $d \\ge 3$; on $\\mathbb Z^2$ any disorder gives pure point spectrum"
+  },
+  "262": {
+    "short": "Sharp 1D Lieb–Thirring constants",
+    "title": "Sharp one-dimensional Lieb–Thirring constants",
+    "subtitle": "Claim: for $\\tfrac{1}{2} < \\gamma < \\tfrac{3}{2}$ the sharp constant is the one-bound-state constant, for matrix potentials too"
+  },
+  "263": {
+    "short": "The ionization conjecture",
+    "title": "The ionization conjecture",
+    "subtitle": "Claim: $M$ nuclei of total charge $Z$ bind at most $Z + CM$ electrons, with one universal constant $C$"
+  },
+  "264": {
+    "short": "Strong cosmic censorship near Kerr",
+    "title": "Strong cosmic censorship near two-ended Kerr data",
+    "subtitle": "Claim: near each fixed rotating Kerr, data with a square-integrable-connection extension are non-generic"
+  },
+  "265": {
+    "short": "Area law for 2D gapped systems",
+    "title": "An area law for two-dimensional gapped systems",
+    "subtitle": "Claim: a uniform global gap bounds each region's entanglement entropy by a constant times its boundary"
+  },
+  "266": {
+    "short": "Mutually unbiased bases in dimension six",
+    "title": "Exactly three mutually unbiased bases in dimension six",
+    "subtitle": "Claim: $\\mathbb C^6$ has at most three mutually unbiased bases, settling Zauner's $N(6) = 3$"
+  },
+  "267": {
+    "short": "Bose–Einstein condensation at $T > 0$",
+    "title": "Bose–Einstein condensation at positive temperature",
+    "subtitle": "Claim: the dilute 3D hard-sphere Bose gas condenses in the thermodynamic limit at some fixed temperature $T > 0$"
+  },
+  "268": {
+    "short": "The spin-one Haldane gap",
+    "title": "The spin-one Haldane gap",
+    "subtitle": "Claim: the spin-1 Heisenberg ring has a unique ground state and a gap above $\\log(20)/784$ for even $L \\ge 2304$"
+  },
+  "269": {
+    "short": "The Laughlin spectral gap",
+    "title": "A uniform Laughlin gap, stable under weak disorder",
+    "subtitle": "Claim: above the Laughlin state at filling $1/3$ the gap is at least $1/25$ for all large $N$"
+  },
+  "270": {
+    "short": "BFSS threshold bound state",
+    "title": "The BFSS threshold bound state, for every $N$",
+    "subtitle": "Claim: SU($N$) BFSS matrix quantum mechanics has exactly one normalizable zero-energy state, for every $N \\ge 2$"
+  },
+  "271": {
+    "short": "Magnetization and Bloch's law",
+    "title": "Spontaneous magnetization and Bloch's law",
+    "subtitle": "Claim: the 3D quantum Heisenberg ferromagnet orders at low temperature, with $\\omega(S^z_0) \\ge S/4$"
+  },
+  "272": {
+    "short": "PPT-squared is false",
+    "title": "PPT-squared is false, and entanglement without secret key",
+    "subtitle": "Claim: a PPT channel on $M_{21}$ whose square still preserves entanglement"
+  },
+  "273": {
+    "short": "The entropy photon-number inequality",
+    "title": "The entropy photon-number inequality",
+    "subtitle": "Claim: on a beam splitter, $N(\\rho_C) \\ge \\eta N(\\rho_A) + (1-\\eta) N(\\rho_B)$ for all finite-energy multimode inputs"
+  },
+  "274": {
+    "short": "Parity is not in QAC$^0$",
+    "title": "Parity is not in QAC$^0$",
+    "subtitle": "Claim: constant-depth quantum circuits with many-input Toffolis and polynomial ancillas cannot compute parity"
+  },
+  "275": {
+    "short": "QMA-hardness of the Coulomb problem",
+    "title": "QMA-hardness of continuum Coulomb energy",
+    "subtitle": "Claim: approximating a molecule's electronic ground-state energy is QMA-hard, even with unit-charge nuclei"
+  },
+  "276": {
+    "short": "Capacity of generalized amplitude damping",
+    "title": "Classical capacity of generalized amplitude damping",
+    "subtitle": "Claim: for every such qubit channel the classical capacity equals the one-shot Holevo capacity"
+  },
+  "277": {
+    "short": "Threshold repetition for entangled games",
+    "title": "Threshold parallel repetition for entangled games",
+    "subtitle": "Claim: winning a $v + \\delta$ fraction of $k$ parallel rounds is exponentially unlikely, for any finite game"
+  },
+  "278": {
+    "short": "Kohn–Sham representability fails",
+    "title": "Failure of Kohn–Sham ensemble representation",
+    "subtitle": "Claim: a three-electron molecule whose ground-state density no noninteracting ensemble reproduces"
+  },
+  "279": {
+    "short": "Exact factoring, fixed finite gate set",
+    "title": "Exact quantum factoring over a fixed finite gate set",
+    "subtitle": "Claim: poly-time circuits over one finite gate set factor every $N \\ge 2$ completely, with probability 1"
+  },
+  "280": {
+    "short": "Unitary VOAs and conformal nets",
+    "title": "Unitary vertex operator algebras and conformal nets",
+    "subtitle": "Claim: every simple unitary strongly rational VOA is strongly local and gives a completely rational net"
+  },
+  "281": {
+    "short": "QAOA reaches the SK optimum",
+    "title": "QAOA attains the Sherrington–Kirkpatrick optimum",
+    "subtitle": "Claim: with size to infinity first, finite-depth QAOA gets arbitrarily close to the SK ground-state energy"
+  },
+  "282": {
+    "short": "Scale to conformal symmetry in 4D",
+    "title": "From scale symmetry to local conformal symmetry in 4D",
+    "subtitle": "Claim: under stated axioms, a scale-invariant 4D QFT has a symmetric, conserved, traceless stress tensor"
+  },
+  "283": {
+    "short": "Unitary synthesis from a Boolean oracle",
+    "title": "Polynomial-time unitary synthesis from a Boolean oracle",
+    "subtitle": "Claim: one uniform polynomial oracle circuit reaches every $n$-qubit unitary within diamond distance $1/2$"
+  },
+  "284": {
+    "short": "Randomized vs quantum queries: exponent 4",
+    "title": "The optimal quartic separation of randomized and quantum queries",
+    "subtitle": "Claim: total functions with $R \\ge Q^{4-o(1)}$, so the known $R = O(Q^4)$ is optimal"
+  },
+  "285": {
+    "short": "Baum–Connes and Kadison–Kaplansky fail",
+    "title": "Counterexamples to Baum–Connes and Kadison–Kaplansky",
+    "subtitle": "Claim: a torsion-free group with a projection of trace strictly between 0 and $1/2$ in its reduced C*-algebra"
+  },
+  "286": {
+    "short": "Rigidity of lattice von Neumann algebras",
+    "title": "Rigidity and arithmetic of lattice von Neumann algebras",
+    "subtitle": "Claim: finite-index correspondences of twisted lattice factors all come from group-level data"
+  },
+  "287": {
+    "short": "The free group factors are isomorphic",
+    "title": "The free group factors are all isomorphic",
+    "subtitle": "Claim: $L(\\mathbb F_n) \\cong L(\\mathbb F_{n+1})$ for $n \\ge 3$, hence every $L(\\mathbb F_r)$, $1 < r \\le \\infty$, is one factor"
+  },
+  "288": {
+    "short": "Kadison's similarity problem",
+    "title": "Kadison's similarity problem",
+    "subtitle": "Claim: every bounded unital homomorphism of a C*-algebra into $B(H)$ is similar to a *-homomorphism"
+  },
+  "289": {
+    "short": "Strong Kadison–Kastler stability",
+    "title": "Strong Kadison–Kastler stability",
+    "subtitle": "Claim: von Neumann algebras close enough are conjugate by a unitary near 1, with a universal tolerance"
+  },
+  "290": {
+    "short": "Connes' bicentralizer problem",
+    "title": "Connes' bicentralizer problem",
+    "subtitle": "Claim: every type III$_1$ factor with separable predual has trivial bicentralizer, via a relative version"
+  },
+  "291": {
+    "short": "Toms–Winter: comparison implies $\\mathcal Z$",
+    "title": "Strict comparison implies Jiang–Su stability",
+    "subtitle": "Claim: simple separable unital nuclear C*-algebras with strict comparison absorb $\\mathcal Z$ (Toms–Winter)"
+  },
+  "292": {
+    "short": "Kirchberg's $\\mathcal O_2$ embedding problem",
+    "title": "Kirchberg's $\\mathcal O_2$ ultrapower embedding problem",
+    "subtitle": "Claim: a separable unital C*-algebra that embeds in no ultrapower $\\mathcal O_2^\\omega$, nor any nuclear ultrapower"
+  },
+  "293": {
+    "short": "No hyperinvariant subspace",
+    "title": "An operator with no hyperinvariant subspace",
+    "subtitle": "Claim: a nonzero quasinilpotent operator whose commutant is a proper, closed, transitive algebra"
+  },
+  "294": {
+    "short": "Kaplansky's quasitraces are not traces",
+    "title": "Kaplansky's quasitraces are not traces",
+    "subtitle": "Claim: a separable unital C*-algebra with 2-quasitraces but no tracial state"
+  },
+  "295": {
+    "short": "The Kadison–Ringrose conjecture",
+    "title": "The Kadison–Ringrose cohomology conjecture",
+    "subtitle": "Claim: every bounded Hochschild cocycle of a von Neumann algebra is a coboundary in every degree $k \\ge 2$"
+  },
+  "296": {
+    "short": "The generator problem",
+    "title": "The generator problem for finite factors",
+    "subtitle": "Claim: every II$_1$ factor with separable predual is generated by a single operator"
+  },
+  "297": {
+    "short": "Naimark's problem in ZFC",
+    "title": "A ZFC counterexample to Naimark's problem",
+    "subtitle": "Claim: in ZFC, a simple non-elementary C*-algebra whose irreducible representations are all equivalent"
+  },
+  "298": {
+    "short": "Two free entropies differ",
+    "title": "Two notions of free entropy differ, even when finite",
+    "subtitle": "Claim: a tuple $X$ with $-\\infty < \\chi(X) \\le \\chi^*(X) - \\tfrac{1}{2} < \\infty$"
+  },
+  "299": {
+    "short": "The Kirchberg–Rørdam character criterion",
+    "title": "The Kirchberg–Rørdam character criterion",
+    "subtitle": "Claim: a unital separable C*-algebra is $\\mathcal Z$-stable exactly when its central sequence algebra has no characters"
+  },
+  "300": {
+    "short": "Paving over any masa",
+    "title": "Approximation and quadratic strong-operator paving",
+    "subtitle": "Claim: self-adjoint elements pave over any masa with at most $5 \\times 10^8\\,\\varepsilon^{-2}$ projections"
+  },
+  "301": {
+    "short": "Trace cones classify $\\mathcal W$-stabilizations",
+    "title": "The trace cone classifies Razak–Jacelon stabilizations",
+    "subtitle": "Claim: separable nuclear $A \\otimes \\mathcal W \\otimes \\mathcal K$ are classified by their cones of tracial weights"
+  },
+  "302": {
+    "short": "Radius of comparison is half mean dimension",
+    "title": "Radius of comparison equals half the mean dimension",
+    "subtitle": "Claim: for every minimal homeomorphism, $\\mathrm{rc}(C(X) \\rtimes_h \\mathbb Z) = \\tfrac{1}{2}\\,\\mathrm{mdim}(X, h)$"
+  },
+  "303": {
+    "short": "Weak pure infiniteness is strong",
+    "title": "Weak pure infiniteness and $\\mathcal O_\\infty$ absorption",
+    "subtitle": "Claim: if every positive element is properly infinite, the C*-algebra is strongly purely infinite"
+  },
+  "304": {
+    "short": "Hilbert–Smith in every dimension",
+    "title": "The Hilbert–Smith conjecture in every dimension",
+    "subtitle": "Claim: a locally compact group acting faithfully on a connected $n$-manifold is a Lie group, for every $n$"
+  },
+  "305": {
+    "short": "Disc embedding fails: $F_2$ is not good",
+    "title": "Four-dimensional disc embedding fails for $F_2$",
+    "subtitle": "Claim: a 4-manifold meets every algebraic test for disc embedding, yet its circles bound no disjoint discs"
+  },
+  "306": {
+    "short": "Purely cosmetic surgery",
+    "title": "The purely cosmetic surgery conjecture",
+    "subtitle": "Claim: for a nontrivial knot, different surgery slopes never give the same oriented 3-manifold"
+  },
+  "307": {
+    "short": "Coarse Novikov fails, bounded geometry",
+    "title": "The rational coarse Novikov conjecture fails",
+    "subtitle": "Claim: a union of finite bounded-degree graphs carries an infinite-order class whose coarse index vanishes"
+  },
+  "308": {
+    "short": "Smith–Toda complexes $V(n)$ at every height",
+    "title": "Finite Smith–Toda complexes at every height",
+    "subtitle": "Claim: for every $n$ there is a prime $p$ and a finite spectrum $V(n)$ killing $p, v_1, \\ldots, v_n$ once"
+  },
+  "309": {
+    "short": "Kervaire invariant at the prime 3",
+    "title": "The Kervaire invariant problem at the prime three",
+    "subtitle": "Claim: at $p = 3$ the classes $b_j$ survive exactly for $j = 0, 2, 3$, in stems 10, 106 and 322"
+  },
+  "310": {
+    "short": "Quillen's conjecture, rationally",
+    "title": "Quillen's conjecture in rational homology",
+    "subtitle": "Claim: if $O_p(G) = 1$, the poset of elementary abelian $p$-subgroups has nonzero rational homology"
+  },
+  "311": {
+    "short": "Hovey–Strickland and Chai",
+    "title": "The Hovey–Strickland and Chai conjectures",
+    "subtitle": "Claim: invariant primes of the Lubin–Tate ring form a chain, so $K(n)$-local thick ideals are classified"
+  },
+  "312": {
+    "short": "Grothendieck's homotopy hypothesis",
+    "title": "The Grothendieck homotopy hypothesis",
+    "subtitle": "Claim: weak globular $\\infty$-groupoids have the homotopy theory of spaces, as Grothendieck guessed"
+  },
+  "313": {
+    "short": "Finite generation for the $K(n)$-local sphere",
+    "title": "Finite generation for the $K(n)$-local sphere",
+    "subtitle": "Claim: every $\\pi_t L_{K(n)} S$ is a finitely generated $\\mathbb Z_p$-module, at every prime and height"
+  },
+  "314": {
+    "short": "Chromatic fixed-point loss",
+    "title": "Cyclic length and chromatic fixed-point loss",
+    "subtitle": "Claim: the chromatic height lost from $H$- to $G$-fixed points equals the shortest cyclic subnormal chain"
+  },
+  "315": {
+    "short": "Singer conjecture in dimension 4",
+    "title": "The four-dimensional Singer conjecture",
+    "subtitle": "Claim: for closed aspherical 4-manifolds, the $L^2$-Betti numbers vanish outside the middle degree"
+  },
+  "316": {
+    "short": "Curtis's conjecture",
+    "title": "Curtis's conjecture on the stable Hurewicz image",
+    "subtitle": "Claim: only $\\eta, \\nu, \\sigma$ and the Kervaire classes $\\theta_j$ reach the mod-2 homology of $Q_0S^0$"
+  },
+  "317": {
+    "short": "Thomason model structures, every $n$",
+    "title": "Thomason model structures in every strict dimension",
+    "subtitle": "Claim: strict $n$-categories, for every $n$ up to $\\omega$, model all homotopy types, as categories do"
+  },
+  "318": {
+    "short": "Chromatic splitting fails at height 3",
+    "title": "Chromatic splitting fails at height three",
+    "subtitle": "Claim: for $p \\ge 5$ Hopkins's strong chromatic splitting fails at height 3, seen by a nonzero map on $\\pi_{-3}$"
+  },
+  "319": {
+    "short": "Hahn–Wilson fails at height 2",
+    "title": "Counterexamples to finite generation at chromatic height two",
+    "subtitle": "Claim: for large primes, a spectrum of fp-type 2 is not finitely built from $\\mathrm{BP}\\langle 2\\rangle$"
+  },
+  "320": {
+    "short": "Borel fails in dimension 4",
+    "title": "Nonhomeomorphic closed aspherical four-manifolds",
+    "subtitle": "Claim: two closed aspherical 4-manifolds are homotopy equivalent but not homeomorphic"
+  },
+  "321": {
+    "short": "Wall's D(2) problem: a counterexample",
+    "title": "A counterexample to Wall's D(2) problem",
+    "subtitle": "Claim: a finite 3-complex that passes every D(2) test is not homotopy equivalent to any 2-complex"
+  },
+  "322": {
+    "short": "Tingley's sphere-isometry problem",
+    "title": "Tingley's problem: isometries of unit spheres are linear",
+    "subtitle": "Claim: every onto isometry between the unit spheres of two real Banach spaces extends to a linear isometry"
+  },
+  "323": {
+    "short": "The separable quotient problem",
+    "title": "The separable quotient problem is independent of ZFC",
+    "subtitle": "Claim: under CH some Banach space has no separable quotient; if $\\mathfrak c$ is real-valued measurable, every one has"
+  },
+  "324": {
+    "short": "Lipschitz-equivalent, not isomorphic",
+    "title": "Lipschitz-equivalent separable spaces need not be isomorphic",
+    "subtitle": "Claim: separable $X$, $Y$ are the same metric space up to bounded distortion, yet not linearly isomorphic"
+  },
+  "325": {
+    "short": "The complete Crouzeix conjecture",
+    "title": "The complete Crouzeix conjecture: the constant is 2",
+    "subtitle": "Claim: $\\|P(A)\\| \\le 2 \\sup_{W(A)} \\|P\\|$ for every Hilbert-space operator $A$, even with matrix coefficients"
+  },
+  "326": {
+    "short": "Cotype–cotype under approximation",
+    "title": "The cotype–cotype conjecture, under the approximation property",
+    "subtitle": "Claim: with AP, a real Banach space is K-convex exactly when $X$ and $X^*$ both have finite cotype"
+  },
+  "327": {
+    "short": "Markov type and superreflexivity",
+    "title": "Markov type characterizes superreflexivity",
+    "subtitle": "Claim: a real Banach space with Markov type $p > 1$ is superreflexive, which closes a Ribe-program question"
+  },
+  "328": {
+    "short": "Kirk's problem: reflexive fixed points",
+    "title": "Nonexpansive maps on reflexive spaces have fixed points",
+    "subtitle": "Claim: in any real reflexive Banach space, a nonexpansive map of a closed bounded convex set fixes a point"
+  },
+  "329": {
+    "short": "Metric-entropy duality fails",
+    "title": "A counterexample to metric-entropy duality",
+    "subtitle": "Claim: covering $K$ by cubes and covering the cube's polar by $K^\\circ$ can differ by any constant factor in the log"
+  },
+  "330": {
+    "short": "Lipschitz-free spaces: AP without BAP",
+    "title": "Bounded approximation fails in a uniformly discrete free space",
+    "subtitle": "Claim: a uniformly discrete metric space whose Lipschitz-free space has AP but no bounded AP"
+  },
+  "331": {
+    "short": "Midpoint convexity and diamonds",
+    "title": "A reflexive space where diamonds need unbounded distortion",
+    "subtitle": "Claim: a reflexive space with no equivalent AUC norm in which diamond graphs still do not embed uniformly"
+  },
+  "332": {
+    "short": "Metric Markov cotype of $\\ell_1$",
+    "title": "Lipschitz maps from Hilbert space into $\\ell_1$ extend",
+    "subtitle": "Claim: $\\ell_1$ has metric Markov cotype 2, with $N_2(\\ell_1) \\le 12\\sqrt{21}$, which answers Ball's extension problem"
+  },
+  "333": {
+    "short": "Smooth isometric immersions into $\\mathbb{R}^4$",
+    "title": "Every closed surface fits isometrically in $\\mathbb{R}^4$",
+    "subtitle": "Claim: every closed smooth Riemannian surface has a $C^\\infty$ isometric immersion into $\\mathbb{R}^4$"
+  },
+  "334": {
+    "short": "A smooth metric with no local immersion in $\\mathbb{R}^3$",
+    "title": "A smooth surface metric that no piece of $\\mathbb{R}^3$ realizes",
+    "subtitle": "Claim: a $C^\\infty$ metric on $(-1,1)^2$ with no smooth isometric immersion of any neighbourhood of 0 into $\\mathbb{R}^3$"
+  },
+  "335": {
+    "short": "Gromov–Lawson in every dimension",
+    "title": "Positive scalar curvature forces rational inessentiality",
+    "subtitle": "Claim: no closed aspherical manifold of any dimension carries positive scalar curvature, spin or not"
+  },
+  "336": {
+    "short": "Codimension-2 width under $\\mathrm{Scal} \\ge 1$",
+    "title": "Positive scalar curvature makes a manifold thin in two ways",
+    "subtitle": "Claim: for $n \\ge 4$, every complete $n$-manifold with $\\mathrm{Scal} \\ge 1$ maps to an $(n-2)$-complex with fibres of diameter $\\le C_n$"
+  },
+  "337": {
+    "short": "Cartan–Hadamard isoperimetry, all dimensions",
+    "title": "The Cartan–Hadamard conjecture in every dimension",
+    "subtitle": "Claim: under $\\sec \\le \\kappa \\le 0$, no region beats the equal-volume ball of the model space"
+  },
+  "338": {
+    "short": "Yau's uniformization conjecture",
+    "title": "Positive bisectional curvature forces $\\mathbb{C}^n$",
+    "subtitle": "Claim: a complete noncompact Kähler manifold with positive bisectional curvature is biholomorphic to $\\mathbb{C}^n$"
+  },
+  "339": {
+    "short": "Katok's entropy rigidity conjecture",
+    "title": "Katok's entropy rigidity in every dimension",
+    "subtitle": "Claim: in negative curvature, Liouville measure has maximal entropy only for locally symmetric metrics, all $n \\ge 3$"
+  },
+  "340": {
+    "short": "The nearby Lagrangian conjecture fails",
+    "title": "A counterexample to the nearby Lagrangian conjecture",
+    "subtitle": "Claim: an exact Lagrangian in $T^*(S^9 \\times S^{N-1})$, diffeomorphic to the base, not Hamiltonian isotopic to it"
+  },
+  "341": {
+    "short": "Donaldson's hypersymplectic conjecture",
+    "title": "Hypersymplectic 4-manifolds deform to hyperkähler",
+    "subtitle": "Claim: a normalized hypersymplectic triple deforms to a hyperkähler one, so the 4-manifold is K3 or $T^4$"
+  },
+  "342": {
+    "short": "Donaldson's tamed-to-compatible question",
+    "title": "Taming implies compatibility on four-manifolds",
+    "subtitle": "Claim: on a closed 4-manifold, if a symplectic form tames $J$, some symplectic form is compatible with $J$"
+  },
+  "343": {
+    "short": "Symplectic ball packing, dimension 6 and up",
+    "title": "Packing symplectic balls: only two obstructions",
+    "subtitle": "Claim: in dimension $2n \\ge 6$, balls pack into a ball iff $\\sum R_i^n < R^n$ and $R_i + R_j < R$"
+  },
+  "344": {
+    "short": "The metric Blaschke conjecture",
+    "title": "Blaschke manifolds are the round spheres and projective spaces",
+    "subtitle": "Claim: a closed manifold with injectivity radius equal to diameter is a compact rank-one symmetric space"
+  },
+  "345": {
+    "short": "Infinitely many closed geodesics on $S^n$",
+    "title": "Infinitely many closed geodesics on every Riemannian sphere",
+    "subtitle": "Claim: every metric on $S^n$, and on every closed 3-manifold, has infinitely many distinct closed geodesics"
+  },
+  "346": {
+    "short": "Regularity of stationary integral varifolds",
+    "title": "Stationary varifolds are regular almost everywhere",
+    "subtitle": "Claim: every stationary integral $m$-varifold has $\\mathcal{H}^m(\\mathrm{Sing}\\,V) = 0$, and in fact $\\dim_H \\mathrm{Sing}\\,V \\le m-1$"
+  },
+  "347": {
+    "short": "Strong Arnold fixed-point bounds fail",
+    "title": "Fewer fixed points than the strong Arnold bounds allow",
+    "subtitle": "Claim: a Hamiltonian map of $Q^3$ with 3 fixed points, though every function on $Q^3$ has at least 4 critical points"
+  },
+  "348": {
+    "short": "Positively curved Einstein 4-manifolds",
+    "title": "Positively curved Einstein 4-manifolds are the three models",
+    "subtitle": "Claim: a closed Einstein 4-manifold with $\\sec > 0$ is round $S^4$, round $\\mathbb{RP}^4$ or Fubini–Study $\\mathbb{CP}^2$"
+  },
+  "349": {
+    "short": "Solomon–Yau least volume",
+    "title": "The Solomon–Yau least-volume conjecture",
+    "subtitle": "Claim: after the equator, the least-volume minimal hypersurface of a round sphere is a Clifford product"
+  },
+  "350": {
+    "short": "Yau's nodal conjecture, both ways",
+    "title": "Yau's nodal upper bound: true on surfaces, false above",
+    "subtitle": "Claim: nodal length is at most $C\\sqrt\\lambda$ on every smooth surface; smooth metrics beat it in dimensions 3 and up"
+  },
+  "351": {
+    "short": "Bounded scalar curvature and Ricci flow",
+    "title": "Does bounded scalar curvature keep Ricci flow alive?",
+    "subtitle": "Claim: yes in dimension 4, where the flow extends; no in high dimensions, where it can still blow up"
+  },
+  "352": {
+    "short": "A finite-time singularity of Calabi flow",
+    "title": "Calabi flow can blow up in finite time",
+    "subtitle": "Claim: a $U(10)$-invariant metric on $\\mathbb{CP}^{10}$ whose Calabi flow develops a point singularity"
+  },
+  "353": {
+    "short": "Affine Bernstein through dimension 9",
+    "title": "Affine Bernstein: rigid through dimension 9, not in 10",
+    "subtitle": "Claim: entire affine-maximal graphs are quadratic for $3 \\le n \\le 9$, and a smooth nonquadratic one exists for $n = 10$"
+  },
+  "354": {
+    "short": "Isoperimetry in the cubic three-torus",
+    "title": "Ball, tube, slab: the isoperimetric profile of the cubic 3-torus",
+    "subtitle": "Claim: least-area regions in $\\mathbb R^3/\\mathbb Z^3$ are balls, then round tubes, then slabs, as the volume grows"
+  },
+  "355": {
+    "short": "Unique tangent flows for surface MCF",
+    "title": "Unique tangent flows at the first surface singularity",
+    "subtitle": "Claim: zooming in on a first singularity of mean curvature flow in $\\mathbb R^3$ gives one limit, whatever the model"
+  },
+  "356": {
+    "short": "Gigli's characterization of Alexandrov",
+    "title": "Gigli's characterization of Alexandrov curvature",
+    "subtitle": "Claim: an $n$-dimensional space is Alexandrov with curvature $\\ge \\kappa$ iff it is RCD with Gigli's curvature $\\ge \\kappa$"
+  },
+  "357": {
+    "short": "Bi-Lipschitz charts at regular RCD points",
+    "title": "Bi-Lipschitz coordinates at every regular RCD point",
+    "subtitle": "Claim: each regular point of a noncollapsed $\\mathrm{RCD}(K,n)$ space has an $L_n$-bi-Lipschitz chart into $\\mathbb R^n$"
+  },
+  "358": {
+    "short": "No conjugate points, no $\\sec \\le 0$",
+    "title": "A 3-manifold without conjugate points or nonpositive curvature",
+    "subtitle": "Claim: a closed 3-manifold has a metric whose geodesics never refocus, but no metric with $\\sec \\le 0$"
+  },
+  "359": {
+    "short": "Negative Kähler curvature, no bounded chart",
+    "title": "Negative Kähler curvature, no bounded holomorphic coordinates",
+    "subtitle": "Claim: a contractible domain in $\\mathbb C^3$ with pinched negative Kähler curvature that is not a bounded domain"
+  },
+  "360": {
+    "short": "Weak MTW: convex injectivity domains",
+    "title": "Weak MTW curvature makes injectivity domains convex",
+    "subtitle": "Claim: under weak MTW every tangent injectivity domain is convex, and optimal transport maps are bi-Hölder"
+  },
+  "361": {
+    "short": "Harmonic functions of integer growth",
+    "title": "Nonnegative Ricci curvature can add harmonic functions",
+    "subtitle": "Claim: metrics on $\\mathbb R^3$ with $\\mathrm{Ric} \\ge 0$ carry more harmonic functions of growth $\\le k$ than flat space"
+  },
+  "362": {
+    "short": "Relativistic Vlasov–Maxwell, large data",
+    "title": "Relativistic Vlasov–Maxwell: no blowup for large data in 3D",
+    "subtitle": "Claim: every smooth admissible datum has a unique global smooth solution, with no smallness or symmetry"
+  },
+  "363": {
+    "short": "Boltzmann: two solutions from one gas",
+    "title": "Hard-sphere Boltzmann: two solutions from one initial gas",
+    "subtitle": "Claim: one initial density on the torus has two distinct global solutions, both with entropy dissipation"
+  },
+  "364": {
+    "short": "Boltzmann–Grad over the regular lifespan",
+    "title": "Kinetic limits over the whole regular Boltzmann lifespan",
+    "subtitle": "Claim: gases with stable radial potentials follow Boltzmann for as long as its solution stays regular"
+  },
+  "365": {
+    "short": "Calderón's problem from one boundary patch",
+    "title": "Calderón's problem from one boundary patch",
+    "subtitle": "Claim: boundary data on one patch determine a smooth metric in dimension $n \\ge 3$; rough conductivities can fool it"
+  },
+  "366": {
+    "short": "Planar Mumford–Shah regularity",
+    "title": "The planar Mumford–Shah conjecture",
+    "subtitle": "Claim: near each interior point, a minimizer's edge set is a smooth arc, a crack tip or a $120^\\circ$ triple junction"
+  },
+  "367": {
+    "short": "Bernoulli free boundaries: $d^* = 7$",
+    "title": "The critical dimension of the one-phase Bernoulli problem is 7",
+    "subtitle": "Claim: every one-homogeneous minimizer in $\\mathbb{R}^d$, $d \\le 6$, is flat, so free boundaries are smooth through dimension 6"
+  },
+  "368": {
+    "short": "Ball–Evans approximation in $\\mathbb{R}^3$",
+    "title": "The Ball–Evans approximation problem in three dimensions",
+    "subtitle": "Claim: every $W^{1,p}$ homeomorphism between bounded domains in $\\mathbb{R}^3$ is a limit of smooth diffeomorphisms"
+  },
+  "369": {
+    "short": "Hot spots on simply connected domains",
+    "title": "The hot spots conjecture for simply connected planar domains",
+    "subtitle": "Claim: on a smooth simply connected plate, the first Neumann eigenfunction has no interior critical point"
+  },
+  "370": {
+    "short": "The Lane–Emden conjecture",
+    "title": "The Lane–Emden conjecture, in every dimension",
+    "subtitle": "Claim: below the Sobolev hyperbola, $-\\Delta u = v^p$, $-\\Delta v = u^q$ has no positive solution on $\\mathbb{R}^n$"
+  },
+  "371": {
+    "short": "Stable blowup for defocusing NLS",
+    "title": "Stable blowup for a defocusing Schrödinger equation",
+    "subtitle": "Claim: an open set of smooth data on the 12-dimensional torus blows up in finite time"
+  },
+  "372": {
+    "short": "Calderón's problem for isotropic elasticity",
+    "title": "Boundary data determine an elastic body's Lamé moduli",
+    "subtitle": "Claim: on any smooth domain in $\\mathbb{R}^3$, the displacement-to-traction map fixes both $\\lambda$ and $\\mu$"
+  },
+  "373": {
+    "short": "Three-electron Coulomb Monge problem",
+    "title": "No Monge minimizer for three electrons",
+    "subtitle": "Claim: a smooth density in $\\mathbb{R}^3$ whose optimal three-particle Coulomb plan is never a map"
+  },
+  "374": {
+    "short": "Brenier maps are $1/3$-stable, no better",
+    "title": "Sharp one-third stability of Brenier maps",
+    "subtitle": "Claim: optimal transport maps move at most like $W_2^{1/3}$, uniformly, and $1/3$ cannot be improved"
+  },
+  "375": {
+    "short": "De Giorgi's conjecture in dimension 8",
+    "title": "De Giorgi's conjecture in dimension eight",
+    "subtitle": "Claim: every monotone solution of $\\Delta u = u^3 - u$ on $\\mathbb{R}^8$ is a flat $\\tanh$ wall, with no extra assumption"
+  },
+  "376": {
+    "short": "Turing machines in forced Navier–Stokes",
+    "title": "Turing machines in forced Navier–Stokes flows",
+    "subtitle": "Claim: for any machine, a smooth force makes a tagged fluid particle reach a region exactly when it halts"
+  },
+  "377": {
+    "short": "Infinity-harmonic functions are $C^{1,\\alpha}$",
+    "title": "Infinity-harmonic functions are $C^{1,\\alpha}$ in every dimension",
+    "subtitle": "Claim: for every $d \\ge 3$, bounded infinity-harmonic functions have Hölder continuous gradients inside the ball"
+  },
+  "001": {
+    "short": "Milne's rationality conjecture",
+    "title": "Milne's rationality conjecture for abelian varieties",
+    "subtitle": "Claim: after good reduction, a Hodge class pairs to one rational number in every cohomology theory"
+  },
+  "002": {
+    "short": "The full BSD formula in rank $\\le 1$",
+    "title": "The full Birch–Swinnerton-Dyer formula in analytic rank $\\le 1$",
+    "subtitle": "Claim: if some $q$-power Selmer group of $E/\\mathbb{Q}$ has corank 0 or 1, the exact BSD formula holds"
+  },
+  "003": {
+    "short": "The quasi-Riemann hypothesis, $\\mathrm{Re}\\, s > 7/8$",
+    "title": "No zeta zeros with real part above $7/8$",
+    "subtitle": "Claim: zeta and every Dirichlet $L$-function are zero-free in the half-plane $\\mathrm{Re}\\, s > 7/8$"
+  },
+  "004": {
+    "short": "Hilbert's tenth problem over $\\mathbb{Q}$",
+    "title": "Hilbert's tenth problem over the rationals",
+    "subtitle": "Claim: no algorithm decides whether an integer polynomial has a rational zero"
+  },
+  "005": {
+    "short": "Catalan's constant is irrational",
+    "title": "Catalan's constant is irrational",
+    "subtitle": "Claim: $G = \\sum_{j \\ge 0} (-1)^j/(2j+1)^2 = L(2, \\chi_{-4})$ is not a fraction"
+  },
+  "006": {
+    "short": "Goldfeld's conjecture, mean rank $1/2$",
+    "title": "Goldfeld's conjecture: half the twists have rank 0",
+    "subtitle": "Claim: among quadratic twists of any $E/\\mathbb{Q}$, analytic ranks 0 and 1 each have density $1/2$"
+  },
+  "007": {
+    "short": "Two-point Chowla, plain averages",
+    "title": "Two-point Chowla with ordinary averages",
+    "subtitle": "Claim: $\\sum_{n \\le X} \\lambda(n)\\lambda(n+h) = O\\big(X/(\\log X)^c\\big)$, with no logarithmic weights"
+  },
+  "008": {
+    "short": "The Deligne–Drinfeld conjecture",
+    "title": "The Deligne–Drinfeld conjecture",
+    "subtitle": "Claim: $\\mathfrak{grt}_1$ is free on one generator in each odd weight $3, 5, 7, \\ldots$, with nothing extra"
+  },
+  "009": {
+    "short": "Function fields from Milnor K-theory",
+    "title": "Rebuilding a function field from its Milnor K-theory",
+    "subtitle": "Claim: a function field of dimension $\\ge 2$ is recovered from its mod-$\\ell$ Milnor K-groups $K_1$, $K_2$"
+  },
+  "010": {
+    "short": "Fontaine–Mazur at the prime 2",
+    "title": "Fontaine–Mazur at the prime 2, with no residual hypothesis",
+    "subtitle": "Claim: every odd, de Rham, 2-dimensional 2-adic Galois representation of $\\mathbb{Q}$ is modular"
+  },
+  "011": {
+    "short": "The prime factors of $p - 1$",
+    "title": "The prime factors of $p - 1$ behave like a random integer's",
+    "subtitle": "Claim: for every $\\delta > 0$, $x^{1-o(1)}$ primes in $(2x, 5x]$ have $p - 1$ free of primes above $x^{\\delta}$"
+  },
+  "012": {
+    "short": "Largest prime factors of $n$ and $n + 1$",
+    "title": "The largest prime factors of $n$ and $n + 1$ are independent",
+    "subtitle": "Claim: $P^+(n) < P^+(n+1)$ for exactly half of all $n$, in natural density"
+  },
+  "013": {
+    "short": "Ostmann's inverse Goldbach problem",
+    "title": "The primes are not a sumset",
+    "subtitle": "Claim: no finite modification of the primes equals $A + B$ with $|A|, |B| \\ge 2$"
+  },
+  "014": {
+    "short": "Restricted geometric Langlands in char $p$",
+    "title": "Restricted geometric Langlands in characteristic $p$",
+    "subtitle": "Claim: the restricted geometric Langlands equivalence for curves in characteristic $p$, and its consequences"
+  },
+  "015": {
+    "short": "Torus packets in higher degree",
+    "title": "Duke's theorem in prime, quartic and sextic degree",
+    "subtitle": "Claim: torus-orbit packets from totally real fields equidistribute, with no escape of mass"
+  },
+  "016": {
+    "short": "Zilber–Pink: abelian varieties, $\\mathcal{A}_2$",
+    "title": "Zilber–Pink for abelian varieties and curves in $\\mathcal{A}_2$",
+    "subtitle": "Claim: unlikely intersections are finite, for subvarieties of abelian varieties and curves in $\\mathcal{A}_2$"
+  },
+  "017": {
+    "short": "The irrationality exponent of $\\pi$ is 2",
+    "title": "The irrationality exponent of $\\pi$ is 2",
+    "subtitle": "Claim: for every $\\nu > 2$, $|\\pi - p/q| \\ge q^{-\\nu}$ once $q$ is large enough"
+  },
+  "018": {
+    "short": "Margulis–Platonov over global fields",
+    "title": "The Margulis–Platonov conjecture over every global field",
+    "subtitle": "Claim: normal subgroups of $G(k)$ come only from the places where $G$ is anisotropic"
+  },
+  "019": {
+    "short": "The local $p$-adic section conjecture",
+    "title": "Grothendieck's section conjecture over $p$-adic fields",
+    "subtitle": "Claim: for curves of genus $\\ge 2$ over $p$-adic fields, every section comes from a unique rational point"
+  },
+  "020": {
+    "short": "Squarefree values of quartics",
+    "title": "Squarefree values of quartic polynomials",
+    "subtitle": "Claim: an irreducible quartic like $n^4 + 2$ is squarefree for a positive proportion of $n$, as predicted"
+  },
+  "021": {
+    "short": "Jacobsthal's function, quadratic bound",
+    "title": "A quadratic bound for Jacobsthal's function",
+    "subtitle": "Claim: $h(k) \\le C k^2/(\\log\\log 3k)^2$ for an absolute constant $C$"
+  },
+  "022": {
+    "short": "Duffin–Schaeffer with a shift",
+    "title": "The weak inhomogeneous Duffin–Schaeffer conjecture",
+    "subtitle": "Claim: the Duffin–Schaeffer law holds with any fixed shift $\\gamma$, for almost every $x$"
+  },
+  "023": {
+    "short": "Patterson's bias for cubic Gauss sums",
+    "title": "Patterson's bias for cubic Gauss sums, unconditionally",
+    "subtitle": "Claim: summed over primes, normalized cubic Gauss sums grow like $\\tfrac{6}{5} c_* X^{5/6}/\\log X$, with no GRH"
+  },
+  "024": {
+    "short": "How many totients are there?",
+    "title": "An asymptotic formula for the number of totients",
+    "subtitle": "Claim: an explicit asymptotic for $V(x)$, the number of values of $\\varphi$ up to $x$, and $V(cx)/V(x) \\to c$"
+  },
+  "025": {
+    "short": "Short Egyptian fractions",
+    "title": "Every $a/b$ is a short sum of unit fractions",
+    "subtitle": "Claim: every $a/b$ is a sum of $O(\\log\\log b)$ distinct unit fractions, and that is best possible"
+  },
+  "026": {
+    "short": "A positive share of large prime gaps",
+    "title": "A positive proportion of large prime gaps",
+    "subtitle": "Claim: for every $C > 0$, a positive proportion of gaps $p_{n+1} - p_n$ exceed $C \\log p_n$"
+  },
+  "027": {
+    "short": "Integral points on character varieties",
+    "title": "Dense integral points on character varieties of curves",
+    "subtitle": "Claim: integral points become Zariski dense on every $\\mathrm{SL}_r$ character variety of a curve"
+  },
+  "028": {
+    "short": "The Gaussian moat",
+    "title": "No walk to infinity on the Gaussian primes",
+    "subtitle": "Claim: with steps of length at most $D$, every connected cluster of Gaussian primes has at most $B_D$ points"
+  },
+  "029": {
+    "short": "Artin's primitive roots, every base",
+    "title": "Every admissible base is a primitive root infinitely often",
+    "subtitle": "Claim: if $a \\ne -1$ is not a square, at least $c_a x/(\\log x)^2$ primes in $(x, 2x)$ have $a$ as primitive root"
+  },
+  "030": {
+    "short": "Modularity over imaginary quadratic fields",
+    "title": "Elliptic curves over imaginary quadratic fields are modular",
+    "subtitle": "Claim: each $E/K$ matches an automorphic representation of $\\mathrm{GL}_2$ over $K$, at every place"
+  },
+  "031": {
+    "short": "Uchida's conjecture",
+    "title": "Uchida's conjecture on homomorphisms of Galois groups",
+    "subtitle": "Claim: every continuous open map between these Galois groups comes from a unique field embedding"
+  },
+  "032": {
+    "short": "Hodge for CM abelian varieties",
+    "title": "The Hodge conjecture for CM abelian varieties",
+    "subtitle": "Claim: on every CM abelian variety, every rational $(p,p)$ class comes from algebraic cycles"
+  },
+  "033": {
+    "short": "Iitaka's conjecture $C_{n,m}$",
+    "title": "Iitaka's subadditivity conjecture $C_{n,m}$",
+    "subtitle": "Claim: in every fibration $X \\to Z$ with general fibre $F$, $\\kappa(X) \\ge \\kappa(F) + \\kappa(Z)$"
+  },
+  "034": {
+    "short": "Log abundance in characteristic zero",
+    "title": "Log abundance in characteristic zero, every dimension",
+    "subtitle": "Claim: for every lc pair $(X,B)$ in characteristic 0, if $K_X+B$ is nef it is semiample"
+  },
+  "035": {
+    "short": "Threefold abundance, $\\nu = 1$, char $p > 3$",
+    "title": "Threefold abundance in characteristic $p > 3$, numerical dimension one",
+    "subtitle": "Claim: a nef log canonical threefold adjoint of numerical dimension one is semiample when $p > 3$"
+  },
+  "036": {
+    "short": "Minimal models and generalised abundance",
+    "title": "Minimal models for every lc pair, and generalised abundance",
+    "subtitle": "Claim: generalized lc pairs have minimal models or Mori fibre spaces, and $K_X+B+M$ nef is numerically semiample"
+  },
+  "037": {
+    "short": "The ordinary double point volume gap",
+    "title": "The ordinary double point volume gap",
+    "subtitle": "Claim: a singular klt point of an $n$-fold has normalized volume at most $2(n-1)^n$, equal only at an ODP"
+  },
+  "038": {
+    "short": "Fujita's freeness, $m \\ge n+1$",
+    "title": "Fujita's freeness conjecture",
+    "subtitle": "Claim: on every smooth projective $n$-fold, $K_X + mL$ is globally generated for all $m \\ge n+1$"
+  },
+  "039": {
+    "short": "Nagata's conjecture, $r \\ge 10$ points",
+    "title": "Nagata's conjecture for every $r \\ge 10$",
+    "subtitle": "Claim: a plane curve through $r \\ge 10$ very general points obeys $\\sum_i m_i < d\\sqrt{r}$"
+  },
+  "040": {
+    "short": "Bloch's conjecture, $p_g = q = 0$",
+    "title": "Bloch's conjecture for surfaces with $p_g = q = 0$",
+    "subtitle": "Claim: on every surface with $p_g = q = 0$, all points are rationally equivalent: $\\mathrm{CH}_0(S) \\cong \\mathbb{Z}$"
+  },
+  "041": {
+    "short": "Hyperkähler SYZ and $\\mathbb{P}^n$ bases",
+    "title": "The hyperkähler SYZ conjecture, for every deformation type",
+    "subtitle": "Claim: a nef isotropic line bundle on any hyperkähler manifold gives a Lagrangian fibration over $\\mathbb{P}^n$"
+  },
+  "042": {
+    "short": "Every K3 surface is Oka",
+    "title": "Every K3 surface is an Oka manifold",
+    "subtitle": "Claim: every complex K3 surface, projective or not, is Oka, with dense entire curves through every point"
+  },
+  "043": {
+    "short": "$P = W$ for $\\mathrm{SL}_n$, every rank",
+    "title": "$P = W$ for $\\mathrm{SL}_n$ in every rank",
+    "subtitle": "Claim: for $\\mathrm{SL}_n$ the perverse filtration equals the weight filtration in every composite rank, completing $P = W$"
+  },
+  "044": {
+    "short": "Equivariant Hikita for every quiver",
+    "title": "The equivariant Hikita conjecture for every finite quiver",
+    "subtitle": "Claim: for any finite quiver, Higgs-branch cohomology equals functions on the Coulomb-branch fixed locus"
+  },
+  "046": {
+    "short": "Shafarevich's convexity conjecture fails",
+    "title": "Counterexamples to Shafarevich's conjecture",
+    "subtitle": "Claim: a projective surface whose universal cover is not holomorphically convex"
+  },
+  "047": {
+    "short": "Zariski cancellation fails over $\\mathbb{C}$",
+    "title": "Zariski cancellation fails over $\\mathbb{C}$",
+    "subtitle": "Claim: one polynomial $H$ in five variables gives $A$ with $A[w] \\cong \\mathbb{C}^{[5]}$ but $A \\not\\cong \\mathbb{C}^{[4]}$"
+  },
+  "048": {
+    "short": "Lipman–Zariski fails for complex surfaces",
+    "title": "A counterexample to Lipman–Zariski in characteristic zero",
+    "subtitle": "Claim: a normal complex surface with free tangent sheaf, $\\mathrm{Der}_{\\mathbb{C}}(A) \\cong A^2$, that is not smooth"
+  },
+  "049": {
+    "short": "Abhyankar–Sathaye fails in four variables",
+    "title": "The Abhyankar–Sathaye conjecture fails in four variables",
+    "subtitle": "Claim: an explicit $F$ in $\\mathbb{C}[h,u,v,w]$ whose zero set is $\\mathbb{C}^3$, yet $F$ is not a coordinate"
+  },
+  "050": {
+    "short": "Griffiths' positivity conjecture fails",
+    "title": "A counterexample to Griffiths' positivity conjecture",
+    "subtitle": "Claim: rank-2 bundles $E_m$ on $\\mathbb{P}^1 \\times \\mathbb{P}^1$ that are ample but carry no Griffiths-positive metric"
+  },
+  "051": {
+    "short": "Kobayashi's canonical ampleness conjecture",
+    "title": "Kobayashi's canonical ampleness conjecture",
+    "subtitle": "Claim: every compact Kähler manifold with no entire curves $\\mathbb{C} \\to X$ has ample canonical bundle"
+  },
+  "052": {
+    "short": "Split tangent bundles are products",
+    "title": "A split tangent bundle makes the universal cover a product",
+    "subtitle": "Claim: if $T_X = E_1 \\oplus E_2$ with both summands integrable, the universal cover of $X$ is a product"
+  },
+  "053": {
+    "short": "Pixton's completeness fails in Chow",
+    "title": "A counterexample to Pixton's completeness conjecture",
+    "subtitle": "Claim: a tautological class outside the span of Pixton's relations vanishes in Chow and in cohomology"
+  },
+  "054": {
+    "short": "Irrational cubic fourfolds with a K3",
+    "title": "Cubic fourfolds with a K3 category that are still irrational",
+    "subtitle": "Claim: a very general cubic in $\\mathcal C_d$, $d$ large, is irrational though it has a K3 category"
+  },
+  "055": {
+    "short": "Gepner stability on the quintic",
+    "title": "Toda's Gepner point on every quintic threefold",
+    "subtitle": "Claim: a Bridgeland stability condition whose phases shift by exactly $2/5$ under the Gepner autoequivalence"
+  },
+  "056": {
+    "short": "Flips terminate on fourfolds",
+    "title": "Every log canonical MMP on a fourfold terminates",
+    "subtitle": "Claim: every sequence of log canonical flips on a projective fourfold stops, with Kähler analogues"
+  },
+  "057": {
+    "short": "Campana's abelianity conjecture",
+    "title": "Special Kähler manifolds have virtually abelian $\\pi_1$",
+    "subtitle": "Claim: every special compact Kähler manifold has a virtually abelian fundamental group"
+  },
+  "058": {
+    "short": "Kollár–Pardon: semialgebraic covers",
+    "title": "Semialgebraic universal covers are $D \\times \\mathbb{C}^m \\times F$",
+    "subtitle": "Claim: a universal cover is semialgebraic exactly when it is a symmetric domain times $\\mathbb{C}^m$ times $F$"
+  },
+  "059": {
+    "short": "Zariski's multiplicity question: no",
+    "title": "Same embedded topology, different multiplicity",
+    "subtitle": "Claim: hypersurface germs that are ambiently homeomorphic with multiplicities 2 and 3, and 4 and 5"
+  },
+  "060": {
+    "short": "The global spherical shell conjecture",
+    "title": "Every minimal class VII surface with $b_2 > 0$ has a shell",
+    "subtitle": "Claim: every minimal class VII surface with $b_2 > 0$ contains a global spherical shell"
+  },
+  "062": {
+    "short": "The LeBrun–Salamon conjecture",
+    "title": "Every contact Fano manifold is an adjoint variety",
+    "subtitle": "Claim: every projective contact Fano manifold is homogeneous, so positive quaternion-Kähler means Wolf space"
+  },
+  "063": {
+    "short": "The generalized Mukai conjecture",
+    "title": "The generalized Mukai conjecture for Fano manifolds",
+    "subtitle": "Claim: every Fano manifold has $\\rho(\\iota-1) \\le n$, with equality only for $(\\mathbb{P}^{\\iota-1})^\\rho$"
+  },
+  "064": {
+    "short": "$\\mu$-constant surface singularities",
+    "title": "Constant Milnor number means constant topology, in $\\mathbb{C}^3$",
+    "subtitle": "Claim: every $\\mu$-constant family of isolated surface singularities in $\\mathbb{C}^3$ is topologically trivial"
+  },
+  "065": {
+    "short": "Virasoro constraints, complete intersections",
+    "title": "Virasoro constraints for every complete intersection",
+    "subtitle": "Claim: the full descendant Virasoro conjecture for every smooth complete intersection, no semisimplicity"
+  },
+  "066": {
+    "short": "Bounded klt complements",
+    "title": "Bounded klt complements for Fano contractions",
+    "subtitle": "Claim: every $\\varepsilon$-lc Fano contraction has klt complements of index bounded by $d$ and $\\varepsilon$"
+  },
+  "067": {
+    "short": "Campana–Peternell in dimension 6",
+    "title": "The Campana–Peternell conjecture in dimension six",
+    "subtitle": "Claim: every smooth Fano sixfold with nef tangent bundle is rational homogeneous"
+  },
+  "068": {
+    "short": "Anticanonical nonvanishing",
+    "title": "Anticanonical nonvanishing in every dimension",
+    "subtitle": "Claim: if $-K_X$ carries a smooth semipositive metric, some power $-mK_X$ has a section"
+  },
+  "069": {
+    "short": "Quantum geometric Langlands, $c \\notin \\mathbb{Q}$",
+    "title": "Quantum geometric Langlands at irrational level",
+    "subtitle": "Claim: $D_c(\\mathrm{Bun}_G) \\simeq D_{-1/(rc)}(\\mathrm{Bun}_{G^\\vee})$ for every simple $G$, curve and $c \\notin \\mathbb{Q}$"
+  },
+  "071": {
+    "short": "Koebe's circle-domain conjecture",
+    "title": "Koebe's circle-domain conjecture",
+    "subtitle": "Claim: every domain in the Riemann sphere maps conformally onto one whose holes are round disks or points"
+  },
+  "072": {
+    "short": "Brennan's conjecture",
+    "title": "Brennan's conjecture, and Kraetzer's formula fails",
+    "subtitle": "Claim: $\\int |\\varphi'|^s\\,dA < \\infty$ for every $4/3 < s < 4$, for every conformal map onto the disk"
+  },
+  "073": {
+    "short": "Falconer's distance conjecture",
+    "title": "Falconer's distance conjecture, in every dimension",
+    "subtitle": "Claim: a compact $E \\subset \\mathbb R^d$ with $\\dim_H E > d/2$ has a distance set of positive length"
+  },
+  "074": {
+    "short": "Kakeya in three and four dimensions",
+    "title": "Kakeya in three and four dimensions",
+    "subtitle": "Claim: every Kakeya set in $\\mathbb R^4$ has full dimension, and the 3D Kakeya maximal estimate holds"
+  },
+  "075": {
+    "short": "Fourier series of $L\\log L$ functions",
+    "title": "Fourier series converge almost everywhere in $L\\log L$",
+    "subtitle": "Claim: for every $f$ with $\\int |f|\\log(2+|f|) < \\infty$, the partial sums $S_N f \\to f$ almost everywhere"
+  },
+  "076": {
+    "short": "Ultraflat Littlewood polynomials",
+    "title": "Ultraflat $\\pm 1$ polynomials exist",
+    "subtitle": "Claim: for every $\\varepsilon$ and large $N$, a $\\pm1$ polynomial with $(1-\\varepsilon)\\sqrt N \\le |P| \\le (1+\\varepsilon)\\sqrt N$ on the circle"
+  },
+  "077": {
+    "short": "Fourier restriction in three dimensions",
+    "title": "Fourier restriction for curved surfaces in three dimensions",
+    "subtitle": "Claim: Fourier extension from a positively curved surface in $\\mathbb R^3$ is bounded into $L^p$ for every $p > 3$"
+  },
+  "078": {
+    "short": "Bochner–Riesz in three dimensions",
+    "title": "The Bochner–Riesz conjecture in three dimensions",
+    "subtitle": "Claim: the multiplier $(1-|\\xi|^2)_+^{\\delta}$ is bounded on $L^3(\\mathbb R^3)$ for every $\\delta > 0$"
+  },
+  "079": {
+    "short": "Local smoothing in three dimensions",
+    "title": "Local smoothing for the wave equation in three dimensions",
+    "subtitle": "Claim: at $p = 3$, averaging a 3D wave over a time window loses only $\\epsilon$ derivatives, for every $\\epsilon > 0$"
+  },
+  "080": {
+    "short": "Schrödinger convergence at the endpoint",
+    "title": "Schrödinger convergence at the exact Sobolev endpoint",
+    "subtitle": "Claim: for $f \\in H^{n/(2(n+1))}(\\mathbb R^n)$, $e^{it\\Delta}f \\to f$ almost everywhere; $s = 1/3$ in the plane"
+  },
+  "081": {
+    "short": "Riesz transforms and rectifiability",
+    "title": "Riesz transforms force rectifiability in higher codimension",
+    "subtitle": "Claim: if the $n$-dimensional Riesz transform is bounded on $L^2(\\mu)$, then $\\mu$ is uniformly rectifiable"
+  },
+  "082": {
+    "short": "The triangular Hilbert transform",
+    "title": "The triangular Hilbert transform at the symmetric point",
+    "subtitle": "Claim: the maximal triangular Hilbert transform is bounded $L^3 \\times L^3 \\to L^{3/2}$"
+  },
+  "083": {
+    "short": "Hilbert transforms along Lipschitz fields",
+    "title": "Hilbert transforms along Lipschitz directions",
+    "subtitle": "Claim: for every 1-Lipschitz planar unit field $v$, the short-scale Hilbert transform along $v$ is $L^2$-bounded"
+  },
+  "084": {
+    "short": "$\\text{Erd\\H{o}s}$ similarity: geometric sequences",
+    "title": "$\\text{Erd\\H{o}s}$ similarity conjecture for geometric sequences",
+    "subtitle": "Claim: for every ratio $q$, a set of measure near 1 in $[0,1]$ contains no scaled, shifted copy of $\\{q^n\\}$"
+  },
+  "085": {
+    "short": "Disk maximal function in $W^{1,1}$",
+    "title": "The centered disk maximal function in $W^{1,1}$",
+    "subtitle": "Claim: for $f \\in W^{1,1}(\\mathbb R^2)$, $\\|\\nabla Mf\\|_{L^1} \\le C\\,\\|\\nabla f\\|_{L^1}$ for centered disk averages"
+  },
+  "086": {
+    "short": "The trilinear Hilbert transform",
+    "title": "A first $L^p$ bound for the trilinear Hilbert transform",
+    "subtitle": "Claim: $\\mathrm{p.v.}\\int f_1(x-t)\\,f_2(x-2t)\\,f_3(x-3t)\\,dt/t$ is bounded $L^3 \\times L^3 \\times L^3 \\to L^1$"
+  },
+  "087": {
+    "short": "Mahler's conjectures, every dimension",
+    "title": "The Mahler conjectures in every dimension",
+    "subtitle": "Claim: $|K|\\,|K^\\circ| \\ge 4^n/n!$ for symmetric bodies, and the simplex floor for all bodies, in every $\\mathbb{R}^n$"
+  },
+  "088": {
+    "short": "Petty's projection conjecture, $n \\ge 4$",
+    "title": "Petty's projection conjecture for $n \\ge 4$",
+    "subtitle": "Claim: at fixed volume, ellipsoids have the smallest projection body, in every dimension from four up"
+  },
+  "089": {
+    "short": "Planar graphs embed into $L_1$",
+    "title": "Planar and bounded-treewidth graphs embed into $L_1$",
+    "subtitle": "Claim: every planar graph metric embeds into $L_1$ with distortion at most a universal constant $C$"
+  },
+  "090": {
+    "short": "Triangular lattice, universally optimal",
+    "title": "The triangular lattice is universally optimal",
+    "subtitle": "Claim: in the plane, no density-one configuration has lower energy, for every completely monotone interaction"
+  },
+  "091": {
+    "short": "The log-Brunn–Minkowski inequality",
+    "title": "The log-Brunn–Minkowski inequality in every dimension",
+    "subtitle": "Claim: geometric averaging of support functions never loses volume, for origin-symmetric convex bodies"
+  },
+  "092": {
+    "short": "Covering density of order $n\\log n$",
+    "title": "Covering space with convex bodies costs $\\Theta(n\\log n)$",
+    "subtitle": "Claim: one lattice covers $\\mathbb{R}^n$ with density $C\\,n\\log n$ for every convex body, and some bodies need $c\\,n\\log n$"
+  },
+  "093": {
+    "short": "Dimension-free log-Sobolev, subgaussian",
+    "title": "A dimension-free log-Sobolev inequality",
+    "subtitle": "Claim: log-concave laws with $a$-subgaussian marginals satisfy log-Sobolev with constant $C a^2$, in every dimension"
+  },
+  "094": {
+    "short": "Dimension reduction in $L_p$, $n^{o(1)}$",
+    "title": "Dimension reduction in $L_p$ with $n^{o(1)}$ coordinates",
+    "subtitle": "Claim: any $n$ points of $L_p$, $1<p<\\infty$, $p \\ne 2$, fit in $\\ell_p^d$ with $d = n^{o(1)}$ at any fixed distortion"
+  },
+  "095": {
+    "short": "Hyperbolicity cones vs. semidefinite lifts",
+    "title": "A hyperbolicity cone that is not spectrahedral",
+    "subtitle": "Claim: the generalized Lax conjecture is false; an explicit cone is no linear slice of any PSD cone"
+  },
+  "096": {
+    "short": "The Gaussian propeller conjecture",
+    "title": "The Gaussian propeller conjecture in every dimension",
+    "subtitle": "Claim: splitting Gaussian space into any number of pieces, the squared centres of mass sum to at most $9/(8\\pi)$"
+  },
+  "097": {
+    "short": "The Euclidean Steinitz–Bergström bound",
+    "title": "The Euclidean Steinitz constant is $\\Theta(\\sqrt d)$",
+    "subtitle": "Claim: signs exist that keep every prefix sum of unit vectors in $\\mathbb{R}^d$ within $C\\sqrt d$, however many there are"
+  },
+  "098": {
+    "short": "A doubling set in $\\ell_2$ that fits no $\\mathbb{R}^k$",
+    "title": "A doubling subset of Hilbert space that fits in no $\\mathbb{R}^k$",
+    "subtitle": "Claim: a subset of $\\ell_2$ with doubling constant at most 76,800 has no bi-Lipschitz embedding into any $\\mathbb{R}^k$"
+  },
+  "099": {
+    "short": "Edit distance into $\\ell_1$: the sharp exponent",
+    "title": "Edit distance into $\\ell_1$: the exponent is right",
+    "subtitle": "Claim: embedding edit distance on length-$d$ strings into $\\ell_1$ needs distortion $\\exp(\\Theta(\\sqrt{\\log d\\,\\log\\log d}))$"
   }
 }
 
