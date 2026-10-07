@@ -128,6 +128,10 @@ export function GET() {
           "",
         ]
       : []),
+    "## Math reels",
+    "",
+    `- [Math reels](${absoluteUrl("/math")}): a filterable wall of short reels, one per result family of OpenAI's openai/math release (372 claimed theorems), each with the claim as we read it, our verdict, its Lean status and its manuscripts. As JSON: ${absoluteUrl("/api/math")} (one family in full: ${absoluteUrl("/api/math/107")}). The write-up: ${absoluteUrl("/articles/openai-math.md")}`,
+    "",
     "## Daily logs (latest)",
     "",
     ...logs.map(

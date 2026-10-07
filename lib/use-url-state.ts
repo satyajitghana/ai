@@ -58,7 +58,8 @@ export function useUrlState<T>(parse: (params: URLSearchParams) => T): [
     const params = new URLSearchParams(window.location.search)
     mutate(params)
     const qs = params.toString()
-    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname)
+    // keep the fragment: /math holds its open panel there (#107)
+    window.history.replaceState(null, "", `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`)
     window.dispatchEvent(new Event(URL_STATE_EVENT))
   }, [])
 
