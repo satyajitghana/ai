@@ -113,7 +113,7 @@ for (const slug of slugs) {
 console.log(`[2/3] painting ${slugs.length} film(s) on ${opt.workers || 3} page(s)`)
 // --noblur: drawings on twos everywhere and no shutter smear (render.mjs film --noblur),
 // several times faster in the brush tiers. The live/p5 cut is CRF 33: brush texture costs bits.
-const flags = [...(social ? ['--crf264=28'] : live ? ['--scale=1280', '--crf264=33'] : ['--scale=1280', '--crf264=32']), ...(opt.noblur ? ['--noblur'] : [])]
+const flags = [...(social ? ['--crf264=28'] : live ? ['--scale=1280', '--crf264=33'] : ['--scale=1280', '--crf264=34']), ...(opt.noblur ? ['--noblur'] : [])]
 const child = spawn(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'film', ...slugs.map(sbPath), `--out=${frames}`, `--workers=${opt.workers || 3}`, ...flags, ...liveFlag], { stdio: ['ignore', 'pipe', 'inherit'] })
 let buf = '', n = 0
 child.stdout.on('data', d => {
