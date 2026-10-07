@@ -43,12 +43,12 @@ export const TIERS = [
 export type TierId = (typeof TIERS)[number]["id"]
 
 export const LENSES = [
+  { id: "newest", label: "Newest", blurb: "Everything, most recently updated first." },
   { id: "must-read", label: "Must read", blurb: "The best pages here, by overall score." },
   { id: "run-it", label: "Run it yourself", blurb: "Open, runnable, with steps and numbers to act on." },
   { id: "learn", label: "Learn the idea", blurb: "Clear mechanisms that will still be true next year." },
   { id: "new", label: "What's new", blurb: "New ideas with wide reach, freshest first." },
   { id: "deep", label: "Deep dives", blurb: "Measured, verified, analysis you won't find elsewhere." },
-  { id: "newest", label: "Newest", blurb: "Everything, most recently updated first." },
 ] as const
 export type LensId = (typeof LENSES)[number]["id"]
 /** Lenses with a computed key; `newest` is plain lastUpdated order. */

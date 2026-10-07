@@ -213,7 +213,7 @@ export default function ScoringPage() {
         {LENSES.map((l) => (
           <div key={l.id} className="contents">
             <dt className="font-medium">
-              <Link href={l.id === "must-read" ? "/articles" : `/articles?lens=${l.id}`} className={link}>
+              <Link href={l.id === "newest" ? "/articles" : `/articles?lens=${l.id}`} className={link}>
                 {l.label}
               </Link>
             </dt>

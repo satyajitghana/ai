@@ -85,12 +85,12 @@ const oneOf = <T extends string>(ids: readonly { id: T }[], v: string | null): T
   v && ids.some((x) => x.id === v) ? (v as T) : null
 
 // Pure, and returns defaults for an empty query string (the server snapshot).
-// Older links still work: `sort=new` is the Newest lens, the other old sorts
-// map to Must read, and `filter=featured` / `featured=1` set Featured.
+// Newest is the default. Older links still work: `sort=new` is Newest, the
+// other old sorts map to Must read, and `filter=featured` / `featured=1` set Featured.
 function parseUrlState(sp: URLSearchParams): State {
   const sort = sp.get("sort")
   const lens =
-    oneOf(LENSES, sp.get("lens")) ?? (sort === "new" ? "newest" : "must-read")
+    oneOf(LENSES, sp.get("lens")) ?? (sort && sort !== "new" ? "must-read" : "newest")
   return {
     lens,
     topic: oneOf(TOPICS, sp.get("topic")),
@@ -104,7 +104,7 @@ function parseUrlState(sp: URLSearchParams): State {
 
 function writeState(sp: URLSearchParams, s: State) {
   for (const k of ["sort", "filter", "page", "featured", "lens", "topic", "kind", "level", "hw", "q"]) sp.delete(k)
-  if (s.lens !== "must-read") sp.set("lens", s.lens)
+  if (s.lens !== "newest") sp.set("lens", s.lens)
   if (s.topic) sp.set("topic", s.topic)
   if (s.kind) sp.set("kind", s.kind)
   if (s.level) sp.set("level", s.level)
