@@ -139,6 +139,9 @@ const LICENSE_FILE_RE = /^(licen[sc]e|copying)(-[\w.]+)?(\.(md|txt|rst))?$/i
 function detectLicense(raw: string): string {
   const t = raw.slice(0, 6000).toLowerCase().replace(/\s+/g, " ")
 
+  // Before the open licences: a BUSL file names its future "Change License"
+  // (often Apache 2.0) in its own text, and must not be read as that licence.
+  if (/business source license,? 1\.1/.test(t)) return "BUSL-1.1"
   if (/gnu affero general public license,? version 3/.test(t)) return "AGPL-3.0"
   if (/gnu lesser general public license,? version 3/.test(t)) return "LGPL-3.0"
   if (/gnu lesser general public license,? version 2\.1/.test(t))
