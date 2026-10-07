@@ -1,0 +1,151 @@
+"use client"
+
+import { useId, useState } from "react"
+
+import { RULES, type Bucket, type Engine } from "@/components/articles/impeccable-design-skill/rules"
+
+// Every entry in impeccable.style's slop catalogue (59 detector rules from the
+// repo's registry plus 6 that only the model's design review checks), sorted
+// by what the rule actually measures. The bucket is this article's call.
+
+const BUCKETS: { key: Bucket; label: string; note: string }[] = [
+  { key: "taste", label: "Taste, as a threshold", note: "a habit the authors judge generated, given a number so code can find it" },
+  { key: "reading", label: "Readability", note: "contrast, size, measure, leading: checked against a standard that predates AI" },
+  { key: "defect", label: "Rendering defects", note: "broken images, script errors, clipped or hidden text" },
+  { key: "system", label: "Your design system", note: "values outside the fonts, colours, sizes and radii in your DESIGN.md" },
+  { key: "review", label: "Model review only", note: "no code checks these; the critique agent judges them" },
+]
+
+const ENGINES: { key: Engine | "all"; label: string }[] = [
+  { key: "all", label: "Any engine" },
+  { key: "source", label: "Reads source" },
+  { key: "browser", label: "Needs a browser" },
+  { key: "review", label: "Model only" },
+]
+
+const CSS = `
+.imp-ledger { margin: 2.5rem 0; border-block: 1px solid var(--imp-rule, var(--border)); padding: 1rem 0 1.5rem; }
+.imp-ledger-title { font-weight: 650; font-size: 1rem; margin: 0 0 0.75rem; }
+.imp-bar { display: flex; gap: 2px; height: 0.75rem; }
+.imp-bar span { flex: var(--n) 1 0; border-radius: 2px; background: color-mix(in oklch, var(--foreground) var(--tone), var(--background)); transition: opacity 150ms ease-out; }
+.imp-bar span.is-dim { opacity: 0.25; }
+.imp-keys { list-style: none; padding: 0; margin: 0.75rem 0 0; display: grid; gap: 0.25rem; }
+.imp-keys button { all: unset; box-sizing: border-box; width: 100%; cursor: pointer; display: grid; grid-template-columns: 0.75rem 2rem minmax(0, 1fr); align-items: baseline; gap: 0.5rem; padding: 0.5rem 0.5rem; min-height: 2.5rem; border-radius: 6px; font-size: 0.9375rem; line-height: 1.45; }
+.imp-keys button:hover { background: var(--imp-wash, var(--muted)); }
+.imp-keys button[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--foreground); }
+.imp-keys button:focus-visible { outline: 2px solid var(--foreground); outline-offset: 2px; }
+.imp-keys i { width: 0.75rem; height: 0.75rem; border-radius: 2px; background: color-mix(in oklch, var(--foreground) var(--tone), var(--background)); align-self: center; }
+.imp-keys b { font-variant-numeric: tabular-nums; text-align: right; }
+.imp-keys span { color: var(--imp-quiet, var(--muted-foreground)); }
+.imp-keys strong { color: var(--foreground); font-weight: 600; }
+.imp-show-all { font: inherit; color: var(--foreground); background: none; border: 0; padding: 0; text-decoration: underline; text-underline-offset: 0.2em; cursor: pointer; }
+.imp-filter { display: flex; flex-wrap: wrap; gap: 0.25rem; border: 0; padding: 0; margin: 1.5rem 0 0.25rem; min-width: 0; }
+.imp-filter legend { font-size: 0.9375rem; font-weight: 600; margin-bottom: 0.25rem; padding: 0; }
+.imp-filter label { position: relative; display: inline-flex; align-items: center; font-size: 0.9375rem; padding: 0.25rem 0.75rem; min-height: 2.5rem; border-radius: 6px; border: 1px solid var(--imp-rule, var(--border)); cursor: pointer; }
+.imp-filter label:has(input:checked) { border-color: var(--foreground); font-weight: 600; }
+.imp-filter label:has(input:focus-visible) { outline: 2px solid var(--foreground); outline-offset: 2px; }
+.imp-filter input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.imp-shown { font-size: 0.9375rem; color: var(--imp-quiet, var(--muted-foreground)); margin: 0.75rem 0 0.25rem; font-variant-numeric: tabular-nums; }
+.imp-rows { list-style: none; margin: 0; padding: 0; max-height: 28rem; overflow-y: auto; overscroll-behavior: contain; }
+.imp-rows li { border-top: 1px solid var(--imp-rule, var(--border)); padding: 0.5rem 0.25rem; }
+.imp-rows li:hover { background: var(--imp-wash, var(--muted)); }
+.imp-rows summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.75rem; padding: 0; cursor: pointer; list-style: none; font-size: 0.9375rem; }
+.imp-rows summary::-webkit-details-marker { display: none; }
+.imp-rows summary:focus-visible { outline: 2px solid var(--foreground); outline-offset: 2px; }
+.imp-rows summary small { font-size: 0.8125rem; color: var(--imp-quiet, var(--muted-foreground)); white-space: nowrap; }
+.imp-row-body { padding: 0.5rem 0 0.25rem; font-size: 0.9375rem; line-height: 1.55; max-width: 60ch; }
+.imp-row-body p { margin: 0.25rem 0 0; }
+.imp-row-body code { font-size: 0.8125rem; }
+`
+
+const TONE: Record<Bucket, string> = { taste: "88%", reading: "62%", defect: "42%", system: "26%", review: "14%" }
+
+export function RuleLedger() {
+  const [bucket, setBucket] = useState<Bucket | "all">("all")
+  const [engine, setEngine] = useState<Engine | "all">("all")
+  const id = useId()
+  const rows = RULES.filter(
+    (r) => (bucket === "all" || r.bucket === bucket) && (engine === "all" || r.engine === engine)
+  )
+  const count = (b: Bucket) => RULES.filter((r) => r.bucket === b).length
+
+  return (
+    <figure className="imp-ledger" aria-labelledby={`${id}-t`}>
+      <style dangerouslySetInnerHTML={{ __html: CSS }} />
+      <p className="imp-ledger-title" id={`${id}-t`}>
+        What the {RULES.length} catalogue entries measure
+      </p>
+      <div className="imp-bar" aria-hidden="true">
+        {BUCKETS.map((b) => (
+          <span
+            key={b.key}
+            className={bucket === "all" || bucket === b.key ? undefined : "is-dim"}
+            style={{ ["--n" as string]: count(b.key), ["--tone" as string]: TONE[b.key] }}
+          />
+        ))}
+      </div>
+      <ul className="imp-keys">
+        {BUCKETS.map((b) => (
+          <li key={b.key}>
+            <button
+              type="button"
+              aria-pressed={bucket === b.key}
+              onClick={() => setBucket(bucket === b.key ? "all" : b.key)}
+            >
+              <i style={{ ["--tone" as string]: TONE[b.key] }} aria-hidden="true" />
+              <b>{count(b.key)}</b>
+              <span>
+                <strong>{b.label}</strong>: {b.note}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <fieldset className="imp-filter">
+        <legend>Where the check runs</legend>
+        {ENGINES.map((e) => (
+          <label key={e.key}>
+            <input type="radio" name={`${id}-e`} checked={engine === e.key} onChange={() => setEngine(e.key)} />
+            {e.label}
+          </label>
+        ))}
+      </fieldset>
+      <p className="imp-shown" aria-live="polite">
+        Showing {rows.length} of {RULES.length}
+        {bucket !== "all" ? `, ${BUCKETS.find((b) => b.key === bucket)!.label.toLowerCase()}` : ""}.
+        {bucket !== "all" ? (
+          <>
+            {" "}
+            <button type="button" className="imp-show-all" onClick={() => setBucket("all")}>
+              Show every bucket
+            </button>
+          </>
+        ) : null}
+      </p>
+      <ul className="imp-rows">
+        {rows.map((r) => (
+          <li key={r.id}>
+            <details>
+              <summary>
+                <span>{r.name}</span>
+                <small>
+                  {r.engine === "review" ? "model review" : r.engine === "browser" ? "browser" : "source"}
+                  {r.sev === "advisory" ? " · advisory" : r.sev === "error" ? " · error" : ""}
+                </small>
+              </summary>
+              <div className="imp-row-body">
+                <code>{r.id}</code>
+                <p>“{r.text}”</p>
+                <p>
+                  {r.line
+                    ? `crates/foundation/src/registry.rs:${r.line}`
+                    : "impeccable.style/slop (no detector rule)"}
+                </p>
+              </div>
+            </details>
+          </li>
+        ))}
+      </ul>
+    </figure>
+  )
+}
