@@ -24,13 +24,14 @@ const ENGINES: { key: Engine | "all"; label: string }[] = [
 ]
 
 const CSS = `
-.imp-ledger { margin: 2.5rem 0; border-block: 1px solid var(--imp-rule, var(--border)); padding: 1rem 0 1.5rem; }
-.imp-ledger-title { font-weight: 650; font-size: 1rem; margin: 0 0 0.75rem; }
+/* The same plate as the slop bench: interface face, a 2px ink rule on top. */
+.imp-ledger { margin: 2.5rem 0; font-family: var(--font-sans); border-top: 2px solid var(--foreground); border-bottom: 1px solid var(--imp-rule, var(--border)); padding: 0.75rem 0 1.5rem; }
+.imp-ledger-title { font-weight: 700; font-size: 1rem; margin: 0 0 0.75rem; }
 .imp-bar { display: flex; gap: 2px; height: 0.75rem; }
 .imp-bar span { flex: var(--n) 1 0; border-radius: 2px; background: color-mix(in oklch, var(--foreground) var(--tone), var(--background)); transition: opacity 150ms ease-out; }
 .imp-bar span.is-dim { opacity: 0.25; }
 .imp-keys { list-style: none; padding: 0; margin: 0.75rem 0 0; display: grid; gap: 0.25rem; }
-.imp-keys button { all: unset; box-sizing: border-box; width: 100%; cursor: pointer; display: grid; grid-template-columns: 0.75rem 2rem minmax(0, 1fr); align-items: baseline; gap: 0.5rem; padding: 0.5rem 0.5rem; min-height: 2.5rem; border-radius: 6px; font-size: 0.9375rem; line-height: 1.45; }
+.imp-keys button { all: unset; box-sizing: border-box; width: 100%; cursor: pointer; display: grid; grid-template-columns: 0.75rem 2rem minmax(0, 1fr); align-items: baseline; gap: 0.5rem; padding: 0.5rem 0.5rem; min-height: 2.5rem; border-radius: 3px; font-size: 0.9375rem; line-height: 1.45; }
 .imp-keys button:hover { background: var(--imp-wash, var(--muted)); }
 .imp-keys button[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--foreground); }
 .imp-keys button:focus-visible { outline: 2px solid var(--foreground); outline-offset: 2px; }
@@ -41,7 +42,7 @@ const CSS = `
 .imp-show-all { font: inherit; color: var(--foreground); background: none; border: 0; padding: 0; text-decoration: underline; text-underline-offset: 0.2em; cursor: pointer; }
 .imp-filter { display: flex; flex-wrap: wrap; gap: 0.25rem; border: 0; padding: 0; margin: 1.5rem 0 0.25rem; min-width: 0; }
 .imp-filter legend { font-size: 0.9375rem; font-weight: 600; margin-bottom: 0.25rem; padding: 0; }
-.imp-filter label { position: relative; display: inline-flex; align-items: center; font-size: 0.9375rem; padding: 0.25rem 0.75rem; min-height: 2.5rem; border-radius: 6px; border: 1px solid var(--imp-rule, var(--border)); cursor: pointer; }
+.imp-filter label { position: relative; display: inline-flex; align-items: center; font-size: 0.9375rem; padding: 0.25rem 0.75rem; min-height: 2.5rem; border-radius: 3px; border: 1px solid var(--imp-rule, var(--border)); cursor: pointer; }
 .imp-filter label:has(input:checked) { border-color: var(--foreground); font-weight: 600; }
 .imp-filter label:has(input:focus-visible) { outline: 2px solid var(--foreground); outline-offset: 2px; }
 .imp-filter input { position: absolute; opacity: 0; width: 1px; height: 1px; }
