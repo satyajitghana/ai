@@ -45,7 +45,7 @@ const LEAN = ['main', 'part', 'none']
 const DUR = { title: [2, 3, 2.6], object: [6, 9, 8], achievement: [3, 5, 4.4], verify: [2, 3, 2.6], end: [1.2, 2, 1.6] }
 const PRIMS = ['numberline', 'graph', 'grid', 'plot', 'shape', 'venn', 'sequence', 'equation', 'tree']
 // fields whose text a viewer reads (paths are matched on their last key)
-const SHOWN = new Set(['short', 'title', 'subtitle', 'heading', 'text', 'label', 'note', 'tex', 'context', 'detail', 'ourCheck', 'caption', 'highlight', 'done', 'inLabel', 'outLabel', 'xlabel', 'ylabel', 'axisLabel'])
+const SHOWN = new Set(['short', 'title', 'subtitle', 'heading', 'text', 'label', 'note', 'tex', 'context', 'detail', 'ourCheck', 'caption', 'highlight', 'done', 'inLabel', 'outLabel', 'xlabel', 'ylabel', 'axisLabel', 'gap'])
 
 let bad = 0
 for (const f of files) {

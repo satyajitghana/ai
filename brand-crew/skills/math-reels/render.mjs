@@ -140,7 +140,10 @@ const main = async () => {
   try {
     if (mode === 'plan') {
       const page = await openPage(browser)
-      for (const f of files) console.log(JSON.stringify(await loadInto(page, loadSpec(f))))
+      for (const f of files) {
+        try { console.log(JSON.stringify(await loadInto(page, loadSpec(f)))) }
+        catch (e) { console.error(`${basename(f)}: ${String(e.message).split('\n')[0].replace(/^page\.evaluate: Error: /, '')}`); process.exitCode = 1 }
+      }
     } else if (mode === 'frame') {
       const page = await openPage(browser)
       const spec = loadSpec(files[0]); const info = await loadInto(page, spec)
@@ -158,7 +161,16 @@ const main = async () => {
       const every = +(opt.every || 1), times = []
       for (let t = +(opt.start || .5); t < info.duration; t += every) times.push(+t.toFixed(3))
       const cols = +(opt.cols || 5), w = +(opt.w || 320), h = Math.round(w * 9 / 16)
-      const shots = []; for (const t of times) shots.push((await shot(page, t, 'jpeg')).toString('base64'))
+      const shots = [], paint = [], cap = []
+      for (const t of times) {
+        const t0 = Date.now()
+        paint.push(await page.evaluate(t => { const a = performance.now(); REEL.frame(t); document.body.offsetHeight; return performance.now() - a }, t))
+        const t1 = Date.now()
+        shots.push((await page.screenshot({ type: 'jpeg', quality: +(opt.q || 92), clip: { x: 0, y: 0, width: 1280, height: 720 } })).toString('base64'))
+        cap.push(Date.now() - t1)
+      }
+      const st = a => { const s = [...a].sort((x, y) => x - y); return { mean: +(a.reduce((x, y) => x + y, 0) / a.length).toFixed(1), p50: +s[s.length >> 1].toFixed(1), max: +s[s.length - 1].toFixed(1) } }
+      if (opt.bench) console.log(JSON.stringify({ id: spec.id, paintMs: st(paint), screenshotMs: st(cap) }))
       const url = await page.evaluate(async ({ shots, times, cols, w, h }) => {
         const rows = Math.ceil(shots.length / cols), c = document.createElement('canvas'); c.width = cols * w; c.height = rows * (h + 20)
         const g = c.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height)
