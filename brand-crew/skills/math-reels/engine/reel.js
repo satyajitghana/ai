@@ -1724,7 +1724,12 @@ PRIM.plot = {
     })
     GG.restore(); g.restore()
     for (const [tp, col] of tips) pen(tp[0], tp[1], col, 1, 16)
-    ends.forEach(({ i, c, p: q, e }) => L(`${key}.cl${i}`, rich(c.label), { x: q[0] + 12 + 8 * (1 - e), y: q[1] + (c.labelDy || 0), ax: 0, ay: .5, size: 21, color: tone(c.tone || (i ? 'soft' : 'accent')), op: e }))
+    // a curve's label sits after its end; if that would leave the frame it
+    // tucks in above the end instead
+    ends.forEach(({ i, c, p: q, e }) => {
+      const html = rich(c.label), [lw] = measure(`${key}.cl${i}`, html, { size: 21 }), fits = q[0] + 12 + lw <= W - 28
+      L(`${key}.cl${i}`, html, { x: fits ? q[0] + 12 + 8 * (1 - e) : q[0] - 6, y: q[1] + (c.labelDy || 0) - (fits ? 0 : 20), ax: fits ? 0 : 1, ay: .5, size: 21, color: tone(c.tone || (i ? 'soft' : 'accent')), op: e })
+    })
     ;(p.points || []).forEach((q, i) => {
       const at = q.at != null ? q.at : 2.5, e = seg(lt, at, at + .4); if (e <= 0) return
       const x = X(q.x), y = Y(q.y), c = tone(q.tone || 'accent'), pr = seg(lt, at, at + .7)
