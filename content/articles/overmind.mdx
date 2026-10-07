@@ -1,0 +1,217 @@
+---
+title: "Overmind: the 28x fewer invented quotes did not come from anyone's agent traces"
+description: "Overmind open-sourced the platform it uses to turn an agent's production traces into datasets, evals and a fine-tuned open model whose weights you keep. I read the code at commit 2c65378. The loop is real and carefully built, with Unsloth and TRL doing LoRA or full fine-tunes on 53 catalogue entries. The headline number, 0.12% invented quotes against 3.36% for a frontier flagship, comes from a contract eval that is not in the repo, names none of its models, and has the shape of CUAD's public test split rather than anyone's traces. The parts that decide whether such a number means anything, the train/eval split and the judges, have gaps I can show from the source."
+date: 2026-10-06
+tags:
+  - fine-tuning
+  - distillation
+  - small-models
+  - lora
+  - agents
+  - benchmarks
+  - datasets
+  - reproducibility
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 3
+  why: "A source read of Overmind's trace-to-fine-tune loop: how the split, judges and trainer work, where holdouts leak, and why the 28x quote claim can't be checked."
+topic: tools-infra
+kind: tool
+level: practitioner
+runsOn: api
+licence: mixed
+---
+
+import { SplitLeak } from "@/components/articles/overmind/split-leak"
+import { RateCounts } from "@/components/articles/overmind/rate-counts"
+
+On 6 October Overmind [announced](https://x.com/OvermindLab/status/2107516180474757291) that it "turns anyone into an AI lab", and open-sourced the platform behind it. A few hours later kimmonismus [summed it up](https://x.com/kimmonismus/status/2107565191366156701) for a much bigger audience:
+
+> In its own test of 4,000+ questions across 100+ contracts, Overmind reports that its trained model invented quotes on 0.12% of questions, compared with 3.36% for the frontier model it tested. That's a 28x lower rate.
+
+He also wrote that the platform "uses records of your agents' real work to build training data and evals, then fine-tunes open models". Put those two sentences next to each other and the natural reading is that the 28x came out of that loop: someone's contract agent, its traces, a model trained on them.
+
+I wanted to know whether that was true, and whether the loop is any good, so I cloned [overmind-core/overmind](https://github.com/overmind-core/overmind) at commit `2c65378` (6 October, 1,739 files, about 109,000 lines of Python in the server package alone) and read it. The short version: the loop is real, more carefully engineered than most launch-day repos, and you can run it yourself. The 28x is a different matter. None of the code or data behind it is in the repository, the models are unnamed, and the benchmark it describes has exactly the shape of a public legal dataset rather than anyone's production traffic.
+
+<RepoCard repo="overmind-core/overmind" />
+
+## The loop, in one paragraph
+
+Overmind's pitch has four parts, and the repository maps onto them cleanly. A **scan** of your agent's repository produces "capabilities", one per product purpose, each with a card describing its task, tools and expected trajectory. An **SDK** sends OpenTelemetry traces from production, which bind to those capabilities. A **Data Workshop** turns traces into versioned train and eval datasets, with an LLM agent doing the cleaning. **Evals** score models against those datasets with LLM judges and rule checks, and **training** fine-tunes an open model on Together, Baseten or Modal, deploys it behind an OpenAI-compatible endpoint, and lets you download the weights. The platform (`overbae/`, `frontend/`) is AGPL-3.0; the SDK and CLI under `overmind/` are MIT.
+
+What makes it more than a fine-tuning wrapper is that the capability is the spine. Traces, datasets, eval sets and trained models all hang off one, so the eval for a trained model is, by construction, the eval for the job the agent was doing. That is a good design. The question is how honest each joint is.
+
+## The "context graph" is written by your coding agent
+
+I expected a server that parses your code into a graph. That used to exist: the squashed migration list in `overbae/migrations/0001_initial_platform.py` still carries `0139_drop_github` and `0142_drop_context_graph`. What replaced it runs on your machine, and the thing doing the reading is whatever coding agent you already use.
+
+`overmind init` installs a skill into Cursor, Claude Code, OpenCode or Codex. The setup prompt (`overmind/skills/overmind/references/setup.md:39`) tells that agent what a capability is:
+
+> A *capability* is ONE PURPOSE: the smallest cluster of LLM work the customer would name, ship, or fail as a unit.
+
+The agent reads your source and writes the cards. Overmind's only deterministic contribution is `overmind chassis` (`overmind/overmind/chassis.py`, 190 lines), which walks every `*.py` file with Python's `ast` module and records functions and the names they call. The prompt calls that digest "GROUND TRUTH", and after the agent writes its JSON, a post-processing pass drops anchor names that do not exist and stamps each trajectory `verified` if every anchor is reachable from the entry point in the call graph.
+
+The reachability check is name-based, and the code says so with unusual candour (`chassis.py:114-116`):
+
+```python
+"""Name-based resolution (no import tracking) over-approximates reachability:
+it never wrongly drops a real path, only fails to drop a fabricated one
+that reuses a real name."""
+```
+
+So the graph is an LLM's reading of your code, lightly fact-checked against Python function names. Two consequences follow. It only checks Python: a TypeScript agent gets cards with nothing to verify them against. And "verified" means "these function names are connected somewhere", which is weaker than it sounds.
+
+<Figure
+  src="/articles/overmind/fig1.jpg"
+  alt="A dark canvas showing a support-ticket triage capability as a flow: an entry node, a shared 'look the merchant up' step, a model call that classifies the ticket, an SLA step, a routing step, and two terminals labelled 'Classify and route' and 'Escalate an incident', each marked verified with its code path."
+  caption="The trajectory map for one capability, drawn from the card the coding agent wrote; the green 'Verified' tags are the chassis reachability check (Overmind docs, Agent & Capabilities)."
+/>
+
+The map above is the per-capability view, and it is a nice piece of UI. Across capabilities there is less than the word "graph" suggests. `AgentGraphView` in `overbae/api/capabilities.py:199` returns `"edges": graph.weighted_edges(project_id, [])`, and `weighted_edges` only annotates the edges it is handed. Handed an empty list, it returns one. The observed-transition counts are computed and discarded, so the project-level "graph" the API serves today is a list of nodes.
+
+I also found a quieter bug in how a scan is versioned. `apply_snapshot` in `overbae/services/sync.py:154` passes `snapshot["version"]` to `mint_behaviour_registry(cap, analyzed_sha)`. That version is the TOML schema version, `"0.2.1"` by default (`overmind/overmind/config.py:77`), not a git commit. The SDK stamps every span with the real commit, so the exact-commit lookup a trace uses to find its behaviour contract cannot match, and binding falls back to the newest contract. For an agent whose code changes weekly, old traces get judged against this week's contract. I did not run it, so take that as what the code says rather than a reproduced failure.
+
+## Traces arrive as OpenTelemetry, and they carry everything
+
+The SDK (`overmind/overmind/tracing.py`) is a thin OpenTelemetry setup that exports OTLP to `/api/v1/traces` every two seconds and stamps each span with the capability id, project id and git commit. Two details matter if you use it.
+
+Auto-instrumentation is opt-in. `init()` defaults to `providers=None`, and `enable_tracing` returns immediately on `None` (`tracing.py:299-300`). The README's example passes `providers="auto"`, which turns on whichever of the OpenAI, Anthropic, Google, LangChain and Agno instrumentors are installed. Leave it out and you get only the spans you decorate by hand.
+
+And the traces are not redacted. Client-side scrubbing blanks values whose dict key looks like a secret, plus base64 blobs; in the code's own words, "All other text passes through in full". There is a PII module on the server, a GLiNER model (`urchade/gliner_multi_pii-v1`) deployed on Modal in `overbae/modal/modal_pii_ner.py`, but nothing outside `overbae/services/pii/` imports it. Trace ingest, connectors and datasets never call it. If your agent reads contracts, the contracts go into Overmind's database as written. Self-hosting is the answer to that, and the README says so.
+
+Binding a span to a step is cleaner than I expected. The SDK's decorators stamp `code.namespace` and `code.function.name` from the function's qualified name, and the binder matches those against the anchors in the card by dotted suffix, preferring the most specific match. Spans imported from Langfuse, LangSmith, Braintrust or Galileo through the connectors never carry those attributes, so they bind to a capability by a name mapping you configure but can never join a behaviour's route.
+
+## The Workshop: your production model writes the labels
+
+This is the part that decides what a fine-tune can learn, so I read it most closely.
+
+A trace becomes exactly one row (`overbae/services/datasets/land.py`). The module docstring sets the policy: "Landing never rejects a row and never triggers scoring." For a training row, the transcript is used as-is. For an eval row, the last assistant turn of the trace becomes `expected_output` (`examples.py:123-131`):
+
+```python
+if intent == "eval":
+    prefix = transcript
+    if transcript[-1]["role"] == "assistant":
+        target = transcript[-1]
+        response = target if target.get("tool_calls") else target.get("content") or target
+        if missing(row.get("expected_output")):
+            row["expected_output"] = response
+```
+
+Read that twice, because it is the whole economics of the product. The gold answer is whatever your production model said. Training on traces is distillation of your incumbent, which is usually a frontier API. That is a sensible thing to do. A smaller model that imitates the expensive one on a narrow job is the oldest trick in applied ML, and I have written about how well it can work, as in the [\$80 paper rewriter](/articles/paper-rewriter-finetune) and [Cactus Needle's fine-tune](/articles/needle-finetune). But it sets a ceiling on what "beats the frontier model" can mean when the eval comes from the same traces: the reference answers were written by the model being beaten. A fine-tune scored on agreement with the incumbent's outputs is being scored on imitation. If you have human-corrected outputs, the code keeps them: an existing `expected_output` that differs from the trace pushes the trace's answer into `model_expected_output` instead. You have to bring those corrections yourself.
+
+<Figure
+  src="/articles/overmind/fig2.jpg"
+  alt="The Data Workshop screen: a dataset of 362 support-triage transcripts in a table, and on the right the workshop agent's reply listing quality checks (2 exact duplicates, 0 truncated finals) and two applied steps, drop exact duplicates and cap one class at 20%."
+  caption="The Data Workshop: each cleaning step is a script cell the agent writes, with the data after it shown underneath (Overmind docs, Datasets)."
+/>
+
+The cleaning is done by an LLM agent writing notebook cells. The engine is configurable, and the default order is Cursor's `composer-2.5` if you have a key, otherwise an OpenRouter chain of `gpt-5.6-terra`, `claude-sonnet-5` and `gemini-3.1-pro-preview` (`overbae/core/model_registry.py`). The platform itself deduplicates only on exact content: `content_key` is a SHA-256 of canonicalised JSON with whitespace collapsed, and the split report says `"near_duplicate_check": "not_checked"` in so many words. Near-duplicate removal is left to the agent, whose prompt suggests MinHash. Synthetic rows are generated by the same agent, at most 50 per batch, must cite a seed row, and are accepted on a format check alone. The prompt is frank about that ("Generated answers are synthetic, not verified ground truth") and says "Never use held-out eval data to generate training examples". That rule lives in a prompt; no code enforces it.
+
+## Where the holdout leaks
+
+Splitting is where a trace-trained model either earns its eval score or memorises it. Overmind has two splitters, and they are worth comparing.
+
+The Workshop's `split_rows` (`overbae/services/datasets/partition.py:105-207`) is good. It builds a union-find over "contamination keys": the normalised input with the final assistant turn removed, `trace_id`, `conversation_id`, any `group_by` columns you name, ids it finds inside the input (`packet_id`, `case_id`, `example_id`), and the seed lineage of synthetic rows. Every connected component goes wholly to one side, components are shuffled with a fixed seed, and each is added to eval if it brings the eval size closer to the target. Most hand-rolled splits I see do none of that.
+
+What it cannot do is group rows by an identity it has never been told about. Take a clause-extraction agent that runs one trace per question. Five questions about the same contract are five traces with five different inputs, so they are five components, and they scatter across train and eval as if they were unrelated. The model then gets evaluated on contracts it has already read in training, which is the leak a reply to the launch post [worried about](https://x.com/ricci_nov/status/2107593465613992415): "The training set and the eval both come from the same agent logs". Naming the contract as a `group_by` column fixes it. The default does not.
+
+The second splitter is the one the CLI uses. `overmind finetune --since 7d` builds train and eval datasets straight from stored LLM calls, and `hash_split` in `overbae/services/datasets/llm_calls.py:257-268` puts each call on a side by `sha256(span_id) % 100`. No grouping at all. In a multi-turn agent, where each call carries the conversation so far, one conversation's calls land on both sides, and the eval rows overlap the training rows almost word for word.
+
+<SplitLeak />
+
+I re-implemented both in the widget above, on a toy of eight contracts and five clause questions. With the default keys, a 20% eval share typically leaves most contracts on both sides; group by contract and none are. The per-call hash behaves the same as the default keys here, because in this setup every question is already its own trace.
+
+The platform does check, and that is to its credit. When a training job starts, `row_store.contamination` counts rows in the training set that overlap the pinned eval set on content, trace, conversation, group or lineage, and `overbae/tasks/finetuning.py:481-488` logs:
+
+```python
+message=f"Warning: {overlap} training rows overlap the pinned eval dataset. Scores are not held-out estimates."
+```
+
+Then it trains anyway. The docs are explicit that overlap is reported "as a warning; it does not drop selected rows or block launch". I would have made that a hard stop with an override flag, since a warning in a job log is easy to miss and the number it qualifies ends up in a slide.
+
+## The judges, and the check that isn't there
+
+Evals are tiered. Tier 0 compiles rule checks from the capability card with no model call (`card_compiler.py`). Tier 1 has an LLM write rubrics grounded in the card and compile them into weighted yes/no checklists. The default judge is the first model of the "fast" chain, `gpt-5.6-luna`, then `claude-sonnet-5`, then `gemini-3.8-flash`.
+
+There is a self-preference guard: when you have not pinned a judge, `resolve_default_judge` skips judge families that match a model under test. It looks families up in a table of catalogue API models, so a fine-tuned Qwen resolves to "unknown" and is not excluded from anything, which is harmless, and an incumbent from OpenAI pushes the judge to Anthropic, which is the point. Comparison between models is pointwise means, with a 0.005 threshold for "unchanged" and no significance test. A Bradley-Terry ranker exists in `ranking.py`, and nothing outside that file calls it.
+
+<Figure
+  src="/articles/overmind/fig3.jpg"
+  alt="A training run page: a line chart of per-class F1 at baseline and final, and an evals table where the baseline row is GPT 5.6 Sol at 75% on 60 samples and the final row is a fine-tuned Qwen3 4B at 87%, with sub-scores for conciseness, correctness, SLA floor, triage accuracy and valid routing team."
+  caption="How a trained model is reported: baseline and final rows scored by the same judges on the pinned eval set, here 60 samples (Overmind docs, Models)."
+/>
+
+That screenshot is from Overmind's own docs, and it shows the format every comparison the platform produces will take: a percentage, a delta, 60 samples. Twelve points on 60 samples is not nothing, but the platform does not tell you whether it is something.
+
+Now the gap I care about most, given the headline. I grepped the whole repository, including tests, docs and frontend, for `CUAD`, `BioRED`, `ASRS`, "false alarm" and "exact quote". There are no matches. There is also no deterministic check that a quoted span appears in the source document. The deterministic evaluators (`deterministic.py`) are `exact_match`, `contains`, `regex`, JSON schema, tool selection and arguments, field comparisons and budgets, and every one of them compares the output to the reference, not to the input. The managed "Hallucination" evaluator is an LLM judge with a rubric that says "lower it for implausible, misleading, or fabricated content". So the platform you can download cannot produce the metric in the headline. Fabricated-quote rate is a substring test on the contract text, ten lines of code, and it is not there.
+
+## Training: Unsloth, TRL, and sensible defaults
+
+The trainer is the most conventional part, and that is a compliment. `overbae/services/sft_assets/engine_unsloth.py` loads the base with Unsloth's `FastLanguageModel`, wraps it in LoRA or runs a full fine-tune, and trains with TRL's `SFTTrainer` (pinned to `trl==1.10.0` in `run.sh`). Loss is on assistant tokens only: `pretok.py` builds the labels from the chat template's assistant mask, including tool calls, so the model is never trained to predict the user or the tool results. The engine's comments come back to import order again and again, because Unsloth patches TRL and importing TRL first silently loses the patches. Someone has been burned by that.
+
+The defaults come from one policy module, `finetuning_policy.py`, so the wizard shows the values the job receives:
+
+```python
+def qlora_lora_params(params_b: float, num_examples: int) -> dict[str, Any]:
+    """LoRA rank/alpha/dropout from the QLoRA rank sweep + Unsloth guide.
+
+    Rank 16 on small datasets (lower overfitting risk), 32 otherwise; alpha 2×rank.
+```
+
+Rank 16 under 1,000 examples and 32 above, alpha twice the rank, every attention and MLP projection as a target. Learning rate 1e-4 for LoRA on models up to 13B with fewer than 2,000 examples, 2e-4 with more, half that above 13B, and 1e-5 for a full fine-tune. Epochs scale so each example is seen about 300 times in total, between three and ten epochs, dropping to two above 10,000 rows and one above 50,000. Cosine schedule, 5% warmup, seed 42. Rows longer than the context raise rather than truncate (`truncation.py`: "refusing to truncate; pick a longer-context model or shorten the row"). Only the final checkpoint is saved.
+
+The catalogue in `overbae/modal/models.json` has 53 entries, 40 on Baseten and 13 on Together, from LiquidAI's LFM2.5-230M up to Llama 3.3 70B and Qwen2.5-72B, with dense models up to 14B trainable either way and the larger and mixture-of-experts models LoRA-only. There are three runners in `finetuning_runner.py`: Together's managed fine-tuning API, Baseten training jobs running Overmind's own `train.py` on H100 or H200, and Modal functions running the same script. Serving is vLLM on Modal. "You own the weights" is literal: `overmind model download-checkpoint` fetches them, and a LoRA adapter's config is rewritten to point at the bf16 base so the merge does not try to apply deltas to Unsloth's 4-bit repack.
+
+## So where did 0.12% come from?
+
+From a research post, [When bigger isn't better](https://overmindlab.ai/research/when-bigger-isnt-better), and an earlier [X post](https://x.com/OvermindLab/status/2103563946662011121) that summarised it on 25 September. Overmind's own reply under kimmonismus says the same: "Those numbers are from our legal clause-extraction eval: 4,000+ questions across 100+ contracts."
+
+<Figure
+  src="/articles/overmind/fig4.png"
+  alt="A three-column chart titled 'Where the answer has to be right, the specialist holds'. Legal: exact quote match 59.6% vs 8.5%, fabricated quotes 0.12% vs 3.36%, cost per 1,000 questions $1.03 vs $20.94. Biomedical BioRED: F1 54.9% vs 14.1%, invented relationships 6.6% vs 48.2%, whole test $17.49 vs $26.73. Aviation NASA ASRS: wording match 0.295 vs 0.268, invented details 19.4% vs 33.4%, synopsis length 32.5 to 39.8 words vs 42.3."
+  caption="Overmind's summary of its three benchmarks; every number is Overmind's claim, and none of the runs is in the repository (Overmind, X post of 25 September)."
+/>
+
+The legal task, as the post describes it: for each question, the model says whether a specific clause is in the contract and quotes its exact wording. Four models were compared: the Overmind fine-tune, the base model it was trained from, a "frontier flagship" and a "frontier mid-tier". None is named. For BioRED the post says the fine-tune was a "Qwen 9B", and for the aviation test it says "12B", which in the catalogue can only be Gemma 4 12B. For the legal test it says nothing.
+
+<Figure
+  src="/articles/overmind/fig5.jpg"
+  alt="A bar chart titled 'Frontier flagship fabricated quotes 28x more often and raised false alarms 15x more often'. False alarm rate: Overmind SFT 0.65%, base model 2.46%, frontier flagship 10.01%, frontier mid-tier 11.72%. Fabrication rate: Overmind SFT 0.12%, base model 3.36%, frontier flagship 3.36%, frontier mid-tier 2.81%."
+  caption="The chart the 28x comes from; note that the untrained base model fabricates exactly as often as the flagship (Overmind's research post, as posted by kimmonismus)."
+/>
+
+From the outside, I can still say a fair amount.
+
+The set has CUAD's shape. CUAD, the Contract Understanding Atticus Dataset ([paper](https://arxiv.org/abs/2103.06268)), asks for 41 clause categories per contract, and its standard test split on [Hugging Face](https://huggingface.co/datasets/theatticusproject/cuad-qa) has 4,182 questions, which is 102 contracts times 41 categories. "4,000+ questions across 100+ contracts" with a yes-or-no-and-quote task is an exact fit. Overmind never names the dataset, so this is my inference, but if it holds it changes how to read the result. The model was trained on annotated contract data, most likely CUAD's own training split, not on traces from anybody's agent, and the gold answers were written by the Atticus Project's lawyers, not by a frontier model. That makes it a cleaner eval than the trace loop would give you, and it says nothing about the trace loop.
+
+The comparison that matters is base against fine-tune. The base model and the flagship fabricate at exactly the same 3.36%, a coincidence a reply under kimmonismus [also spotted](https://x.com/fireplyai/status/2107565799322079377). So the drop to 0.12% is what supervised fine-tuning did to one model. It is not evidence that small models fabricate less than large ones, and the "Think Smaller" framing gets it backwards: the untuned small model was no better than the flagship.
+
+Exact-quote match is partly a test of annotation conventions. The fine-tune quotes the clause exactly 59.6% of the time, the flagship 8.5%, and the untuned base 4.2%. A frontier model that quotes the right sentence plus the one after it, or starts the span a clause earlier than the annotator did, fails an exact match while being right. A model trained on that annotator's spans learns where they start and stop. Some of the 7x is better reading. I would bet a good share is learned span boundaries, and the post gives no partial-match or overlap metric that would separate the two.
+
+The rates are per question, and many questions have no answer. Both the false alarm rate and the fabrication rate are divided by every question asked, including those where the right answer is "not in this contract". A model that answers "not present" more readily fabricates less per question almost by construction, a point a [reply](https://x.com/aiartgallerie/status/2107569833961566325) made in one line: "A model that declines more will invent fewer quotes almost by default." The F1 numbers, 91.6% for the fine-tune and 82.0% for the flagship, suggest the fine-tune is not simply abstaining, but the post never gives the miss rate, how often a model said a clause was absent when it was there. In contract review that is the expensive error.
+
+<RateCounts />
+
+The counts are small. If the set is 4,182 questions, 0.12% is about five fabricated quotes and 3.36% about 140. The 95% intervals, roughly 0.05% to 0.28% and 2.9% to 3.9%, do not come close to overlapping, so the gap is not noise. But "28x" rests on a numerator of about five, and moving it by two either way puts the ratio anywhere from 20x to about 47x.
+
+The other two benchmarks have their own oddities, in Overmind's own numbers. On BioRED the frontier flagship scores an F1 of 14.1%, which is low enough for a frontier model on a yes-or-no relation question that I suspect the prompt or output format rather than the model. On NASA ASRS the headline "2.5X fewer invented details" uses the smallest trained model at 13.4% against 33.4%, while the "tied on meaning" headline uses the 12B, which invented details 19.4% of the time. Each claim picks the model that flatters it.
+
+None of this makes the result false. A fine-tuned small model beating a general frontier model on narrow, span-level extraction is plausible. But it cannot be checked: no weights on Overmind's [Hugging Face page](https://huggingface.co/OvermindLab) (it hosts one PII model), no eval code in the repo, no prompts, no model names.
+
+## Running it, and what I would use it for
+
+Self-hosting is `docker compose up` for Postgres, Redis, the API, the console, Celery workers and Grafana, but the API refuses to start without `OPENROUTER_API_KEY` (judges, the workshop, frontier inference), Modal tokens (training and serving workers), AWS credentials (the checkpoint archive) and a Hugging Face token. "Self-hosted" means your database and your network; the GPUs are still Modal's or Baseten's and the judges are still OpenRouter's. The SDK and CLI send anonymous PostHog events unless you set `OVERMIND_ANALYTICS_ENABLED=false` or `DO_NOT_TRACK=1`. The AGPL on the platform matters if you plan to modify it and offer it as a service.
+
+Would I use it? For an agent with one narrow, high-volume job and a frontier bill to match, yes, with three changes on day one. Name the document, customer or case as a `group_by` column in every split, and never use `overmind finetune` straight from LLM calls for anything you report. Put a human-corrected `expected_output` on the eval rows, because otherwise the fine-tune is graded on how well it copies the model it replaces. And add the deterministic check the headline implies but the platform lacks: for extraction, assert the quote is a substring of the source, and report misses alongside fabrications. The loop has the right shape. Whether a given 28x is real depends on exactly the parts the default settings leave loose.
+
+If agent memory is the problem you actually have rather than model cost, [Sentry](/articles/sentry-agent-recovery) and [Agent Memory Repo](/articles/agent-memory-repo) attack it from the other end, and the [Qwen3.8 2B distill](/articles/qwen3-8-2b-distill) is a reminder of how much a filter can do to a distillation headline.
+
+## How I checked
+
+I cloned `overmind-core/overmind` with `git clone --depth 1` at commit `2c65378` (6 October 2026) and read the server's dataset, split, eval, training and sync code, the SDK's tracing and chassis modules, the setup skill and the model catalogue; file and line references above are to that commit. Two read-only sub-agents swept the capability/trace and dataset/eval packages and I re-read every citation I use. I executed none of the repository's code. The split widget re-implements `split_rows` and `hash_split` in TypeScript, with FNV-1a and a seeded mulberry32 standing in for SHA-256 and Python's `random.Random(42)`. The benchmark numbers are copied from Overmind's research post and its 25 September X post; the CUAD test-split size is from the dataset card on Hugging Face; the identification of the legal set as CUAD is my inference. Confidence intervals are Wilson 95% assuming 4,182 questions. I read the launch thread and its replies through the fxtwitter mirror, and the platform docs and screenshots from docs.overmindlab.ai.

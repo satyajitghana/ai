@@ -169,6 +169,41 @@ export default function Page() {
         </p>
       </Section>
 
+      <Section id="changes" title="Changes within v1">
+        <ul className="max-w-prose space-y-4 leading-7 text-muted-foreground">
+          <li>
+            <span className="font-mono text-xs text-foreground">2026-10 · additive</span>{" "}—{" "}
+            <code className="font-mono text-xs">/api/articles</code>{" "}gains{" "}
+            <code className="font-mono text-xs">rating</code>,{" "}
+            <code className="font-mono text-xs">topic</code>,{" "}
+            <code className="font-mono text-xs">articleKind</code>,{" "}
+            <code className="font-mono text-xs">level</code>,{" "}
+            <code className="font-mono text-xs">runsOn</code>,{" "}
+            <code className="font-mono text-xs">licence</code>,{" "}
+            <code className="font-mono text-xs">facts</code>,{" "}
+            <code className="font-mono text-xs">score</code>,{" "}
+            <code className="font-mono text-xs">tier</code>,{" "}
+            <code className="font-mono text-xs">rank</code>{" "}and{" "}
+            <code className="font-mono text-xs">lenses</code>{" "}(null while an article is unrated),
+            and MCP gains <code className="font-mono text-xs">list_articles</code>. The existing{" "}
+            <code className="font-mono text-xs">kind</code>{" "}field keeps its meaning, the content
+            kind; an article&apos;s own kind is <code className="font-mono text-xs">articleKind</code>.
+          </li>
+          <li>
+            <span className="font-mono text-xs text-foreground">2026-10 · deprecated</span>{" "}—{" "}
+            <code className="font-mono text-xs">signal</code>{" "}on articles. Its{" "}
+            <code className="font-mono text-xs">level</code>{" "}and{" "}
+            <code className="font-mono text-xs">label</code>{" "}keep their 1–5 scale and names and now
+            come from the percentile tier when an article is rated;{" "}
+            <code className="font-mono text-xs">interest</code>,{" "}
+            <code className="font-mono text-xs">helpful</code>{" "}and its{" "}
+            <code className="font-mono text-xs">score</code>{" "}are null for articles that no longer
+            carry the old fields. Read <code className="font-mono text-xs">tier</code>{" "}and the
+            top-level <code className="font-mono text-xs">score</code>{" "}instead.
+          </li>
+        </ul>
+      </Section>
+
       <Section id="stability" title="What is not covered">
         <p className="max-w-prose leading-7 text-muted-foreground">
           The content itself is not versioned. Articles get edited, digests get added, the health

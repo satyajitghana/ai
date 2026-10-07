@@ -1,5 +1,7 @@
 import { z } from "zod"
 
+import { KIND_IDS, LEVEL_IDS, LICENCE_SPECIAL, RUNS_ON_IDS, TOPIC_IDS } from "@/data/taxonomy"
+
 // Frontmatter schemas (Zod 4). A malformed post fails `pnpm validate` / the build
 // — this is the loud-failure safety net that lets agents edit content safely.
 
@@ -23,19 +25,67 @@ export type BlogFrontmatter = z.infer<typeof blogFrontmatter>
 
 // Curated long-form articles on AI — essays/explainers, distinct from the
 // personal build-log blog. Same shape as blog, plus `featured` to star the
-// standout pieces, and a per-article editorial signal: how `interest`ing
-// (novelty/insight) and `helpful` (practical/reference value) the piece is,
-// 1–5 each. These live in frontmatter so the rating is set right where the
-// article is written; the derived level drives the /articles filter + sort.
-export const articleFrontmatter = blogFrontmatter.extend({
-  featured: z.boolean().default(false),
-  interest: z.number().int().min(1).max(5).optional(),
-  helpful: z.number().int().min(1).max(5).optional(),
+// standout pieces, and the editorial metadata that organises /articles:
+//
+//   rating   8 rubric dimensions, 0–3 each, plus a one-line `why` (see
+//            lib/content/rating.ts for the anchors). Score, tier and lens
+//            keys are computed from it by lib/content/signals.ts.
+//   topic    exactly one, from data/taxonomy.ts TOPICS
+//   kind     paper | model | tool | teardown | roundup | essay | guide | dataset
+//            (loaded as `articleKind`: items already carry `kind: "articles"`)
+//   level    intro | practitioner | research
+//   runsOn   the smallest hardware the subject runs on: browser < phone < cpu <
+//            consumer-gpu < workstation < datacenter, or api / none
+//   licence  SPDX id, or proprietary | mixed | source-available | non-commercial |
+//            custom | unlicensed | n/a
+//
+// All optional while the corpus is being rated. `interest` / `helpful` (1–5)
+// are the previous, inflated signal: still accepted, deprecated, and removed
+// once every article carries `rating`.
+const rubricScore = z.number().int().min(0).max(3)
+export const ratingSchema = z.object({
+  novelty: rubricScore,
+  verification: rubricScore,
+  runnable: rubricScore,
+  explains: rubricScore,
+  takeaway: rubricScore,
+  durability: rubricScore,
+  reach: rubricScore,
+  unique: rubricScore,
+  why: z.string().trim().min(1).max(160),
 })
+
+const licence = z
+  .string()
+  .refine(
+    (v) => (LICENCE_SPECIAL as readonly string[]).includes(v) || /^[A-Za-z0-9][A-Za-z0-9.+-]*$/.test(v),
+    "licence must be an SPDX id (e.g. Apache-2.0) or one of: " + LICENCE_SPECIAL.join(", "),
+  )
+
+// `kind` is the frontmatter name, but every loaded content item already has a
+// `kind` (the content kind, "articles"), so the loader exposes this one as
+// `articleKind`.
+export const articleFrontmatter = blogFrontmatter
+  .extend({
+  featured: z.boolean().default(false),
+  rating: ratingSchema.optional(),
+  topic: z.enum(TOPIC_IDS).optional(),
+  kind: z.enum(KIND_IDS).optional(),
+  level: z.enum(LEVEL_IDS).optional(),
+  runsOn: z.enum(RUNS_ON_IDS).optional(),
+  licence: licence.optional(),
+  /** @deprecated superseded by `rating` */
+  interest: z.number().int().min(1).max(5).optional(),
+  /** @deprecated superseded by `rating` */
+  helpful: z.number().int().min(1).max(5).optional(),
+  })
+  .transform(({ kind, ...rest }) => ({ ...rest, articleKind: kind }))
 export type ArticleFrontmatter = z.infer<typeof articleFrontmatter>
 
-// Derive a 1–5 signal level (with a label) from the two axes. Returns null when
-// a piece hasn't been rated yet, so the UI can treat it as unranked.
+// Back-compat 1–5 signal (level + label), kept for the API's `signal` field and
+// any caller written against it. Rated articles derive it from their tier
+// (pass `tier`, from lib/content/signals.ts); unrated ones fall back to the old
+// interest + helpful sum. Null when neither exists.
 const SIGNAL_TIERS: { min: number; level: number; label: string }[] = [
   { min: 9, level: 5, label: "Essential" },
   { min: 8, level: 4, label: "High" },
@@ -45,21 +95,36 @@ const SIGNAL_TIERS: { min: number; level: number; label: string }[] = [
 ]
 
 export type ArticleSignal = {
-  interest: number
-  helpful: number
-  score: number
+  /** Deprecated 1–5 axis from frontmatter; null once an article only has `rating`. */
+  interest: number | null
+  /** Deprecated 1–5 axis from frontmatter; null once an article only has `rating`. */
+  helpful: number | null
+  /** interest + helpful (2–10) when both exist, else null. Not the 0–100 score. */
+  score: number | null
+  /** 1–5, from the percentile tier when rated, else from interest + helpful. */
   level: number
   label: string
+  source: "tier" | "legacy"
 }
 
-export function articleSignal(fm: {
-  interest?: number
-  helpful?: number
-}): ArticleSignal | null {
-  if (fm.interest == null || fm.helpful == null) return null
-  const score = fm.interest + fm.helpful
-  const tier = SIGNAL_TIERS.find((t) => score >= t.min) ?? SIGNAL_TIERS[SIGNAL_TIERS.length - 1]
-  return { interest: fm.interest, helpful: fm.helpful, score, level: tier.level, label: tier.label }
+export function articleSignal(
+  fm: { interest?: number; helpful?: number },
+  rated?: { tier: { level: number; label: string } | null } | null,
+): ArticleSignal | null {
+  const legacy = fm.interest != null && fm.helpful != null ? fm.interest + fm.helpful : null
+  if (rated?.tier) {
+    return {
+      interest: fm.interest ?? null,
+      helpful: fm.helpful ?? null,
+      score: legacy,
+      level: rated.tier.level,
+      label: rated.tier.label,
+      source: "tier",
+    }
+  }
+  if (legacy === null) return null
+  const tier = SIGNAL_TIERS.find((t) => legacy >= t.min) ?? SIGNAL_TIERS[SIGNAL_TIERS.length - 1]
+  return { interest: fm.interest!, helpful: fm.helpful!, score: legacy, level: tier.level, label: tier.label, source: "legacy" }
 }
 
 export const logFrontmatter = z.object({

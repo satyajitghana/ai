@@ -7,6 +7,8 @@ import { Citation } from "@/components/site/citation"
 import { PageShell } from "@/components/site/page-shell"
 import { RelatedArticles } from "@/components/site/related-articles"
 import { ShareButtons } from "@/components/site/share-buttons"
+import { WhyReadThis } from "@/components/site/why-read-this"
+import { displayTags } from "@/data/taxonomy"
 import { getArticle, getArticles } from "@/lib/content"
 import { getFilm } from "@/lib/films"
 import { isAbsolute } from "@/lib/media"
@@ -87,7 +89,7 @@ export default async function Page({
           </div>
           <p className="mt-3 font-mono text-xs text-muted-foreground">
             {article.date} · {article.readingTimeMins} min
-            {article.tags.length ? ` · ${article.tags.join(" · ")}` : ""}
+            {displayTags(article.tags).length ? ` · ${displayTags(article.tags).join(" · ")}` : ""}
           </p>
           {film ? (
             <ArticleFilm film={film} title={article.title} />
@@ -107,6 +109,7 @@ export default async function Page({
               />
             </div>
           ) : null}
+          <WhyReadThis article={article} />
         </header>
         <Article />
       </article>
