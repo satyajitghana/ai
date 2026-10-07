@@ -45,7 +45,7 @@ const MD_PAGES = new Set(["about", "resume", "health", "now", "uses", "reading"]
 // real routing, and anything listed here falls through untouched.
 const KNOWN_TOP = new Set([
   "", "about", "architectures", "articles", "arxiv", "blog", "changelog",
-  "colophon", "contact", "developers", "github", "health", "logs", "models",
+  "colophon", "contact", "developers", "github", "health", "logs", "math", "models",
   "notes", "now", "patents", "privacy", "projects", "publications", "reading",
   "resume", "search", "snippets", "uses",
   // machine-readable documents served as routes or static files

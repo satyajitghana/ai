@@ -13,7 +13,7 @@ import { problem } from "@/lib/api-error"
 // real route above still wins; only genuinely unknown paths land here.
 
 const KNOWN = [
-  "architectures", "articles", "arxiv", "ask", "github", "health", "notes",
+  "architectures", "articles", "arxiv", "ask", "github", "health", "math", "math/{id}", "notes",
   "now", "patents", "posts", "posts/{slug}", "profile", "projects",
   "publications", "reading", "resume", "search", "snippets", "uses",
 ]

@@ -144,4 +144,4 @@ Two panels in `sequence` work well: the object first (what is being measured), t
 
 ## Not in scope
 
-The narrated explainer films and thumbnails are `explainer-films` — never modify that folder (its files are hashed into every film's freshness check); this skill copies its patterns, not its code. Embedding reels on the site is a separate step: the outputs land in `public/films/math/` and go through `mediaUrl()` like every other film.
+The narrated explainer films and thumbnails are `explainer-films` — never modify that folder (its files are hashed into every film's freshness check); this skill copies its patterns, not its code. Embedding reels on the site is a separate step: the outputs land in `public/films/math/` and go through `mediaUrl()` like every other film. After committing a reel (or removing one), run `pnpm data:math` so `/math` knows it exists: the wall never reads `public/` at runtime, it reads the list `scripts/build-math-reels-data.mts` writes to `data/math-wall/generated.ts`.
