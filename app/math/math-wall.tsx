@@ -6,9 +6,14 @@
 //
 // The tiles are a slim projection serialized into the page; the panel fetches
 // the review prose for one family from /api/math/<id> when it opens. A tile
-// with a rendered reel plays it muted while hovered or focused on a device
+// with a rendered reel (the short narrated video; "reel" is the internal name)
+// is a poster that plays a muted preview while hovered or focused on a device
 // that hovers, never under prefers-reduced-motion; on a phone a tap opens the
-// panel. A family without a reel shows a typographic card that says so.
+// panel. The panel plays the reel in the site's player
+// (components/site/film-player.tsx): ambient and muted, "Watch with sound" for
+// the narration with captions and the full controls. One player at a time, for
+// the reel being watched. A family without a reel shows a typographic card
+// that says so.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
 import {
@@ -19,6 +24,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react/dist/ssr"
 
+import { FilmPlayer } from "@/components/site/film-player"
 import type { MathResultDetail, WallTile } from "@/lib/math-wall"
 import { useUrlState } from "@/lib/use-url-state"
 import { cn } from "@/lib/utils"
@@ -528,7 +534,7 @@ function ReelPlaceholder({ tile, discipline, accent, large }: { tile: WallTile; 
       <span className="flex items-center justify-between gap-2">
         <span aria-hidden className="h-0.5 w-8 rounded" style={{ background: accent }} />
         <span className={cn("font-mono", large ? "text-xs" : "text-[9px]")} style={{ color: REEL_MUTE }}>
-          reel coming
+          video coming
         </span>
       </span>
     </div>
@@ -601,7 +607,7 @@ function Tile({
           stop()
           onOpen()
         }}
-        aria-label={`${tile.id}. ${tile.t}. ${discipline}, ${SIG[tile.s]}, ${LEAN_LABEL[tile.l]}${tile.r ? "" : ", reel coming"}`}
+        aria-label={`${tile.id}. ${tile.t}. ${discipline}, ${SIG[tile.s]}, ${LEAN_LABEL[tile.l]}${tile.r ? "" : ", video coming"}`}
         className="group block rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-4 focus-visible:ring-offset-background"
       >
         <div className="relative aspect-video overflow-hidden rounded-xl border border-black/5 bg-[#0b0d12] shadow-sm transition-transform duration-300 group-hover:-translate-y-0.5 group-hover:shadow-md motion-reduce:transition-none motion-reduce:group-hover:translate-y-0 dark:border-white/10">
@@ -704,7 +710,6 @@ function Panel({
   const dialog = useRef<HTMLDialogElement>(null)
   const body = useRef<HTMLDivElement>(null)
   const heading = useRef<HTMLHeadingElement>(null)
-  const reduce = useMedia(REDUCE)
   const detail = useDetail(id)
 
   // open/close the native modal dialog: it makes the page inert behind it,
@@ -758,6 +763,8 @@ function Panel({
         if (e.target === dialog.current) onClose()
       }}
       onKeyDown={(e) => {
+        // the player's own keys (arrows seek while it narrates) win
+        if (e.defaultPrevented) return
         const el = e.target as HTMLElement
         if (el.closest("video, input, select, textarea")) return
         if (e.key === "ArrowLeft" && prev) onNavigate(prev)
@@ -798,28 +805,27 @@ function Panel({
           </div>
 
           <div ref={body} className="flex-1 overflow-y-auto overscroll-contain px-4 pt-4 pb-10 sm:px-6">
-            <div className={cn("relative overflow-hidden rounded-xl bg-[#0b0d12]", tile.r ? "aspect-video" : "aspect-[21/8]")}>
-              {tile.r ? (
-                <video
-                  key={tile.id}
-                  src={tile.r[0]}
-                  poster={tile.r[1]}
-                  controls
-                  playsInline
-                  muted
-                  autoPlay={!reduce}
-                  preload="metadata"
-                  aria-label={`Reel: ${tile.t}`}
-                  className="absolute inset-0 size-full"
-                />
-              ) : (
-                <ReelPlaceholder tile={tile} discipline={discipline} accent={accent} large />
-              )}
-            </div>
-            {tile.r ? null : (
-              <p className="mt-2 text-xs text-muted-foreground">
-                The reel for this result has not been rendered yet. Everything below is the written review.
-              </p>
+            {tile.r ? (
+              // keyed: the next or previous result is a fresh player, back in ambient
+              <FilmPlayer
+                key={tile.id}
+                src={tile.r[0]}
+                poster={tile.r[1]}
+                captions={tile.r[2]}
+                duration={tile.r[3]}
+                title={`${tile.id}. ${tile.t}`}
+                noun="video"
+                kind={tile.r[2] ? "narrated video" : "video"}
+              />
+            ) : (
+              <>
+                <div className="relative aspect-[21/8] overflow-hidden rounded-xl bg-[#0b0d12]">
+                  <ReelPlaceholder tile={tile} discipline={discipline} accent={accent} large />
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  The video for this result has not been rendered yet. Everything below is the written review.
+                </p>
+              </>
             )}
 
             <h2

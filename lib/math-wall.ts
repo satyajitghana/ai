@@ -1,5 +1,7 @@
-// The records behind /math, the wall of math reels: one per result family of
-// openai/math (372). Composed at import time from three committed sources:
+// The records behind /math, "AI results in mathematics": one short narrated
+// video (a "reel" internally, made by brand-crew/skills/math-reels) per result
+// family of openai/math (372). Composed at import time from four committed
+// sources:
 //
 //   components/articles/openai-math/catalogue-data.ts  our grades (discipline,
 //       significance, kind, Lean status, one-line claim, caveat line)
@@ -7,6 +9,8 @@
 //       detail, pages) and the release's manuscript map, snapshotted at a commit
 //   data/math-wall/generated.ts  which families have a rendered reel, reel spec
 //       titles, and the heading of /articles/openai-math that covers each family
+//   data/.generated/math-reels.json  the render manifest: which reels were
+//       voiced, so have a WebVTT captions track beside them
 //
 // Server-only in practice: notes.json is ~650 KB. Pages hand the client a slim
 // projection (wallTiles) and the panel fetches one record from /api/math/<id>.
@@ -16,12 +20,24 @@
 import { DISCIPLINES, FAMILIES, type Family } from "@/components/articles/openai-math/catalogue-data"
 import notes from "@/data/math-wall/notes.json"
 import { ARTICLE_ANCHORS, REELS, SPEC_TITLES } from "@/data/math-wall/generated"
+import reelManifest from "@/data/.generated/math-reels.json"
 import { mediaUrl } from "@/lib/media"
 import { texToText } from "@/lib/tex-text"
 
 export const MATH_ARTICLE = "/articles/openai-math"
 export const MATH_REPO = "https://github.com/openai/math"
 export const MATH_COMMIT: string = notes.commit
+
+/**
+ * What the /math collection is called wherever a reader or an agent sees it.
+ * "Results", not "breakthroughs": every entry is a claim from an unrefereed
+ * release, from claimed landmarks down to technical lemmas, and only some are
+ * checked in Lean. The URL (/math), /api/math and the math-reels skill keep
+ * their names.
+ */
+export const MATH_COLLECTION = "AI results in mathematics"
+
+const VOICED = (reelManifest as { reels: Record<string, { hasVoice?: boolean }> }).reels
 
 // The reel engine's accents (brand-crew/skills/math-reels/engine/reel.js), one
 // per discipline at a similar lightness. Indexed like DISCIPLINES.
@@ -98,6 +114,8 @@ function catalogueUrl(id: string, title: string) {
 export type MathReel = {
   src: string
   poster: string
+  /** WebVTT captions of the narration, when the reel is voiced */
+  captions: string | null
   duration: number | null
   width: number | null
   height: number | null
@@ -167,6 +185,7 @@ function record(f: Family): MathResultDetail {
       ? {
           src: mediaUrl(`/films/math/${f.id}.mp4`),
           poster: mediaUrl(`/films/math/${f.id}-poster.webp`),
+          captions: VOICED[f.id]?.hasVoice ? mediaUrl(`/films/math/${f.id}.vtt`) : null,
           duration: r.duration,
           width: r.width,
           height: r.height,
@@ -207,14 +226,14 @@ export type WallTile = {
   k: string
   l: number
   c: string
-  /** reel: [src, poster] when rendered */
-  r: [string, string] | null
+  /** reel: [src, poster, captions, seconds] when rendered */
+  r: [string, string, string | null, number | null] | null
 }
 
 export function wallTiles(): WallTile[] {
   return FAMILIES.map((f) => {
     const r = BY_ID.get(f.id)!.reel
-    return { id: f.id, t: BY_ID.get(f.id)!.title, d: f.d, s: f.s, k: f.k, l: f.l, c: f.c, r: r ? [r.src, r.poster] : null }
+    return { id: f.id, t: BY_ID.get(f.id)!.title, d: f.d, s: f.s, k: f.k, l: f.l, c: f.c, r: r ? [r.src, r.poster, r.captions, r.duration] : null }
   })
 }
 
