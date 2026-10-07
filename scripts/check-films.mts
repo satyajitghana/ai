@@ -453,6 +453,8 @@ if (!only && !sbOnly) {
     for (const d of readdirSync(dir, { withFileTypes: true })) {
       if (!d.isDirectory()) out.push(d.name)
       else if (NAMESPACES.includes(d.name)) out.push(...readdirSync(join(dir, d.name)).map((f) => `${d.name}/${f}`))
+      // public/films/math holds the math reels: their own manifest and checker (validate:reels)
+      else if (dir.endsWith(join("public", "films")) && d.name === "math") continue
       else fail(d.name, `${dir.slice(ROOT.length + 1)}/${d.name}/ is not a film namespace`)
     }
     return out
