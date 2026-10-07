@@ -1,6 +1,6 @@
 // Offline checker for math-reel specs. No browser, no rendering.
 //
-//   node brand-crew/skills/math-reels/check.mjs [data/math-reels/*.json] [--reviews=<dir of *.jsonl>]
+//   node brand-crew/skills/math-reels/check.mjs [data/math-reels/*.json] [--reviews=<dir of *.jsonl>] [--notes=data/math-wall/notes.json] [--quiet]
 //
 // Holds every spec to the truth rules in SKILL.md:
 //   - shape: required fields, enums, scene durations, 15-20 s in total;
@@ -13,7 +13,10 @@
 //   - every quote whose ref starts with "article" is verbatim in
 //     content/articles/openai-math.mdx; "catalogue" quotes are verbatim in the
 //     catalogue; "review" quotes are verbatim in the family's review when
-//     --reviews points at the review JSONL files (otherwise reported as unchecked).
+//     --reviews points at the review JSONL files (otherwise reported as unchecked);
+//     --notes points at the /math wall's committed review snapshot instead, which
+//     holds only some review fields (explainer, caveats, lean, ...): a quote found
+//     there is confirmed, one not found is reported, never failed.
 // Glyph coverage and text-length limits are enforced by the engine itself
 // (REEL.load), so `node render.mjs plan <spec>` is the second half of a check.
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
@@ -35,7 +38,9 @@ const DISC = JSON.parse(catSrc.match(/export const DISCIPLINES = (\[.*?\]) as co
 const FAM = JSON.parse(catSrc.match(/export const FAMILIES: Family\[\] = (\[[\s\S]*?\n\])/)[1].replace(/,\s*\]$/, "]"))
 const byId = Object.fromEntries(FAM.map(f => [f.id, f]))
 const catalogue = norm(catSrc)
-const reviews = {}
+const reviews = {}, notes = {}
+if (opt.notes && existsSync(opt.notes)) for (const [id, f] of Object.entries(JSON.parse(readFileSync(opt.notes, 'utf8')).families || {})) notes[id] = norm(Object.values(f).map(v => typeof v === 'string' ? v : JSON.stringify(v)).join(' \n '))
+let confirmed = 0, unconfirmed = 0
 if (opt.reviews) for (const f of readdirSync(opt.reviews).filter(f => f.endsWith('.jsonl'))) for (const line of readFileSync(join(opt.reviews, f), 'utf8').split('\n')) {
   if (!line.trim()) continue
   const r = JSON.parse(line); (reviews[r.id] ||= []).push(norm(Object.values(r).join(' \n ')))
@@ -87,7 +92,8 @@ for (const f of files) {
     if (ref.startsWith('article')) { if (!article.includes(quote)) errs.push(`article quote not found verbatim: "${q.quote}"`) }
     else if (ref.startsWith('catalogue')) { if (!catalogue.includes(quote)) errs.push(`catalogue quote not found verbatim: "${q.quote}"`) }
     else if (ref.startsWith('review')) {
-      if (!opt.reviews) warns.push(`review quote unchecked (pass --reviews): "${q.quote.slice(0, 50)}"`)
+      if (!opt.reviews && notes[id] != null) { if (notes[id].includes(quote)) confirmed++; else { unconfirmed++; warns.push(`review quote not in the notes snapshot (not checkable here): "${q.quote.slice(0, 50)}"`) } }
+      else if (!opt.reviews) warns.push(`review quote unchecked (pass --reviews): "${q.quote.slice(0, 50)}"`)
       else if (!(reviews[id] || []).some(r => r.includes(quote))) errs.push(`review quote not found in review ${id}: "${q.quote}"`)
     } else errs.push(`source ref must start with article | catalogue | review: "${q.ref}"`)
   }
@@ -109,7 +115,7 @@ for (const f of files) {
     }
   }
   if (errs.length) bad++
-  console.log(`${errs.length ? 'FAIL' : 'ok  '} ${basename(f)}${errs.map(e => '\n  - ' + e).join('')}${warns.length && opt.verbose ? warns.map(w => '\n  ~ ' + w).join('') : warns.length ? `\n  ~ ${warns.length} review quotes unchecked (no --reviews)` : ''}`)
+  if (!opt.quiet || errs.length) console.log(`${errs.length ? 'FAIL' : 'ok  '} ${basename(f)}${errs.map(e => '\n  - ' + e).join('')}${warns.length && opt.verbose ? warns.map(w => '\n  ~ ' + w).join('') : warns.length ? `\n  ~ ${warns.length} review quotes unchecked (no --reviews)` : ''}`)
 }
-console.log(`${files.length} specs, ${bad} failing`)
+console.log(`${files.length} specs, ${bad} failing${opt.notes ? `; review quotes: ${confirmed} confirmed in the notes snapshot, ${unconfirmed} not in it` : ''}`)
 process.exit(bad ? 1 : 0)
