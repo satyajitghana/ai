@@ -22,12 +22,12 @@ export const metadata: Metadata = {
 }
 
 export default function Page() {
-  // The full corpus, server-rendered in the default lens (Must read) order so
+  // The full corpus, server-rendered in the default lens (Newest) order so
   // the whole list is in the HTML for crawlers and no-JS readers. The client
   // list re-orders and filters a copy; it never fetches.
   const scores = articleScores()
   const articles: ArticleCard[] = getArticles()
-    .sort(compareByLens("must-read", scores))
+    .sort(compareByLens("newest", scores))
     .map((a) => {
       const s = scores.get(a.slug)!
       const thumb = getThumb(a.slug)
