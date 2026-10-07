@@ -106,8 +106,11 @@ const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(
 function texHTML(src, display) {
   return katex.renderToString(src, {
     throwOnError: true, displayMode: !!display, strict: 'ignore', output: 'html',
+    // \term{name}{...} tags part of a formula so the equation visualiser can
+    // colour, label and point at it; it is the only HTML extension trusted
+    trust: c => c.command === '\\htmlClass' && /^t-[A-Za-z0-9]+$/.test(c.class),
     // '##' is a literal '#' inside a macro body
-    macros: { '\\hl': `\\textcolor{#${ACC}}{#1}`, '\\mute': `\\textcolor{#${K.mute}}{#1}`, '\\hot': `\\textcolor{#${K.hot}}{#1}` },
+    macros: { '\\hl': `\\textcolor{#${ACC}}{#1}`, '\\mute': `\\textcolor{#${K.mute}}{#1}`, '\\hot': `\\textcolor{#${K.hot}}{#1}`, '\\term': '\\htmlClass{t-#1}{#2}' },
   })
 }
 // Rich text: "plain $tex$ ==accent== **bold**". Everything that is not Latin
@@ -1515,8 +1518,10 @@ PRIM.equation = {
         const pin = seg(lt, at, at + .7), out = eio(seg(lt, nx - .35, nx))
         if (pin <= 0 || out >= 1) return
         const col = tone(ln.tone || 'ink')
-        L(`${key}.l${i}`, texHTML(ln.tex, true), { x: cx, y: box.y + box.h / 2 - 16 * out, ax: .5, ay: .5, size: ln._size || ln.size || 46, color: col, op: 1 - out, st: { sel: TERMS, p: pin, spread: .65, dy: 12 }, glow: col === ACC ? .3 : 0 })
-        if (ln.note) L(`${key}.n${i}`, rich(ln.note), { x: cx, y: box.y + box.h / 2 + 84, ax: .5, size: 22, color: K.mute, op: eout(seg(lt, at + .4, at + .9)) * (1 - out) })
+        const ly = ln.y != null ? box.y + ln.y * box.h : box.y + box.h / 2 - (eqHasVis(ln) ? 70 : 0)
+        const el = L(`${key}.l${i}`, texHTML(ln.tex, true), { x: cx, y: ly - 16 * out, ax: .5, ay: .5, size: ln._size || ln.size || 46, color: col, op: 1 - out, st: { sel: TERMS, p: pin, spread: .65, dy: 12 }, glow: col === ACC ? .3 : 0 })
+        if (ln.note) L(`${key}.n${i}`, rich(ln.note), { x: cx, y: eqHasVis(ln) ? box.y + box.h - 18 : ly + 84, ax: .5, ay: eqHasVis(ln) ? 1 : 0, size: 22, color: K.mute, op: eout(seg(lt, at + .4, at + .9)) * (1 - out) })
+        if (eqHasVis(ln)) { const keep = ALPHA; ALPHA *= 1 - out; eqVis(ln, el, cx, ly, lt, at, `${key}.l${i}`, box); ALPHA = keep }
       })
       return
     }
@@ -1524,14 +1529,172 @@ PRIM.equation = {
     let y = box.y + box.h / 2 - gapY * (n - 1) / 2
     lines.forEach((ln, i) => {
       const at = ln.at != null ? ln.at : .3 + i * .9, pin = seg(lt, at, at + .7)
+      const yy = ln.y != null ? box.y + ln.y * box.h : y
       if (pin > 0) {
         const col = tone(ln.tone || 'ink')
-        L(`${key}.l${i}`, texHTML(ln.tex, true), { x: cx, y, ax: .5, ay: .5, size: ln._size || ln.size || 40, color: col, op: 1, st: { sel: TERMS, p: pin, spread: .65, dy: 12 }, glow: col === ACC ? .3 : 0 })
-        if (ln.note) { const w = pool.get(`${key}.l${i}`).offsetWidth, ne = eout(seg(lt, at + .4, at + .9)); L(`${key}.n${i}`, rich(ln.note), { x: cx + w / 2 + 28 + 10 * (1 - ne), y, ay: .5, size: 20, color: K.mute, op: ne }) }
+        const el = L(`${key}.l${i}`, texHTML(ln.tex, true), { x: cx, y: yy, ax: .5, ay: .5, size: ln._size || ln.size || 40, color: col, op: 1, st: { sel: TERMS, p: pin, spread: .65, dy: 12 }, glow: col === ACC ? .3 : 0 })
+        if (ln.note) { const w = el.offsetWidth, ne = eout(seg(lt, at + .4, at + .9)); L(`${key}.n${i}`, rich(ln.note), { x: cx + w / 2 + 28 + 10 * (1 - ne), y: yy, ay: .5, size: 20, color: K.mute, op: ne }) }
+        if (eqHasVis(ln)) eqVis(ln, el, cx, yy, lt, at, `${key}.l${i}`, box)
       }
       y += gapY
     })
   },
+}
+
+// ------------------------------------------------- the equation visualiser --
+// Optional, per equation line. Tag parts of the formula with \term{name}{...}
+// and describe them in `terms`: a colour, a short caption under a brace or at
+// the end of an arrow, and an optional mini-visual linked by a leader line.
+// `relation` animates what the formula says: two sides as bars, one shrinking
+// under the other (lt/le/gt/ge), two bars merging (eq), or a term sliding out
+// for its replacement (sub).
+const eqHasVis = ln => !!(ln.terms || ln.relation)
+// term boxes in label-local px (unscaled), measured once per formula with
+// every staggered offset cleared
+function termRects(el) {
+  if (el._tr && el._trh === el._h) return el._tr
+  const keep = (el._items || []).map(it => [it.style.top, it.style.left])
+  ;(el._items || []).forEach(it => { it.style.top = ''; it.style.left = '' })
+  const disp = el.style.display; el.style.display = ''
+  const R = el.getBoundingClientRect(), k = R.width / (el.offsetWidth || 1) || 1, out = {}
+  for (const t of el.querySelectorAll('[class*="t-"]')) {
+    const name = [...t.classList].find(c => c.startsWith('t-')); if (!name) continue
+    const r = t.getBoundingClientRect()
+    out[name.slice(2)] = { x: (r.left - R.left) / k, y: (r.top - R.top) / k, w: r.width / k, h: r.height / k, el: t }
+  }
+  ;(el._items || []).forEach((it, i) => { it.style.top = keep[i][0]; it.style.left = keep[i][1] })
+  el.style.display = disp
+  el._tr = out; el._trh = el._h
+  return out
+}
+function brace(x0, x1, y, dir, color, a, e = 1) {
+  // a curly brace from x0 to x1 opening towards the formula (dir = +1: below it)
+  const m = (x0 + x1) / 2, h = 9 * dir, w = (x1 - x0) / 2 * e
+  bloom(() => {
+    g.beginPath(); g.moveTo(m - w, y); g.quadraticCurveTo(m - w, y + h, m - w + Math.min(10, w), y + h)
+    g.lineTo(m - 8, y + h); g.quadraticCurveTo(m, y + h, m, y + 2 * h); g.quadraticCurveTo(m, y + h, m + 8, y + h)
+    g.lineTo(m + w - Math.min(10, w), y + h); g.quadraticCurveTo(m + w, y + h, m + w, y)
+    stroke(color, 1.6, a)
+  }, .5)
+  return y + 2 * h
+}
+function eqVis(ln, el, cx, cy, lt, at, key, box) {
+  const T = termRects(el), w = el.offsetWidth, h = el.offsetHeight, ox = cx - w / 2, oy = cy - h / 2
+  const names = Object.keys(ln.terms || {})
+  names.forEach((name, i) => {
+    const tm = ln.terms[name], r = T[name]
+    need(r, `equation term "${name}" is not tagged in the formula: write \\term{${name}}{...}`)
+    const t0 = tm.at != null ? at + tm.at : at + .9 + i * .7, e = eout(seg(lt, t0, t0 + .5))
+    const c = tone(tm.tone || 'accent')
+    // the term takes its colour (and a soft glow while it is introduced)
+    const col = e > 0 ? c : '', gl = e > 0 ? `0 0 ${(8 + 14 * flare(seg(lt, t0, t0 + 1.2))).toFixed(1)}px ${rgba(c, .5 * e)}` : ''
+    if (r.el._c !== col) { r.el.style.color = col; r.el._c = col }
+    if (r.el._g !== gl) { r.el.style.textShadow = gl; r.el._g = gl }
+    if (e <= 0) return
+    const x0 = ox + r.x, x1 = ox + r.x + r.w, side = tm.side || 'below', dir = side === 'above' ? -1 : 1
+    const yEdge = side === 'above' ? oy + r.y - 6 : oy + r.y + r.h + 6
+    let yCap = yEdge
+    const mark = tm.mark || (tm.label ? 'brace' : null)
+    if (mark === 'brace') yCap = brace(x0 + 2, x1 - 2, yEdge, dir, c, .9 * e, eio(seg(lt, t0, t0 + .45)))
+    else if (mark === 'box') { bloom(() => traceRect(x0 - 5, oy + r.y - 4, r.w + 10, r.h + 8, 6, eio(seg(lt, t0, t0 + .6)), c, 1.6, .9 * e), .5); yCap = yEdge + 4 * dir }
+    else if (mark === 'arrow') { const len = 26 * eout(seg(lt, t0, t0 + .5)); bloom(() => { line((x0 + x1) / 2, yEdge + dir * (8 + len), (x0 + x1) / 2, yEdge + dir * 6, c, 1.6, e); arrowHead((x0 + x1) / 2, yEdge + dir * 4, dir > 0 ? -Math.PI / 2 : Math.PI / 2, 8, c, e) }, .5); yCap = yEdge + dir * (12 + len) }
+    const mx = (x0 + x1) / 2
+    let yNext = yCap
+    if (tm.label) {
+      const lab = L(`${key}.tl_${name}`, rich(tm.label), { x: mx, y: yCap + dir * 6 + 6 * (1 - e) * dir, ax: .5, ay: side === 'above' ? 1 : 0, size: tm.size || 19, color: c, op: e, weight: 520 })
+      yNext = yCap + dir * (10 + lab.offsetHeight)
+    }
+    if (tm.visual) miniVis(tm.visual, mx, mx + (tm.visual.dx || 0), yNext + dir * 14, dir, lt, t0 + .35, c, `${key}.tv_${name}`, box)
+  })
+  if (ln.relation) relation(ln.relation, T, ox, oy, w, h, cx, cy, lt, at, key)
+}
+// A small, labelled drawing beside a term: a curve, a number line, a shape, a
+// graph, dots or a bar. Illustrative unless the spec says it is not.
+function miniVis(v, ax, mx, y0, dir, lt, t0, c, key, box) {
+  const vw = v.w || 170, vh = v.h || 84, x = clamp(mx - vw / 2, box.x - 30, box.x + box.w + 30 - vw), y = dir > 0 ? y0 + (v.dy || 0) : y0 - vh - (v.dy || 0)
+  const e = eout(seg(lt, t0, t0 + .5)), d = eio(seg(lt, t0 + .1, t0 + 1.3))
+  if (e <= 0) return
+  // leader line from the caption to the visual
+  line(ax, y0 - dir * 10, x + vw / 2, dir > 0 ? y : y + vh, c, 1, .45 * e)
+  rrect(x, y, vw, vh, 10); fill('#ffffff', .03 * e); stroke(K.faint, 1, e)
+  const px = x + 12, py = y + 10, pw = vw - 24, ph = vh - 20
+  const vc = tone(v.tone) === K.ink && !v.tone ? c : tone(v.tone || 'accent')
+  const kind = v.kind || 'curve'
+  if (kind === 'curve') {
+    const [xa, xb] = v.x || [0, 1], [ya, yb] = v.y || [0, 1], f = fnOf(v.f || 'x')
+    const X = q => px + (q - xa) / (xb - xa) * pw, Y = q => py + ph - (q - ya) / (yb - ya) * ph
+    line(px, py + ph, px + pw, py + ph, K.faint, 1, e); line(px, py, px, py + ph, K.faint, 1, e)
+    if (v.ref != null) line(px, Y(v.ref), px + pw, Y(v.ref), K.mute, 1, .7 * e, [3, 4])
+    const pts = []; for (let k = 0; k <= 80; k++) { const q = lerp(xa, xb, k / 80), val = f(q); if (isFinite(val)) pts.push([X(q), clamp(Y(val), py - 2, py + ph + 2)]) }
+    let tip = null; bloom(() => { tip = polyline(pts, d, vc, 2.2, e) }, .5)
+    if (tip && d < 1) pen(tip[0], tip[1], vc, 1, 10)
+  } else if (kind === 'line') {
+    const lo = v.min != null ? v.min : 0, hi = v.max != null ? v.max : 1, X = q => px + (q - lo) / (hi - lo) * pw, yy = py + ph * .6
+    line(px, yy, px + pw * d, yy, K.soft, 1.4, e)
+    ;(v.marks || []).forEach((m, k) => { const me = seg(lt, t0 + .4 + k * .25, t0 + .8 + k * .25); if (me <= 0) return; const mc = tone(m.tone || 'accent'); bloom(() => dot(X(m.v), yy, 4.5 * eback(me), mc, 1), .5); if (m.label) L(`${key}.m${k}`, rich(m.label), { x: X(m.v), y: yy - 9, ax: .5, ay: 1, size: 15, color: mc, op: eout(me) }) })
+  } else if (kind === 'shape') {
+    const S2 = Math.min(pw, ph) / 2 * .9, scx = px + pw / 2, scy = py + ph / 2
+    const pts = resample(shapePts({ kind: v.shape || 'circle', n: v.n || 6, r: 1, p: v.p }), 96).map(q => [scx + q[0] * S2, scy - q[1] * S2])
+    if (v.shape === 'ball' || v.fill) { g.beginPath(); pts.forEach((q, k) => (k ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); fill(vc, .18 * d) }
+    let tip = null; bloom(() => { tip = polyline([...pts, pts[0]], d, vc, 2, e) }, .5)
+    if (tip && d < 1) pen(tip[0], tip[1], vc, 1, 10)
+  } else if (kind === 'graph') {
+    const n = v.n || 5, R2 = Math.min(pw, ph) / 2 * .85, gcx = px + pw / 2, gcy = py + ph / 2
+    const P = Array.from({ length: n }, (_, k) => [gcx + R2 * Math.cos(-Math.PI / 2 + 2 * Math.PI * k / n), gcy + R2 * Math.sin(-Math.PI / 2 + 2 * Math.PI * k / n)])
+    const E = v.edges || (() => { const o = []; for (let a = 0; a < n; a++) for (let b = a + 1; b < n; b++) o.push([a, b]); return o })()
+    E.forEach(([a, b], k) => polyline([P[a], P[b]], seg(d, k / E.length * .7, k / E.length * .7 + .3), vc, 1.3, .8 * e))
+    P.forEach(q => { dot(q[0], q[1], 3.6, K.bg, e); ring(q[0], q[1], 3.6, K.ink, 1.4, e) })
+  } else if (kind === 'dots') {
+    const n = Math.min(v.n || 12, 60), cols = Math.ceil(Math.sqrt(n * pw / ph)), rows = Math.ceil(n / cols), sx = pw / cols, sy = ph / rows
+    for (let k = 0; k < n; k++) { const de = seg(d, k / n * .8, k / n * .8 + .2); if (de <= 0) continue; const hl = (v.mark || []).includes(k); bloom(() => dot(px + (k % cols + .5) * sx, py + (Math.floor(k / cols) + .5) * sy, Math.min(sx, sy) * .28 * eback(de), hl ? vc : K.soft, e), hl ? .6 : 0) }
+  } else if (kind === 'bar') {
+    const frac = clamp((v.v != null ? v.v : 1) / (v.max || 1))
+    rrect(px, py + ph * .3, pw * frac * d, ph * .4, 4); bloom(() => { rrect(px, py + ph * .3, pw * frac * d, ph * .4, 4); fill(vc, .7 * e) }, .4)
+  } else need(false, `mini visual kind must be curve | line | shape | graph | dots | bar, not "${kind}"`)
+  if (v.label) L(`${key}.lab`, rich(v.label), { x: x + 4, y: y + vh + 3, size: 15, color: K.soft, op: e })
+  if (v.illustrative !== false) L(`${key}.ill`, 'illustrative', { x: x + vw - 4, y: y + vh + 4, ax: 1, cls: 'caps', size: 10, color: K.mute, op: .9 * e })
+}
+// Two sides of a relation, animated. Bars are illustrative unless the spec
+// gives quoted values and says illustrative: false.
+function relation(R, T, ox, oy, w, h, cx, cy, lt, at, key) {
+  const t0 = R.at != null ? at + R.at : at + 1.2, e = eout(seg(lt, t0, t0 + .5)), d = eio(seg(lt, t0 + .3, t0 + 1.6))
+  if (e <= 0) return
+  const kind = R.kind || 'le'
+  if (kind === 'sub') {
+    const r = T[R.term]; need(r, `relation.term "${R.term}" is not tagged with \\term`)
+    const o = seg(lt, t0, t0 + .5), ni = eout(seg(lt, t0 + .35, t0 + .9))
+    r.el.style.opacity = (1 - o).toFixed(3); r.el.style.position = 'relative'; r.el.style.top = (18 * eio(o)).toFixed(1) + 'px'
+    const html = texHTML(R.tex)
+    L(`${key}.sub`, html, { x: ox + r.x + r.w / 2, y: oy + r.y + r.h / 2 - 18 * (1 - ni), ax: .5, ay: .5, size: (pool.get(key) && parseFloat(pool.get(key).style.fontSize)) || 40, color: tone(R.tone || 'accent'), op: ni, glow: .5 * ni })
+    if (R.label) L(`${key}.subl`, rich(R.label), { x: ox + r.x + r.w / 2, y: oy + r.y + r.h + 30, ax: .5, size: 18, color: tone(R.tone || 'accent'), op: ni })
+    return
+  }
+  // bars under the formula, one per side
+  const bw = Math.min(420, Math.max(260, w * .7)), bx = cx - bw / 2, by = oy + h + (R.dy || 34), bh = 16
+  const lv = R.left && R.left.v != null ? R.left.v : 1, rv = R.right && R.right.v != null ? R.right.v : (kind === 'eq' ? lv : 1.5)
+  const lv0 = R.left && R.left.from != null ? R.left.from : (kind === 'lt' || kind === 'le' ? Math.max(lv, rv) * 1.3 : lv)
+  const mx = Math.max(lv, rv, lv0) * 1.05, Wd = q => bw * q / mx
+  const lc = tone((R.left && R.left.tone) || 'accent'), rc = tone((R.right && R.right.tone) || 'soft')
+  const lab = (side, txt, y, c) => txt && L(`${key}.r${side}`, rich(txt), { x: bx - 12, y: y + bh / 2, ax: 1, ay: .5, size: 17, color: c, op: e })
+  if (kind === 'eq') {
+    // two equal lengths slide together and become one
+    const gap = 36 * (1 - d), yl = by - gap / 2 - bh / 2 + bh / 2, yr = by + gap / 2 + bh / 2 - bh / 2
+    rrect(bx, yl, Wd(lv), bh, 4); fill(lc, .55 * e)
+    rrect(bx, yr, Wd(rv), bh, 4); fill(rc, .45 * e)
+    const fl = flare(seg(lt, t0 + 1.6, t0 + 2.4))
+    if (fl > 0) bloom(() => { rrect(bx, by - 2, Wd(lv), bh + 4, 5); fill(ACC, .4 * fl) }, 1)
+    lab('l', R.left && R.left.label, yl, lc); lab('r', R.right && R.right.label, yr, rc)
+  } else {
+    // lt/le/gt/ge: the first side shrinks (or grows) until it sits under (over) the second
+    const lw = Wd(lerp(lv0, lv, d)), yl = by, yr = by + bh + 12
+    rrect(bx, yr, Wd(rv), bh, 4); fill(rc, .4 * e); line(bx + Wd(rv), yl - 6, bx + Wd(rv), yr + bh + 4, rc, 1.2, .7 * e, [3, 3])
+    bloom(() => { rrect(bx, yl, Math.max(2, lw), bh, 4); fill(lc, .7 * e) }, .4)
+    const ok = (kind === 'lt' || kind === 'le') ? lerp(lv0, lv, d) <= rv : lerp(lv0, lv, d) >= rv
+    if (ok && d > 0) { const fl = flare(seg(lt, t0 + 1.6, t0 + 2.5)); if (fl > 0) glowDot(bx + lw, yl + bh / 2, 22, lc, .6 * fl) }
+    lab('l', R.left && R.left.label, yl, lc); lab('r', R.right && R.right.label, yr, rc)
+    if (R.label) L(`${key}.rl`, rich(R.label), { x: bx + bw + 14, y: yl + bh + 6, ay: .5, size: 18, color: K.soft, op: eout(seg(lt, t0 + 1.4, t0 + 1.9)) })
+  }
+  if (R.illustrative !== false) L(`${key}.rill`, 'illustrative lengths', { x: cx, y: by + 2 * bh + 26, ax: .5, cls: 'caps', size: 11, color: K.mute, op: .9 * e })
 }
 
 // A tree of dependencies: what the main theorem rests on, built bottom-up.
