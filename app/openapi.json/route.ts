@@ -481,6 +481,31 @@ export function GET() {
         schema: arrayOf("ContentSummary"),
         tags: ["content"],
       }),
+      "/api/math": get({
+        id: "listMathResults",
+        summary: "openai/math result families, with reels",
+        description:
+          "Every result family of OpenAI's openai/math release (372) as shown on /math: our significance, kind and verdict, the release's Lean status, the claim as we read it, manuscript links pinned to a commit, a link to the section of our article that covers it, and its reel when one has been rendered. Each entry's `detail` is the full record.",
+        schema: { type: "object", required: ["commit", "counts", "results"], properties: { commit: { type: "string" }, counts: { type: "object" }, results: { type: "array", items: { type: "object" } } } },
+        tags: ["content"],
+      }),
+      "/api/math/{id}": get({
+        id: "getMathResult",
+        summary: "One openai/math result family, with review notes",
+        description: "The /api/math record for one family plus our review notes: what the result means, caveats, what exactly is in Lean, and the release's own summary.",
+        schema: { type: "object", required: ["id", "title", "claim"], properties: { id: { type: "string" }, title: { type: "string" }, claim: { type: "string" } } },
+        tags: ["content"],
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "Three-digit family id, e.g. `107`.",
+            schema: { type: "string", pattern: "^[0-9]{3}$" },
+          },
+        ],
+        extraErrors: ["404"],
+      }),
       "/api/health": get({
         id: "getHealthPanel",
         summary: "Biomarker panel with derived statuses",
