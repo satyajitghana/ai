@@ -40,6 +40,17 @@ const base = { title: {}, object: { dur: 6 }, proof: { archetype: 'squeeze', ste
   const r = fitVoice(base, [2.4, 3.6, 3.5, 2.4, 3.0, 1.6])   // object 7.65 -> 7.7, ach 3.55 -> 3.6, verify 2.15 -> 2.2
   assert.ok(r.errs.some(e => /over 21 s/.test(e)), r.errs.join('; '))
 }
+// 4b. a long object line is paid for by slack elsewhere (title, achievement,
+//     proof), never by shortening the object scene or any scene below its lines
+{
+  const secs = [1.8, 3.0, 3.6, 2.4, 2.0, 1.4]          // object needs 7.3 s: 22.0 s before reclaiming
+  const r = fitVoice(base, secs)
+  assert.deepEqual(r.errs, [])
+  assert.equal(r.total, 21)
+  assert.equal(r.durs.object, 7.3); assert.equal(r.durs.end, 1.2); assert.equal(r.durs.verify, 2)
+  assert.equal(r.durs.title, 2.4); assert.equal(r.durs.achievement, 3); assert.equal(r.durs.proof, 5.1)
+  assert.deepEqual(r.changed.title, [2.5, 2.4])
+}
 // 5. placement: lead, gap, scene offsets
 {
   const secs = [1.8, 2.0, 2.2, 2.4, 2.0, 1.4]

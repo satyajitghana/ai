@@ -259,6 +259,12 @@ function fill(color, a) { A(a); g.fillStyle = color; g.fill() }
 function line(x1, y1, x2, y2, color, w = 2, a = 1, dash) { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); stroke(color, w, a, dash) }
 function dot(x, y, r, color, a = 1) { g.beginPath(); g.arc(x, y, Math.max(0, r), 0, 2 * Math.PI); fill(color, a) }
 function ring(x, y, r, color, w = 2, a = 1) { g.beginPath(); g.arc(x, y, Math.max(0, r), 0, 2 * Math.PI); stroke(color, w, a) }
+// draw fn clipped to a horizontal band (on the canvas and its glow buffer):
+// rings that flare on a number line stay above the axis, off the tick labels
+function band(y0, y1, fn) {
+  for (const c of [MAIN, GG]) { c.save(); c.beginPath(); c.rect(-4000, y0, 9000, y1 - y0); c.clip() }
+  try { fn() } finally { MAIN.restore(); GG.restore() }
+}
 function rrect(x, y, w, h, r) { g.beginPath(); g.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2))) }
 // soft round light, from a cached radial sprite (cheap)
 const SPR = new Map()
@@ -524,6 +530,7 @@ function fitLayout(spec) {
   if (ac.form === 'status') {
     const lines = ac.statement || []
     ac._sizes = lines.map((tx, i) => fitSize(rich(`$${tx}$`), lines.length > 1 ? 44 : 52, 1120, 28, `achievement.statement.${i}`))
+    ac._lay = statusLayout(ac)
   } else if (ac.before && ac.after) {
     ac.before._size = fitSize(rich(`$${ac.before.tex}$`), 52, 470, 30, 'achievement.before.tex')
     ac.after._size = fitSize(rich(`$${ac.after.tex}$`), 60, 495, 32, 'achievement.after.tex')
@@ -536,6 +543,35 @@ function fitLayout(spec) {
   })
   const f = pool.get('_fit'); if (f) { f.remove(); pool.delete('_fit') }
   used.delete('_fit')
+}
+
+// The status form stacks, top to bottom: label, statement lines, context,
+// the stamp, the note. Measure them all once and place the stamp in the gap
+// between the context and the note; when the gap is too small, lift the
+// block (up to 64 px), then shrink the stamp (to 0.72), and only then accept
+// a tight fit, reported in checks.layout.
+const STATUS = { label: 172, top: 236, stampY: 520, noteY: 626 }
+function stampBox(kind, scale) {
+  need(STAMPS[kind], `stamp must be one of ${Object.keys(STAMPS).join(', ')}`)
+  const [ww] = measure('_fit', esc(STAMPS[kind].toUpperCase()), { size: 40, weight: 760, ls: '0.14em' })
+  const bw = Math.max(ww + 64, 240), bh = 104
+  // half extents once settled (turned -0.05 rad), plus the hairline frame
+  return { bw, bh, hw: (bw / 2 + bh / 2 * .05) * scale + 4, hh: (bh / 2 + bw / 2 * .05) * scale + 4 }
+}
+function statusLayout(ac) {
+  const lines = ac.statement || []
+  let y = STATUS.top
+  lines.forEach((tx, i) => { y += measure('_fit', rich(`$${tx}$`), { size: ac._sizes[i] })[1] + 18 })
+  let bottom = y - 18
+  if (ac.context) bottom = y + 10 + measure('_fit', richW(ac.context), { w: 1000, align: 'center', size: 23, lh: 1.3 })[1]
+  const noteTop = ac.note ? STATUS.noteY - measure('_fit', rich(ac.note), { w: 1060, align: 'center', size: 23, lh: 1.3 })[1] / 2 : H - 30
+  let shift = 0, scale = 1, hh = stampBox(ac.stamp || 'proved', 1).hh
+  const lo = () => bottom - shift + 12 + hh * scale, hi = () => noteTop - 10 - hh * scale
+  if (lo() > hi()) shift = Math.min(64, lo() - hi())
+  if (lo() > hi()) scale = Math.max(.72, (noteTop - 10 - (bottom - shift + 12)) / (2 * hh))
+  const tight = lo() > hi() + .5
+  if (tight) (CHECKS.layout ||= []).push(`achievement: the stamp overlaps the context or note by ${Math.round(lo() - hi())} px; shorten the context or the statement`)
+  return { shift, scale, sy: tight ? (lo() + hi()) / 2 : clamp(STATUS.stampY, lo(), hi()) }
 }
 
 // ---------------------------------------------------------------- framing --
@@ -671,13 +707,15 @@ const SCENES = {
 
   object(sc, lt, dur) {
     // with a plain-words line on top (HUD), the heading and the stage move down
-    const plainOff = SPEC.plain ? 44 : 0
-    if (sc.heading) { const he = seg(lt, .1, .8); L('ob.h', richW(sc.heading), { x: 96, y: 100 + plainOff, ay: .5, size: plainOff ? 20 : 23, color: K.soft, weight: 520, op: he > 0 ? 1 : 0, st: { p: he, spread: .6, dy: 6 } }) }
+    // (the plain line is one line, 88-114 px; a heading under it sits at 158 px,
+    // a clear 32 px below it, ~25 px after the camera push)
+    const plainOff = SPEC.plain ? 44 : 0, headGap = plainOff ? 14 : 0
+    if (sc.heading) { const he = seg(lt, .1, .8); L('ob.h', richW(sc.heading), { x: 96, y: 100 + plainOff + headGap, ay: .5, size: plainOff ? 20 : 23, color: K.soft, weight: 520, op: he > 0 ? 1 : 0, st: { p: he, spread: .6, dy: 6 } }) }
     const panels = sc._panels, lay = sc._layout
     panels.forEach((p, i) => {
       let box = BOX
       if (lay === 'split') { const gw = 48, w = (BOX.w - gw * (panels.length - 1)) / panels.length; box = { x: BOX.x + i * (w + gw), y: BOX.y, w, h: BOX.h } }
-      if (sc.heading) box = { ...box, y: box.y + 14, h: box.h - 14 }
+      if (sc.heading) box = { ...box, y: box.y + 14 + headGap, h: box.h - 14 - headGap }
       if (plainOff) box = { ...box, y: box.y + plainOff, h: box.h - plainOff }
       // the last panel holds through the scene's exit; the others hand over
       // to the next with an overlap: out by scaling up, in from slightly small
@@ -723,8 +761,9 @@ const SCENES = {
     }
     L('ac.av', av, { x: xR, y: yB, ay: .5, size: sc.after._size || 60, color: K.ink, op: fo, scale: 1.16 - .16 * eback(fe), glow: .35 + .65 * fl, glowColor: ACC })
     if (sc.after.note) L('ac.an', rich(sc.after.note), { x: xR, y: yB + 66 + 8 * (1 - eout(seg(lt, 1.6, 2.1))), size: 21, color: K.soft, op: eout(seg(lt, 1.6, 2.1)), w: 480 })
-    // optional stamp, and a line underneath
-    if (sc.stamp) stamp(sc.stamp, 1040, 470, lt - 2.4, .8)
+    // optional stamp, in the free top-right corner above the claimed value's
+    // label (at 470 px it sat on the after-note and the line underneath)
+    if (sc.stamp) stamp(sc.stamp, 1040, 168, lt - 2.4, .72)
     if (sc.note) { const ne = seg(lt, 2.1, 2.8); L('ac.n', richW(sc.note), { x: W / 2, y: 560, ax: .5, ay: .5, w: 1060, align: 'center', size: 25, color: K.soft, op: ne > 0 ? 1 : 0, lh: 1.3, st: { p: ne, spread: .6, dy: 8 } }) }
     return null
   },
@@ -794,10 +833,10 @@ const HUDS = {
 
 function achievementStatus(sc, lt) {
   const cx = W / 2
-  const le = eout(seg(lt, .05, .6))
-  L('as.l', rich(sc.label || 'Conjecture'), { x: cx, y: 172 + 6 * (1 - le), ax: .5, cls: 'caps', size: 15, color: K.mute, op: le })
+  const le = eout(seg(lt, .05, .6)), lay = sc._lay || { shift: 0, scale: 1, sy: STATUS.stampY }
+  L('as.l', rich(sc.label || 'Conjecture'), { x: cx, y: STATUS.label - lay.shift + 6 * (1 - le), ax: .5, cls: 'caps', size: 15, color: K.mute, op: le })
   const lines = sc.statement || []
-  let y = 236
+  let y = STATUS.top - lay.shift
   lines.forEach((tx, i) => {
     // each formula assembles term by term
     const p = seg(lt, .2 + i * .3, .95 + i * .3)
@@ -805,8 +844,8 @@ function achievementStatus(sc, lt) {
     y += el.offsetHeight + 18
   })
   if (sc.context) { const ce = seg(lt, .8, 1.4); L('as.c', richW(sc.context), { x: cx, y: y + 10, ax: .5, w: 1000, align: 'center', size: 23, color: K.soft, op: ce > 0 ? 1 : 0, lh: 1.3, st: { p: ce, spread: .6, dy: 6 } }) }
-  stamp(sc.stamp || 'proved', cx, 520, lt - 1.5, 1)
-  if (sc.note) { const ne = eout(seg(lt, 2.2, 2.8)); L('ac.n', rich(sc.note), { x: cx, y: 626, ax: .5, ay: .5, w: 1060, align: 'center', size: 23, color: K.mute, op: ne, lh: 1.3 }) }
+  stamp(sc.stamp || 'proved', cx, lay.sy, lt - 1.5, lay.scale)
+  if (sc.note) { const ne = eout(seg(lt, 2.2, 2.8)); L('ac.n', rich(sc.note), { x: cx, y: STATUS.noteY, ax: .5, ay: .5, w: 1060, align: 'center', size: 23, color: K.mute, op: ne, lh: 1.3 }) }
 }
 
 // A rubber stamp, always labelled as a claim. It drops in large and turned,
@@ -821,6 +860,9 @@ function stamp(kind, cx, cy, lt, scale) {
   const word = STAMPS[kind].toUpperCase()
   const [ww] = measure('st.w', esc(word), { size: 40, weight: 760, ls: '0.14em' })
   const bw = Math.max(ww + 64, 240), bh = 104
+  // never let a long word ("PROVED, CONDITIONALLY") push the stamp off the frame
+  const hw = (bw / 2 + bh / 2 * .05) * scale + 30
+  cx = clamp(cx, hw, W - hw)
   const hit = lt - STAMP_HIT, fl = flare(seg(hit, 0, .9))
   // shock ring and dust, under the stamp
   if (hit > 0) {
@@ -1031,9 +1073,12 @@ const ARCH = {
     }
     const cr = seg(lt, at(n - 1), at(n - 1) + .5), split = eio(seg(lt, at(n - 1) + .4, at(n - 1) + 1))
     if (e0 > 0) {
-      if (split > 0) { g.save(); g.beginPath(); g.rect(0, 0, cx, H); g.clip(); g.translate(-18 * split, 6 * split); g.rotate(-.04 * split); blob(cx, cy, r, K.soft, e0 * (1 - .4 * split), cr); g.restore(); g.save(); g.beginPath(); g.rect(cx, 0, W, H); g.clip(); g.translate(18 * split, 6 * split); g.rotate(.04 * split); blob(cx, cy, r, K.soft, e0 * (1 - .4 * split), cr); g.restore() }
+      // each half turns about the blob's centre (not the canvas origin), so the crack stays inside the blob's band
+      const half = (x0c, x1c, sg) => { g.save(); g.beginPath(); g.rect(x0c, -H, x1c - x0c, 3 * H); g.clip(); g.translate(cx + sg * 18 * split, cy + 6 * split); g.rotate(sg * .04 * split); g.translate(-cx, -cy); blob(cx, cy, r, K.soft, e0 * (1 - .4 * split), cr); g.restore() }
+      if (split > 0) { half(-W, cx, -1); half(cx, 2 * W, 1) }
       else blob(cx, cy, r, K.soft, e0, cr)
-      tag('pf.ca', rich(d.assume || 'the smallest bad case'), cx, cy + r + 20, K.soft, e0, { size: 19 })
+      // under the blob's lowest point (r * 1.13 with its wobble), the crack (r * 1.05) and the split's drop
+      tag('pf.ca', rich(d.assume || 'the smallest bad case'), cx, cy + r * 1.13 + 22, K.soft, e0, { size: 19 })
     }
     if (n > 2 || d.smaller !== false) {
       const t1 = at(1), e1 = eout(seg(lt, t1 + .3, t1 + .8)), x2 = B.x + B.w * .7
@@ -1089,7 +1134,7 @@ const ARCH = {
     const f = eio(seg(lt, at(1), at(n - 1) + .8)); let tip = null
     bloom(() => { tip = polyline(pts, f, ACC, 3, 1) }, .7)
     if (tip && f < 1) pen(tip[0], tip[1], ACC, 1, 14)
-    if (d.label) tag('pf.ml', rich(d.label), x0 + 90, y0 + 4, ACC, ae, { size: 19, weight: 600 })
+    if (d.label) L('pf.ml', rich(d.label), { x: x1, y: y0 + 4 + 6 * (1 - ae), ax: 1, size: 19, color: ACC, op: ae, weight: 600 })
     if (f >= 1) glowDot(pts[pts.length - 1][0], pts[pts.length - 1][1], 30, ACC, .5 * flare(seg(lt, at(n - 1) + .8, at(n - 1) + 1.8)))
     if (d.illustrative !== false) ill(B, ae)
   },
@@ -1112,14 +1157,15 @@ const ARCH = {
   // two objects side by side; matching parts linked by arrows
   correspondence(d, lt, B, at, n) {
     const Lf = d.left || ['a', 'b', 'c'], Rt = d.right || ['A', 'B', 'C'], pairs = d.pairs || Lf.map((_, i) => [i, i])
-    const xl = B.x + B.w * .2, xr = B.x + B.w * .8, rows = Math.max(Lf.length, Rt.length), yy = (i, m) => B.y + 40 + (i + .5) * (B.h - 60) / m
+    // rows stop 90 px above the box's foot, so the label under them clears the step dots
+    const xl = B.x + B.w * .2, xr = B.x + B.w * .8, yy = (i, m) => B.y + 40 + (i + .5) * (B.h - 90) / m
     const col = (arr, x, keyp, t0, c) => arr.forEach((lab, i) => { const e = eout(seg(lt, t0 + i * .08, t0 + i * .08 + .4)); if (e <= 0) return; const y = yy(i, arr.length); rrect(x - 110, y - 22, 220, 44, 10); fill(c, .08 * e); stroke(c, 1.5, e); L(keyp + i, rich(lab), { x, y, ax: .5, ay: .5, size: 19, color: K.ink, op: e }) })
     col(Lf, xl, 'pf.cl', at(0), K.soft); col(Rt, xr, 'pf.cr', at(0) + .3, ACC)
     if (d.leftTitle) tag('pf.clt', rich(d.leftTitle), xl, B.y - 6, K.soft, eout(seg(lt, at(0), at(0) + .5)), { size: 18 })
     if (d.rightTitle) tag('pf.crt', rich(d.rightTitle), xr, B.y - 6, ACC, eout(seg(lt, at(0) + .3, at(0) + .8)), { size: 18 })
     const t1 = at(Math.min(1, n - 1)), span = Math.max(.15, (at(n - 1) + .4 - t1) / pairs.length)
     pairs.forEach(([a, b], i) => { const ae = eio(seg(lt, t1 + i * span, t1 + i * span + .5)); arrowTo(xl + 114, yy(a, Lf.length), xr - 118, yy(b, Rt.length), ACC, ae, 1.6) })
-    if (d.label) tag('pf.cpl', rich(d.label), B.x + B.w / 2, B.y + B.h + 6, ACC, eout(seg(lt, at(n - 1) + .5, at(n - 1) + 1)), { size: 22, weight: 600 })
+    if (d.label) tag('pf.cpl', rich(d.label), B.x + B.w / 2, B.y + B.h - 28, ACC, eout(seg(lt, at(n - 1) + .5, at(n - 1) + 1)), { size: 22, weight: 600 })
   },
   // patches, each checked, then stitched into the whole
   'local-to-global'(d, lt, B, at, n) {
@@ -1234,29 +1280,40 @@ PRIM.numberline = {
     tk(p.ticks, z ? 1 - seg(lt, z.at, z.at + (z.dur || 2) * .3) : 1, '.t', .3)
     if (z) tk(z.ticks, seg(lt, z.at + (z.dur || 2) * .75, z.at + (z.dur || 2)), '.zt')
     if (p.axisLabel) L(key + '.ax', rich(p.axisLabel), { x: x0, y: y + 62, size: 22, color: K.mute, op: eout(seg(lt, .4, 1.1)) })
-    // label rows, computed once in the final mapping so nothing jumps
+    // label rows, computed once so nothing jumps. With a zoom a label lives
+    // in two mappings (the full axis, then the zoomed one); its row must be
+    // free in every mapping where its value is on the axis. The x position
+    // itself is computed per frame from the current mapping (a cached x
+    // shift from the final mapping put pre-zoom labels at the wrong place).
     if (!p._rows) {
+      const X0 = v => x0 + (v - p.min) / (p.max - p.min) * (x1 - x0)
+      const maps = z ? [X0, XF] : [XF]
       const items = []
-      ;(p.ranges || []).forEach((r, i) => items.push({ id: 'r' + i, x: (XF(r.from) + XF(r.to)) / 2, html: labelHTML(r), side: r.side || 'above' }))
-      ;(p.markers || []).forEach((m, i) => items.push({ id: 'm' + i, x: XF(m.v), html: labelHTML(m), side: m.side || 'above' }))
-      if (p.slide) items.push({ id: 's', x: XF(p.slide.to), html: labelHTML({ tone: 'claim', ...p.slide }), side: p.slide.side || 'above' })
-      if (p.slide && p.slide.gap) items.push({ id: 'g', x: (XF(p.slide.from) + XF(p.slide.to)) / 2, html: gapHTML(p.slide.gap), side: p.slide.gapSide || 'below' })
+      ;(p.ranges || []).forEach((r, i) => items.push({ id: 'r' + i, at: [r.from, r.to], html: labelHTML(r), side: r.side || 'above' }))
+      ;(p.markers || []).forEach((m, i) => items.push({ id: 'm' + i, at: [m.v], html: labelHTML(m), side: m.side || 'above' }))
+      if (p.slide) items.push({ id: 's', at: [p.slide.to], html: labelHTML({ tone: 'claim', ...p.slide }), side: p.slide.side || 'above' })
+      if (p.slide && p.slide.gap) items.push({ id: 'g', at: [p.slide.from, p.slide.to], html: gapHTML(p.slide.gap), side: p.slide.gapSide || 'below' })
       p._rows = {}
-      const occ = { above: [], below: [] }
+      const occ = maps.map(() => ({ above: [], below: [] }))
       for (const it of items) {
         const [w, h] = measure(key + '.m_' + it.id, it.html, { size: 26 })
-        let x = clamp(it.x - w / 2, box.x - 10, box.x + box.w + 10 - w)
+        const spans = maps.map(Xm => {
+          const xs = it.at.map(Xm), xc = xs.reduce((a, b) => a + b, 0) / xs.length
+          if (Math.max(...xs) < x0 - 2 || Math.min(...xs) > x1 + 2) return null    // off the axis in this mapping
+          const x = clamp(xc - w / 2, box.x - 10, box.x + box.w + 10 - w); return [x, x + w]
+        })
         let row = 0
-        while (occ[it.side].some(o => o.row === row && !(x + w + 14 < o.a || x > o.b + 14))) row++
-        occ[it.side].push({ row, a: x, b: x + w })
-        p._rows[it.id] = { row, x, w, h, shift: x - (it.x - w / 2) }
+        const busy = r => spans.some((s, k) => s && occ[k][it.side].some(o => o.row === r && !(s[1] + 14 < o.a || s[0] > o.b + 14)))
+        while (busy(row)) row++
+        spans.forEach((s, k) => { if (s) occ[k][it.side].push({ row, a: s[0], b: s[1] }) })
+        p._rows[it.id] = { row, w, h }
       }
     }
     const placeLabel = (id, html, side, xv, a, color, lead = true) => {
       const r = p._rows[id]; if (!r) return
       const off = 34 + r.row * 74
       const ly = side === 'above' ? y - off : y + off + 36
-      const x = clamp(xv - r.w / 2 + r.shift, box.x - 10, box.x + box.w + 10 - r.w)
+      const x = clamp(xv - r.w / 2, box.x - 10, box.x + box.w + 10 - r.w)
       if (lead) line(xv, side === 'above' ? y - 9 : y + 9, xv, side === 'above' ? ly + 2 : ly - 2, color, 1.2, .55 * a)
       L(key + '.m_' + id, html, { x: x + r.w / 2, y: ly + (side === 'above' ? 6 : -6) * (1 - a), ax: .5, ay: side === 'above' ? 1 : 0, size: 26, op: a, color: K.ink })
     }
@@ -1280,7 +1337,7 @@ PRIM.numberline = {
       const isNew = ['claim', 'accent', 'new'].includes(m.tone), c = tone(m.tone || 'old'), fa = isNew ? 1 : back
       const keep = ALPHA; ALPHA *= fa
       const pr = seg(lt, at, at + .7)
-      if (pr < 1) ring(x, y, 6 + 18 * eout(pr), c, 1.5, .7 * (1 - pr))
+      if (pr < 1) band(-4000, y + 8, () => ring(x, y, 6 + 18 * eout(pr), c, 1.5, .7 * (1 - pr)))
       bloom(() => { if (m.style === 'ring') ring(x, y, 7 * eback(e), c, 2.2, 1); else dot(x, y, 6.5 * eback(e), c, 1) }, isNew ? 1 : .25)
       placeLabel('m' + i, labelHTML(m), m.side || 'above', x, eout(e), c)
       ALPHA = keep
@@ -1300,8 +1357,11 @@ PRIM.numberline = {
         dot(xc, y, 3.5, K.bg, 1)
         const land = lt - s.at - d
         if (land > 0) {
-          for (const dl of [0, .22]) { const pe = seg(land - dl, 0, .9); if (pe > 0 && pe < 1) bloom(() => ring(xb, y, 8 + 34 * eout(pe), c, dl ? 1.2 : 2, (dl ? .5 : 1) * (1 - pe)), .6) }
-          glowDot(xb, y, 40, c, .5 * flare(seg(land, 0, 1)))
+          // the landing rings splash above the axis only: below it are the tick labels
+          band(-4000, y + 8, () => {
+            for (const dl of [0, .22]) { const pe = seg(land - dl, 0, .9); if (pe > 0 && pe < 1) bloom(() => ring(xb, y, 8 + 34 * eout(pe), c, dl ? 1.2 : 2, (dl ? .5 : 1) * (1 - pe)), .6) }
+            glowDot(xb, y, 40, c, .5 * flare(seg(land, 0, 1)))
+          })
           // the gap: a bracket just over the axis between the two values
           const ge = eio(seg(land, .15, .7))
           if (ge > 0 && s.gap !== false) {
@@ -1905,8 +1965,13 @@ function termRects(el) {
   const R = el.getBoundingClientRect(), k = R.width / (el.offsetWidth || 1) || 1, out = {}
   for (const t of el.querySelectorAll('[class*="t-"]')) {
     const name = [...t.classList].find(c => c.startsWith('t-')); if (!name) continue
-    const r = t.getBoundingClientRect()
-    out[name.slice(2)] = { x: (r.left - R.left) / k, y: (r.top - R.top) / k, w: r.width / k, h: r.height / k, el: t }
+    // a KaTeX span's own box is its strut line; \binom, \frac and big
+    // delimiters ink above and below it, so take the union of every inked leaf
+    let l = Infinity, tp = Infinity, rt = -Infinity, bt = -Infinity
+    const add = r => { if (r.width > .5 && r.height > .5) { l = Math.min(l, r.left); tp = Math.min(tp, r.top); rt = Math.max(rt, r.right); bt = Math.max(bt, r.bottom) } }
+    add(t.getBoundingClientRect())
+    for (const c of t.querySelectorAll('*')) if (c.tagName.toLowerCase() === 'svg' || (!c.children.length && c.textContent.trim()) || c.classList.contains('frac-line')) add(c.getBoundingClientRect())
+    out[name.slice(2)] = { x: (l - R.left) / k, y: (tp - R.top) / k, w: (rt - l) / k, h: (bt - tp) / k, el: t }
   }
   ;(el._items || []).forEach((it, i) => { it.style.top = keep[i][0]; it.style.left = keep[i][1] })
   el.style.display = disp
@@ -1980,7 +2045,9 @@ function miniVis(v, ax, mx, y0, dir, lt, t0, c, key, box) {
     ;(v.marks || []).forEach((m, k) => { const me = seg(lt, t0 + .4 + k * .25, t0 + .8 + k * .25); if (me <= 0) return; const mc = tone(m.tone || 'accent'); bloom(() => dot(X(m.v), yy, 4.5 * eback(me), mc, 1), .5); if (m.label) L(`${key}.m${k}`, rich(m.label), { x: X(m.v), y: yy - 9, ax: .5, ay: 1, size: 15, color: mc, op: eout(me) }) })
   } else if (kind === 'shape') {
     const S2 = Math.min(pw, ph) / 2 * .9, scx = px + pw / 2, scy = py + ph / 2
-    const pts = resample(shapePts({ kind: v.shape || 'circle', n: v.n || 6, r: 1, p: v.p }), 96).map(q => [scx + q[0] * S2, scy - q[1] * S2])
+    const sk = v.shape === 'ball' ? 'circle' : v.shape || 'circle'
+    need(['circle', 'regular', 'superellipse', 'ellipse'].includes(sk), `mini visual shape must be circle | ball | regular | superellipse | ellipse, not "${v.shape}"`)
+    const pts = resample(shapePts({ kind: sk, n: v.n || 6, r: 1, p: v.p, rx: v.rx, ry: v.ry }), 96).map(q => [scx + q[0] * S2, scy - q[1] * S2])
     if (v.shape === 'ball' || v.fill) { g.beginPath(); pts.forEach((q, k) => (k ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); fill(vc, .18 * d) }
     let tip = null; bloom(() => { tip = polyline([...pts, pts[0]], d, vc, 2, e) }, .5)
     if (tip && d < 1) pen(tip[0], tip[1], vc, 1, 10)
@@ -2038,9 +2105,10 @@ function relation(R, T, ox, oy, w, h, cx, cy, lt, at, key) {
     const ok = (kind === 'lt' || kind === 'le') ? lerp(lv0, lv, d) <= rv : lerp(lv0, lv, d) >= rv
     if (ok && d > 0) { const fl = flare(seg(lt, t0 + 1.6, t0 + 2.5)); if (fl > 0) glowDot(bx + lw, yl + bh / 2, 22, lc, .6 * fl) }
     lab('l', R.left && R.left.label, yl, lc); lab('r', R.right && R.right.label, yr, rc)
-    if (R.label) L(`${key}.rl`, rich(R.label), { x: bx + bw + 14, y: yl + bh + 6, ay: .5, size: 18, color: K.soft, op: eout(seg(lt, t0 + 1.4, t0 + 1.9)) })
+    if (R.label) L(`${key}.rlab`, rich(R.label), { x: bx + bw + 14, y: yr + bh / 2, ay: .5, size: 18, color: K.soft, op: eout(seg(lt, t0 + 1.4, t0 + 1.9)) })
   }
-  if (R.illustrative !== false) L(`${key}.rill`, 'illustrative lengths', { x: cx, y: by + 2 * bh + 26, ax: .5, cls: 'caps', size: 11, color: K.mute, op: .9 * e })
+  // beside the first bar, not under the pair: under it, it ran into the next stacked line
+  if (R.illustrative !== false) L(`${key}.rill`, 'illustrative lengths', { x: bx + bw + 14, y: (kind === 'eq' ? by - 18 : by) + bh / 2, ay: .5, cls: 'caps', size: 11, color: K.mute, op: .9 * e })
 }
 
 // A tree of dependencies: what the main theorem rests on, built bottom-up.
