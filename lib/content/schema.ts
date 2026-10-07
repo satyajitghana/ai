@@ -62,6 +62,13 @@ const licence = z
     "licence must be an SPDX id (e.g. Apache-2.0) or one of: " + LICENCE_SPECIAL.join(", "),
   )
 
+// A bespoke page shell for one article, keyed by id. Optional, so every other
+// article keeps the default page; app/articles/[slug]/page.tsx looks the id up
+// in components/articles/layouts.ts, which must name a shell for every id here
+// (typecheck fails otherwise).
+export const ARTICLE_LAYOUT_IDS = ["impeccable"] as const
+export type ArticleLayoutId = (typeof ARTICLE_LAYOUT_IDS)[number]
+
 // `kind` is the frontmatter name, but every loaded content item already has a
 // `kind` (the content kind, "articles"), so the loader exposes this one as
 // `articleKind`.
@@ -74,6 +81,7 @@ export const articleFrontmatter = blogFrontmatter
   level: z.enum(LEVEL_IDS).optional(),
   runsOn: z.enum(RUNS_ON_IDS).optional(),
   licence: licence.optional(),
+  layout: z.enum(ARTICLE_LAYOUT_IDS).optional(),
   /** @deprecated superseded by `rating` */
   interest: z.number().int().min(1).max(5).optional(),
   /** @deprecated superseded by `rating` */
