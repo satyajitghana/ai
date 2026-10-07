@@ -39,8 +39,8 @@
 // data/films/architectures/transformer.json, is held to
 // content/architectures/transformer.mdx, and writes
 // public/films/architectures/transformer.mp4.
-// The site cut is downscaled to 960x540 in the encoder: the article column is
-// ~700 px wide, and type stays sharper than if it were painted at 960.
+// The site cut ships at 1280x720, the size the lite tier paints at, so nothing
+// is resampled; type stays as sharp as the painting.
 import { spawn, spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, renameSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -113,7 +113,7 @@ for (const slug of slugs) {
 console.log(`[2/3] painting ${slugs.length} film(s) on ${opt.workers || 3} page(s)`)
 // --noblur: drawings on twos everywhere and no shutter smear (render.mjs film --noblur),
 // several times faster in the brush tiers. The live/p5 cut is CRF 33: brush texture costs bits.
-const flags = [...(social ? ['--crf264=28'] : live ? ['--scale=1280', '--crf264=33'] : ['--scale=960', '--crf264=32']), ...(opt.noblur ? ['--noblur'] : [])]
+const flags = [...(social ? ['--crf264=28'] : live ? ['--scale=1280', '--crf264=33'] : ['--scale=1280', '--crf264=32']), ...(opt.noblur ? ['--noblur'] : [])]
 const child = spawn(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'film', ...slugs.map(sbPath), `--out=${frames}`, `--workers=${opt.workers || 3}`, ...flags, ...liveFlag], { stdio: ['ignore', 'pipe', 'inherit'] })
 let buf = '', n = 0
 child.stdout.on('data', d => {
@@ -154,8 +154,8 @@ function finish(r) {
     scenes: r.scenes.length,
     style: r.style,
     tier,
-    width: r.style === 'pixel' && !social ? 640 : social || live ? 1280 : 960,
-    height: r.style === 'pixel' && !social ? 360 : social || live ? 720 : 540,
+    width: r.style === 'pixel' && !social ? 640 : 1280,
+    height: r.style === 'pixel' && !social ? 360 : 720,
     mascot: r.mascot?.name,
     voice: VOICE,
     rendered: new Date().toISOString().slice(0, 10),
