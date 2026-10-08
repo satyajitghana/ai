@@ -12,19 +12,26 @@ import { cn } from "@/lib/utils"
 //   Community PRs: `created_at` from the GitHub REST API, kappa from each PR title or
 //     body (the exact rationals are in the PR descriptions). #11 and #26 claim no
 //     kappa and are omitted, as is #45 (a Lean audit, no kappa). #46 to #48 were added
-//     on a second pass at 15:24 UTC, #49 on a third at 15:46 UTC.
+//     on a second pass at 15:24 UTC, #49 on a third at 15:46 UTC, and #50 to #77 on a
+//     fourth at 19:46 UTC. #73 (withdrawn, no kappa) is omitted. #64's title states no
+//     kappa; its body gives 20411033624901463/(4*10^20).
 //   The merge: GitHub marks PR #39 merged at 15:18:18 UTC, when main moved to 0605a24
 //     ("Publish audited community bound with contributor attribution"). The merge commit
 //     itself, fd8c563, was made on integration/community at 13:23 UTC; main stayed at the
 //     2^-30 checkpoint until the audit (c9fca20, 15:12 UTC) and the release commit landed.
 //     kappa on main is 971668963/25000000000000, the PR #39 witness, unchanged.
+//   Two later moves of main, at GitHub's merged_at times: 16:46:58 UTC (#45, #46, #48,
+//     #49 and #26 marked merged; README at ed8201c gives 4123863984/10^14) and 18:35:34
+//     UTC (#50 to #58 and #60 to #62; README at 0d235fe gives
+//     25508460085039/(5*10^17), the #61 refinement of #62 stacked on #57).
 //   Swapnil Jain's parallel track (github.com/Swapnil-jain/integer-mult-kappa): times are
 //     his six X posts (fxtwitter mirror), kappa the exact witness in the commit each post
 //     announced. Rounds five and six have their moment and assembly arithmetic checked by
 //     Lean's kernel (lean/Round5.lean, lean/Round6.lean, decide / decide +kernel, no
 //     native_decide); everything else on the chart is an exact-rational Python certificate.
-//   The 2^-182 origin sits at 22:19 UTC on Oct 6, the time Julian Schiavo's chart
-//     labels it with; I did not verify that time independently.
+//   The 2^-182 origin sits at 21:58:50 UTC on Oct 6, the commit time of openai/math
+//     adc7f12 ("Initial commit"), the same time Aurel Prosz's tracker uses. Julian
+//     Schiavo's chart labels it 3:19 PM Pacific (22:19 UTC).
 // "Extrapolation" is my straight line in log2(kappa) through Colkitt's two announcement
 // posts that preceded Julian's first chart: 2^-78 at 13:56 UTC and 2^-59 at 19:35 UTC
 // on Oct 7. It reaches kappa = 1 at about 13:08 UTC on Oct 8.
@@ -42,7 +49,7 @@ type Pt = {
   url?: string
 }
 
-const ORIGIN: Pt = { who: "OpenAI", h: 0.317, l2: -182, k: "2^-182", note: "original manuscript (family 109)" }
+const ORIGIN: Pt = { who: "OpenAI", h: -0.019, l2: -182, k: "2^-182", note: "original manuscript (family 109)" }
 
 const COLKITT: Pt[] = [
   { who: "Colkitt", h: 4.367, l2: -107.088, k: "5.8e-33", note: "5cf29ec · parameters only" },
@@ -100,19 +107,70 @@ const PRS: Pt[] = [
   { pr: 47, who: "rohanarun", h: 40.943, l2: -14.572, k: "4.1051e-5" },
   { pr: 48, who: "chafreaky", h: 41.248, l2: -14.567, k: "4.1186e-5" },
   { pr: 49, who: "rohanarun", h: 41.616, l2: -14.566, k: "4.1239e-5" },
+  { pr: 50, who: "gupt1156", h: 42.053, l2: -14.564, k: "4.1294e-5" },
+  { pr: 51, who: "hipotures", h: 42.308, l2: -14.549, k: "4.1712e-5" },
+  { pr: 52, who: "rohanarun", h: 42.381, l2: -14.561, k: "4.136e-5" },
+  { pr: 53, who: "ikeboy", h: 42.521, l2: -14.44, k: "4.4981e-5" },
+  { pr: 54, who: "chafreaky", h: 42.69, l2: -14.43, k: "4.529e-5" },
+  { pr: 55, who: "gupt1156", h: 43.089, l2: -14.427, k: "4.541e-5" },
+  { pr: 56, who: "rohanarun", h: 43.103, l2: -14.424, k: "4.5487e-5" },
+  { pr: 57, who: "eumemic", h: 43.123, l2: -14.386, k: "4.6694e-5" },
+  { pr: 58, who: "chafreaky", h: 43.411, l2: -14.361, k: "4.7507e-5" },
+  { pr: 59, who: "rohangar1", h: 43.615, l2: -14.408, k: "4.5989e-5" },
+  { pr: 60, who: "chafreaky", h: 43.675, l2: -14.357, k: "4.7645e-5" },
+  { pr: 61, who: "alejandrozu", h: 43.687, l2: -14.259, k: "5.1017e-5" },
+  { pr: 62, who: "ikeboy", h: 43.764, l2: -14.292, k: "4.9861e-5" },
+  { pr: 63, who: "DominikScholz", h: 44.09, l2: -14.258, k: "5.1028e-5" },
+  { pr: 64, who: "rfu08", h: 44.34, l2: -14.258, k: "5.1028e-5" },
+  { pr: 65, who: "rohanarun", h: 44.415, l2: -14.258, k: "5.1029e-5" },
+  { pr: 66, who: "chafreaky", h: 44.588, l2: -14.337, k: "4.8311e-5" },
+  { pr: 67, who: "rohanarun", h: 44.657, l2: -14.258, k: "5.1034e-5" },
+  { pr: 68, who: "DominikScholz", h: 44.671, l2: -14.258, k: "5.1035e-5" },
+  { pr: 69, who: "eumemic", h: 45.031, l2: -14.249, k: "5.1368e-5" },
+  { pr: 70, who: "alejandrozu", h: 45.061, l2: -14.258, k: "5.104e-5" },
+  { pr: 71, who: "chafreaky", h: 45.116, l2: -14.247, k: "5.1415e-5" },
+  { pr: 72, who: "maxime-fleury", h: 45.132, l2: -14.565, k: "4.125e-5" },
+  { pr: 74, who: "tomdif", h: 45.443, l2: -14.25, k: "5.1329e-5" },
+  { pr: 75, who: "alejandrozu", h: 45.579, l2: -14.247, k: "5.1415e-5" },
+  { pr: 76, who: "DominikScholz", h: 45.737, l2: -14.238, k: "5.1739e-5" },
+  { pr: 77, who: "huxint", h: 45.761, l2: -14.244, k: "5.1548e-5" },
 ]
 
-// PR #39 opened at 12:58 UTC; merged into main at 15:18 UTC after the maintainer's audit.
-const MERGED: Pt = {
-  who: "Colkitt",
-  h: 41.305,
-  l2: -14.651,
-  k: "3.886675852e-5",
-  note: "PR #39 (Rohan Arun) merged into main · 0605a24 · maintainer-audited, still conditional on the manuscript",
-  merged: true,
-  url: "https://github.com/CrocSwap/integer-mult-bounds/pull/39",
-}
-const PR39 = { h: 38.979, l2: -14.651 }
+// Each move of main: the PR that supplied the witness, when it was opened, and when GitHub
+// marks it merged (main moved). PR #39 opened 12:58 UTC, merged 15:18 after the audit.
+type MainMove = Pt & { from: { h: number; l2: number } }
+const MAIN: MainMove[] = [
+  {
+    who: "Colkitt",
+    h: 41.305,
+    l2: -14.651,
+    k: "3.886675852e-5",
+    note: "PR #39 (Rohan Arun) merged into main · 0605a24 · maintainer-audited, still conditional on the manuscript",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/39",
+    from: { h: 38.979, l2: -14.651 },
+  },
+  {
+    who: "Colkitt",
+    h: 42.783,
+    l2: -14.566,
+    k: "4.123863984e-5",
+    note: "PR #49 (Rohan Arun) merged into main · ed8201c · reviewed follow-up",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/49",
+    from: { h: 41.616, l2: -14.566 },
+  },
+  {
+    who: "Colkitt",
+    h: 44.593,
+    l2: -14.259,
+    k: "5.1016920170078e-5",
+    note: "PRs #50 to #62 reviewed; main takes #62's network with #57's compiler and #61's parameters · 0d235fe",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/61",
+    from: { h: 43.687, l2: -14.259 },
+  },
+]
 
 const JAIN_REPO = "https://github.com/Swapnil-jain/integer-mult-kappa"
 const JAIN: Pt[] = [
@@ -132,6 +190,7 @@ const PALETTE: Record<string, string> = {
   rohanarun: "oklch(0.70 0.15 70)",
   icekylinx: "oklch(0.60 0.17 320)",
   DominikScholz: "oklch(0.62 0.12 200)",
+  ikeboy: "oklch(0.62 0.14 115)",
 }
 const JAIN_COLOUR = "oklch(0.45 0.2 295)"
 const OTHER = "oklch(0.60 0.04 260)"
@@ -143,16 +202,21 @@ const L = 48
 const R = 14
 const T = 14
 const B = 34
-const H_MAX = 42.5
-const Y_MIN = -190
+// Two views: the whole race, and the last ten hours, where everything after 2^-17 lives.
+type View = { h0: number; h1: number; y0: number; y1: number }
+const FULL: View = { h0: -0.5, h1: 46.5, y0: -190, y1: 0 }
+const ZOOM: View = { h0: 36, h1: 46.5, y0: -17.5, y1: -13.9 }
 
 const EXTRA_A = { h: 15.933, l2: -78 }
 const EXTRA_B = { h: 21.583, l2: -59 }
 const SLOPE = (EXTRA_B.l2 - EXTRA_A.l2) / (EXTRA_B.h - EXTRA_A.h)
 const HIT_ONE = EXTRA_B.h - EXTRA_B.l2 / SLOPE
 
-const x = (h: number) => L + (h / H_MAX) * (W - L - R)
-const y = (l2: number) => T + (l2 / Y_MIN) * (H - T - B)
+const scales = (v: View) => ({
+  x: (h: number) => L + ((h - v.h0) / (v.h1 - v.h0)) * (W - L - R),
+  y: (l2: number) => T + ((v.y1 - l2) / (v.y1 - v.y0)) * (H - T - B),
+  inside: (p: { h: number; l2: number }) => p.h >= v.h0 && p.h <= v.h1 && p.l2 >= v.y0 && p.l2 <= v.y1,
+})
 
 function stamp(h: number) {
   const mins = Math.round(h * 60) + 22 * 60
@@ -167,7 +231,10 @@ export function KappaRace() {
   const [showPrs, setShowPrs] = useState(true)
   const [showLine, setShowLine] = useState(true)
   const [showJain, setShowJain] = useState(true)
+  const [zoom, setZoom] = useState(false)
   const [sel, setSel] = useState<Pt>(PRS[11])
+  const view = zoom ? ZOOM : FULL
+  const { x, y, inside } = scales(view)
 
   const frontier: Pt[] = []
   let best = -Infinity
@@ -181,7 +248,11 @@ export function KappaRace() {
 
   const jainPath = JAIN.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.h)},${y(p.l2)}`).join("")
 
-  const all = [ORIGIN, ...COLKITT, MERGED, ...(showPrs ? PRS : []), ...(showJain ? JAIN : [])]
+  const mainPath = MAIN.map((p, i) => (i === 0 ? `M${x(p.h)},${y(p.l2)}` : `H${x(p.h)}V${y(p.l2)}`)).join("") + `H${x(view.h1)}`
+  const last = MAIN[MAIN.length - 1]
+
+  const all = [ORIGIN, ...COLKITT, ...MAIN, ...(showPrs ? PRS : []), ...(showJain ? JAIN : [])]
+  const shown = all.filter(inside)
   const who = sel.pr
     ? `PR #${sel.pr} by ${sel.who}`
     : sel.merged
@@ -189,24 +260,34 @@ export function KappaRace() {
       : sel.who === "Jain"
         ? "Swapnil Jain (own repo)"
         : sel.who
-  const ticksY = [-180, -150, -120, -90, -60, -30, 0]
-  const ticksX = [
-    { h: 2, label: "Oct 7 00:00" },
-    { h: 14, label: "12:00" },
-    { h: 26, label: "Oct 8 00:00" },
-    { h: 38, label: "12:00" },
-  ]
+  const ticksY = zoom ? [-17, -16, -15, -14] : [-180, -150, -120, -90, -60, -30, 0]
+  const ticksX = zoom
+    ? [
+        { h: 36, label: "Oct 8 10:00" },
+        { h: 38, label: "12:00" },
+        { h: 40, label: "14:00" },
+        { h: 42, label: "16:00" },
+        { h: 44, label: "18:00" },
+        { h: 46, label: "20:00" },
+      ]
+    : [
+        { h: 2, label: "Oct 7 00:00" },
+        { h: 14, label: "12:00" },
+        { h: 26, label: "Oct 8 00:00" },
+        { h: 38, label: "12:00" },
+      ]
 
   return (
     <figure className="not-prose my-8 rounded-xl border border-border bg-card p-4">
       <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
-        log₂ κ against time · every checkpoint and PR, the merge into main, and Jain&apos;s six rounds, Oct 6 to Oct 8 (UTC)
+        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s six rounds, Oct 6 to Oct 8 (UTC)
+        {zoom ? " · zoomed to 10:00–20:30 on Oct 8" : ""}
       </figcaption>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 and flatten after 12:30 UTC. A red square at 15:18 UTC on October 8 marks pull request 39, opened at 12:58 at 2 to the minus 14.65, being merged into main after the maintainer's audit; it is the first community witness on main. Swapnil Jain's separate track, six diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC to 2 to the minus 14.7 at 14:03 UTC; its last two points are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8."
+        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause there for about three hours, then climb again after 16:30 to about 2 to the minus 14.24 by 19:45. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47 at 2 to the minus 14.57, and a reviewed batch of pull requests 50 to 62 at 18:36 at 2 to the minus 14.26. Swapnil Jain's separate track, six diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC to 2 to the minus 14.7 at 14:03 UTC; its last two points are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows only the last ten hours."
       >
         {ticksY.map((t) => (
           <g key={t}>
@@ -221,6 +302,12 @@ export function KappaRace() {
             {t.label}
           </text>
         ))}
+        <defs>
+          <clipPath id="kappa-race-plot">
+            <rect x={L} y={T - 2} width={W - L - R} height={H - T - B + 4} />
+          </clipPath>
+        </defs>
+        <g clipPath="url(#kappa-race-plot)">
         {showLine ? (
           <g>
             <line
@@ -239,30 +326,25 @@ export function KappaRace() {
           </g>
         ) : null}
         {showPrs ? <path d={path} fill="none" stroke="oklch(0.62 0.16 150)" strokeWidth={1.2} opacity={0.6} /> : null}
-        <g>
+        {MAIN.map((p, i) => (
           <line
-            x1={x(PR39.h)}
-            y1={y(PR39.l2)}
-            x2={x(MERGED.h)}
-            y2={y(MERGED.l2)}
+            key={i}
+            x1={x(p.from.h)}
+            y1={y(p.from.l2)}
+            x2={x(p.h)}
+            y2={y(p.l2)}
             stroke={PALETTE.Colkitt}
             strokeDasharray="2 3"
             strokeWidth={1.4}
           />
-          <line
-            x1={x(MERGED.h)}
-            y1={y(MERGED.l2) + 6}
-            x2={x(MERGED.h)}
-            y2={y(MERGED.l2) + 30}
-            stroke={PALETTE.Colkitt}
-            strokeWidth={0.8}
-          />
-          <text x={x(MERGED.h) - 4} y={y(MERGED.l2) + 38} textAnchor="end" fontSize={10} fill={PALETTE.Colkitt} className="font-mono">
-            #39 merged into main
-          </text>
-        </g>
+        ))}
+        <path d={mainPath} fill="none" stroke={PALETTE.Colkitt} strokeWidth={1.4} opacity={0.75} />
+        <text x={x(last.h) - 4} y={y(last.l2) + (zoom ? -10 : 22)} textAnchor="end" fontSize={10} fill={PALETTE.Colkitt} className="font-mono">
+          main
+        </text>
         {showJain ? <path d={jainPath} fill="none" stroke={JAIN_COLOUR} strokeWidth={1.2} opacity={0.7} /> : null}
-        {all.map((p, i) => {
+        </g>
+        {shown.map((p, i) => {
           const on = p === sel
           if (p.who === "Jain") {
             const r = on ? 6.5 : 4.6
@@ -351,6 +433,14 @@ export function KappaRace() {
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
         <button
           type="button"
+          onClick={() => setZoom((v) => !v)}
+          aria-pressed={zoom}
+          className={cn("rounded-md border px-2 py-0.5 font-mono", zoom ? "border-foreground" : "border-border text-muted-foreground")}
+        >
+          zoom: last ten hours
+        </button>
+        <button
+          type="button"
           onClick={() => setShowPrs((v) => !v)}
           aria-pressed={showPrs}
           className={cn("rounded-md border px-2 py-0.5 font-mono", showPrs ? "border-foreground" : "border-border text-muted-foreground")}
@@ -386,7 +476,7 @@ export function KappaRace() {
                 {p.pr
                   ? `#${p.pr} ${p.who}`
                   : p.merged
-                    ? `main ${p.k} (#39 merged)`
+                    ? `main ${p.k}`
                     : `${p.who} ${p.k}${p.lean ? " (Lean)" : ""}`}
               </option>
             ))}
@@ -400,7 +490,7 @@ export function KappaRace() {
           </span>
         ))}
         <span>
-          <span style={{ color: PALETTE.Colkitt }}>■</span> merged into main after the maintainer&apos;s audit
+          <span style={{ color: PALETTE.Colkitt }}>■</span> main moves, each after the maintainer&apos;s review (dashed from the PR&apos;s opening)
         </span>
         <span>
           <span style={{ color: JAIN_COLOUR }}>◆</span> Jain (own repo)
