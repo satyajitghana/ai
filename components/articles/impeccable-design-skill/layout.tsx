@@ -1,5 +1,5 @@
 import { Children, isValidElement, type ComponentPropsWithoutRef, type ReactElement, type ReactNode } from "react"
-import { Newsreader } from "next/font/google"
+import { Bodoni_Moda, Fragment_Mono, Jost } from "next/font/google"
 
 import type { ArticleLayoutProps } from "@/components/articles/layouts"
 import { CSS } from "@/components/articles/impeccable-design-skill/layout-css"
@@ -12,23 +12,51 @@ import { mediaUrl } from "@/lib/media"
 
 // The page shell for impeccable-design-skill, set by following Impeccable's
 // own references (pbakaus/impeccable at d98b0be) rather than the site default.
-// mode-read.md:7 is the brief: the world owns the frame (title, section
+// mode-read.md:7 is the brief: the world owns the frame (masthead, section
 // openers, quotes, figures, the run log) and the reading column stays calm.
-// The world here is a proof sheet: blue-black ink on white, and the
-// detector overlay's yellow as the one mark (colorize.md:42).
 //
-// Reading face: Newsreader, loaded here and nowhere else. typeset.md:57 allows
-// a second family only for a role it alone performs; the site's grotesk stays
-// the display and interface face, the serif takes the long reading column.
+// The world is a fashion magazine's front of book. "Impeccable" is a word from
+// that trade, and the article is a review of taste written down as rules, so
+// the frame borrows the trade's own tools: a Didone masthead at cover scale, a
+// geometric sans for the text, and one shocking pink.
+//
+// None of the three faces is on new-work.md:67's list of training-data
+// defaults (Fraunces, Playfair, Newsreader, IBM Plex, Space Grotesk, ...) or on
+// the detector's overused-font list (crates/foundation/src/constants.rs:85).
+// The page's previous design used Newsreader and IBM Plex Mono; both are named.
+//
 // preload is off because this module is imported by the shared article route:
-// a preload would make every other article fetch a font it never uses. The
+// a preload would make every other article fetch fonts it never uses. The
 // @font-face rules alone fetch nothing until this page's class asks for them.
-const readingFace = Newsreader({
+
+// Display: masthead, section openers, pull quotes. The optical-size axis is
+// the point: the 96 master's hairlines at cover size, a sturdier cut lower down.
+const displayFace = Bodoni_Moda({
   subsets: ["latin"],
-  variable: "--font-imx-read",
+  variable: "--font-imx-display",
+  style: ["normal"],
+  axes: ["opsz"],
   display: "swap",
   preload: false,
-  axes: ["opsz"],
+})
+
+// Text and interface: the column, captions, controls, the widgets.
+const textFace = Jost({
+  subsets: ["latin"],
+  variable: "--font-imx-text",
+  style: ["normal"],
+  display: "swap",
+  preload: false,
+})
+
+// Code, file paths and rule ids only (craft-floor.md:38). One weight.
+const codeFace = Fragment_Mono({
+  subsets: ["latin"],
+  variable: "--font-imx-code",
+  weight: "400",
+  style: ["normal"],
+  display: "swap",
+  preload: false,
 })
 
 const DEK =
@@ -55,12 +83,12 @@ function Title({ title }: { title: string }) {
   return (
     <h1 className="imx-h1">
       {name ? (
-        <span className="imx-h1-name">
+        <span className="imx-mast">
           {name}
           <span className="imx-sr">: </span>
         </span>
       ) : null}
-      <span className="imx-h1-rest">
+      <span className="imx-claim">
         {j >= 0 ? (
           <>
             {rest.slice(0, j)}
@@ -75,16 +103,21 @@ function Title({ title }: { title: string }) {
   )
 }
 
-// What each rule asked for, as this page answers it. The values are the
-// stylesheet's (layout-css.ts); the measure was counted on a render.
-const COLOPHON: [string, ReactNode][] = [
-  ["Reading face", <>Newsreader, 19px, for the column only</>],
-  ["Display face", <>Hanken Grotesk, the site&rsquo;s own</>],
-  ["Measure", <>63 to 73 characters a line (<code>mode-read.md:15</code>)</>],
-  ["Scale", <>14, 16, 19, 22, 26, 40, 44 and 96px; four times the space above a heading as below (<code>craft-floor.md:11</code>)</>],
-  ["Colour", <>Ink on white, both tinted blue; yellow marks findings and nothing else (<code>colorize.md:42</code>)</>],
-  ["Refused", <>Eyebrows, side stripes, nested cards, gradient text (<code>craft-floor.md:25-35</code>)</>],
-]
+// The credits: a magazine says what the cover is wearing in one run-on line,
+// so the page says what it is set in the same way, instead of a spec table.
+function Credits() {
+  return (
+    <p className="imx-credits">
+      <b>Masthead</b> Bodoni Moda, at its 96-point optical size.{" "}
+      <b>Text</b> Jost, 19px, about 66 characters a line.{" "}
+      <b>Code</b> Fragment Mono.{" "}
+      <b>Colour</b> Ink on white, or white on aubergine, and one shocking pink for the verdict, links
+      and findings.{" "}
+      <b>Left out</b> Every face on Impeccable&rsquo;s list of training-data defaults, eyebrows, italic
+      display, side stripes and cream.
+    </p>
+  )
+}
 
 // ---- MDX overrides, used only on this page ----------------------------------
 
@@ -93,6 +126,13 @@ function SectionHeading(props: ComponentPropsWithoutRef<"h2">) {
 }
 
 type PElement = ReactElement<{ children?: ReactNode }>
+
+const textLength = (n: ReactNode): number =>
+  typeof n === "string"
+    ? n.length
+    : isValidElement<{ children?: ReactNode }>(n)
+      ? Children.toArray(n.props.children).reduce<number>((t, c) => t + textLength(c), 0)
+      : 0
 
 // Every quote in the article is one paragraph ending in its source, written
 // `"…" (\`file:line\`)`. Split that into the quote and a source line so the
@@ -118,8 +158,11 @@ function PullQuote({ children }: { children?: ReactNode }) {
   ) {
     const body: ReactNode[] = [...inner.slice(0, n - 3), lead.replace(/"?\s\($/, "")]
     if (typeof body[0] === "string") body[0] = (body[0] as string).replace(/^"/, "")
+    // A short sentence is set at display size across the column and its
+    // margins; a long passage stays in the column at a reading size.
+    const length = body.reduce<number>((t, b) => t + textLength(b), 0)
     return (
-      <blockquote className="imx-pq">
+      <blockquote className={`imx-pq${length > 200 ? " imx-pq--long" : ""}`}>
         <p className="imx-pq-text">
           <span className="imx-pq-open" aria-hidden="true">
             &ldquo;
@@ -182,38 +225,27 @@ const OVERRIDES = {
 
 export function ImpeccableLayout({ article, film, Body, endMatter, jsonLd }: ArticleLayoutProps) {
   const tags = displayTags(article.tags)
+  const faces = `${displayFace.variable} ${textFace.variable} ${codeFace.variable}`
   return (
-    <main className={`imx flex-1 ${readingFace.variable}`}>
+    <main className={`imx flex-1 ${faces}`}>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       {jsonLd}
       <article>
-        <header className="imx-hero imx-grid">
+        <header className="imx-hero">
+          <p className="imx-meta">
+            <time dateTime={article.date}>{longDate(article.date)}</time>
+            <span>{article.readingTimeMins} min read</span>
+            {tags.length ? <span>{tags.join(", ")}</span> : null}
+          </p>
           <Title title={article.title} />
           <div className="imx-hero-foot">
             <div>
               <p className="imx-dek">{DEK}</p>
-              <p className="imx-meta">
-                <time dateTime={article.date}>{longDate(article.date)}</time>
-                <span>{article.readingTimeMins} min read</span>
-                {tags.length ? <span>{tags.join(", ")}</span> : null}
-              </p>
               <div className="imx-chip">
                 <AgentChip md={`/articles/${article.slug}.md`} json="/api/articles" />
               </div>
             </div>
-            <section className="imx-colo" aria-labelledby="imx-colo-t">
-              <h2 id="imx-colo-t" className="imx-colo-t">
-                How this page is set
-              </h2>
-              <dl>
-                {COLOPHON.map(([k, v]) => (
-                  <div key={k}>
-                    <dt>{k}</dt>
-                    <dd>{v}</dd>
-                  </div>
-                ))}
-              </dl>
-            </section>
+            <Credits />
           </div>
           {film ? (
             <div className="imx-film">
