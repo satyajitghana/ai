@@ -12,7 +12,12 @@ import { cn } from "@/lib/utils"
 //   Community PRs: `created_at` from the GitHub REST API, kappa from each PR title or
 //     body (the exact rationals are in the PR descriptions). #11 and #26 claim no
 //     kappa and are omitted, as is #45 (a Lean audit, no kappa). #46 to #48 were added
-//     on a second pass at 15:24 UTC.
+//     on a second pass at 15:24 UTC, #49 on a third at 15:46 UTC.
+//   The merge: GitHub marks PR #39 merged at 15:18:18 UTC, when main moved to 0605a24
+//     ("Publish audited community bound with contributor attribution"). The merge commit
+//     itself, fd8c563, was made on integration/community at 13:23 UTC; main stayed at the
+//     2^-30 checkpoint until the audit (c9fca20, 15:12 UTC) and the release commit landed.
+//     kappa on main is 971668963/25000000000000, the PR #39 witness, unchanged.
 //   Swapnil Jain's parallel track (github.com/Swapnil-jain/integer-mult-kappa): times are
 //     his six X posts (fxtwitter mirror), kappa the exact witness in the commit each post
 //     announced. Rounds five and six have their moment and assembly arithmetic checked by
@@ -25,7 +30,17 @@ import { cn } from "@/lib/utils"
 // on Oct 7. It reaches kappa = 1 at about 13:08 UTC on Oct 8.
 // x is hours after 2026-10-06 22:00 UTC; y is log2(kappa), precomputed.
 
-type Pt = { pr?: number; who: string; h: number; l2: number; k: string; note?: string; lean?: boolean; url?: string }
+type Pt = {
+  pr?: number
+  who: string
+  h: number
+  l2: number
+  k: string
+  note?: string
+  lean?: boolean
+  merged?: boolean
+  url?: string
+}
 
 const ORIGIN: Pt = { who: "OpenAI", h: 0.317, l2: -182, k: "2^-182", note: "original manuscript (family 109)" }
 
@@ -84,7 +99,20 @@ const PRS: Pt[] = [
   { pr: 46, who: "chafreaky", h: 40.734, l2: -14.574, k: "4.1006e-5" },
   { pr: 47, who: "rohanarun", h: 40.943, l2: -14.572, k: "4.1051e-5" },
   { pr: 48, who: "chafreaky", h: 41.248, l2: -14.567, k: "4.1186e-5" },
+  { pr: 49, who: "rohanarun", h: 41.616, l2: -14.566, k: "4.1239e-5" },
 ]
+
+// PR #39 opened at 12:58 UTC; merged into main at 15:18 UTC after the maintainer's audit.
+const MERGED: Pt = {
+  who: "Colkitt",
+  h: 41.305,
+  l2: -14.651,
+  k: "3.886675852e-5",
+  note: "PR #39 (Rohan Arun) merged into main · 0605a24 · maintainer-audited, still conditional on the manuscript",
+  merged: true,
+  url: "https://github.com/CrocSwap/integer-mult-bounds/pull/39",
+}
+const PR39 = { h: 38.979, l2: -14.651 }
 
 const JAIN_REPO = "https://github.com/Swapnil-jain/integer-mult-kappa"
 const JAIN: Pt[] = [
@@ -115,7 +143,7 @@ const L = 48
 const R = 14
 const T = 14
 const B = 34
-const H_MAX = 42
+const H_MAX = 42.5
 const Y_MIN = -190
 
 const EXTRA_A = { h: 15.933, l2: -78 }
@@ -153,8 +181,14 @@ export function KappaRace() {
 
   const jainPath = JAIN.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.h)},${y(p.l2)}`).join("")
 
-  const all = [ORIGIN, ...COLKITT, ...(showPrs ? PRS : []), ...(showJain ? JAIN : [])]
-  const who = sel.pr ? `PR #${sel.pr} by ${sel.who}` : sel.who === "Jain" ? "Swapnil Jain (own repo)" : sel.who
+  const all = [ORIGIN, ...COLKITT, MERGED, ...(showPrs ? PRS : []), ...(showJain ? JAIN : [])]
+  const who = sel.pr
+    ? `PR #${sel.pr} by ${sel.who}`
+    : sel.merged
+      ? "main"
+      : sel.who === "Jain"
+        ? "Swapnil Jain (own repo)"
+        : sel.who
   const ticksY = [-180, -150, -120, -90, -60, -30, 0]
   const ticksX = [
     { h: 2, label: "Oct 7 00:00" },
@@ -166,13 +200,13 @@ export function KappaRace() {
   return (
     <figure className="not-prose my-8 rounded-xl border border-border bg-card p-4">
       <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
-        log₂ κ against time · every checkpoint and PR, plus Jain&apos;s six rounds, Oct 6 to Oct 8 (UTC)
+        log₂ κ against time · every checkpoint and PR, the merge into main, and Jain&apos;s six rounds, Oct 6 to Oct 8 (UTC)
       </figcaption>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 and flatten after 12:30 UTC. Swapnil Jain's separate track, six diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC to 2 to the minus 14.7 at 14:03 UTC; its last two points are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8."
+        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 and flatten after 12:30 UTC. A red square at 15:18 UTC on October 8 marks pull request 39, opened at 12:58 at 2 to the minus 14.65, being merged into main after the maintainer's audit; it is the first community witness on main. Swapnil Jain's separate track, six diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC to 2 to the minus 14.7 at 14:03 UTC; its last two points are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8."
       >
         {ticksY.map((t) => (
           <g key={t}>
@@ -205,6 +239,28 @@ export function KappaRace() {
           </g>
         ) : null}
         {showPrs ? <path d={path} fill="none" stroke="oklch(0.62 0.16 150)" strokeWidth={1.2} opacity={0.6} /> : null}
+        <g>
+          <line
+            x1={x(PR39.h)}
+            y1={y(PR39.l2)}
+            x2={x(MERGED.h)}
+            y2={y(MERGED.l2)}
+            stroke={PALETTE.Colkitt}
+            strokeDasharray="2 3"
+            strokeWidth={1.4}
+          />
+          <line
+            x1={x(MERGED.h)}
+            y1={y(MERGED.l2) + 6}
+            x2={x(MERGED.h)}
+            y2={y(MERGED.l2) + 30}
+            stroke={PALETTE.Colkitt}
+            strokeWidth={0.8}
+          />
+          <text x={x(MERGED.h) - 4} y={y(MERGED.l2) + 38} textAnchor="end" fontSize={10} fill={PALETTE.Colkitt} className="font-mono">
+            #39 merged into main
+          </text>
+        </g>
         {showJain ? <path d={jainPath} fill="none" stroke={JAIN_COLOUR} strokeWidth={1.2} opacity={0.7} /> : null}
         {all.map((p, i) => {
           const on = p === sel
@@ -224,6 +280,25 @@ export function KappaRace() {
               </g>
             )
           }
+          if (p.merged) {
+            const r = on ? 6.5 : 5
+            const cx = x(p.h)
+            const cy = y(p.l2)
+            return (
+              <rect
+                key={i}
+                x={cx - r}
+                y={cy - r}
+                width={2 * r}
+                height={2 * r}
+                fill={PALETTE.Colkitt}
+                stroke={on ? "var(--foreground)" : "var(--background)"}
+                strokeWidth={on ? 2 : 1}
+                style={{ cursor: "pointer" }}
+                onClick={() => setSel(p)}
+              />
+            )
+          }
           return (
             <circle
               key={i}
@@ -241,8 +316,16 @@ export function KappaRace() {
       </svg>
 
       <div className="mt-2 rounded-md border border-border p-2 font-mono text-xs">
-        <span style={{ color: colour(sel.who) }}>●</span> {who} · {stamp(sel.h)} · κ = {sel.k} · log₂ κ = {sel.l2.toFixed(2)}
+        <span style={{ color: colour(sel.who) }}>{sel.merged ? "■" : "●"}</span> {who} · {stamp(sel.h)} · κ = {sel.k} · log₂ κ = {sel.l2.toFixed(2)}
         {sel.note ? ` · ${sel.note}` : ""}
+        {sel.merged ? (
+          <>
+            {" "}·{" "}
+            <a className="underline" href={sel.url}>
+              merged PR
+            </a>
+          </>
+        ) : null}
         {sel.pr ? (
           <>
             {" "}·{" "}
@@ -251,7 +334,7 @@ export function KappaRace() {
             </a>
           </>
         ) : null}
-        {sel.url ? (
+        {sel.url && !sel.merged ? (
           <>
             {" "}·{" "}
             <a className="underline" href={sel.url}>
@@ -300,7 +383,11 @@ export function KappaRace() {
           >
             {all.map((p, i) => (
               <option key={i} value={i}>
-                {p.pr ? `#${p.pr} ${p.who}` : `${p.who} ${p.k}${p.lean ? " (Lean)" : ""}`}
+                {p.pr
+                  ? `#${p.pr} ${p.who}`
+                  : p.merged
+                    ? `main ${p.k} (#39 merged)`
+                    : `${p.who} ${p.k}${p.lean ? " (Lean)" : ""}`}
               </option>
             ))}
           </select>
@@ -312,6 +399,9 @@ export function KappaRace() {
             <span style={{ color: k === "others" ? OTHER : PALETTE[k] }}>●</span> {k}
           </span>
         ))}
+        <span>
+          <span style={{ color: PALETTE.Colkitt }}>■</span> merged into main after the maintainer&apos;s audit
+        </span>
         <span>
           <span style={{ color: JAIN_COLOUR }}>◆</span> Jain (own repo)
         </span>
