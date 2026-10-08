@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils"
 //   ungated IC-LoRA headers (Lightricks' Union-Control at rank 64 and
 //   DoctorDiffusion's Colorizer at rank 32), which give the FFN shapes.
 // - Qwen-Image-2.1: the RunningHub relight LoRA header, rank 32 on seven
-//   layers per block, and ausboss's outpaint LoRA (fused gate_up).
+//   layers per block (the same author's blending LoRA has the identical layout), and ausboss's outpaint LoRA (fused gate_up).
 //
 // The "reference files" are files whose parameter count this calculator
 // reproduces exactly. All but the restore LoRA are measured headers; the
@@ -130,7 +130,7 @@ const LTX: Model = {
 
 const QWEN: Model = {
   id: "qwen",
-  label: "Qwen-Image-2.1 (relight)",
+  label: "Qwen-Image-2.1 (relight, blending)",
   blocks: 32,
   base: 7115124736,
   groups: [
@@ -160,7 +160,7 @@ const QWEN: Model = {
   ],
   refs: [
     {
-      name: "RunningHub relight LoRA",
+      name: "RunningHub relight LoRA (and the blending LoRA, same layout)",
       rank: 32,
       groups: ["attn", "split", "out"],
       params: 83886080,
