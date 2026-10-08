@@ -11,7 +11,13 @@ import { cn } from "@/lib/utils"
 //     (5cf29ec, 52ce3be, bcd4ebd, 6e56487, 1c09a58, 1a74950), converted to UTC.
 //   Community PRs: `created_at` from the GitHub REST API, kappa from each PR title or
 //     body (the exact rationals are in the PR descriptions). #11 and #26 claim no
-//     kappa and are omitted; #45 (a Lean audit) arrived after the snapshot.
+//     kappa and are omitted, as is #45 (a Lean audit, no kappa). #46 to #48 were added
+//     on a second pass at 15:24 UTC.
+//   Swapnil Jain's parallel track (github.com/Swapnil-jain/integer-mult-kappa): times are
+//     his six X posts (fxtwitter mirror), kappa the exact witness in the commit each post
+//     announced. Rounds five and six have their moment and assembly arithmetic checked by
+//     Lean's kernel (lean/Round5.lean, lean/Round6.lean, decide / decide +kernel, no
+//     native_decide); everything else on the chart is an exact-rational Python certificate.
 //   The 2^-182 origin sits at 22:19 UTC on Oct 6, the time Julian Schiavo's chart
 //     labels it with; I did not verify that time independently.
 // "Extrapolation" is my straight line in log2(kappa) through Colkitt's two announcement
@@ -19,7 +25,7 @@ import { cn } from "@/lib/utils"
 // on Oct 7. It reaches kappa = 1 at about 13:08 UTC on Oct 8.
 // x is hours after 2026-10-06 22:00 UTC; y is log2(kappa), precomputed.
 
-type Pt = { pr?: number; who: string; h: number; l2: number; k: string; note?: string }
+type Pt = { pr?: number; who: string; h: number; l2: number; k: string; note?: string; lean?: boolean; url?: string }
 
 const ORIGIN: Pt = { who: "OpenAI", h: 0.317, l2: -182, k: "2^-182", note: "original manuscript (family 109)" }
 
@@ -75,6 +81,19 @@ const PRS: Pt[] = [
   { pr: 42, who: "rohanarun", h: 39.86, l2: -14.574, k: "4.099e-5" },
   { pr: 43, who: "chafreaky", h: 39.931, l2: -14.574, k: "4.1e-5" },
   { pr: 44, who: "rohanarun", h: 40.406, l2: -14.574, k: "4.101e-5" },
+  { pr: 46, who: "chafreaky", h: 40.734, l2: -14.574, k: "4.1006e-5" },
+  { pr: 47, who: "rohanarun", h: 40.943, l2: -14.572, k: "4.1051e-5" },
+  { pr: 48, who: "chafreaky", h: 41.248, l2: -14.567, k: "4.1186e-5" },
+]
+
+const JAIN_REPO = "https://github.com/Swapnil-jain/integer-mult-kappa"
+const JAIN: Pt[] = [
+  { who: "Jain", h: 33.339, l2: -27.581, k: "4.98e-9", note: "round 1 · ε → 1 stack", url: "https://x.com/SJ_Swapnil_Jain/status/2108095135024304240" },
+  { who: "Jain", h: 34.266, l2: -26.991, k: "7.499e-9", note: "round 2 · recentred Gaussian inverse", url: "https://x.com/SJ_Swapnil_Jain/status/2108109123774796281" },
+  { who: "Jain", h: 36.098, l2: -17.865, k: "4.188e-6", note: "round 3 · batched two-stage bit side", url: "https://x.com/SJ_Swapnil_Jain/status/2108136796886548867" },
+  { who: "Jain", h: 37.167, l2: -16.35, k: "1.1972e-5", note: "round 4 · PR #24's bit network", url: "https://x.com/SJ_Swapnil_Jain/status/2108152926959284315" },
+  { who: "Jain", h: 38.665, l2: -15.979, k: "1.5479e-5", note: "round 5 · flag basis · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108175552549118371" },
+  { who: "Jain", h: 40.055, l2: -14.735, k: "3.6666e-5", note: "round 6 · copied centres · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108196538568851574" },
 ]
 
 const PALETTE: Record<string, string> = {
@@ -86,8 +105,9 @@ const PALETTE: Record<string, string> = {
   icekylinx: "oklch(0.60 0.17 320)",
   DominikScholz: "oklch(0.62 0.12 200)",
 }
+const JAIN_COLOUR = "oklch(0.45 0.2 295)"
 const OTHER = "oklch(0.60 0.04 260)"
-const colour = (who: string) => PALETTE[who] ?? OTHER
+const colour = (who: string) => (who === "Jain" ? JAIN_COLOUR : (PALETTE[who] ?? OTHER))
 
 const W = 680
 const H = 340
@@ -118,6 +138,7 @@ function stamp(h: number) {
 export function KappaRace() {
   const [showPrs, setShowPrs] = useState(true)
   const [showLine, setShowLine] = useState(true)
+  const [showJain, setShowJain] = useState(true)
   const [sel, setSel] = useState<Pt>(PRS[11])
 
   const frontier: Pt[] = []
@@ -130,8 +151,10 @@ export function KappaRace() {
   }
   const path = frontier.map((p, i) => (i === 0 ? `M${x(p.h)},${y(p.l2)}` : `H${x(p.h)}V${y(p.l2)}`)).join("")
 
-  const all = [ORIGIN, ...COLKITT, ...(showPrs ? PRS : [])]
-  const who = sel.pr ? `PR #${sel.pr} by ${sel.who}` : sel.who
+  const jainPath = JAIN.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.h)},${y(p.l2)}`).join("")
+
+  const all = [ORIGIN, ...COLKITT, ...(showPrs ? PRS : []), ...(showJain ? JAIN : [])]
+  const who = sel.pr ? `PR #${sel.pr} by ${sel.who}` : sel.who === "Jain" ? "Swapnil Jain (own repo)" : sel.who
   const ticksY = [-180, -150, -120, -90, -60, -30, 0]
   const ticksX = [
     { h: 2, label: "Oct 7 00:00" },
@@ -143,13 +166,13 @@ export function KappaRace() {
   return (
     <figure className="not-prose my-8 rounded-xl border border-border bg-card p-4">
       <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
-        log₂ κ against time · every checkpoint and PR, Oct 6 to Oct 8 (UTC)
+        log₂ κ against time · every checkpoint and PR, plus Jain&apos;s six rounds, Oct 6 to Oct 8 (UTC)
       </figcaption>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 and flatten after 12:30 UTC. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8."
+        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 and flatten after 12:30 UTC. Swapnil Jain's separate track, six diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC to 2 to the minus 14.7 at 14:03 UTC; its last two points are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8."
       >
         {ticksY.map((t) => (
           <g key={t}>
@@ -182,8 +205,25 @@ export function KappaRace() {
           </g>
         ) : null}
         {showPrs ? <path d={path} fill="none" stroke="oklch(0.62 0.16 150)" strokeWidth={1.2} opacity={0.6} /> : null}
+        {showJain ? <path d={jainPath} fill="none" stroke={JAIN_COLOUR} strokeWidth={1.2} opacity={0.7} /> : null}
         {all.map((p, i) => {
           const on = p === sel
+          if (p.who === "Jain") {
+            const r = on ? 6.5 : 4.6
+            const cx = x(p.h)
+            const cy = y(p.l2)
+            return (
+              <g key={i} style={{ cursor: "pointer" }} onClick={() => setSel(p)}>
+                {p.lean ? <circle cx={cx} cy={cy} r={r + 3.6} fill="none" stroke={JAIN_COLOUR} strokeWidth={1.3} /> : null}
+                <path
+                  d={`M${cx},${cy - r}L${cx + r},${cy}L${cx},${cy + r}L${cx - r},${cy}Z`}
+                  fill={JAIN_COLOUR}
+                  stroke={on ? "var(--foreground)" : "var(--background)"}
+                  strokeWidth={on ? 2 : 1}
+                />
+              </g>
+            )
+          }
           return (
             <circle
               key={i}
@@ -211,6 +251,18 @@ export function KappaRace() {
             </a>
           </>
         ) : null}
+        {sel.url ? (
+          <>
+            {" "}·{" "}
+            <a className="underline" href={sel.url}>
+              post
+            </a>{" "}
+            ·{" "}
+            <a className="underline" href={JAIN_REPO}>
+              repo
+            </a>
+          </>
+        ) : null}
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
@@ -230,6 +282,14 @@ export function KappaRace() {
         >
           straight-line extrapolation
         </button>
+        <button
+          type="button"
+          onClick={() => setShowJain((v) => !v)}
+          aria-pressed={showJain}
+          className={cn("rounded-md border px-2 py-0.5 font-mono", showJain ? "border-foreground" : "border-border text-muted-foreground")}
+        >
+          Jain&apos;s track
+        </button>
         <label className="flex items-center gap-2 font-mono text-muted-foreground">
           step through
           <select
@@ -240,7 +300,7 @@ export function KappaRace() {
           >
             {all.map((p, i) => (
               <option key={i} value={i}>
-                {p.pr ? `#${p.pr} ${p.who}` : `${p.who} ${p.k}`}
+                {p.pr ? `#${p.pr} ${p.who}` : `${p.who} ${p.k}${p.lean ? " (Lean)" : ""}`}
               </option>
             ))}
           </select>
@@ -252,6 +312,12 @@ export function KappaRace() {
             <span style={{ color: k === "others" ? OTHER : PALETTE[k] }}>●</span> {k}
           </span>
         ))}
+        <span>
+          <span style={{ color: JAIN_COLOUR }}>◆</span> Jain (own repo)
+        </span>
+        <span>
+          <span style={{ color: JAIN_COLOUR }}>◎</span> arithmetic checked in Lean&apos;s kernel; the other checkpoints and PRs ship exact Python certificates
+        </span>
       </div>
     </figure>
   )
