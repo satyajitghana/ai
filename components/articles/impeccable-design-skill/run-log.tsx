@@ -10,8 +10,10 @@ export function RunLog({ title, note, children }: { title: string; note?: string
   return (
     <section className="imx-log" aria-label={title}>
       <div className="imx-log-in">
-        <p className="imx-log-t">{title}</p>
-        {note ? <p className="imx-log-note">{note}</p> : null}
+        <div className="imx-log-top">
+          <p className="imx-log-t">{title}</p>
+          {note ? <p className="imx-log-note">{note}</p> : null}
+        </div>
         <ol>{children}</ol>
       </div>
     </section>
