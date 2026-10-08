@@ -10,8 +10,17 @@ import { cn } from "@/lib/utils"
 // MEMORY.md and findings.md follow the spec's entry format. The file contents
 // are the exact lines the script wrote. Nothing here is simulated in the
 // browser; the widget only lays the recorded runs side by side.
+//
+// The second lane is NOT a git run. It is what Supermemory's memoryrepo
+// (commit 54f7ff3) does with the same pair of writes, worked out from its two
+// write paths: the chat-time check in src/server/memory-agent.ts:326-329 and
+// the dream rebase in memory-agent.ts:407-415. I transcribed those rules into
+// a short script and replayed each case through it; nothing from that repo
+// was executed.
 
 type Outcome = "conflict" | "clean" | "resurrected"
+
+type Lane = { outcome: Outcome; label: string; text: string }
 
 type Scenario = {
   key: string
@@ -23,6 +32,7 @@ type Scenario = {
   outcome: Outcome
   result: string[]
   why: string
+  mm: Lane
 }
 
 const FINDINGS_BASE = ["- Database: queries are fast [source: s/301]"]
@@ -55,6 +65,11 @@ const SCENARIOS: Scenario[] = [
       ">>>>>>> (the commit B pulled)",
     ],
     why: "Both sides inserted a line at the same place, the end of the file. Git cannot order two insertions at one point, so a shared findings file conflicts on every pair of concurrent appends, not only when two agents edit the same line.",
+    mm: {
+      outcome: "conflict",
+      label: "rejected, agent merges",
+      text: "B's write never lands. The check compares whole files, sees findings.md changed since B's turn began, and hands back the current version; the agent writes one merged file and retries once. Had B been a dream, the whole dream would be dropped.",
+    },
   },
   {
     key: "union",
@@ -76,6 +91,11 @@ const SCENARIOS: Scenario[] = [
       "- Runtime: GC freezes 400 ms [source: s/302]",
     ],
     why: "One line in .gitattributes, `findings.md merge=union`, tells git to keep both sides' lines. That is right for a log of one-line bullets, and wrong for a file where a later line is meant to replace an earlier one.",
+    mm: {
+      outcome: "conflict",
+      label: "rejected, agent merges",
+      text: "There is no merge driver to configure. Any change to the same file, appends included, is case 1 again.",
+    },
   },
   {
     key: "files",
@@ -94,6 +114,11 @@ const SCENARIOS: Scenario[] = [
       "cache.md:    - Cache: refresh every 10 s [source: s/304]",
     ],
     why: "The second push is still rejected as non-fast-forward, as every concurrent push is. The merge that follows is clean because the edits touch different files. This is what a one-file-per-agent layout buys.",
+    mm: {
+      outcome: "clean",
+      label: "lands, nothing refused",
+      text: "Better than git here: B's write lands on the first try, because the check looks only at the files B touches.",
+    },
   },
   {
     key: "untouched",
@@ -105,6 +130,11 @@ const SCENARIOS: Scenario[] = [
     outcome: "clean",
     result: [MEMORY_BASE[0]],
     why: "A three-way merge sees that the older session never changed the port line, so the deletion wins. A stale clone does not bring a forgotten entry back merely by existing.",
+    mm: {
+      outcome: "clean",
+      label: "dream commits",
+      text: "Same as git. A file the chat never touched takes the dream's version, so the deletion stays.",
+    },
   },
   {
     key: "edit",
@@ -125,6 +155,11 @@ const SCENARIOS: Scenario[] = [
       ">>>>>>> (the commit B pulled)",
     ],
     why: "Delete on one side and modify on the other is a real conflict. The session has to decide, and the spec gives it nothing to decide with: no record says the deletion was deliberate.",
+    mm: {
+      outcome: "conflict",
+      label: "second writer loses",
+      text: "Whichever lands second loses. A chat write is refused and shown a MEMORY.md with the line already gone; a dream is dropped whole and retried four hours later.",
+    },
   },
   {
     key: "relearn",
@@ -142,6 +177,11 @@ const SCENARIOS: Scenario[] = [
       "env.md:    - Dev server runs on port 3001 [added: 2026-09-05]",
     ],
     why: "The fact comes back with no conflict, because to git it is a new line in a new file. Only a tombstone, an entry that says this was removed on purpose, could catch it, and the spec does not define one.",
+    mm: {
+      outcome: "resurrected",
+      label: "lands, fact is back",
+      text: "Same as git. env.md existed at neither commit, so nothing looks touched, and the dream prompt's rule that the most recent statement wins favours the re-learned line.",
+    },
   },
 ]
 
@@ -234,12 +274,25 @@ export function MemoryMergeLab() {
         <Lines lines={s.result} tone="result" />
 
         <p className="text-sm text-muted-foreground">{s.why}</p>
+
+        <div className="rounded-lg border border-dashed px-3 py-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[11px] text-muted-foreground">
+              same writes, Supermemory&apos;s memoryrepo (read from its code) →
+            </span>
+            <span className={cn("rounded border px-2 py-0.5 font-mono text-[11px]", BADGE[s.mm.outcome])}>
+              {s.mm.label}
+            </span>
+          </div>
+          <p className="mt-1.5 text-sm text-muted-foreground">{s.mm.text}</p>
+        </div>
       </div>
 
       <figcaption className="border-t px-4 py-2 text-xs text-muted-foreground">
         Each run starts from the same two files, lets session A push first, then has B commit
         from the older checkout and pull. The outcomes are what git printed; the widget only
-        shows them side by side.
+        shows them side by side. The dashed lane is not a git run: it applies
+        memoryrepo&apos;s two write rules (memory-agent.ts:326-329 and 407-415) to the same writes.
       </figcaption>
     </figure>
   )
