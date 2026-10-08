@@ -1,0 +1,274 @@
+---
+title: "LayerRoPE: sixteen scalars that tell each layer how deep it is"
+description: "LayerRoPE replaces every per-layer RMSNorm weight with one shared gain vector per site, scaled by a power law in depth and rotated pair-by-pair on a RoPE-style spectrum, and adds a depth-scheduled write gain to Pre-Norm. On a 58M to 1.3B C4 ladder at 80 tokens per parameter it reaches Pre-Norm's 1.3B loss with 3.4x less compute, and it keeps training at 512 layers. I rebuild the mechanism from the equations, re-derive the 3.4x from the paper's own plot (about 1.6x against the strongest baseline), read LLaMA-2 7B's norm weights to test the 'rotation with depth' premise, and list what the experiments leave untested."
+date: 2026-10-08
+tags:
+  - transformers
+  - pretraining
+  - scaling-laws
+  - positional-encoding
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "LayerRoPE rebuilt from its equations; the 3.4x re-derived (1.6x vs the best baseline) and the rotation premise tested on LLaMA-2 weights."
+topic: llm-architecture
+kind: paper
+level: research
+runsOn: consumer-gpu
+licence: n/a
+---
+
+import { GainRotor } from "@/components/articles/layerrope/gain-rotor"
+import { StreamWidth } from "@/components/articles/layerrope/stream-width"
+
+A week ago I wrote up [DepthBench](/articles/depthbench), which found that a plain Pre-Norm Transformer gets *worse* as you trade width for depth, and that only the redesigned residual streams (Hyper-Connections, Attention Residuals) make extra layers pay. So when [@arXivBangers](https://x.com/arXivBangers/status/2108077752134127987) posted a paper claiming a fix that touches nothing but the normalization weights, I wanted to know how a change that small could matter.
+
+The paper is [LayerRoPE](https://arxiv.org/abs/2610.09179) (Shikhar Srivastava and Christopher Kanan, University of Rochester, 6 Oct 2026). Its pitch: the residual stream's growth with depth is not a disease, the norm weights of trained LLMs already encode which layer they sit in, and if you make that encoding explicit, with a magnitude and a rotation borrowed from RoPE, you get a model that reaches Pre-Norm's 1.3B loss with 3.4x less compute and still trains at 512 layers.
+
+Two things surprised me. The method is tiny: per site, one shared gain vector and four scalars, sixteen scalars for the whole network. And the "RoPE" half of it, the rotation, turns out to be the weakest part of the evidence, both in the paper's own ablation and in the pretrained weights I read. The magnitude half holds up well. The headline 3.4x is real arithmetic on the paper's plot, but it is measured against the weakest baseline, at sequence length 256, on a recipe with no gradient clipping. There is no code yet; the project page linked from the paper returned a 404 when I checked.
+
+## Why depth is hard, in two equations
+
+Every Transformer layer is a pair of sublayers (attention, then MLP), and the only question that matters for depth is where the normalization sits relative to the residual add.
+
+Post-Norm, the original 2017 layout, normalizes *after* the add:
+
+$$
+h_{\ell} = \mathrm{Norm}\big(h_{\ell-1} + F_\ell(h_{\ell-1})\big).
+$$
+
+The stream never grows, because it is renormalized every layer. But the gradient has no clean path home: every layer's backward pass goes through a normalization Jacobian, and those products compound. [Xiong et al.](https://arxiv.org/abs/2002.04745) showed the gradients near the output are large at initialization, which is why Post-Norm needs a learning-rate warm-up and why it falls apart as you stack layers.
+
+Pre-Norm moves the normalization inside the branch:
+
+$$
+h_{\ell} = h_{\ell-1} + F_\ell\big(\gamma_\ell \odot \hat h_{\ell-1}\big), \qquad \hat h = h / \mathrm{RMS}(h).
+$$
+
+Now there is an identity path from the loss to every layer, so it trains at any depth. The cost shows up in the forward pass. Each block reads a *normalized* input, so its output has roughly fixed size no matter how big the stream has become, while the stream itself is a running sum that keeps growing. By layer $\ell$ a new write is one term against $\ell$ earlier ones, and its relative effect shrinks roughly like $1/\sqrt{\ell}$. [Sun et al.](https://arxiv.org/abs/2502.05795) named this the *curse of depth*: deep Pre-Norm layers end up close to identity maps, and you can delete many of them with little loss.
+
+The fixes so far come in two families, and the paper frames itself against both.
+
+The first damps something. [DeepNet](https://arxiv.org/abs/2203.00555) keeps Post-Norm but up-weights the residual by a constant $\alpha$ and shrinks the initialization of some projections, which bounds each update and got a 1,000-layer model to train. Layer-Norm Scaling (Sun et al.) multiplies each block's normalized input by $1/\sqrt{\ell+1}$. [Peri-Norm](https://arxiv.org/abs/2502.02732), which Gemma 2 ships, normalizes both the input and the output of every block. [ReZero](https://arxiv.org/abs/2003.04887) and LayerScale gate each branch with a learned scalar that starts near zero. [Mix-LN](https://arxiv.org/abs/2412.13795) uses Post-Norm in early layers and Pre-Norm in later ones; LayerRoPE does not cite or compare against it, which is a gap.
+
+The second family rebuilds the residual path itself. [Hyper-Connections](https://arxiv.org/abs/2409.19606) widen the single stream into several (see [xHC](/articles/xhc-residual-connections) for the current state of that line), and [Kimi K3](/articles/kimi-k3)'s Attention Residuals replace the uniform sum with a learned read over earlier layers.
+
+LayerRoPE's position is the contrarian one. It does not try to keep the stream small; its learned model ends up with a *bigger* stream than Pre-Norm's. What it controls is how much each block reads from the stream and how much it writes back, as a function of depth.
+
+## What trained models already do with their norm weights
+
+The paper starts from an observation. In a Pre-Norm model, the RMSNorm weight $\gamma_\ell$ is the one learned per-layer gain that sits directly on the path from the stream into each block. If the network wanted a per-layer dial, that is where it would put it. Across 16 open models from 9 families, the authors look at those vectors and report two patterns: their magnitude grows with depth, and their direction rotates.
+
+<Figure
+  src="/articles/layerrope/fig4.png"
+  alt="Violin plots of RMSNorm weight values for each of LLaMA-2 7B's 32 layers. The median rises from about 0.05 at layer 0 to about 0.48 at layer 30, then drops to about 0.43 at layer 31. Whiskers span roughly 0 to 0.2 at the first layers and up to 0.6 or more at the last."
+  caption="LLaMA-2 7B's MLP-input RMSNorm weights per layer. The bulk of each vector rises nearly monotonically with depth (LayerRoPE paper, Figure 2a)."
+/>
+
+The magnitude part I could check directly. I pulled the 64 RMSNorm weight vectors of LLaMA-2 7B out of its safetensors with HTTP range requests, about 8 KB each, without downloading the model. The paper's plot starts at a layer-0 mean of 0.055; mine does too. The root-mean-square of the MLP-input gain grows from 0.056 at layer 0 to 0.478 at layer 30, and a power law $c\,(\ell+1)^{0.553}$ fits it with $R^2 = 0.972$ in log space. That matters because a power law in $\ell+1$ is exactly the form LayerRoPE builds in. On this one model, the magnitude premise holds up.
+
+The rotation part is where I disagree with the paper's reading.
+
+<Figure
+  src="/articles/layerrope/fig5.png"
+  alt="A polar plot titled MDS Projection of Norm Weights (LLaMA2 7B). Thirty-two spokes, one per layer, fan from layer 0 at 0 degrees counter-clockwise to layer 31 at roughly 217 degrees, with lengths growing from about 0.1 to 1.0. A box reports explained variance 0.834, stress-1 0.3490, R-squared 0.8440."
+  caption="The paper's evidence for rotation: each layer's gain vector placed by a 2-D multidimensional-scaling embedding, then read as an angle. The paper describes the sweep as an arc of about 143 degrees (LayerRoPE paper, Figure 2b)."
+/>
+
+That angle is measured inside a two-dimensional MDS embedding, not between the vectors themselves, and the paper does not say what point the angles are taken around. The plot's own quality box reports a stress of 0.349, which by the usual rule of thumb is a poor fit. So I measured the angle in the space the vectors live in, $\mathbb{R}^{4096}$:
+
+- Between any two layers' MLP-input gains, the largest angle is 12.3 degrees.
+- The single step from layer 0 to layer 1 accounts for 11.0 degrees of it.
+- From layer 1 to layer 31 the direction moves 7.7 degrees while the norm grows 4.2x.
+
+The MDS angle has a simpler explanation. I generated 32 copies of one fixed vector, scaled from 1 to 8 with 5% noise, whose true pairwise angles never exceed 4.2 degrees. Projected the same way and read around the centroid, that pure-scaling control sweeps 176 degrees, because a line of points seen from its own middle spans half a turn. A large swept angle in an MDS plane can be produced by a vector that only grows.
+
+The paper's own Appendix C says much the same in other words: about 99% of the dimensions follow one shared magnitude trajectory, and the "rotation" comes from about 1% of outlier channels. My numbers agree with that decomposition. Where I disagree is the framing that comes after it. In LLaMA-2, direction is a small, early-layer effect, and magnitude is most of what changes. Keep that in mind when you get to the ablation.
+
+## The construction: RoPE's polar form, applied to a gain vector
+
+RoPE (see the [RoPE explainer](/architectures/rope)) treats a query or key as $d/2$ complex numbers and multiplies pair $j$ by $e^{i\,m\,\theta_j}$, where $m$ is the token position and $\theta_j = b^{-2j/d}$ is a geometric spectrum of frequencies. LayerRoPE borrows the same polar form and points it at a different object and a different index: the norm gain instead of the activations, and the layer index $\ell$ instead of the token position.
+
+$$
+\gamma_\ell = \gamma \odot_c c(\ell), \qquad c(\ell, j) = e^{\,r(\ell)}\, e^{\,i\,\theta(\ell, j)}
+$$
+
+Here $\gamma \in \mathbb{R}^d$ is one shared vector per site, read as complex pairs $\tilde\gamma_j = \gamma_{2j} + i\,\gamma_{2j+1}$, and $\odot_c$ multiplies pair by pair. There are four sites per layer: the read into attention, the write out of attention, the read into the MLP, the write out of the MLP. The two schedules are:
+
+$$
+r(\ell) = \alpha^{\text{mag}} + \beta^{\text{mag}} \log(\ell + 1), \qquad
+\theta(\ell) = \exp\!\big(\alpha^{\text{rot}} + \beta^{\text{rot}} \log(\ell+1)\big), \qquad
+\theta(\ell, j) = \theta(\ell)\, b_0^{-2j/d}.
+$$
+
+Exponentiate them and both are power laws in depth. The magnitude multiplier is $e^{\alpha^{\text{mag}}}(\ell+1)^{\beta^{\text{mag}}}$, the same shape as Layer-Norm Scaling's $(\ell+1)^{-1/2}$ but with a learned slope and offset. The base angle is $e^{\alpha^{\text{rot}}}(\ell+1)^{\beta^{\text{rot}}}$, spread over the channel pairs with base $b_0 = 100$, so the first pair turns by the full angle and the last by about a hundredth of it. Both slopes start at $-0.5$.
+
+The "superposition" in the title is this polar form: a complex number's modulus and phase, multiplied together. A rotation leaves each pair's modulus alone, so $\lVert\gamma_\ell\rVert = e^{r(\ell)}\lVert\gamma\rVert$ exactly. The magnitude schedule sets the length of the gain vector and the rotation sets only its direction.
+
+The analogy to RoPE stops at the arithmetic. RoPE works because the rotated vectors meet in a dot product: $\langle R_m q, R_n k\rangle$ depends only on $m - n$, which is what makes it a *relative* position code. Nothing here takes a dot product between layers. The rotated gain is just a per-channel scale applied elementwise to $\hat h$. Write out what rotating one pair does to the two gains it holds:
+
+$$
+\begin{aligned}
+\gamma'_{2j} &= e^{r}\big(\gamma_{2j}\cos\theta_j - \gamma_{2j+1}\sin\theta_j\big), \\
+\gamma'_{2j+1} &= e^{r}\big(\gamma_{2j}\sin\theta_j + \gamma_{2j+1}\cos\theta_j\big).
+\end{aligned}
+$$
+
+If the shared gain starts at all-ones, as RMSNorm weights usually do (the paper does not print its learned $\gamma$), pair $j$ becomes $e^{r}\sqrt{2}\,\big(\cos(45^\circ + \theta_j),\ \sin(45^\circ + \theta_j)\big)$. So rotation moves gain from one channel of a pair to its neighbour, by an amount that depends on depth and on the pair's frequency. Past 45 degrees the first channel's gain goes negative. It is a legitimate way to give each layer a different per-channel weighting with almost no parameters. I would not call it a positional encoding in RoPE's sense, though. The name oversells the mechanism a little.
+
+The widget builds one layer's gain from the paper's learned 1.3B values. The slopes are printed in its Figures 20 and 21; the layer-0 values I read off those plots. On the right is the LLaMA-2 measurement from above.
+
+<GainRotor />
+
+Two things stood out while I was building it. The learned base angles all decay hard with depth: at the MLP read, the slope is $-1.09$, so a base angle near 49 degrees at layer 0 is down to about 1.5 degrees by layer 23. Averaged over all 1,024 pairs of a 2,048-wide gain, the whole vector turns about 16 degrees at layer 0 and about half a degree at layer 23. The LLaMA-2 measurement has the same shape: nearly all the turning happens at the bottom of the stack. Trained with the rotation available, the model chose to use it mostly in the first few layers.
+
+The parameter arithmetic also checks out. Pre-Norm has $2Ld$ gain parameters (two norms per layer); LayerRoPE has four shared vectors plus sixteen scalars, $4d + 16$. At the 1B tier ($d = 2048$, $L = 24$) that is $98{,}304 - 8{,}208 = 90{,}096$ fewer, exactly the 90.096K in the paper's Table 5. The FLOP overhead is the new write gate, $8Ld$ per training token, which is 0.0051% of the 7.72 GFLOPs per token at 1B and 0.0128% at 60M. It is effectively free.
+
+The method is short enough to write out. This is my numpy reading of the equations, not the authors' code, which is not public. It builds all $L$ gains for one site:
+
+```python
+# layerrope_gain.py, my implementation of the paper's Eq. 1 (not the authors' code)
+import numpy as np
+
+def layerrope_gains(gamma, L, a_mag, b_mag, a_rot, b_rot, base=100.0):
+    """All L per-layer gains for one site, from one shared gamma (shape [d])."""
+    d = gamma.shape[0]
+    l = np.arange(L)[:, None]                                  # [L, 1]
+    r = a_mag + b_mag * np.log(l + 1)                          # magnitude, log-linear in depth
+    theta = np.exp(a_rot + b_rot * np.log(l + 1))              # base angle per layer
+    theta = theta * base ** (-2 * np.arange(d // 2) / d)       # RoPE spectrum over pairs, [L, d/2]
+    g = gamma[0::2] + 1j * gamma[1::2]                         # read gamma as d/2 complex pairs
+    g = g * np.exp(r) * np.exp(1j * theta)                     # scale and rotate
+    out = np.empty((L, d))
+    out[:, 0::2], out[:, 1::2] = g.real, g.imag
+    return out                                                 # [L, d]: use row l as layer l's norm weight
+```
+
+With `gamma = ones(2048)`, both offsets at zero and both slopes at $-0.5$, the row norms come out at exactly $(\ell+1)^{-0.5}\sqrt{d}$, and 54 channels of layer 0 have negative gain. Because the gains depend only on $\ell$, a framework computes them once per step and broadcasts; the gradient flows into five tensors per site instead of $L$.
+
+## Read less, write more
+
+The idea that carries the paper is easier to see in its overview figure than in the equations.
+
+<Figure
+  src="/articles/layerrope/fig1.png"
+  alt="Three rows of residual-stream diagrams for a 24-layer model, with attention and MLP blocks branching off the stream at layer 12 and layer 24. The stream is coloured and thickened by variance. Pre-Norm starts at variance 0.4 and ends at 575. Layer-Norm Scaling ends at 172. LayerRoPE plus Pre-Norm ends at 2,420, with arrows labelled 'read scales down' pointing at the thin input branches and 'write scales up' pointing at the thick output branches."
+  caption="Residual-stream variance from input to layer 24 in the 1.3B models: Pre-Norm ends at 575, Layer-Norm Scaling at 172 and LayerRoPE at 2,420. LayerRoPE learns to shrink what each block reads and enlarge what it writes (LayerRoPE paper, Figure 1a)."
+/>
+
+In a Pre-Norm backbone LayerRoPE does two different things. At the *read* sites it replaces the existing RMSNorm weight, so it can turn a block's input down with depth, as Layer-Norm Scaling does with a fixed $1/\sqrt{\ell+1}$. At the *write* sites it adds something Pre-Norm does not have at all: a per-channel gate $\tilde\gamma_\ell \odot F(x)$ on every sublayer output, before the residual add. Both slopes start at $-0.5$. The learned model takes them to opposite signs.
+
+<Figure
+  src="/articles/layerrope/fig6.png"
+  alt="Four panels of multiplier against layer 0 to 23. Left column, input (read) multipliers for attention and MLP: Layer-Norm Scaling's fixed 1/sqrt(l+1) falls from 1 to 0.2; Pre-Norm plus LayerRoPE falls gently with learned slopes -0.14 and -0.16; Peri-Norm plus LayerRoPE falls with slopes -0.19 and -0.50. Right column, residual-write multipliers: both LayerRoPE variants rise, Pre-Norm with slopes +0.76 and +0.56, Peri-Norm with +1.02 and +0.91, reaching 5 to 20 by the last layer."
+  caption="Learned magnitude multipliers at 1.3B. The read slopes stay negative but shallower than Layer-Norm Scaling's fixed -0.5, and the write slopes, initialised at -0.5, turn positive (LayerRoPE paper, Figure 20)."
+/>
+
+The write slopes go from $-0.5$ to $+0.56$ and $+0.76$ on the Pre-Norm backbone and to about $+1$ on the Peri-Norm one. The paper's Figure 22 adds an interesting detail. Layer-Norm Scaling's own free per-layer norm weights learn to *undo* most of its prescribed $1/\sqrt{\ell+1}$, never letting the effective attention-input ratio fall below about 0.75. The optimizer, given the freedom, does not want the reads damped as hard as LNS damps them, and it does want the writes louder.
+
+Why would bigger writes help? Go back to the dilution argument. If every layer writes a fixed-size update into a growing sum, late layers are whispering into a crowd. A write gain that grows with depth lets them keep up. The widget below is a toy that isolates exactly that and nothing else: each block is held at unit gain, its write is assumed independent of the stream, and only the depth schedule changes.
+
+<StreamWidth />
+
+The toy is useful mostly for what it shows that the paper does not say. At 24 layers, the learned LayerRoPE schedule ends with 2.5x Pre-Norm's variance (the real 1.3B ratio in the figure above is 2,420 against 575, about 4.2x, because real block weights also grow), and its last layer's relative update is 0.297 against Pre-Norm's 0.208. A constant-factor lift, then, and no cure. Work out the sum and you see why: if the per-layer write grows as $(\ell+1)^k$, the stream's variance grows as $\ell^{2k+1}$, and the relative update still decays like $1/\sqrt{\ell}$, only from a start $\sqrt{2k+1}$ times higher. A power-law schedule can delay the curse of depth but cannot remove it. Drag the depth slider to 512 and the extrapolated learned schedule gives a last-layer relative update of 0.065 against Pre-Norm's 0.044.
+
+In the toy, turning the read down and the write up are the same knob, since the block is linear. The paper's reason to separate them must live in the nonlinear blocks. Attention logits scale with the square of the read gain, so a damped read keeps softmax from saturating, and SwiGLU's gate behaves differently at different input scales. A reasonable story, but the paper does not test it directly. Its evidence is the learned slopes plus the end losses.
+
+<Figure
+  src="/articles/layerrope/fig7.png"
+  alt="Two log-scale plots of residual-stream variance against depth 0 to 24, for 368M and 1.3B models. Lines from lowest to highest at the last layer: Layer-Norm Scaling, Pre-Norm, Peri-Norm, Pre-Norm plus LayerRoPE, Peri-Norm plus LayerRoPE. At 1.3B the top line reaches about 3 x 10^4."
+  caption="Measured residual-stream variance by layer on C4 validation, excluding the first token. Both LayerRoPE variants widen the stream: about 4x Pre-Norm and 14x Layer-Norm Scaling at 1.3B, and 94x Peri-Norm on the Peri-Norm backbone (LayerRoPE paper, Figure 8)."
+/>
+
+## How it was trained
+
+The claims only mean something next to what each experiment held fixed, so I put the six setups side by side.
+
+| Experiment | Shapes | Data, budget | Tuning | Seeds |
+|---|---|---|---|---|
+| Scaling ladder | 58M, 134M, 250M, 554M, 1.34B; LLaMA-style, head dim 64 | C4, 80 tokens/param, up to 107.1B tokens, sequence length 256 | LR swept per method up to 554M; 1.3B at an LR extrapolated from a power-law fit | 1 (3 at 58M and 134M) |
+| Depth sweep | width 128, 48 to 512 layers, 17.8M to 111.1M params | C4, 20K steps x 512 seqs = 2.6B tokens | shared LR of 1e-3 for all methods; separate per-method sweep in Appendix D.2 | 2 up to 384 layers, 1 at 512 |
+| LR basins | 58M, 368M, 1.3B, Pre and Peri, with and without LayerRoPE | C4, shorter budgets | swept over 2 to 3 orders of magnitude | 1 |
+| 6.7B | LLaMA-7B shape, 32 layers, width 4096 | 11.7B tokens; schedule set for 150K steps, stopped at 89K | shared LR of 5e-4, untuned | 1 |
+| Looped (Parcae) | 140M, 370M, 770M | FineWeb-Edu, 11.2B to 61.6B tokens | Parcae's recipe as-is (Muon + AdamW, clipping at 1.0) | 1 |
+| ViT | ViT-T, ViT-S | ImageNet-1k, 300 epochs, DeiT recipe | none | 1 |
+
+The ladder recipe has some unusual choices, all listed in Appendix D.1: Adam with no weight decay and no gradient clipping ("for fairness"), every document padded or truncated to 256 tokens, the norm gains kept in fp32 while everything else is bf16. At 1.3B the output logits grew until bf16 rounding destabilized late training (the final norm gain was not weight-decayed), so the authors resumed four of the five 1B runs from a pre-instability checkpoint with fp32 logits. All of that applies equally to every method, which keeps the comparison fair inside the paper. It also means the comparison is between methods on a recipe nobody would use for a real pretraining run.
+
+## Checking the 3.4x
+
+<Figure
+  src="/articles/layerrope/fig2.png"
+  alt="Final evaluation loss against training compute from 10^18 to 10^21 FLOPs, log x-axis, for five model sizes. Pre-Norm (blue circles, alpha 0.117) is highest; Peri-Norm (alpha 0.129) and Layer-Norm Scaling (alpha 0.133) are in between; LayerRoPE (red triangles, dashed, alpha 0.139) is lowest at every size. Post-Norm is marked as diverged at 554M and 1.3B. A red double arrow labelled '3.4x less compute to match Pre-Norm at 1.3B' spans between the curves near loss 2.43."
+  caption="Compute-scaling curves on the 4x-Chinchilla ladder, with a shared irreducible loss E and per-method power laws (LayerRoPE paper, Figure 1b)."
+/>
+
+Appendix D.1.3 defines the number exactly. Fit $L(C) = E + A_m C^{-\alpha_m}$ to the 20 (method, scale) points with a shared $E = 1.81$, then divide Pre-Norm's 1B compute ($8.3 \times 10^{20}$ FLOPs) by the compute at which LayerRoPE's fitted curve reaches Pre-Norm's measured 1B loss. The paper notes the crossing falls between LayerRoPE's own 554M and 1.3B points, so it is an interpolation.
+
+I redid it. I read every marker off the figure by pixel colour, calibrated against the gridlines, fixed $E$ and each method's exponent to the values printed in the legend, and refit $A_m$. Pre-Norm's 1.3B point reads 2.431 and LayerRoPE's 2.324, and LayerRoPE's curve reaches 2.431 at $2.42 \times 10^{20}$ FLOPs. That is a ratio of 3.44. The headline reproduces.
+
+The same arithmetic against the other baselines is what the post leaves out:
+
+- Layer-Norm Scaling reaches Pre-Norm's 1.3B loss with about 2.2x less compute, and Peri-Norm with about 1.7x less. Most of the 3.4x is something the existing fixes already buy.
+- Against the strongest baseline, LNS, LayerRoPE reaches LNS's 1.3B loss (2.371 on my reading) with about 1.6x less compute. Against Peri-Norm it is about 2.1x.
+- In loss terms, LayerRoPE's lead over Pre-Norm is 0.043 nats at 58M and 0.085 at 134M (three-seed means, Table 7), and about 0.127 at 554M and 0.107 at 1.3B on my reading of the plot. Its lead over LNS grows only from 0.018 nats at 58M to about 0.046 at 1.3B. Seed-to-seed standard deviation is at most 0.016 nats, so the margins are real, but the one against LNS is modest.
+
+I trust a 1.6x over the best fix more than a 3.4x over no fix, and it is still a good result for sixteen scalars.
+
+Three more caveats, all in the paper's own appendix:
+
+- The curves compare methods at a fixed 80 tokens per parameter, not along a compute-optimal frontier. The paper says so. A compute saving here means "a smaller model trained the same way matches it", not "you can train the same model for less".
+- The 1.3B runs are single runs at extrapolated learning rates, not swept ones. Table 6 has LayerRoPE's 1B rate at $32 \times 10^{-3}$ against Pre-Norm's $2 \times 10^{-3}$, a ratio of 16x, not the "4 to 8x" the text gives; the 4 to 8x holds from 58M to 554M (64/16, 32/8, 64/8, 32/4).
+- The downstream table supports the loss but is noisy. At 1.3B LayerRoPE's eight-task average is 52.6 against 48.0 for Pre-Norm and 51.6 for Peri-Norm, but MMLU sits between 22.9 and 23.8 for every method at every size, below the 25% you get by guessing. The average includes one task that is pure noise.
+
+The 6.7B run is the only point beyond 1.3B, and it is weaker evidence than it looks. Every method trains for 11.7B tokens (under 2 per parameter) at a shared, untuned learning rate, and stops at step 89K of a cosine schedule set for 150K, so no run has annealed. LayerRoPE finishes 0.168 nats below Pre-Norm and 0.087 below LNS, and matches Pre-Norm's final loss after 41K steps. That tells you it is stable at 7B and ahead early in training. It does not tell you the gap survives a full run.
+
+## Checking "stable up to 512 layers"
+
+<Figure
+  src="/articles/layerrope/fig3.png"
+  alt="Final evaluation loss against number of layers (48, 96, 192, 256, 384, 512). LayerRoPE (red dashed) falls from about 3.65 to about 3.30 and is flat from 384 to 512. Pre-Norm (blue) falls to about 3.40 at 384 then rises to about 3.56 at 512. DeepNet (purple) falls steadily from 3.89 to 3.45. Peri-Norm and Layer-Norm Scaling rise past 96 layers, reaching 4.5 and 4.2. Post-Norm diverges from 192 layers on, shown in a strip at the top."
+  caption="Depth sweep at width 128 with a shared learning rate; points average two seeds, except at 512 layers, which is one seed (LayerRoPE paper, Figure 5)."
+/>
+
+The claim survives, in a narrow regime. These models are 128 wide. At 512 layers that is an aspect ratio of 0.25, far deeper and narrower than anything anyone trains, and the whole model is 111.1M parameters, of which 8.2M is the untied 32K vocabulary. Each run sees 2.6B tokens.
+
+LayerRoPE's loss falls from about 3.65 at 48 layers to about 3.30 at 384 and stays flat at 512. Pre-Norm trails it by 0.05 to 0.1 nats up to 384 layers and then jumps to about 3.56 at 512, on one seed. At 48 and 96 layers Peri-Norm matches or slightly beats LayerRoPE. Peri-Norm and LNS falling apart past 96 layers is the striking part of the figure; under the per-method sweep in Appendix D.2 they still degrade, so this is not a learning-rate artefact.
+
+Two things limit what this shows. First, depth is not traded against width here: every extra layer adds about 200K parameters, so the deeper models are also bigger, and a falling loss is what you expect from any method that merely keeps training. The question DepthBench asked, whether the extra depth beats spending the same parameters on width, is not asked. Second, DeepNet runs with the $\alpha$ prescribed for 32 layers at every depth. The authors note that this beat the depth-matched value at the shared rate, which is fair, but it is the one baseline designed for this regime and it is configured off its own recipe.
+
+So "LayerRoPE trains stably at 512 layers" is supported. "LayerRoPE makes very deep models a good use of parameters" is not tested.
+
+## What the ablation says about the rotation
+
+Table 4 ablates at 134M, one seed per row, and its numbers deserve more attention than the paper gives them. On the Peri-Norm backbone the baseline loss is 3.0720; magnitude only reaches 3.0351, rotation only 3.0533, and both together 3.0252. So magnitude gets about four-fifths of the full gain on its own. On the Pre-Norm backbone, replacing RoPE's frequency spectrum with one angle for every pair costs 0.006 nats (3.0317 against 3.0379), which is smaller than the seed-to-seed spread of 0.014 that Table 7 reports for Pre-Norm at the same scale. Giving each layer its own free $\gamma$ instead of the shared one changes nothing (3.0318 against 3.0317) while adding 33.8K parameters.
+
+I read that as: the depth-scheduled magnitude, especially the new write gain, is the method. The rotation helps a little on its own, its multi-frequency spectrum is not distinguishable from one angle at this sample size, and the shared vector is a free parameter saving rather than a source of quality. That matches what I saw in LLaMA-2's weights, where direction barely changes after layer 1. It also suggests a cheaper experiment the paper did not run: drop the rotation, keep the learned power-law read and write gains, and see how much of the 1.6x over LNS remains.
+
+## Outside language modelling
+
+Applied untuned to Parcae, a looped model, LayerRoPE lowers validation perplexity at all three sizes: 18.66 to 18.36 at 140M, 14.22 to 14.05 at 370M, 12.49 to 12.09 at 770M. The relative gains are smaller than on the ladder, and Parcae's recipe uses Muon with gradient clipping at 1.0. That fits a suspicion I cannot test: some of the ladder's learning-rate robustness, LR sensitivity cut 3 to 10x, may be robustness to the missing clipping. The recurrent state's norm reaches about $10^9$ at 770M against about $10^3$ for plain Parcae, while its token states stay less collinear. The paper reads that as more of the loop's capacity being used. I read it as a number I would want to see survive bf16 or fp8 inference before shipping it. For the looped-model background, see the [looped Transformer explainer](/architectures/looped-transformer) and [LoopCD](/articles/looped-contrastive-decoding), which works with Parcae too.
+
+On ImageNet, ViT-T gains 0.9 points of top-1 (72.21 to 73.08) and ViT-S 0.6 (79.80 to 80.38), one run each with DeiT's recipe unchanged.
+
+## What is still untested
+
+- Scale past 1.3B at a real budget. The 6.7B run is short, untuned and not annealed.
+- Context length. Everything on the ladder trains on 256-token sequences. How a 4 to 100x wider stream interacts with long-context attention, sequence RoPE scaling, or attention sinks is unknown.
+- A modern recipe. No weight decay, no gradient clipping and Adam rather than AdamW on the main experiments. Part of the learning-rate story may change once clipping is on.
+- Inference numerics. A stream with 4 to 94x the variance of its baseline, and a looped state at around $10^9$, is a quantization question the paper does not ask.
+- The strongest competitors. Hyper-Connections, mHC and Attention Residuals are cited and not run, and Mix-LN is not mentioned. DepthBench suggests the redesigned streams are where depth actually pays.
+- Code. None is released yet, so I could not check the implementation, the $\alpha$ initialisation or the exact read and write placement against a source file.
+
+What I would take from it: if you train Pre-Norm models, a learned power-law gain on each block's output, initialised at a negative slope and allowed to go positive, is about the cheapest experiment in this whole area: $4d + 16$ parameters, under 0.02% of the FLOPs. The paper's evidence that it beats Layer-Norm Scaling at 1.3B is solid. The evidence that the RoPE-style rotation is what makes it work is thin.
+
+## How I checked
+
+I read the full arXiv HTML (v1) including all appendices and rendered the paper's figures from their source SVGs. LLaMA-2 7B's 64 RMSNorm vectors came from `NousResearch/Llama-2-7b-hf` through safetensors range requests; I computed per-layer RMS, the power-law fit, the angles between vectors in $\mathbb{R}^{4096}$, and a classical MDS of the vectors and of a pure-scaling control. For the 3.4x I located Figure 1(b)'s markers by colour, calibrated against its gridlines, refit $A_m$ with the paper's $E = 1.81$ and its printed exponents, and solved for the crossing compute; readings off a plot carry roughly ±0.003 nats of error. The parameter and FLOP counts were recomputed from Appendix A's formulas, and the learning-rate ratios read from Table 6. The two widgets use the slopes printed in Figures 20 and 21, with layer-0 values read off those plots by eye; the toy stream is labelled as one. The code above is mine, checked only for shape, norms and sign flips. No authors' code exists to compare against.
