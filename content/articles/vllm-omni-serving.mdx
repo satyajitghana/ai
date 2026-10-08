@@ -1,0 +1,198 @@
+---
+title: "vLLM-Omni: the request is unified, the schedulers are not"
+description: "vLLM-Omni's technical report pitches one serving runtime for speech assistants, image and video generators, world models and robot policies. I read the orchestrator, the shared-memory connector and both diffusion schedulers at c548a11, and checked the evaluation against its own tables. The stage graph is a sound idea and chunked streaming between stages is where the latency comes from. Every baseline in the paper, though, is vLLM-Omni itself, and one headline range understates its own table."
+date: 2026-10-08
+tags:
+  - inference
+  - vllm
+  - omni
+  - diffusion
+  - tts
+  - benchmarks
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 2
+  unique: 2
+  why: "Reads vLLM-Omni's orchestrator, connector and diffusion schedulers from source and rechecks the report's tables: no rival system, one understated speedup."
+topic: inference-serving
+kind: tool
+level: practitioner
+runsOn: workstation
+licence: Apache-2.0
+---
+
+import { StagePipelineSim } from "@/components/articles/vllm-omni-serving/stage-pipeline-sim"
+
+Ask Qwen3-Omni a question and ask for the answer out loud, and you are not running one model. A thinker reads your audio and video and writes text. A talker turns that text into audio codec codes. A third network, code2wav, turns the codes into a waveform. Three sets of weights and three engines, two autoregressive and one not, and the person on the other end only cares about one number: how long until they hear something.
+
+The vLLM team's new [technical report](https://arxiv.org/abs/2610.09307) is about serving that, and everything shaped like it: TTS stacks, image generators with an autoregressive front end, video DiTs, world models that feed their own predictions back in, robot policies on a control loop. The pitch in the announcement is that "LLM servers and diffusion stacks each go deep on only one of these, so deployments fall back to stitching disjoint runtimes together", and that vLLM-Omni is "the shared control plane for that mix".
+
+I wanted to know what "unified" means in that sentence, because there are two very different things it could mean. One is a single scheduler that understands decode steps and denoising steps and batches them together. The other is a single owner for the request while specialised engines do their own scheduling underneath. The report says the second, and the code agrees. That turns out to be the right call, and most of this article is about why.
+
+<RepoCard repo="vllm-project/vllm-omni" />
+
+I read the repository at `c548a11`. The `vllm_omni/` package is 1,722 Python files and 630,843 lines, and it ships 130 deploy YAMLs and 46 `pipeline.py` files, one per model family. The report is 34 pages. Its evaluation has a sentence near the top that matters more than any table in it, and I will come back to it.
+
+## Splitting a model into stages
+
+The unit of everything is a stage: one model component, one execution engine, one resource budget. Qwen3-Omni's topology is declared in `vllm_omni/model_executor/models/qwen3_omni/pipeline.py`, and it is short enough to read whole:
+
+```python
+# vllm_omni/model_executor/models/qwen3_omni/pipeline.py:34-81 (trimmed)
+StagePipelineConfig(stage_id=0, model_stage="thinker",
+    execution_type=StageExecutionType.LLM_AR, input_sources=(),
+    final_output=True, final_output_type="text",
+    async_chunk_process_next_stage_input_func=f"{_PROC}.thinker2talker_async_chunk"),
+StagePipelineConfig(stage_id=1, model_stage="talker",
+    execution_type=StageExecutionType.LLM_AR, input_sources=(0,),
+    async_chunk_process_next_stage_input_func=f"{_PROC}.talker2code2wav_async_chunk"),
+StagePipelineConfig(stage_id=2, model_stage="code2wav",
+    execution_type=StageExecutionType.LLM_GENERATION, input_sources=(1,),
+    final_output=True, final_output_type="audio"),
+```
+
+There are exactly three execution types in `vllm_omni/config/stage_config.py:195-200`: `LLM_AR`, `LLM_GENERATION` and `DIFFUSION`. The first two reuse vLLM's own worker and scheduler. `LLM_AR` is ordinary continuous batching with a paged KV cache, the thing the [vLLM teardown](/articles/vllm) covers. `LLM_GENERATION` is for stages that take a tensor in and give a tensor out without sampling a vocabulary, which is what a vocoder is. `DIFFUSION` gets a separate engine with its own schedulers, which I come back to below.
+
+Notice that the thinker and code2wav both have `final_output=True`. A spoken reply has two outputs, the text and the audio, and the request is not finished until both have drained. The orchestrator tracks this as a set (`final_output_stage_ids` in `OrchestratorRequestState`, `vllm_omni/engine/orchestrator.py:199-239`), so text can stream to the client while the audio is still being made.
+
+What actually crosses the thinker-to-talker edge is not text. The talker is conditioned on two of the thinker's internal tensors: the layer-0 embeddings and the hidden state at an "accept" layer. Qwen3-Omni's own config sets `accept_hidden_layer` to 24, halfway up a 48-layer thinker whose hidden size is 2,048. The talker emits one codec frame per step, 16 codebooks wide. code2wav's upsampling factors multiply to 1,920 samples per frame, so at 24 kHz the talker is producing 12.5 frames for every second of speech.
+
+An AR-plus-diffusion image model splits the same way with different payloads. GLM-Image's deploy (`vllm_omni/deploy/glm_image.yaml`) is an AR stage on device 0 that writes `prior_token_ids` and a diffusion stage on device 1 that runs 50 denoising steps conditioned on them. HunyuanImage-3.0's Mooncake deploy goes further and ships the AR stage's paged KV blocks to the DiT stage over a KV connector. Both are two-stage graphs under the same orchestrator as the speech model.
+
+<Figure src="/articles/vllm-omni-serving/fig2.png" alt="Block diagram. At the top, OpenAI/WebSocket and OpenPI/Omni API boxes feed an Entrypoint box containing AsyncOmni (request_queue, output_queue) and AsyncOmni Engine (admit/abort, client output demux). Below it, a Control plane: Orchestrator box with Admit, Advance, Stream and Complete in a row and a Session bar for lifecycle, state continuity and concurrent I/O. Below that, Execution stages Stage 0, Stage 1 and Stage 2 in a chain, each connected down to a dashed OmniConnector bar." caption="The whole system in one picture: entrypoints at the top, one orchestrator that admits and advances requests, stages that do the compute, and a connector underneath that carries the tensors so the orchestrator never has to (vLLM-Omni technical report, Figure 2)." />
+
+## The orchestrator owns the request and nothing else
+
+The report draws the boundary in one sentence, and I checked it against the code: the orchestrator "does not schedule tokens inside a stage, manage paged KV, denoise diffusion steps, or move large tensors." It decides which stage a request goes to next, which replica gets it, and whether an output goes to the client or to the next stage.
+
+The unification is the request. One request id from admission to completion, one abort path that tears down every stage's work, one place that knows a text-only request should skip the talker and code2wav. Each engine underneath keeps its own scheduler and its own batching rules. A decode step and a denoising step are never in the same batch, and I think that is correct. They want opposite things from a batch, which the diffusion section shows with numbers.
+
+The control loop itself is plainer than the diagram suggests. The default `_orchestration_loop` walks every stage and every replica, polls each one with a 1 ms timeout, and sleeps 1 ms when nothing came back (`orchestrator.py:1045` and `:1073`). An event-driven variant exists, but `_event_driven_orch_default_for_pipeline` (`orchestrator.py:102-104`) turns it on by default for exactly one pipeline, `qwen3_tts`. Everything else, Qwen3-Omni included, runs the polling loop. That detail matters later when we look at the text-only overhead.
+
+Replicas sit inside a `StagePool`. Once a request lands on a replica it stays there, because a streaming request's chunks and its in-stage KV cache have to stay together. Unbound requests go round-robin over the live replicas (`vllm_omni/engine/stage_pool.py:574-608`).
+
+<Figure src="/articles/vllm-omni-serving/fig4.png" alt="Three columns under an Orchestrator box. Stage 0 (AR) has a StagePool with one client over one EngineCore engine, labelled plus TP/EP. Stage 1 (AR) has a StagePool with two clients over two independent engines. Stage 2 (Gen) has one client over one engine, labelled e.g. code2wav. A bar at the bottom reads Optional Omni DP Coordinator, cross-host replica membership." caption="Each stage scales on its own. Here the talker stage has two replicas while the thinker and code2wav have one; tensor and expert parallelism live inside a replica (vLLM-Omni technical report, Figure 4)." />
+
+## How tensors move between stages
+
+The orchestrator never carries the payloads. Workers hand them to an `OmniConnector`, whose whole interface is `put`, `get`, `cleanup` and `health` (`vllm_omni/distributed/omni_connectors/connectors/base.py:12-93`). A producer puts a payload under a key and gets back a small metadata dict. Only that dict travels on the control queue. The consumer uses it to fetch the bytes.
+
+On one machine the backend is `SharedMemoryConnector`, and it does less than the name suggests. A `put` serialises the payload with msgspec's msgpack encoder, creates a fresh POSIX shared-memory segment named after the key, copies the bytes in under an `flock`, and writes one byte into a FIFO for each receiver of the destination stage so the receiver wakes up instead of polling (`shm_connector.py:202-222` and `:150-174`). The `get` copies the bytes out and unlinks the segment (`vllm_omni/entrypoints/stage_utils.py:223-237`).
+
+Before any of that, the stage bridge has already moved the tensor to host memory. The thinker-to-talker bridge calls `.detach().cpu()` on every hidden state it forwards (`stage_input_processors/qwen3_omni.py:472-477` and `:538`). So a thinker hidden state on GPU 0 reaches the talker on GPU 1 by way of a device-to-host copy, a msgpack encode, a shared-memory segment, a decode and a host-to-device copy. For a single decode step's embedding that is a few kilobytes and the overhead is in the syscalls. Nobody would mistake it for NVLink. Cross-node edges, and the KV-block edges, use Mooncake or NIXL transfer engines instead, chosen per edge in the deploy file.
+
+The report sorts what crosses these edges into four kinds, and the figure is accurate to what the bridges send.
+
+<Figure src="/articles/vllm-omni-serving/fig5.png" alt="Four boxes above a dashed OmniConnector bar. Hidden states (activations, embeddings) on the Thinker to Talker edge, labelled async_chunk. Codec codes (RVQ, discrete audio tokens) on Talker to Code2Wav, labelled chunk plus context. KV blocks (paged K/V, block table) on PD or AR to DiT edges, labelled KV transfer. Latents (DiT/VAE tensors) on DiT to VAE, labelled stage output." caption="The four payload kinds and the edges that carry them. The connector does not know which is which; the bridge functions on either side do (vLLM-Omni technical report, Figure 5)." />
+
+### Chunked streaming is the latency feature
+
+If the talker had to finish an utterance before code2wav started, time to first audio would be the full talker time plus a vocoder pass. `async_chunk` breaks that. The orchestrator pre-submits placeholder requests on the downstream stages as soon as the request is admitted (`_prewarm_async_chunk_stages`, `orchestrator.py:2639`), and the bridges publish chunks as the upstream stage produces them.
+
+The Qwen3-Omni deploy sets the chunk schedule in three lines (`vllm_omni/deploy/qwen3_omni_moe.yaml:21-23`): `initial_codec_chunk_frames: 4`, `codec_chunk_frames: 25`, `codec_left_context_frames: 25`. At 12.5 frames per second the first chunk is 320 ms of audio, and every chunk after it is two seconds. The left context is what this design costs, and the bridge says so in a comment:
+
+```python
+# vllm_omni/model_executor/stage_input_processors/qwen3_omni.py:782-784
+# Ramp (replaces initial_codec_chunk_frames): chunk i carries ramp[i]
+# new frames, then codec_chunk_frames. Code2Wav decodes statelessly, so
+# every chunk re-sends up to codec_left_context_frames earlier frames.
+```
+
+Code2wav keeps no state between chunks, so each 25-frame chunk is decoded together with the 25 frames before it, and the context's audio is thrown away afterwards (`qwen3_omni_code2wav.py:429-430`). In the steady state code2wav decodes about twice the frames it emits. The trade is reasonable, because the vocoder is the cheap stage. The deploy gives it 10% of a GPU's memory against the talker's 60%. But it explains something in the TTS results later: a fused profile with a stateful streaming decoder can win outright.
+
+The docs carry the clearest picture of the overlap: thinker decode steps feeding talker steps, talker steps feeding code chunks, text and audio both streaming before the thinker has finished.
+
+<Figure src="/articles/vllm-omni-serving/docs-async-chunk.png" alt="Timing diagram with four rows: Thinker, Talker, Code2Wav and Output. The thinker row shows a prefill then decode steps; arrows go from each thinker decode into a talker decode. The talker row starts with a prefill after the thinker's first decode. Code2Wav boxes labelled codes appear after groups of talker decodes. The output row shows text_0 to text_n under the thinker and audio_0 to audio_n under code2wav, bracketed as text streaming output and audio streaming output." caption="Qwen3-Omni under async_chunk: the talker starts after the thinker's first decode step, and code2wav decodes a chunk whenever enough codec frames have accumulated, so audio leaves while text is still being written (vLLM-Omni documentation, docs/source/architecture/qwen3-omni-async-chunk.png)." />
+
+The vocoder stage has its own batching policy, and it waits. `OmniGenerationScheduler` reads `generation_min_batch_size` and `generation_max_wait_ms` from the connector config (`vllm_omni/core/sched/omni_generation_scheduler.py:68-69`) and will hold a step for up to that window to gather chunks from more streams. The defaults are 1 and 0, so it does not wait unless you ask, and the code refuses the option unless the stage runs on the experimental Model Runner V2 (`:80-97`). A first-chunk "express" mode exists behind an environment variable for the opposite trade.
+
+## Batching a denoiser is a different problem
+
+For an LLM decode step, batching is close to free. A step at batch 1 reads every weight once to produce one token, and a step at batch 32 reads every weight once to produce 32 tokens. The step is bound by memory bandwidth, so the extra rows barely move its time. Continuous batching is the whole game in text serving for this reason.
+
+A DiT denoising step has nothing like that slack. A 512 by 512 Qwen-Image latent is about a thousand image tokens going through a full transformer, attention over all of them, with classifier-free guidance doubling the work. That step is already compute-bound at batch 1, so a batch of 8 takes several times as long as a batch of 1. Batching still helps, because it fills the gaps between kernels and amortises the fixed costs, but the free lunch is gone.
+
+The diffusion engine reflects this in its defaults. `OmniDiffusionConfig` ships `step_execution: False`, `max_num_seqs: 1` and `request_batch_max_wait_ms: 0.0` (`vllm_omni/diffusion/data.py:1133`, `:1139`, `:1153`). Out of the box, a diffusion stage runs one job at a time from first step to last.
+
+Two schedulers sit behind those switches. The default `RequestScheduler` batches whole requests in waves, and only requests whose batch key matches can share a wave. That key includes the image size, the guidance settings, the LoRA and `num_inference_steps` (`vllm_omni/diffusion/sched/interface.py:98-160`). A 20-step request and a 35-step request never share a wave. With a nonzero wait window it holds admission open for a moment to let a wave fill, and the stable-window rule is `min(0.05, max_wait_s / 5.0)` (`request_scheduler.py:75-95`).
+
+Turning on `step_execution` swaps in `StepScheduler`, whose docstring is the whole idea: "Scheduler that advances each request by one denoise step per update" (`step_scheduler.py:32`). Its batch key leaves the step count out, so requests at different points in their trajectories share a step. That is the diffusion equivalent of continuous batching, and it is also what makes cancellation and streaming frames possible, since a step boundary is a place to stop. One rule remains: a request at step 0 can only join a running batch whose members can mix phases (`step_scheduler.py:66-77`). Every request allows that by default, and Qwen-Image-2.1's pipeline turns it off for its own requests (`pipeline_qwen_image_21.py:188`).
+
+The report's Qwen-Image numbers show how little batching buys here. On one H100 at 512 by 512 and 20 steps, a single request takes 2.42 s with step execution on, and the server finishes 0.412 requests a second. At concurrency 8 it finishes 0.816 a second, about double, while each request now takes 9.66 s. Throughput at concurrency 4, 0.667 a second, is no better than at 2, 0.671. The committed recipe at `c548a11` shows the same flat spot. Its baselines are 0.6606 at concurrency 2 and 0.6188 at 4. Eight times the concurrency buys twice the throughput and four times the latency. A text server would never accept that curve. For a denoiser it is the physics.
+
+So the diffusion engine spends its effort elsewhere: step caches (TeaCache and Cache-DiT, which reuse computation between similar steps; the report says enabling both is unsupported), sequence and CFG parallelism across GPUs, offload, and regional `torch.compile`. In the report's table, the 1536 by 1536, 35-step Qwen-Image cell goes from 23.60 s on one H100 to 8.22 s with Ulysses-2 and CFG-2 parallelism across four, and to 5.20 s with Cache-DiT added. The Cache-DiT rows report no image-quality metric. A step cache is an approximation, so the missing quality column matters. The [Qwen-Image-2.1 article](/articles/qwen-image-2-1) and the [diffusion transformer explainer](/architectures/diffusion-transformer) cover the model side of this.
+
+## A toy of the trade-off
+
+The simulator below runs the same workload two ways. The stage graph puts each stage, and each replica, on its own worker with its own continuous batch, as the Qwen3-Omni deploy does with the thinker on GPU 0 and the talker and code2wav on GPU 1. The single loop puts all the models in one worker that runs each phase with work, one after another, every iteration.
+
+The chunk schedule (4 frames, then 25, with 25 frames of re-sent context) and the 12.5 frames per second come from the deploy file and the model config. Every millisecond is made up. I chose step costs of the right shape: a decode step that barely grows with batch, a vocoder cost that grows with frames, a denoise step that grows almost linearly with batch. Read the shapes, not the values.
+
+<StagePipelineSim />
+
+Three things are worth trying. Turn `async_chunk` off in the speech preset and watch time to first audio jump from a few hundred milliseconds to the whole request, since the vocoder now waits for the full utterance. Raise concurrency and compare throughput per worker. The stage graph has the better latency and the better total throughput, but it is using three workers to the loop's one. Per GPU, the single loop can come out ahead. Then switch to the image preset and toggle step batching: the denoise stage's throughput grows, and time to image grows with it.
+
+That second observation is the honest version of the disaggregation argument. Splitting stages buys overlap and independent scaling. It costs hardware and a hop. Whether that is a good trade depends on the stage sizes, and the report's own TTS results show a case where it is not.
+
+## What the evaluation compares against
+
+The sentence from the setup section reads: "Cross-framework overlays and engineering-health aggregates are left out of this revision."
+
+So there is no SGLang-Omni in the evaluation, no Diffusers, no xDiT, no M\*, none of the systems the related-work section discusses. Every comparison in the paper is vLLM-Omni against vLLM-Omni: a default deploy against an opt-in profile, async chunking on against off, one replica against two, and once, the Omni text route against a plain vLLM endpoint running the thinker alone. Those are legitimate ablations, and they are what I would want if I were tuning a deployment. They are not evidence that this runtime is faster than the alternatives, and the paper never claims that they are. The announcement's "deployments fall back to stitching disjoint runtimes together" goes unmeasured. I would like to see that comparison, even against a hand-stitched baseline.
+
+The hardware is also mixed in a way the abstract undersells. The image, video and world-model tables come from the public H100 nightly CI at a freeze day of 2026-09-14. The async-chunk and replica tables are H100 recipe baselines averaged over the nightlies of 2026-07-05 to 2026-07-11. The Qwen3-Omni concurrency, Random-MM, text-only, TTS and MiniCPM-o tables were measured separately on H200. So the H200 Qwen3-Omni table cannot be lined up against the H100 async-chunk table, even though both run the same Fixed-Len-2500/900 workload.
+
+With that framing, I went through the claims one at a time against the tables. Most hold exactly.
+
+### Qwen3-Omni: what holds
+
+The MRv2 claims in the concurrency sweep (Table 3, two H200s) are right. At concurrency 32 mean end-to-end latency goes from 75.06 s to 39.53 s and RTF from 0.423 to 0.212. Mean time to first audio drops from 1064.6 ms to 500.4 ms, while thinker TTFT rises slightly, 322.2 to 336.3 ms. "Roughly halves at C≥16" checks out: the ratios are 0.56 at 16 and 0.53 at 32. One footnote the authors deserve credit for printing: the MRv2 profile failed at startup on the measured commit and needed a one-line guard, and on the text-only route its thinker exited mid-run and failed 32 of 128 requests, so they report the default instead.
+
+The Random-MM claims hold too. MRv2 cuts mean end-to-end by 15.1%, 26.1% and 33.1% on the three text-and-audio arms, matching the "15–33%" in the text, and thinker TTFT stays within 3% on every arm.
+
+The async-chunk ablation (Table 6, two H100s) is the most important table in the paper, and its numbers match its prose. At concurrency 32, turning chunking off takes mean TTFT from 507.8 ms to 3420.1 ms, end-to-end from 72.63 s to 136.62 s, and RTF from 0.630 to 0.927. For scale, the companion no-async recipe in the tree pins the talker to 1,536 codec frames, about 123 seconds of speech per request. These are long replies.
+
+<Figure src="/articles/vllm-omni-serving/fig9.png" alt="Three line charts against concurrency 1, 4, 8, 16, 32. TTFT in ms: async-chunk rises gently to about 500, no async-chunk stays close until 16 then jumps to about 3400. E2EL in seconds: async-chunk reaches about 73, no async-chunk about 137. Audio RTF: async-chunk reaches about 0.63, no async-chunk about 0.93, below a dotted line at 1.0." caption="Async chunking on (solid) against off (dashed) for Qwen3-Omni Fixed-Len-2500/900 on two H100s. The gap is small until concurrency 16 and large at 32 (vLLM-Omni technical report, Figure 9)." />
+
+I could not explain one thing in that table. TTFT is the time to the thinker's first text token, and the thinker runs alone on GPU 0 in this deploy (`qwen3_omni_moe.yaml:33`). Its own work should be the same with chunking on or off. Yet its first token arrives 6.7 times later with chunking off. Something on the shared path, the single polling control loop or the full-payload forwarding, is queueing the thinker's work behind the audio stages at high load. The report does not say what, and I could not find it by reading.
+
+The same shared path shows up in the text-only comparison (Table 5, one H200). At concurrency 1, the Omni route and a plain thinker-only vLLM are within 6% on TTFT and end-to-end. At concurrency 32 end-to-end is identical at 13.7 s, but Omni's TTFT is 860.1 ms against 562.4 ms. The authors say plainly that they "have not isolated how much of that gap comes from the stage graph and orchestrator in front of the thinker." A 1 ms polling loop over every replica is the first place I would look.
+
+### Qwen3-Omni: what does not quite hold
+
+The replica section claims that at concurrency 8 the 3-GPU, 2-replica deploy (Table 7) has "lower mean audio TTFP and RTF versus the two-GPU async Fixed-Len cell at the same concurrency". RTF is lower: 0.190 against 0.236 in Table 6. But Table 6 has no TTFP column, so the H100 two-GPU number the sentence compares against is not in the paper. The only two-GPU TTFP at concurrency 8 is Table 3's 439.5 ms on H200, and it is lower than the replica cell's 486.5 ms. Figure 10 may hold the missing value, but the tables do not support the TTFP half of the sentence.
+
+The replica story also looks different in the tree today. Table 7 reports a mean RTF of 0.732 at concurrency 32. The replica recipe committed at `c548a11` (`tests/dfx/perf/tests/test_qwen3_omni_multi_replicas.json`) expects 0.2791 for the same concurrency on H100, and a mean TTFP of 1024.088 ms against Table 7's 2196.8. That recipe does not pin the talker's output length the way the no-async recipe does, so I cannot tell how much of the gap is the system improving since July and how much is a lighter workload. Either way, the report's conclusion that extra replicas stop helping at 32 belongs to the July build.
+
+### TTS: the understated range
+
+The TTS section (Table 8, H200) compares each model's default deploy with an opt-in profile. The prose in section 4.2.2 says the fused single-stage Qwen3-TTS "delivers 1.2–2.2× the audio throughput of the two-stage default on two GPUs." I divided every Qwen3-TTS row of Table 8. The low end, 15.0 over 12.5 audio-seconds per second for Base voice clone at concurrency 1, is 1.20. The high end is CustomVoice at concurrency 64: 612.1 against 234.6, which is 2.61. The table is better than the sentence about it.
+
+<Figure src="/articles/vllm-omni-serving/fig11.png" alt="Two line charts against concurrency 0 to 64 for Qwen3-TTS on H200. Left, median TTFP in ms: Base default (dashed) climbs to about 550, Base fused (solid) to about 220, CustomVoice default to about 120, CustomVoice fused stays near 30. Right, throughput in audio seconds per second: CustomVoice fused reaches about 610, Base fused about 280, CustomVoice default about 235, Base default about 170." caption="Qwen3-TTS, two-stage default (dashed) against the fused single-stage profile (solid). The CustomVoice fused line at concurrency 64 is the 612.1 audio-s/s cell (vLLM-Omni technical report, Figure 11)." />
+
+The "half the GPUs" framing needs a footnote. The shipped default, `vllm_omni/deploy/qwen3_tts.yaml`, puts both stages on `devices: "0"` (lines 86 and 125) and says "Verified on 1x H100" in its header. The benchmark recipe moves code2wav to a second GPU (`test_tts.json`: `"stage_overrides": {"1": {"devices": "1"}}`). The two-GPU "default" in Table 8 is a CI layout. The comparison is still fair as measured, and the fused profile wins in every cell. But someone running the default YAML is already on one GPU.
+
+It is also the clearest evidence in the paper against its own architecture, and the authors present it straight. Fusing the talker with a stateful streaming decoder removes the code2wav stage, its connector hop and its process, and the result beats the disaggregated version on half the hardware. Disaggregation helps when stages are big and mismatched, like a 30B thinker against a vocoder. When the second stage is small enough to share a GPU, the hop is pure cost.
+
+The rest of the TTS rows check out against the table: CosyVoice3's packed streaming profile at 78.4 against 4.9 audio-s/s (16 times), Higgs Audio v3's MRv2 profile at 311.0 against 29.1 (10.7 times), Fish Speech's high-concurrency profile at 40.4 against 10.4 (3.9 times, with RTF still above 1 at that load). These baselines are the models' own default deploys, which in CosyVoice3's case does not scale with load at all, so the multipliers measure how bad the old default was as much as how good the new profile is. The section does report Whisper WER for each optimised profile, which most serving papers skip. The opt-in MiniCPM-o turn profile is the honest outlier: faster, but it appended unrelated speech to 13% of outputs, and the authors left it out of the results for that reason. The [Fish Audio S2 article](/articles/fish-audio-s2) covers that model's own serving numbers.
+
+## What I would use it for
+
+If I were serving Qwen3-Omni or any thinker-talker model with spoken output, this is the runtime I would start from. The stage split matches the model, the per-edge chunk streaming is the thing that makes time to first audio tolerable, and the 6.7 times TTFT blow-up without it is the strongest number in the paper. Independent replica pools for the audio stages are a real operational lever that a monolithic process does not have.
+
+For a single-stage image or video DiT, the case is thinner. The engine is one job at a time by default. Step batching is opt-in and, by the report's own Qwen-Image numbers, doubles throughput at four times the latency. The speed comes from parallelism and step caches that other diffusion stacks also have. What vLLM-Omni adds there is the OpenAI-compatible surface and the same lifecycle as everything else, which matters if you serve several model families from one fleet. The [Ming-Image-0.1-Design](/articles/ming-image-0-1-design) and [Qwen-Image-2.1 Pocket rewriter](/articles/qwen-image-2-1-pocket-rewriter) pieces show what its recipes look like in practice. If you serve one image model and nothing else, it buys you less.
+
+The world-model, robot and full-duplex paths are in the report as architecture, with session lifecycles, fencing and an OpenPI adapter, but the evaluation covers them thinly: video latency cells for Cosmos3 and MiniMax H3 and health metrics for one duplex session. The conclusion lists "closed-loop robot evaluation" as future work. Read those sections as design, not as results. The [Cosmos 3](/articles/cosmos-world-model) and [MiniMax H3](/articles/minimax-h3) articles cover those models themselves.
+
+The word "unified" holds up in a narrower sense than the announcement suggests. One request identity, one admission and abort path, one connector contract, one API surface: yes. One scheduler: no, by design. The decode loops stay vLLM's, the denoiser gets its own scheduler with different defaults, and the orchestrator stays out of both. The design also puts the integration risk somewhere specific: a polling control loop that every stage's outputs pass through, which is my best guess for both of the unexplained TTFT gaps. If I were filing one issue against this repo, it would be to measure that loop under load.
+
+For the PD-disaggregation side of vLLM, see [vLLM serving Qwen3.8-2.4T](/articles/qwen38-pd-serving). For the radix-cache view of the same serving problems, see [SGLang](/articles/sglang).
+
+## How I checked
+
+The report is arXiv 2610.09307v1, read from the arXiv HTML and the PDF; the figures were rendered from the PDF pages and cropped. The repository is `vllm-project/vllm-omni` at `c548a110a5a9bc278c39cfa81e673a8d505a24dd`, shallow-cloned and read, not run. File and line references are to that commit. The line and file counts are `find vllm_omni -name '*.py' | xargs wc -l`. Qwen3-Omni's layer count, hidden size, accept layer, codebook count and upsampling factors come from the `config.json` of `Qwen/Qwen3-Omni-30B-A3B-Instruct` on Hugging Face; the 24 kHz output rate is the model's published sample rate, and 1,920 samples per frame at that rate is where 12.5 frames per second comes from. Every ratio in the evaluation section is my own division of the report's table cells, and the recipe baselines are read from the JSON files under `tests/dfx/perf/tests/`. I ran nothing on a GPU, so I have not reproduced any of the report's measurements; the unexplained TTFT gaps stay unexplained. The simulator's timings are invented and labelled as such; only its chunk schedule and frame rate come from the source.
