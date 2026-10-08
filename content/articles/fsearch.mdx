@@ -1,0 +1,245 @@
+---
+title: "fsearch: whole-disk search on a Mac, and what the 17,000x is measured against"
+description: "Noah Dunnagan's fsearch finds any file on a Mac by name in about a millisecond and keeps itself current from FSEvents. I read all 5,000 lines of its Rust: a getattrlistbulk crawl, one mmap'd file laid out folder by folder, no trigram index for names at all (a 64-bit character mask and a brute-force pass over distinct names instead), and a trigram index for contents. The launch line says 17,000x faster than Finder; the frame it comes from says fd. What each number compares, and how it sits next to Everything, plocate, fd, fzf and fff."
+date: 2026-10-08
+tags:
+  - rust
+  - search
+  - performance
+  - developer-tools
+  - benchmarks
+draft: false
+rating:
+  novelty: 1
+  verification: 3
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Reads all of fsearch: mask-and-scan name search, a folder-ordered mmap index, FSEvents diffing, and what its 17,000x (fd, not Finder) really compares."
+topic: tools-infra
+kind: tool
+level: practitioner
+runsOn: cpu
+licence: MIT
+---
+
+import { IndexRace } from "@/components/articles/fsearch/index-race"
+import { BlockLayout } from "@/components/articles/fsearch/block-layout"
+
+Noah Dunnagan posted a terminal recording on October 8: a search box, every keystroke answered across the whole disk of his M4 Max in a few milliseconds, "~60mb of ram". Later the same day he open-sourced it as [fsearch](https://github.com/noahdunnagan/fsearch) with the line "Full disk search, in milliseconds. 17,000x faster than Finder." A follow-up post in the same thread sets the tone better than any launch copy could: "this isnt mean to compete with fff or really any other file search. I was just curious what could be done for funzies."
+
+I took him at his word and read it the way you read a friend's weekend project: all of it, with interest, and with the numbers checked. Two things surprised me. The name search, the part that answers in a millisecond, uses no clever index at all. And the 17,000x is not measured against Finder.
+
+<RepoCard repo="noahdunnagan/fsearch" />
+
+<Figure
+  src="/articles/fsearch/fig1.jpg"
+  alt="fsearch terminal, whole disk, 7,643,622 files and folders. The query 'fsearch ma' is half typed and answered in 8.8 ms: main.rs in ~/Developer/Tools/FSearch/src first, then manifest, main, demo.tape and two proc-macro2 build folders. A sparkline reads 'every keystroke is a whole-disk search, median 4.1 ms'."
+  caption="Mid-keystroke: two tokens, `fsearch` matched by a folder on the path and `ma` by the file name, ranked across 7.6 million entries (Noah Dunnagan's launch demo, about 2 s in)."
+/>
+
+The repository is about 5,000 lines of Rust in ten files under `src/`, MIT-licensed, 27 commits written between October 5 and October 8. It is macOS only, and says so: the FSEvents bindings link Apple frameworks, which is why the first person in the replies who tried `cargo build` on Ubuntu got `link kind 'framework' is only supported on Apple targets`. I could not run it on this Linux machine, so everything below comes from reading the code, the two demo videos, the benchmark script and its JSON, plus one small measurement of my own that I describe at the end. There is no test suite in the repo; the earlier README instead reports accuracy measured against a fresh fd listing of the disk, with 99.95% of 2,000 random entries found by name.
+
+## The number on the last frame
+
+The launch video ends on this card. Everything else in this section is about the bar chart in it.
+
+<Figure
+  src="/articles/fsearch/fig3.jpg"
+  alt="A terminal card titled 'Find a file by name, whole disk, 7,643,622 entries'. fsearch 3.5 ms against fd 62 s, labelled 17,789x faster. Below, 'Search inside files ~/Developer': fsearch 8.2 ms against grep -r 7.7 min, didn't finish, labelled 56,311x faster, at least."
+  caption="The closing card of the launch demo: fsearch against fd for a name, and against grep -r for contents. Both baselines walk the disk with no index (Noah Dunnagan's demo video, final frame)."
+/>
+
+The 17,789x is fsearch against [fd](https://github.com/sharkdp/fd), not Finder. 62 seconds divided by 3.5 milliseconds is about 17,700; the printed figure presumably comes from unrounded times. The content number is the same shape: grep -r, killed after 7.7 minutes, against 8.2 ms.
+
+So "faster than Finder" is a loose word for "faster than walking the disk". That matters because the comparison is between two different kinds of work. fd has no index. Every query reads every directory on the volume, 7.6 million entries, then filters. fsearch read those directories once, about 20 seconds by its own README, and every query after that touches a file it already holds. The ratio between "read the disk" and "read my copy of the disk" has no ceiling; it grows with the disk. Comparing an index lookup to a crawl tells you the index works. It does not tell you the index is fast compared to other indexes.
+
+Two more details make the fd bar longer than it would be on most Macs. An earlier version of the README, at commit `f43261b`, measured "`fd` for one name, no index: 25.9 s" on the same machine, so the 62 s in the video is a slower run of the same thing, and the repo contains no script for it, so I can't tell how fd was invoked. And this Mac is unusually hostile to crawling. A comment in `src/walk.rs:104-107` explains:
+
+```rust
+// Children are opened with openat() relative to the parent's fd, so paths
+// never get rebuilt and PATH_MAX never bites. Measured on this Mac: open() +
+// close() is ~19us per directory (two Endpoint Security clients tax every
+// open), getattrlistbulk ~14us; past ~8 threads the kernel side stops scaling.
+```
+
+Two Endpoint Security clients (the old README names MDM and a VPN) inspect every `open()`. A crawler pays that per directory, an index lookup never does. fsearch's own first crawl takes about 20 s under the same tax, roughly a third of fd's 62 s, which says something good about how it crawls (next section) and something about how much of fd's bar is the machine.
+
+What would Finder actually be? Finder's search window and `mdfind` both query Spotlight, which is itself an index, kept live by the same kernel change stream, and which by default matches file contents and metadata as well as names. That is the comparison the tweet implies: index against index, names against names. Nobody has run it in public, I can't run it here, and I would expect Spotlight's `mdfind -name` to land in the tens to hundreds of milliseconds rather than a minute. That would still be a large win for fsearch. It would not be four orders of magnitude.
+
+The headline compares a sports car to walking. The car is still nice, and the rest of this piece is about how it is built.
+
+## Crawling without a stat per file
+
+The usual way to list a tree is `readdir` for the names, then `stat` on each one for its size, type and time. On 7.6 million entries that is 7.6 million extra syscalls. macOS has a better call, `getattrlistbulk(2)`, that returns a buffer of entries with the attributes you asked for already attached. fsearch asks for exactly what the index stores (`src/walk.rs:165-170`): name, object type, modification time, BSD flags (for the Finder's hidden bit), the mount status of directories, and the data length of files. One syscall fills a 256 KB buffer with hundreds of entries.
+
+Directories fan out over a rayon pool of 8 threads (`SCAN_THREADS` in `src/engine.rs:25`, chosen because the kernel side stops scaling past that). Each child is opened with `openat()` against its parent's descriptor, so no path string is ever rebuilt during the crawl. Mount points are flagged and not crossed; firmlinks are, which is how `/Users` on the data volume shows up under `/` exactly once (`src/walk.rs:1-6`).
+
+Two small things in here show someone who has been bitten by macOS. `main.rs:81-84` and `engine.rs:110-118` call `setiopolicy_np` with `IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES` off, so that listing an iCloud-evicted folder fails fast instead of silently downloading it. And without Full Disk Access, the walker skips the consent-gated folders (Desktop, Downloads and friends) instead of opening them, because opening one pops a privacy prompt and blocks the call until somebody clicks (`src/walk.rs:16-19`). A crawler that hangs on a dialog nobody can see is a classic background-daemon bug, and he avoided it.
+
+This is the macOS answer to what [Everything](https://www.voidtools.com/) does on Windows. Everything reads the NTFS Master File Table directly, a flat array of every file record on the volume, which is why it can index a Windows disk in seconds. macOS has no public equivalent of reading the APFS catalog wholesale, so fsearch does the next best thing: the fattest directory-listing syscall there is, in parallel.
+
+## One file, laid out folder by folder
+
+The whole name index is one blob, written to `index.bin` and read back with `mmap`. The format is sixteen flat arrays, each a section of the file (`src/index.rs:22-41`). There are no pointers, no tree nodes and no hash table on disk.
+
+The layout trick is in the module comment, `src/index.rs:3-7`:
+
+```rust
+//! Layout trick: entries are emitted one directory *block* at a time, blocks
+//! in depth-first order. So every directory's children are contiguous (and
+//! sorted, for path lookup), and every directory's whole subtree is the single
+//! range `dir_start..dir_end`. Scoping a search to a folder is a range bound,
+//! not a filter.
+```
+
+Pick a folder below and watch the range. The green rows are the folder's own children, one sorted block, which is what lets `lookup()` resolve a path with a binary search per component (`src/index.rs:183-200`). The blue rows are everything beneath it.
+
+<BlockLayout />
+
+Because a folder's block is emitted and then its child folders' blocks are pushed on a stack before any sibling's, everything under a folder ends up between two numbers. `in:~/Developer` becomes "scan entries 16 to 32" in the toy and "scan this slice" on the real disk. There is no per-entry path check. `Searcher::scope_range` in `src/query.rs:670-676` is four lines: look the folder up, read `dir_start` and `dir_end`, done.
+
+The second trick is interning. On Noah's disk, 7.5 million entries share about 2 million distinct names (`src/index.rs:9-11`): every `README.md`, every `index.js` in every `node_modules`, every `Info.plist` in every app bundle. Each distinct name is stored once, with a precomputed 64-bit mask, and each entry holds a 4-byte name id. The query engine scores names, not entries, so `index.js` is scored once even if it appears 40,000 times.
+
+### What an entry costs
+
+The section sizes are in `section_lens` (`src/index.rs:449-451`), so the memory per file can be read straight off the code:
+
+| Per | Bytes | What |
+|---|---|---|
+| entry | 21 | name id 4, kind and flags 1, parent folder 4, size 4, mtime 4, slot in the name-to-entries list 4 |
+| folder | 21 | entry index, block start, block length, subtree end, parent, all 4 bytes, plus a 1-byte location prior |
+| distinct name | 16 + its bytes | mask 8, offset 4, entries-list offset 4 |
+
+Size fits in 4 bytes by going lossy above 2 GiB (`src/index.rs:453-460`): exact below, 2 MiB granularity above, which is fine for a `size:>1gb` filter.
+
+To see what that comes to on a real tree I listed `/usr` on this Linux box: 189,110 entries, 20,155 folders, 99,825 distinct names averaging 15 bytes. The formula gives about 7.5 MB, around 40 bytes per entry all-in. Noah's disk interns harder (2 million names for 7.5 million entries, against roughly half on `/usr`), and the old README reports "280 MB names" on disk for it, which works out to about 37 bytes per entry.
+
+The daemon's reported memory is a different number: 30 to 135 MB in the README, 50 MB on the benchmark card. The difference is not a contradiction. After a build, `src/engine.rs:492-493` re-maps the index from the saved file "so the index is clean, evictable page cache rather than anonymous memory." macOS's `footprint` tool, which is what the benchmark script calls (`demo/vs_fff.py:19-22`), charges a process for memory it has dirtied, not for clean pages mapped from a file. So the 280 MB index is in RAM when you search, but it shows up as file cache, and the kernel can drop it under pressure and fault it back in. That is a legitimate design and the right one for a daemon. It also means "50 MB" and "358 MB" in the fff comparison below are not the same kind of number.
+
+## The name search has no index
+
+I expected a trigram index for names. [plocate](https://plocate.sesse.net/) uses one over whole paths, and fsearch already has one for file contents. Instead, the name search is a brute-force pass over every distinct name, made cheap by a filter that costs one AND.
+
+Each name's 64-bit mask records which character classes it contains: one bit per letter (case folded), one per digit, one each for `.`, `-` or `_`, space, non-ASCII and anything else. That is 41 bits (`char_bit`, `src/index.rs:509-520`). A fuzzy query token can only match a name that contains every one of its letters, so the test is whether the token's mask is a subset of the name's: `token.mask & !name.mask == 0`. For most queries that rejects most of the disk without reading a single name byte.
+
+The spare high 23 bits hold a hash of the first letter of the name and of each space-separated word in it (`name_mask`, `src/index.rs:496-506`). That is for typos, and it lets the whole test stay branch-free (`src/query.rs:30-39`):
+
+```rust
+/// Can a name with mask `m` (`index::name_mask`) match? Cleanly it has
+/// every char class; with a typo, a word in it starts with this token's
+/// first letter and at most one `loose` class is missing. Branchless, so
+/// the scan over every name stays vectorized.
+#[inline(always)]
+fn fits(&self, m: u64) -> bool {
+    let miss = self.mask & !m;
+    (miss == 0) | ((((miss & !self.loose) | (miss & miss.wrapping_sub(1))) == 0) & (m & self.start != 0))
+}
+```
+
+Read it as two cases OR'd together. Either nothing is missing. Or exactly one class is missing (`miss & (miss - 1) == 0` is the power-of-two test), it is not the first letter's class (`loose` excludes it), and some word in the name starts with the query's first letter. Only names that pass go to the real scorer, an fzf-v1-style matcher (`src/query.rs:405-471`) that finds the leftmost-ending subsequence, shrinks it from the right, and adds bonuses for word boundaries, camelCase and consecutive runs, plus a big bonus when the query is the whole name or its stem.
+
+I wanted to know how much the mask actually rejects on a real tree, so I ported `char_bit`, `name_mask` and `fits` to C and ran them over the 99,825 distinct names from `/usr`. For `json` 0.78% of names survive the mask; `zlib` 1.21%; `config` 2.94%; `python` 4.78%; `readme` 5.94%; `main` 8.00%. A one-letter query is the worst case, and `x` lets 17.00% through. The mask pass ran at about 1.5 ns per name on one core of a busy shared machine, against about 57 ns per name for a naive subsequence check over every name. At 2 million names that is around 3 ms on one thread for the mask, split across the M4 Max's cores, which is consistent with the 1.3 ms median the README reports.
+
+After the names are scored, the query has to get back to entries, and there are two paths (`src/query.rs:686-701`). If the matching names cover at most 60,000 entries (`SELECTIVE`, line 660), fsearch walks a name-to-entries list, a second CSR-style array in the index, and touches only those entries. Otherwise it does one sequential pass over every entry in scope, looking each one's name id up in the scored table. Folder tokens (`dev main` meaning "a `main` somewhere under something matching `dev`") are resolved with a per-folder memo folded down the tree in parallel.
+
+One more thing makes typing fast. The scored name table is cached, and when the new query only narrows the last one (`mai` becoming `main`), the scorer revisits only the names the previous query matched (`NameKey::narrows`, `src/query.rs:1053-1070`). With one exception that shows the author thought about it: "Gaining a typo widens the match: score afresh." A four-letter token takes no typos, and a five-letter one does, so `mian` to `mianr` cannot reuse the narrower set.
+
+Try it on the toy disk. Each lane runs the same query through a different structure. `pyhton` and `wllpaper` show why the trigram lane is the wrong tool for this job: a typo or a fuzzy gap leaves no contiguous three-letter run to look up, so the index never proposes the right file. The sorted array is fast and almost useless, since binary search can only answer a prefix.
+
+<IndexRace />
+
+The toy is too small for the costs to mean much: it has 41 entries and 38 distinct names, so interning saves almost nothing, and a one-letter query like `a` lets so many names through the mask that the fsearch lane costs more than the plain scan. The shape is what carries over. The mask pass is a linear scan, but over the smallest thing that can answer the question, with the cheapest possible test first. Trigram indexes win when the query is a literal substring and the corpus is huge; fsearch wants fuzzy, typo-tolerant matching over a few million short strings, and for that a vectorised scan is simpler and fast enough.
+
+### Typos at word starts only
+
+Words of five or more letters forgive one typo: a wrong letter, an extra one, a missing one, or two letters swapped (`one_edit_prefix`, `src/query.rs:533-555`). Digits are never edited, because `hat_18` and `hat_98` are different files. The typo has to sit inside a word that starts with the query's first letter, and the comment at `src/query.rs:505-510` gives the reason:
+
+```rust
+/// ... Other word starts (`_`, `-`, camelCase) would cost
+/// a scan of every name per query, ~10x the price.
+```
+
+That is a deliberate trade, and the first letter is the price: `mian.rs` finds `main.rs`, `pyhton` finds `python3`, but `ython` with a dropped `p` finds nothing. The benchmark script knows this, which matters in a moment.
+
+## Staying current: diff a folder, never trust an event
+
+The index is immutable once written. Changes go in a `Live` layer on top (`src/live.rs:1-7`): a bitset of base entries that are gone, plus an overlay map of entries added since. Every search scans the overlay too, at about 1 ms per 100,000 entries, so once 50,000 changes pile up (or every 12 hours), the overlay is folded into a new base: about 1 s of CPU and a 280 MB write (`src/engine.rs:19-24`).
+
+Changes come from FSEvents, watching `/` at directory granularity with a 0.1 s latency (`src/fsevents.rs:84-86`, `src/engine.rs:308`). The handling is the part I like most. An event never says what changed, only which folder. fsearch lists that one folder again and diffs the listing against what it holds. Because the diff is idempotent, duplicate events, events replayed from history after a restart, and events racing a compaction are all harmless. That is how a new file shows up in about 0.1 s.
+
+Restart is cheap for the same reason. The index header stores the last FSEvents id it applied, and FSEvents can replay history from an id, so a restart reloads the mmap'd file in milliseconds and replays only what changed while it was down. If the history is gone (FSEvents drops it, or the gap is too long), it does not recrawl. Adding, removing or renaming an entry bumps its folder's mtime, so one `lstat` per folder, in parallel, finds the folders to relist (`src/live.rs:320-324`). The old README timed that recovery at 8 to 13 seconds instead of a full crawl.
+
+## Contents: here is the trigram index
+
+File contents do get a trigram index, built the way Russ Cox described for Google Code Search, and the same idea our [tgrep teardown](/articles/tgrep) covers in depth. Every text file under your home folder is broken into case-folded three-byte runs; each run maps to the list of documents that contain it. A query becomes an AND/OR tree of trigrams. `regex-syntax` parses a regex into its HIR and the planner (`src/content.rs:1102-1209`) works out which literal strings every match must contain. The posting lists are intersected, and the surviving candidates are read fresh from disk and matched for real (`src/content.rs:1-8`), so results are never stale even when the index is a couple of seconds behind.
+
+The storage is careful. Segments are immutable mmap'd files; a posting list is delta varints, or a bitset over the segment's documents once more than one document in 8 contains the trigram (`src/content.rs:33-35`, `:559-574`). Small segments merge in tiers of 8. Files are debounced per folder: indexed 2 s after the folder goes quiet, or 5 minutes after the first change if it never does, so a log written every second costs one reindex per 5 minutes (`src/engine.rs:398-401`). `sym:` is a nice extra: identifiers that follow a declaring keyword (`fn`, `def`, `class`, `struct` and about twenty-five more) are hashed into the same key table above the 24-bit trigram space, so "where is `apply_dir` defined" is a single posting list (`src/content.rs:287-325`).
+
+<Figure
+  src="/articles/fsearch/fig2.jpg"
+  alt="fsearch terminal with the query 'ext:rs sym:apply_dir' answered in 0.7 ms, listing live.rs:164 and live.rs:155 with the line 'pub fn apply_dir(&mut self, path: &[u8], recursive: bool) -> Applied {'. A sparkline at the bottom reads 'every keystroke is a whole-disk search, median 2.8 ms'."
+  caption="A definition lookup across the home folder: `sym:` reads one posting list for the identifier rather than every file containing its trigrams (Noah Dunnagan's demo video, about 18 s in)."
+/>
+
+The scope is narrower than "whole disk", and that is a reasonable choice that should be said out loud. Only files under `$HOME` are content-indexed. A file over 1 MiB (`MAX_FILE`, `src/content.rs:27`) is skipped, as is anything whose extension is not on a list of about 130 text types, anything with a NUL byte in its first 8 KB, and anything under `node_modules`, `.git`, `target`, `build`, `dist`, `vendor`, `Library`, the caches and about forty other names (`src/content.rs:37-72`). Outside the indexed area, `grep:` with `in:` picks files from the name index and reads them, which is slower but correct.
+
+## Against fff, read closely
+
+The repo's real comparison is with [fff](https://github.com/dmtrKovalenko/fff), Dmitriy Kovalenko's file finder: it began as a Neovim plugin, is now an MIT library and MCP server that powers file search in opencode and others, with typo-tolerant path and content search, frecency ranking and a background watcher. Someone in the first thread said "just use fff", and the benchmark was the reply. Unlike the fd card, this one has a script, `demo/vs_fff.py`, and its output is committed.
+
+<Figure
+  src="/articles/fsearch/fig6.jpg"
+  alt="Summary card. Find a file by name, 13x faster, median of 1,500 queries: fsearch 1.1 ms, fff 14 ms. Search inside files, 10x faster, median of 67 patterns: fsearch 5.6 ms, fff 53 ms. Ready after launch, 50x faster: fsearch 50 ms, fff 2.5 s. Memory, 7x less, fsearch whole disk 8.3M files, fff this folder: 50 MB against 358 MB. Typo in the name, right file first: fsearch 98%, fff 88%."
+  caption="The fff comparison on a Chromium checkout of 508,652 files. Numbers are from demo/vs_fff_chromium.json; the caveats in the text matter for three of the five rows (the project's demo video, final frame)."
+/>
+
+The method is decent. Both engines get the same 300 target names, picked at random from files fd also sees, each unique in the tree, then four typo variants of each, 1,500 queries in all; the engines alternate going first; content search uses 67 patterns. fsearch is even handicapped: it is timed through its Unix socket with JSON on both sides (`vs_fff.py:89-95`), while fff is called in-process through its Python binding. The name-search row, 1.05 ms against 13.8 ms at the median, I believe as stated. On the Linux kernel tree (95,939 files) the same script gives 1.15 ms against 1.04 ms, which the README honestly calls a tie.
+
+Three rows need context.
+
+The typo row tests the kind of typo fsearch handles. The generator's docstring, `vs_fff.py:46`: "One typo on a letter, never the first char (fsearch needs that one)." That is disclosed, and it is fair to test the common case, but a typo in the first letter would score zero for fsearch by design. The 98% against 88% is "typos after the first letter".
+
+"Ready after launch" compares two different things. For fsearch it is the time from a killed daemon to the first answer, with a saved index already on disk: load the mmap, answer. For fff it is the time to scan the folder from nothing, 2.5 s, and 12.8 s until its content cache is warm. fsearch's equivalent would be its first crawl, about 20 s for the whole disk. Both numbers are true; they measure different events.
+
+The memory row compares footprints, and as covered above, fsearch's index lives in clean file-backed pages that `footprint` does not count, while fff holds its index in anonymous memory. "7x less" is real in the sense that matters under memory pressure (fsearch's pages can be dropped and re-read), and not in the sense of bytes resident while you search.
+
+And one honest disclosure from the README itself: fff finds about 9% more files with content matches on Chromium (353,276 against 323,688), because fsearch skips `build/`, `vendor/` and some file types. Faster partly because it reads less.
+
+<Figure
+  src="/articles/fsearch/fig5.jpg"
+  alt="Split-pane comparison on Chromium, 508,652 files. Query grep:kMaxTabCount. fsearch answered in 28 ms, fff in 750 ms, both returning power_metrics_reporter_unittest.cc:413."
+  caption="One content query from the side-by-side recording: the same hit, 28 ms against 750 ms. Single queries vary; the medians are in the summary card (the project's demo video, about 12 s in)."
+/>
+
+## Where it sits
+
+| | How it learns the disk | Name matching | Stays current | Contents |
+|---|---|---|---|---|
+| fsearch | parallel `getattrlistbulk` crawl, once | mask filter, then fuzzy scan of distinct names, one typo | FSEvents, relist and diff the folder | trigram index under `$HOME` |
+| Everything | reads the NTFS MFT | substring, wildcards, regex | NTFS USN change journal | not indexed by default; scans on demand |
+| plocate | `updatedb`, a periodic full crawl | substring over paths, via trigrams | not live; as fresh as the last `updatedb` | none |
+| mlocate | `updatedb` | linear scan of the whole database | not live | none |
+| fd | none, walks every time | regex or glob | always current, by construction | none |
+| fzf | none, filters whatever you pipe in | fuzzy scoring | n/a | none |
+| fff | per-folder scan in a long-running process | typo-tolerant fuzzy, frecency | background watcher | in-memory content index |
+| Spotlight (Finder, `mdfind`) | `mds` importers | names, metadata and contents | the same kernel change stream | yes, with importers |
+
+The closest relative is Everything: same idea of a name index that is effectively free to query, built from the filesystem's own bulk metadata and kept live from the kernel's change stream. fsearch adds fuzzy and typo matching that Everything does not do by default, and a content index. It is also a fresh take on something people have built many times, which a few repliers pointed out with less warmth than they could have.
+
+## What I'd take from it
+
+If you build search for a few million short strings, the main lesson is the order of operations. Intern first so you score distinct values. Put the cheapest possible test in front of the expensive one, and make it a bitmask so it vectorises. Reach for an inverted index only when the query is a literal and the corpus is large, which is file contents, not file names. The layout trick, emitting blocks depth-first so a subtree is a range, is worth stealing for anything tree-shaped you need to scope.
+
+On the claim: "17,000x faster than Finder" should read "about 17,700x faster than fd on a Mac whose security agents tax every directory open". fsearch's first-crawl time on that Mac is the honest bound on what an unindexed tool can do there, and against fff the honest summary is "about 13x faster on name search in a big tree, a tie in a small one".
+
+Would I use it? On a Mac, as a launcher backend or an agent tool, yes; its JSON-lines socket and the crate API make it easy to wire in, and the owner/follower design (the first process owns the index files, others follow and take over when it exits) is thoughtful for that. On Linux it needs a port: fanotify or inotify instead of FSEvents, `getdents64` and `statx` instead of `getattrlistbulk`. The index and query code would carry over almost untouched.
+
+## How I checked
+
+I shallow-cloned `noahdunnagan/fsearch` at commit `af9476d` (October 8), then fetched the full history to read the earlier README at `f43261b`, and read every file under `src/` and `demo/`. Line references are to `af9476d`. The fd and grep -r figures come from the final frame of the launch video, which I pulled with ffmpeg; the repo has no script for them. The fff numbers are from `demo/vs_fff_chromium.json` and `demo/vs_fff_linux.json`, and the method from `demo/vs_fff.py`. The thread quotes are from the fxtwitter mirror of posts 2107993727809855570 and 2108257494841827721.
+
+fsearch does not build on Linux, so I did not run it. The per-entry byte counts are read from `section_lens`; the `/usr` listing (189,110 entries) came from `find /usr -xdev`; the mask rejection rates and the 1.5 ns per name come from a single-threaded C port of `char_bit`, `name_mask` and `Token::fits` timed over 50 repetitions on a shared 16-core machine under load, so treat the timings as rough. The widgets port the same functions plus `one_edit_prefix` and `Index::build`'s ordering to TypeScript; their ranking is simplified. I could not measure Finder, Spotlight or `mdfind` here, so the Spotlight estimate above is a guess and labelled as one.
