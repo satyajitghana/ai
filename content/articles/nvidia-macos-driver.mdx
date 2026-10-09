@@ -1,0 +1,231 @@
+---
+title: "NullMoth's NVIDIA driver for macOS: Metal on an RTX card, by way of Vulkan"
+description: "NullMoth Systems published a Metal driver for NVIDIA Turing-and-later GPUs on macOS 15, the first since NVIDIA's web drivers stopped at High Sierra. I read the repository at b9a5a2b, the 1.1.1 release package and NVIDIA's own 610.57.04 driver. Metal calls land in a plugin that subclasses Apple's private MTLIOAccelDevice, shaders go from Apple AIR to SPIR-V through a fork of metal2vulkan, Mesa's NVK runs on top with a backend that speaks NVIDIA's resource-manager escapes over IOKit (much of it from X512's Haiku port), and NVIDIA's open kernel modules, built for Darwin, boot the GPU's GSP firmware inside a kext. The firmware really is byte-identical to NVIDIA's. Mesh shaders are emulated with a compute pass, ray tracing runs in software on the shader cores, seven Mesa files lost their copyright headers, a bundled NVIDIA compiler library is binary-patched in 48,134 places, physical validation is one RTX 5060, and the whole thing appeared as one 365,122-line commit two days ago."
+date: 2026-10-09
+tags:
+  - gpu
+  - compilers
+  - nvidia
+  - reverse-engineering
+  - licensing
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 1
+  durability: 1
+  reach: 1
+  unique: 3
+  why: "Code-level teardown of the first Turing+ NVIDIA Metal driver: every layer traced, firmware and NVIDIA libraries byte-compared, provenance and licences checked."
+topic: gpu-systems
+kind: tool
+level: practitioner
+runsOn: consumer-gpu
+licence: mixed
+---
+
+import { DrawCallPath } from "@/components/articles/nvidia-macos-driver/draw-call-path"
+import { FeatureMatrix } from "@/components/articles/nvidia-macos-driver/feature-matrix"
+
+I reposted this repository twice in a day, and the second time I only managed two words: "holy shit". That was before I had opened a single file. Nobody has run a modern NVIDIA card under macOS with real acceleration since 2018, and the reason was never a missing weekend of work. NVIDIA wrote the drivers, Apple signed them, and when that arrangement ended nothing could replace it.
+
+So I expected one of two things. Either a framebuffer that lights a screen and calls itself a driver, or a closed binary with a story attached. It is neither. `nullmoth/nvidia-macos-driver` is a real stack, with source, and almost every layer of it is somebody else's open work joined by a large amount of reverse-engineered glue. System Information on a user's RTX 2060 SUPER says "Metal 3". Getting there takes a Metal plugin that pretends to be an Apple driver, a shader translator, Mesa's Vulkan driver for NVIDIA, and NVIDIA's own kernel code recompiled for the Mac kernel, with NVIDIA's firmware doing most of the real work on the GPU.
+
+This is how each layer works, what I could check against primary files, and where the claims run ahead of the evidence.
+
+<RepoCard repo="nullmoth/nvidia-macos-driver" />
+
+## Why this was impossible for eight years
+
+Apple last shipped NVIDIA graphics in Kepler-era Macs, and macOS kept Kepler drivers in the box through Big Sur. For Maxwell and Pascal, NVIDIA published its own "web drivers", and those stopped at High Sierra, 10.13. Dortania's GPU guide sums up what followed: no support for those cards "in Mojave and up", and for Turing, "no support in any version of macOS as no drivers were ever written even for High Sierra". Both companies have told different stories about why. What matters here is the engineering consequence: from 2018 on, every RTX card was a stranger to macOS, and the only way to change that was to write the driver yourself.
+
+Writing an NVIDIA driver yourself used to mean nouveau-style reverse engineering of the whole chip: power management, memory training, display engines, all undocumented, all signed-firmware gated. On Turing and later three things changed.
+
+The first is GSP. Since Turing, NVIDIA cards carry a RISC-V microcontroller, the GPU System Processor, and NVIDIA moved most of its resource manager (RM), the software that knows how to initialise and run the chip, into a firmware image that runs on it. The firmware files in the release package are exactly that; `file` reports `gsp_ga10x.bin` and `gsp_tu10x.bin` as "ELF 64-bit LSB relocatable, UCB RISC-V". The CPU side becomes a client that sends remote procedure calls.
+
+The second is that NVIDIA published that CPU side. `open-gpu-kernel-modules` is NVIDIA's own RM client and kernel interface, MIT-licensed for the RM core ("Except where noted otherwise, the individual files within this package are licensed as MIT"), dual MIT/GPLv2 only when linked into a Linux kernel module. It supports Turing and later, because it leans on GSP.
+
+The third is NVK, Mesa's open Vulkan driver for NVIDIA, with its shader compiler NAK. Before NVK, a non-NVIDIA userspace that could actually compile shaders for these GPUs did not exist in a usable form.
+
+Put the three together and you have a driver for any kernel that can host NVIDIA's RM and give NVK a way to reach it. That had already been done once, outside Linux: X512's Haiku port, `X547/nvidia-haiku`, describes itself as "Haiku drivers for Nvidia Turing+ GPUs based on official Nvidia kernel driver sources, Mesa NVK Vulkan Driver and Mesa Zink OpenGL driver". The macOS driver is the same recipe with a much harder last step: macOS does not want Vulkan, it wants Metal.
+
+<Figure
+  src="/articles/nvidia-macos-driver/fig1.png"
+  alt="Two ASCII diagrams from the project's documentation. The first stacks Metal app, WindowServer, Core Image, MPS and OpenGL over NVMTLDriver.bundle, which translates Apple AIR to SPIR-V, over NVK with the NAK compiler, over NVRM.kext, NVIDIA's open GPU kernel modules ported to XNU, over the GeForce RTX GPU with GSP firmware 610.57.04. The second shows WindowServer reaching NVRMFB.kext as the IOFramebuffer, NVAccel.kext as the IOAccelerator, and NVRMAGDC.kext for AppleGraphicsDeviceControl policy."
+  caption="The project's own map of the stack: the render path top to bottom, and the three display kexts beside it. The repository has no diagrams as images; this is its text diagram rendered (NullMoth, docs/HOW-IT-WORKS.md, section 1)."
+/>
+
+## The kernel side: NVIDIA's RM inside a kext
+
+`NVRM.kext` is not a reimplementation of anything. It is NVIDIA's RM, compiled for Darwin. The build script pulls its preprocessor defines straight from NVIDIA's own generated compile commands for a `Darwin_x86_64` target (`build/accel_build.sh:15`) and links against the resulting objects. What NullMoth wrote is the OS layer: the few hundred `os_*` and `nv_*` functions that NVIDIA's RM calls into, which on Linux live in `kernel-open/`. On macOS they are `os-xnu.cpp`, `os-xnu2.cpp` and `nv_xnu_stubs.cpp`. Memory allocation becomes `kern_os_malloc`, wait queues become `IOLockSleep`, work items become kernel threads, and firmware loading is a `vnode_open` on a fixed path:
+
+```cpp
+// kexts/NVRM/os-xnu2.cpp:23
+#define NV_FIRMWARE_FOR_NAME(name) "/Users/Shared/nvfw/nvidia/610.57.04/" name ".bin"
+```
+
+Some of the port is honest stubbery. `os_get_cpu_count` returns 4 and `os_get_cpu_number` returns 0 (`os-xnu.cpp:56`), and the ACPI methods RM uses to find a laptop's internal panel return "not supported". A user in issue #15 got an RTX 3070 Laptop's internal screen working by implementing `nv_acpi_dsm_method` in a separate kext, and wrote that "the nv_acpi_* functions in the port are stubs". That is a fair description of the state of the OS layer: enough to boot the chip, with gaps wherever a desktop card does not exercise the code.
+
+Bring-up happens in two passes in `NVRM::go()` (`NVRM.cpp:865`). Pass one calls `rm_init_rm`, checks `rm_is_supported_device` (NVIDIA's gate, not NullMoth's) and builds private state. Pass two enables bus mastering, insists on a message-signalled interrupt, and calls `rm_init_adapter()`, which is where NVIDIA's code loads the GSP image into the GPU and starts it. A user's boot log on an RTX 2060 in issue #5 shows both passes, 1.6 seconds apart:
+
+```text
+19:05:36.016 NVRM-xnu: PASS 1 REACHED: RM initialised, private state built, GSP firmware requested
+19:05:36.062 NVRM-xnu: >nv_get_firmware type=0 family=1 -> /Users/Shared/nvfw/nvidia/610.57.04/gsp_tu10x.bin
+19:05:37.638 NVRM-xnu: PASS 2 REACHED: the adapter is up — GSP-RM is running on the card under macOS
+```
+
+After that, almost every request is an RPC. NVIDIA's CPU-side RM writes a command into a ring in shared memory and the GSP answers in a status ring; the layout is spelled out in NVIDIA's `message_queue_cpu.c` (lines 297 to 303 at tag 610.57.04): a page-table header, then command queue header and entries, then status queue header and entries, each page aligned. That is why this project is tractable at all. The hard, chip-specific knowledge lives in a firmware blob NVIDIA keeps up to date, and the kext only has to carry messages to it.
+
+Userspace reaches RM through `NVRMUserClient`, an IOKit user client with seven selectors (`NVRM.cpp:1132`). Selector 1 carries an RM "escape", the same `NV_ESC_RM_ALLOC` / `NV_ESC_RM_CONTROL` / `NV_ESC_RM_MAP_MEMORY` numbering that `/dev/nvidia0` ioctls use on Linux. A handful are handled locally; the default case hands the buffer to `rm_ioctl` unchanged (`NVRM.cpp:1310`). The kernel never learns anything about Metal or Vulkan. It speaks NVIDIA's RM API, and the question becomes who speaks it from above.
+
+## NVK on a kernel with no DRM
+
+NVK normally talks to the nouveau kernel driver through Linux DRM. Here there is no DRM, and no nouveau. Mesa already abstracts the kernel interface behind something it calls `nvkmd`, and the patch adds a second backend, `nvkmd/nvrm/`, that drives NVIDIA's RM directly. So this is not a DRM shim. It is a new winsys, and NVK ends up using the same kernel ABI as NVIDIA's proprietary userspace.
+
+The transport is the cleverest small hack in the repository. Mesa's RM code wants file descriptors and ioctls. `nvrm_xnu.c` opens `/dev/null` to obtain a real descriptor number, uses it as an index into a table of `io_connect_t` handles, and turns each escape into an `IOConnectCallMethod` on selector 1, with mappings done through `IOConnectMapMemory64`. One function decides how an escape leaves the process, with an arm per operating system:
+
+```c
+// nvk/nvk-macos.patch:7080, src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
+#ifdef __HAIKU__
+		res = ioctl(fd, cmd + NV_HAIKU_BASE, pParams, paramsSize);
+#elif defined(__APPLE__)
+		res = nvrm_xnu_ioctl(fd, cmd, pParams, paramsSize);
+#else
+		res = ioctl(fd, _IOC(IOC_INOUT, NV_IOCTL_MAGIC, cmd, paramsSize), pParams);
+#endif
+```
+
+That `__HAIKU__` branch made me go and look. The patch also adds a header called `nv-haiku.h`, and X512 keeps a Mesa fork whose `nvrm-event-sync-r4` branch has an `nvkmd/nvrm/` directory. I fetched its files and compared them line by line with the patch's versions:
+
+| file in `nvkmd/nvrm/` | lines in NullMoth's | shared with X512's branch |
+|---|---|---|
+| `nvRmSemSurf.c` | 208 | 205 (99%) |
+| `nvkmd_nvrm_va.c` | 177 | 154 (87%) |
+| `nvRmApi.c` | 305 | 240 (79%) |
+| `nvkmd_nvrm_pdev.c` | 610 | 429 (70%) |
+| `nvkmd_nvrm_mem.c` | 388 | 207 (53%) |
+| `nvkmd_nvrm_ctx.c` | 1,155 | 224 (19%) |
+
+The RM backend is X512's design, extended. `nvrm_xnu.c` and the command-context work are NullMoth's; the bones are from Haiku. There is a paperwork problem attached. On X512's branch, seven of these files open with Mesa's usual header, "Copyright © 2024 Collabora Ltd. and Red Hat Inc." and an MIT SPDX line. In the patch, the same seven files open with blank lines where that header was. The patch also deletes the "Copyright © 2022 Collabora Ltd. and Red Hat Inc." line from the top of the existing `nvk_acceleration_structure.c`. MIT asks for exactly one thing, that the notice stays with the code, and `NOTICE` credits only "Vulkan driver from Mesa (MIT)", with no mention of the Haiku work this rests on. Both are easy to fix, and should be.
+
+The whole patch touches 81 files, +10,524 and −116 lines, against Mesa `17ca6174`. Beyond the backend, the biggest addition is ray tracing, and its header is refreshingly blunt about what kind:
+
+> SOFTWARE RAY TRACING ON NVK. [...] No RT hardware is touched: NAK has no TTU instructions and nobody has the Blackwell BVH format
+
+The acceleration structures are built by Mesa's shared BVH builder into lavapipe's software BVH layout (`bvh/encode.comp`), and traversal is shader code that `nvk_nir_lower_ray_queries.c` compiles into every shader that uses a ray query. The RT cores on an RTX card sit idle. A meson comment calls the work "our RT port".
+
+## The Metal side: becoming an Apple driver from the outside
+
+This is the part I could not picture before reading it. Apple publishes no driver interface for Metal. On an Intel Mac, AMD's and Intel's Metal drivers are bundles in `/System/Library/Extensions` that Metal.framework loads on behalf of the IOAccelerator attached to the GPU. NullMoth needed three things: a kernel accelerator Metal would recognise, a way to make Metal load a bundle from outside the sealed system volume, and a userspace class Metal would accept as its device.
+
+The kernel accelerator is `NVAccel`, a subclass of Apple's `IOGraphicsAccelerator2`. Apple ships no header for it, so the project reconstructed one, and the header says how:
+
+> IT IS AN ABSTRACT CLASS. 17 of its vtable slots are `___cxa_pure_virtual`, and those 17 methods are the ENTIRE required vendor interface
+
+The class size, 3,544 bytes, came from two independent places: the kernel's live `OSMetaClass` registry and a `movl $0xdd8, %ecx` immediate in the metaclass constructor (`kexts/NVRM/accel/re/IOGraphicsAccelerator2.h:15`). The 84 new virtual slots were generated in vtable order from Apple's `IOAcceleratorFamily2` binary, with their names recovered from AMD's `AMDRadeonX4000` kext, which subclasses the same class and therefore carries mangled symbols for every override. Return types are guessed, and the header says so, with the right caveat: on x86-64 a pointer and an integer come back in the same register, so a wrong guess is harmless unless the method returns a struct or a float. This is careful reverse engineering, and it is written down well enough that someone else could check it.
+
+Making Metal load the bundle took one line. Metal reads `MetalPluginName` from the accelerator's registry entry and resolves it relative to `/System/Library/Extensions`. NVAccel's personality sets it to `../../../Library/GPUBundles/NVMTLDriver` (`kexts/NVRM/accel/Info.plist:37`). Three parent directories, and the plugin lives on the writable data volume.
+
+The userspace device is `NVMTLDevice`, declared as a subclass of Apple's private `MTLIOAccelDevice` (`plugin/NVMTLDevice.m:133`). Calling `[super initWithAcceleratorPort:]` lets Apple's own base class do the IOKit handshake, and everything after that is NullMoth's: buffers, textures, encoders and pipelines, implemented in Objective-C on top of Vulkan. Metal's surface area is enormous and mostly undocumented below the public protocol, so the plugin handles the unknown in a way I have not seen before. When an Apple framework sends a selector the plugin does not implement, the forwarding hook looks up the same selector on the Apple class it mirrors (`NVMTLCommandBuffer` → `MTLIOAccelCommandBuffer`, twenty pairs in `NVMTLForward.m:30`), borrows that method's type encoding from the Objective-C runtime, logs `SPI-STUB ... NOT IMPLEMENTED`, and returns zeroes of the right size. The runtime is self-describing, so each missing private method announces itself in the log, with a warning when its return is a pointer someone might dereference. I suspect that log is how most of the private interface was found.
+
+The bundle is ad-hoc signed (`codesign -f -s -`, `build/build_plugin.sh:14`). WindowServer will not load a library like that with Apple Mobile File Integrity on, which is why the README's boot arguments include `amfi_get_out_of_my_way=0x1`. I come back to what that costs below.
+
+<DrawCallPath />
+
+The widget follows one draw down the stack, quoting the code at each stop. In prose: Metal finds the plugin through NVAccel's registry entry; the plugin brings Vulkan up in the calling process, refusing to become the device if it cannot; shaders are translated once and cached; encoders record into a Vulkan command buffer that `commit` submits to NVK; NVK compiles with NAK and turns resource management into RM escapes; the shim carries each escape over IOKit; the kext passes it to NVIDIA's RM; and RM forwards it to GSP through the shared-memory queues.
+
+## Shaders: Apple AIR to SPIR-V
+
+A Metal shader library contains AIR, Apple's flavour of LLVM bitcode. NVK eats SPIR-V. Between them sits `libnvmtl_translate.dylib`, built from `translator/`, which is a fork of Anees Iqbal's `metal2vulkan` (LGPL-3.0, created in July, 271 stars). Its own README describes it as translating "Metal AIR, LLVM bitcode or sanitized LLVM IR, into Vulkan 1.2 SPIR-V with a native Rust emitter", validating the result with `spirv-val` and failing visibly rather than returning invalid SPIR-V.
+
+The plugin's side is plain plumbing: split the metallib into functions, run a bundled 92 MB `air-opt` to get text IR (spawned per library with a 20-second limit, `NVMTLLibraryLoad.m:318`), call the translator, and cache the SPIR-V by hash. The interesting part is what the fork adds. Comparing it with upstream `metal2vulkan` at its current head, the fork has fourteen new files and directories under `src/`, about 8,300 lines, including `mesh_lower.rs`, `passes/air_calls/ray_query.rs` and `sample_positions.rs`, plus edits across most of the existing files. A thin wrapper crate adds the bindless argument-buffer plumbing: buffer pointers inside argument buffers become 64-bit device addresses read from a table at a synthetic binding (`wrapper/src/buffer_addresses.rs`, `table_ubo.rs`). Because the wrapper links the LGPL library into a `cdylib`, the translator directory stays LGPL, which the README states correctly.
+
+That gives a concrete answer to how Metal 3 features map onto NVK:
+
+<FeatureMatrix />
+
+Argument buffers tier 2 map onto descriptor indexing, `VK_EXT_mutable_descriptor_type` and buffer device addresses; the device simply answers `MTLArgumentBuffersTier2` (`NVMTLDevice.m:1597`). Ray tracing maps onto `VK_KHR_acceleration_structure` and `VK_KHR_ray_query`, which fits Metal's model of intersector objects called from inside a shader better than Vulkan's ray-tracing pipelines would. Underneath, as above, it is NullMoth's software traversal in ordinary shader code, so "ray tracing" here means the API works, not that the RT cores do.
+
+Mesh shaders are the one I would have liked the README to be plainer about. The plugin enables no `VK_EXT_mesh_shader`. A mesh draw ends the current render pass, allocates a private scratch buffer sized for the whole grid, clears it, dispatches the mesh function as a compute kernel that writes vertices into it, resumes the render pass, and draws those vertices with a generated vertex shader called `m2v_mesh_vs` (`NVMTLLibraryLoad.m:2448`). That is a legitimate emulation. It also means every mesh draw splits the render pass and allocates memory, which is the opposite of why anyone writes a mesh shader. "Mesh shaders" in the README is true in the sense that the API works.
+
+OpenGL and OpenCL ride on Apple's own GL-on-Metal renderer, which NVAccel switches on by setting `IOGLBundleName` to `AppleMetalOpenGLRenderer` once a display is armed (`nvrm-accel.cpp:332`). For MetalFX I found no specific code at all; it would run, if it runs, as ordinary Metal compute. MPS and Core Image are the only rows the project itself tested.
+
+### An optional second compiler, made of NVIDIA's Linux libraries
+
+There is a second shader path, off unless `NVMTL_VENDOR_COMPILER` is set (`NVMTLVendorCompiler.m:29`), and it is the strangest thing in the package. `NVIDIAShared.bundle` contains `air2nvvm.py`, which rewrites AIR into NVVM IR, and two Linux ELF libraries from NVIDIA's 610.57.04 driver, `libnvidia-nvvm` and `libnvidia-ptxjitcompiler`, run on macOS by a small Mach-O program, `nvvmdrive`, that contains its own ELF loader (its strings include "elfhost: the loaded object called an UNIMPLEMENTED import"). The chain is AIR → NVVM IR → PTX → cubin, compiled by NVIDIA's own compiler.
+
+The NVVM library is not the one NVIDIA shipped. `nvcompile.sh` says why: the shipped library "SIGSEGVs with no diagnostic (48,139 %fs:0x28 stack-canary sites, and macOS has no Linux TCB at %fs)". On Linux, glibc keeps the stack-protector canary at `%fs:0x28`; macOS does not set `%fs` up that way, so every function prologue faults. I extracted `libnvidia-nvvm.so.610.57.04` from NVIDIA's own `.run` package and compared it with the bundled `libnvidia-nvvm.nocanary.so`. They are the same size, 78,315,016 bytes, and differ in 48,134 separate places, 415,299 bytes in all. Each one replaces a canary load with a constant:
+
+```text
+64 48 8b 04 25 28 00 00 00   mov  rax, fs:[0x28]   ->   48 c7 c0 00 00 00 00 90 90   mov rax, 0 ; nop ; nop
+64 48 2b 04 25 28 00 00 00   sub  rax, fs:[0x28]   ->   48 31 c0 90 90 90 ...         xor rax, rax ; nops
+```
+
+The patched file has no `fs:0x28` loads left. The PTX JIT library, by contrast, is byte-identical to NVIDIA's. Technically this is a neat hack, stack protection compiled out by hand. Legally it is a different category of thing from the firmware, and I come back to it.
+
+## Display: a framebuffer built on NVIDIA's mode-setting
+
+The render path is half of a desktop. The other half is getting pixels to a monitor, and macOS expects an `IOFramebuffer` for that. `NVRMFB.kext` is one, built on NVKMS, NVIDIA's mode-setting layer, through the same KAPI interface `nvidia-drm` uses on Linux. Each NVKMS head becomes a display with real EDID modes and real vblank interrupts. It advertises one pixel format, `IO32BitDirectPixels` (`NVRMFB/fb/nvrm-fb.cpp:60`), which is 8 bits per channel; HDR (issue #30) and adaptive sync (issue #31) are open feature requests. `NVRMAGDC.kext` answers `AppleGraphicsDeviceControl` policy queries, with its own reconstructed header that asserts the Apple class is `0x110` bytes "in 15.7.9".
+
+The most instructive bug in the history sits where the two halves meet. WindowServer composites the desktop with Metal and then flips the finished surface onto the display. With Apple's drivers the flip is ordered after the GPU work. Here NVAccel "cannot order that swap after an NVK fence", so the screen could scan out a surface the GPU was still drawing, and users saw flashing under the cursor. The fix is blunt and lives in the plugin: in WindowServer only, `commitAndWaitUntilSubmitted` waits for the command buffer to complete before returning (`NVMTLObjects.m:4567`). Every other app keeps the normal submit-and-go behaviour. That works, and it costs WindowServer its pipelining; every composited frame now waits for the GPU before the flip is queued.
+
+## What was validated, and on what
+
+The README is unusually careful about this, and I want to credit that before I get to the gaps. It says plainly that "device-table coverage is not runtime qualification". The installer carries 235 PCI device IDs from NVIDIA's 610.57.04 table; the same file's `tested` list has one entry, `2D05`, the RTX 5060. `CARD-SUPPORT.md` marks Turing, Ampere and Ada physical validation as "Pending", and Blackwell as "RTX 5060 automated; RTX 5070/5080 reported working".
+
+The rendering evidence in `CARD-SUPPORT.md`, all on the RTX 5060 under macOS 15.8.1: eight texture row-pitch and offset cases with zero incorrect pixels, twelve private and IOSurface render-target cases at five repetitions each, five MPS Gaussian blur runs, one Core Image filter graph. Release 1.1.0 adds two displays with refresh changes committed at 60, 75 and 100 Hz, and "a verified 4096-byte Metal buffer copy". The `VALIDATION.json` attached to the 1.1.0 release adds sanitizer runs of 100,000 allocation-reuse cycles and a `not_qualified` list: two-display mode changes, macOS 26, RTX 5090, "universal hardware support", and "DRM and full browser/rendering/benchmark compatibility".
+
+That is a test plan for a display driver and a handful of system frameworks on one card. It is not evidence that games, Blender or any Metal app beyond the system's own run correctly, and the project does not claim it is. The README's feature table does read more broadly than this, and the widget above shows where the gap is.
+
+What users report fills in the rest. HighDelay, on an RTX 2060 SUPER with macOS 15.8.1, got to a desktop after setting two NVK memory knobs, and posted the System Information pane:
+
+<Figure
+  src="/articles/nvidia-macos-driver/fig2.png"
+  alt="macOS System Information showing NVIDIA GeForce RTX 2060 SUPER, PCIe x16, 8 GB VRAM, vendor NVIDIA 0x10de, device ID 0x1f06, Metal Support: Metal 3, one 1920 by 1080 display at 60 Hz with 24-bit ARGB8888 framebuffer depth. Beside it, About This Mac reports iMac Pro 2017 with an 11th-gen Core i5-11400F, the RTX 2060 SUPER and macOS Sequoia 15.8.1."
+  caption="A Turing card reporting Metal 3 under macOS 15.8.1, from a user's report. The display serial number and the machine name are blanked by me. The 'iMac Pro' identity is the SMBIOS model the OpenCore setup presents; the CPU is an Intel desktop part (GitHub issue #5, comment by HighDelay, 7 October 2026)."
+/>
+
+The same user later wrote that 1.1.0 regressed on that card, with WindowServer crashing back to the boot console. The open issues read the same way: a GTX 1650 in a "Failed to create MetalDevice" crash loop (#38), displays that go black after about 90 seconds on an RTX 2080 Super laptop (#26), an RTX 5070 that does not recover from sleep (#48), a laptop GTX 1660 Ti where Metal 3 and DisplayPort output work but the copy-engine queue fails (#32). In #26 the same RTX 2080 Super user posted Geekbench's compute screen:
+
+<Figure
+  src="/articles/nvidia-macos-driver/fig3.jpg"
+  alt="Geekbench's Compute tab listing GPU 1 Intel UHD Graphics 630 and GPU 2 NVIDIA GeForce RTX 2080 Super, with the Compute API set to OpenCL and the Compute Device dropdown open showing only Intel(R) UHD Graphics 630."
+  caption="Geekbench sees the RTX 2080 Super, but offers only the Intel iGPU as an OpenCL device. The user's note: 'RTX2080S not shown in the list' (GitHub issue #26, comment by sephoriths, 8 October 2026)."
+/>
+
+None of this is surprising for a driver that is two days old. It is the right picture to hold next to a README that lists OpenCL, ray tracing and mesh shaders in one line.
+
+## Firmware, licences and what the setup switches off
+
+The README says the GSP firmware is "NVIDIA, unmodified". I checked. I downloaded NVIDIA's `NVIDIA-Linux-x86_64-610.57.04.run`, unpacked its zstd payload without running it, and hashed the four firmware files against the ones in `nullmoth-nvidia-1.1.0.tar.gz`. All four match byte for byte, including the 84,310,168-byte `gsp_ga10x.bin` and the 29,381,504-byte `gsp_tu10x.bin`. That claim holds.
+
+Whether they may be redistributed this way is a separate question, and I can only lay out the terms. The licence inside that `.run` package grants the right to "Distribute the SOFTWARE provided for use with operating system kernels distributed under the terms of an OSI-approved open source license", on two conditions: the binaries are "not modified in any way", and "this Agreement is provided to each SOFTWARE recipient". linux-firmware's `LICENCE.nvidia`, which covers the GSP images in that repository, has a similar open-source exception. XNU's source is published under the Apple Public Source License 2.0, which the OSI does list, while the kernel that ships inside macOS comes under Apple's own licence; I do not know which way a lawyer would read that. What I can say is that the release tarball contains three licence texts, for LLVM and zstd, and no copy of NVIDIA's agreement, Mesa's MIT notice, NVIDIA's MIT notice for the RM code compiled into `NVRM.kext`, or the LGPL for the translator. The source repository has the LGPL; the binary package does not.
+
+The patched `libnvidia-nvvm` is clearer. The same NVIDIA agreement says "You may not modify or create derivative works of the SOFTWARE provided in binary form", and redistribution requires unmodified binaries. The patched file sits in an optional path that is off by default, but it ships in every package.
+
+The NullMoth code itself, the plugin, kexts, build scripts and package, is under PolyForm Noncommercial 1.0.0: source available, free for personal, research and non-profit use, no commercial use. The SPDX field on GitHub reads `NOASSERTION`. It is not open source in the OSI sense, and the README does not claim it is.
+
+Then there is macOS. Apple's licence for Sequoia is headed "For use on Apple-branded Systems", and section J says the grant does not permit you "to install, use or run the Apple Software on any non-Apple-branded computer, or to enable others to do so". The project's documentation is written for OpenCore systems, which in practice means PCs, and its tested machine is one. The README also names Intel Macs. The 2019 Mac Pro is an Apple-branded Intel Mac with PCIe slots, so the licence question does not arise there, though the project lists no Mac Pro among its tested systems.
+
+Finally, the security cost, which applies on any machine. The kexts are not signed by Apple, so the documented configuration disables Apple Secure Boot and sets a System Integrity Protection value of `0x0A43`, which by the bit definitions in Apple's `csr.h` allows untrusted kexts, unapproved kexts, an unauthenticated root volume, unrestricted file-system writes and unrestricted NVRAM. The `amfi_get_out_of_my_way=0x1` boot argument turns off code-signing enforcement for the whole system, not only for WindowServer. NullMoth documents all of this, with reasons. A reader should know that the price of the driver is running macOS with most of its integrity protections off.
+
+## Who made it, and how fast
+
+The GitHub account `nullmoth` was created on 25 September 2026. The repository was created on 7 October. Its first commit, at 00:58 Pacific time that day, added 483 files and 365,122 lines; there are 40 commits in all, the last at 14:25 on 8 October, and 19 tagged releases in those 38 hours, from v1.0.0 to v1.1.1. The development history before the first commit is not public. Every commit is authored as "NullMoth Systems". When I checked, the repository had 1,584 stars, 143 forks and 47 open issues, several of them detailed technical reports with patches from people who are clearly drivers people themselves.
+
+I found no statement anywhere in the repository about AI assistance. The one related line is in the 1.1.0 `VALIDATION.json`: `"public_content_scan": "source and artifacts scanned (no AI or personal marks)"`. That tells you the authors checked their artifacts for such marks before publishing. It does not tell you how the code was written, and I am not going to guess. The release notes have a recognisable register of their own, dense with "qualification", "evidence" and "scope", which is at least consistent with someone who expects to be audited.
+
+The scale explains the velocity. About 24,500 lines of plugin and 14,400 of NVRM port are NullMoth's own, plus the NVK backend, the translator additions and the 1401 companion app. Everything underneath, the RM, the firmware, NVK and NAK, metal2vulkan, came from NVIDIA, Mesa, Anees Iqbal and X512.
+
+## What I make of it
+
+I came in expecting a stunt. What is here is a correct architecture, done with real care in the places that are hardest to see: the reconstructed IOKit headers that document where every fact came from, the forwarding hook that makes Metal's private interface report its own gaps, the shim that lets Mesa's RM backend run unchanged on macOS. The insight underneath is simple. Since Turing, NVIDIA's kernel driver is a messenger for a firmware NVIDIA maintains, and Mesa has a Vulkan driver that already knows the chip. Glue those to a third operating system and the problem shrinks to the glue. X512 showed that on Haiku. NullMoth did it for the operating system with the least documentation and the most opinions about its graphics stack.
+
+It is also a two-day-old driver qualified on one card, with emulated mesh shaders, ray tracing in software, a WindowServer that waits on every frame, a patched NVIDIA library in the package, missing third-party notices, and a configuration that switches off macOS's code-signing protections. I would read it as a working proof of the architecture, not yet as a graphics driver. If the project credits the Haiku work, restores the stripped copyright headers, ships the licences its components ask for and drops or replaces the patched compiler, the technical part deserves a long life, and the Metal-plugin knowledge it has written down will outlast this particular driver.
+
+It belongs next to [AnyPS5](/articles/anyps5-static-relinker), which also turns one platform's GPU interface into another's through a SPIR-V recompiler, and [GTA V in a browser tab](/articles/gta5-in-the-browser), which replays Direct3D 11 on WebGPU. All three are translation layers. This one has to convince an operating system that it is a vendor driver, which is the hardest of the three.
+
+## How I checked
+
+I cloned `nullmoth/nvidia-macos-driver` at `b9a5a2b` (8 October 2026, 14:25 PDT) and read the plugin, kexts, translator wrapper, NVK patch, build scripts and docs; file:line references are to that commit. Commit history came from a blob-less clone; stars, forks, issues, releases and the account's creation date from the GitHub API on 9 October. I downloaded the 1.1.1 release's `nullmoth-nvidia-1.1.0.tar.gz` and the 1.1.0 `VALIDATION.json`, listed the tarball and extracted only the bundle, firmware and kext binaries to inspect with `file`, `strings` and hashes; I ran nothing from it. I downloaded NVIDIA's `NVIDIA-Linux-x86_64-610.57.04.run` from `download.nvidia.com`, decompressed its payload with `zstd` without executing the script, and compared firmware and libraries by SHA-256 and byte diff; the 48,134 patch sites are contiguous differing regions, and the `fs:0x28` count is a byte-pattern search. The `nvkmd/nvrm` comparison fetched X512's files from the `nvrm-event-sync-r4` branch of `X547/mesa` and counted shared non-blank lines with Python's `difflib`. The translator comparison is a directory diff against a shallow clone of `steelbrain/metal2vulkan`. The firmware licence text is linux-firmware's `LICENSES/LICENCE.nvidia`, the driver licence is the `LICENSE` inside the `.run`, and the Apple terms are Apple's published Sequoia licence PDF. The two screenshots are users' posts in the project's issues; I cropped the first and blanked a display serial number and a machine name. I did not install or run the driver, so nothing here is a measurement of it running.
