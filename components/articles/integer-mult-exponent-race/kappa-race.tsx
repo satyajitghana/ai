@@ -23,6 +23,14 @@ import { cn } from "@/lib/utils"
 //     #154 (a verification-speed PR the tracker parses as 4.76e-5) and #159 (kappa = 0.127865,
 //     closed eleven minutes after it was opened, by its own author's "AI is not to be blindly
 //     trusted"). #148's title value 4.611281e-4 is used, not the tracker's 4.609169e-4.
+//   #180 to #217 were added at 18:50 UTC on Oct 9 from the GitHub REST API, kappa from each
+//     title as it read then. Omitted: PRs whose titles claim no kappa (#180, an audit draft;
+//     #183, #190, #192, #201, #203, #208, #209, #212, #214, #215, ceilings, tooling and research)
+//     and #200 and #204, whose titles state a bit-side saving or a priced target, not a kappa.
+//   A fifth move of main: GitHub's push log has d1d6c07 -> 27d82eb at 12:57:37 UTC on Oct 9;
+//     certificates/selected-result.json gives 330942774629799/(5*10^17), PR #186 (Dugongue),
+//     imported as a package (GitHub still shows #186 open). The same push carried the
+//     unpublished 472154791/10^12 overnight candidate (#147/#150/#151), which never stood alone.
 //   A fourth move of main: GitHub marks #144 (via #149) merged at 05:06:02 UTC on Oct 9;
 //     README at d1d6c07 gives 4609169/10^10.
 //   The merge: GitHub marks PR #39 merged at 15:18:18 UTC, when main moved to 0605a24
@@ -35,10 +43,10 @@ import { cn } from "@/lib/utils"
 //     UTC (#50 to #58 and #60 to #62; README at 0d235fe gives
 //     25508460085039/(5*10^17), the #61 refinement of #62 stacked on #57).
 //   Swapnil Jain's parallel track (github.com/Swapnil-jain/integer-mult-kappa): times are
-//     his ten X posts (fxtwitter mirror), kappa the exact witness in the commit each post
+//     his eleven X posts (fxtwitter mirror), kappa the exact witness in the commit each post
 //     announced (round 7 is the 741e7aa witness he posted, 1599247689723/(2.5*10^16), not the
-//     later 7.1 headline). Rounds five to ten ship Lean files (lean/Round5.lean to
-//     Round10.lean) that check their moment and assembly arithmetic in the kernel; everything
+//     later 7.1 headline). Rounds five to eleven ship Lean files (lean/Round5.lean to
+//     Round11.lean) that check their moment and assembly arithmetic in the kernel; everything
 //     else on the chart is an exact-rational Python certificate.
 //   The 2^-182 origin sits at 21:58:50 UTC on Oct 6, the commit time of openai/math
 //     adc7f12 ("Initial commit"), the same time Aurel Prosz's tracker uses. Julian
@@ -234,6 +242,31 @@ const PRS: Pt[] = [
   { pr: 177, who: "gabriele-nespoli", h: 60.054, l2: -11.082, k: "4.6114e-4" },
   { pr: 178, who: "rohanarun", h: 60.483, l2: -10.574, k: "6.5592e-4" },
   { pr: 179, who: "chafreaky", h: 60.684, l2: -10.574, k: "6.5592e-4" },
+  { pr: 181, who: "chafreaky", h: 61.182, l2: -10.567, k: "6.5918e-4" },
+  { pr: 182, who: "chafreaky", h: 61.461, l2: -10.565, k: "6.6022e-4" },
+  { pr: 184, who: "icekylinx", h: 61.538, l2: -10.573, k: "6.5664e-4", note: "source-assisted recycling; closed five minutes after opening" },
+  { pr: 185, who: "rohanarun", h: 61.686, l2: -10.564, k: "6.6063e-4" },
+  { pr: 186, who: "Dugongue", h: 61.9, l2: -10.561, k: "6.6189e-4", note: "imported to main at 12:57 UTC" },
+  { pr: 187, who: "rohanarun", h: 62.06, l2: -10.561, k: "6.6176e-4" },
+  { pr: 188, who: "huxint", h: 62.06, l2: -10.665, k: "6.1603e-4" },
+  { pr: 189, who: "chafreaky", h: 62.118, l2: -10.561, k: "6.6176e-4" },
+  { pr: 191, who: "ikeboy", h: 62.273, l2: -10.56, k: "6.6263e-4" },
+  { pr: 193, who: "ikeboy", h: 62.61, l2: -10.555, k: "6.6479e-4" },
+  { pr: 194, who: "ikeboy", h: 62.729, l2: -10.549, k: "6.6743e-4" },
+  { pr: 195, who: "huxint", h: 63.005, l2: -10.559, k: "6.6265e-4" },
+  { pr: 196, who: "chafreaky", h: 63.395, l2: -10.554, k: "6.6505e-4" },
+  { pr: 197, who: "evmckinney9", h: 63.454, l2: -10.531, k: "6.7608e-4", note: "first claim past Jain's round eleven" },
+  { pr: 198, who: "sennemmi", h: 63.712, l2: -10.548, k: "6.6791e-4" },
+  { pr: 199, who: "maxime-fleury", h: 64.143, l2: -10.528, k: "6.7731e-4" },
+  { pr: 202, who: "chafreaky", h: 64.658, l2: -10.529, k: "6.7688e-4" },
+  { pr: 205, who: "rohanarun", h: 65.778, l2: -10.516, k: "6.8306e-4" },
+  { pr: 206, who: "EcmaXp", h: 65.83, l2: -10.516, k: "6.8306e-4" },
+  { pr: 207, who: "Dugongue", h: 66.004, l2: -10.515, k: "6.8319e-4" },
+  { pr: 210, who: "eumemic", h: 66.983, l2: -10.514, k: "6.8396e-4" },
+  { pr: 211, who: "rohanarun", h: 67.249, l2: -10.514, k: "6.8385e-4" },
+  { pr: 213, who: "sennemmi", h: 67.55, l2: -10.514, k: "6.8385e-4" },
+  { pr: 216, who: "Dugongue", h: 68.467, l2: -10.514, k: "6.8386e-4" },
+  { pr: 217, who: "hcg890", h: 68.637, l2: -10.512, k: "6.847e-4", note: "best open claim at 18:50 UTC" },
 ]
 
 // Each move of main: the PR that supplied the witness, when it was opened, and when GitHub
@@ -280,6 +313,16 @@ const MAIN: MainMove[] = [
     url: "https://github.com/CrocSwap/integer-mult-bounds/pull/144",
     from: { h: 54.326, l2: -11.083 },
   },
+  {
+    who: "Colkitt",
+    h: 62.96,
+    l2: -10.561,
+    k: "6.61885549e-4",
+    note: "PR #186 (Dugongue) imported into main · 27d82eb · shared-edge supplier, coordinated frames, completed entrance banks, reviewed",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/186",
+    from: { h: 61.9, l2: -10.561 },
+  },
 ]
 
 const JAIN_REPO = "https://github.com/Swapnil-jain/integer-mult-kappa"
@@ -294,6 +337,7 @@ const JAIN: Pt[] = [
   { who: "Jain", h: 54.294, l2: -12.953, k: "1.2613e-4", note: "round 8 · opposite bank orders, shared cores · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108411540672336133" },
   { who: "Jain", h: 55.425, l2: -11.066, k: "4.6637e-4", note: "round 9 · his bit word inside PR #144's three-stage cover · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108428623191605299" },
   { who: "Jain", h: 59.836, l2: -10.666, k: "6.1534e-4", note: "round 10 · paired-cube words with birth reuse · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108495221369757968" },
+  { who: "Jain", h: 63.13, l2: -10.547, k: "6.6857e-4", note: "round 11 · dead-copy recycling, terminal sinks · Lean-checked arithmetic · led every claim for 19 minutes", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108544965630648526" },
 ]
 
 const PALETTE: Record<string, string> = {
@@ -318,8 +362,8 @@ const T = 14
 const B = 34
 // Two views: the whole race, and everything from 10:00 UTC on Oct 8, where everything after 2^-17 lives.
 type View = { h0: number; h1: number; y0: number; y1: number }
-const FULL: View = { h0: -0.5, h1: 61.5, y0: -190, y1: 0 }
-const ZOOM: View = { h0: 36, h1: 61.5, y0: -17.5, y1: -10 }
+const FULL: View = { h0: -0.5, h1: 69.5, y0: -190, y1: 0 }
+const ZOOM: View = { h0: 36, h1: 69.5, y0: -17.5, y1: -10 }
 
 const EXTRA_A = { h: 15.933, l2: -78 }
 const EXTRA_B = { h: 21.583, l2: -59 }
@@ -381,6 +425,8 @@ export function KappaRace() {
         { h: 44, label: "18:00" },
         { h: 50, label: "Oct 9 00:00" },
         { h: 56, label: "06:00" },
+        { h: 62, label: "12:00" },
+        { h: 68, label: "18:00" },
       ]
     : [
         { h: 2, label: "Oct 7 00:00" },
@@ -388,19 +434,20 @@ export function KappaRace() {
         { h: 26, label: "Oct 8 00:00" },
         { h: 38, label: "12:00" },
         { h: 50, label: "Oct 9 00:00" },
+        { h: 62, label: "12:00" },
       ]
 
   return (
     <figure className="not-prose my-8 rounded-xl border border-border bg-card p-4">
       <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
-        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s ten rounds, Oct 6 to 11:00 UTC on Oct 9
+        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s eleven rounds, Oct 6 to 18:50 UTC on Oct 9
         {zoom ? " · zoomed to 10:00 UTC on Oct 8 onward" : ""}
       </figcaption>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, and to 2 to the minus 10.57 by 08:22. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, and pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08. Swapnil Jain's separate track, ten diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9; rounds five to ten are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
+        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, and to 2 to the minus 10.51 by 18:38. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, and pull request 186 at 12:57 UTC at 2 to the minus 10.56. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
       >
         {ticksY.map((t) => (
           <g key={t}>
