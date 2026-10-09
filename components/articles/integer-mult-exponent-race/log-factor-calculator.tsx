@@ -13,7 +13,8 @@ import { Range } from "@/components/articles/ui/range"
 // computed with expm1 so tiny kappa does not vanish in cancellation.
 // The kappa presets are the exact witnesses: OpenAI's manuscript (2^-182), Colkitt's
 // checkpoints (2^-59, 2^-30), PR #13 (7699/10^10) and PR #44 (2050314627/(5*10^13)),
-// the largest claim open when I read the repository. Hidden constants are not modelled:
+// the largest claim open when I read the repository, and PR #144 (4609169/10^10), main's
+// witness from 05:06 UTC on Oct 9. Hidden constants are not modelled:
 // the real construction only starts below n log n at sizes far beyond the slider.
 
 const PRESETS = [
@@ -22,6 +23,7 @@ const PRESETS = [
   { id: "c30", label: "2^-30", sub: "Colkitt, Oct 8", kappa: 2 ** -30 },
   { id: "pr13", label: "7699/10^10", sub: "PR #13", kappa: 7699e-10 },
   { id: "pr44", label: "4.10e-5", sub: "PR #44", kappa: 4.100629254e-5 },
+  { id: "pr144", label: "4.61e-4", sub: "main, Oct 9 (PR #144)", kappa: 4.609169e-4 },
 ]
 
 const LANDMARKS = [

@@ -15,6 +15,16 @@ import { cn } from "@/lib/utils"
 //     on a second pass at 15:24 UTC, #49 on a third at 15:46 UTC, and #50 to #77 on a
 //     fourth at 19:46 UTC. #73 (withdrawn, no kappa) is omitted. #64's title states no
 //     kappa; its body gives 20411033624901463/(4*10^20).
+//   #78 to #179 were added on 2026-10-09 at 11:00 UTC from the GitHub REST API and the
+//     tracker's /api/research JSON (fetched 10:53 UTC), with kappa from each PR's title or
+//     body as it read then. PRs are edited in place, so a few points (#168 most of all) show
+//     a later version's claim at the PR's opening time. Omitted: PRs with no kappa (#83, #90,
+//     #101, #105, #156, #166, #167, #172, #174, #175), #149 (the integration PR for #144),
+//     #154 (a verification-speed PR the tracker parses as 4.76e-5) and #159 (kappa = 0.127865,
+//     closed eleven minutes after it was opened, by its own author's "AI is not to be blindly
+//     trusted"). #148's title value 4.611281e-4 is used, not the tracker's 4.609169e-4.
+//   A fourth move of main: GitHub marks #144 (via #149) merged at 05:06:02 UTC on Oct 9;
+//     README at d1d6c07 gives 4609169/10^10.
 //   The merge: GitHub marks PR #39 merged at 15:18:18 UTC, when main moved to 0605a24
 //     ("Publish audited community bound with contributor attribution"). The merge commit
 //     itself, fd8c563, was made on integration/community at 13:23 UTC; main stayed at the
@@ -25,10 +35,11 @@ import { cn } from "@/lib/utils"
 //     UTC (#50 to #58 and #60 to #62; README at 0d235fe gives
 //     25508460085039/(5*10^17), the #61 refinement of #62 stacked on #57).
 //   Swapnil Jain's parallel track (github.com/Swapnil-jain/integer-mult-kappa): times are
-//     his six X posts (fxtwitter mirror), kappa the exact witness in the commit each post
-//     announced. Rounds five and six have their moment and assembly arithmetic checked by
-//     Lean's kernel (lean/Round5.lean, lean/Round6.lean, decide / decide +kernel, no
-//     native_decide); everything else on the chart is an exact-rational Python certificate.
+//     his ten X posts (fxtwitter mirror), kappa the exact witness in the commit each post
+//     announced (round 7 is the 741e7aa witness he posted, 1599247689723/(2.5*10^16), not the
+//     later 7.1 headline). Rounds five to ten ship Lean files (lean/Round5.lean to
+//     Round10.lean) that check their moment and assembly arithmetic in the kernel; everything
+//     else on the chart is an exact-rational Python certificate.
 //   The 2^-182 origin sits at 21:58:50 UTC on Oct 6, the commit time of openai/math
 //     adc7f12 ("Initial commit"), the same time Aurel Prosz's tracker uses. Julian
 //     Schiavo's chart labels it 3:19 PM Pacific (22:19 UTC).
@@ -134,6 +145,95 @@ const PRS: Pt[] = [
   { pr: 75, who: "alejandrozu", h: 45.579, l2: -14.247, k: "5.1415e-5" },
   { pr: 76, who: "DominikScholz", h: 45.737, l2: -14.238, k: "5.1739e-5" },
   { pr: 77, who: "huxint", h: 45.761, l2: -14.244, k: "5.1548e-5" },
+  { pr: 78, who: "rohanarun", h: 45.809, l2: -14.247, k: "5.1429e-5" },
+  { pr: 79, who: "chafreaky", h: 45.863, l2: -14.238, k: "5.1746e-5" },
+  { pr: 80, who: "rohanarun", h: 45.958, l2: -14.237, k: "5.1779e-5" },
+  { pr: 81, who: "DominikScholz", h: 46.217, l2: -14.233, k: "5.1916e-5" },
+  { pr: 82, who: "rohanarun", h: 46.237, l2: -14.23, k: "5.2033e-5" },
+  { pr: 84, who: "chafreaky", h: 46.545, l2: -14.224, k: "5.2271e-5" },
+  { pr: 85, who: "rohanarun", h: 46.798, l2: -14.224, k: "5.2272e-5" },
+  { pr: 86, who: "rohanarun", h: 46.924, l2: -14.224, k: "5.2275e-5" },
+  { pr: 87, who: "gupt1156", h: 47.178, l2: -14.219, k: "5.2432e-5" },
+  { pr: 88, who: "chafreaky", h: 47.208, l2: -14.217, k: "5.2514e-5" },
+  { pr: 89, who: "rohanarun", h: 47.366, l2: -14.219, k: "5.2445e-5" },
+  { pr: 91, who: "chafreaky", h: 47.616, l2: -14.209, k: "5.279e-5" },
+  { pr: 92, who: "maxime-fleury", h: 47.642, l2: -14.228, k: "5.2112e-5" },
+  { pr: 93, who: "rohanarun", h: 47.893, l2: -14.209, k: "5.2791e-5" },
+  { pr: 94, who: "maxime-fleury", h: 48.013, l2: -14.209, k: "5.2791e-5" },
+  { pr: 95, who: "rohanarun", h: 48.117, l2: -14.209, k: "5.2791e-5" },
+  { pr: 96, who: "eumemic", h: 48.233, l2: -14.141, k: "5.5355e-5" },
+  { pr: 97, who: "jacklightChen", h: 48.665, l2: -13.932, k: "6.3966e-5" },
+  { pr: 98, who: "rohanarun", h: 48.692, l2: -14.209, k: "5.2791e-5" },
+  { pr: 99, who: "djsmanchanda", h: 48.944, l2: -13.932, k: "6.3979e-5" },
+  { pr: 100, who: "rohanarun", h: 48.957, l2: -13.932, k: "6.3979e-5" },
+  { pr: 102, who: "SovereignSteak", h: 48.981, l2: -13.932, k: "6.3975e-5" },
+  { pr: 103, who: "rohanarun", h: 49.17, l2: -13.932, k: "6.3983e-5" },
+  { pr: 104, who: "icekylinx", h: 49.201, l2: -13.647, k: "7.7948e-5", note: "stopped product-ring interchange" },
+  { pr: 106, who: "Th0rgal", h: 49.359, l2: -14.209, k: "5.2805e-5" },
+  { pr: 107, who: "rohanarun", h: 49.408, l2: -13.646, k: "7.7984e-5" },
+  { pr: 108, who: "rohanarun", h: 49.903, l2: -13.612, k: "7.9883e-5" },
+  { pr: 109, who: "rohanarun", h: 49.994, l2: -13.61, k: "7.9962e-5" },
+  { pr: 110, who: "ikeboy", h: 50.047, l2: -13.508, k: "8.5848e-5" },
+  { pr: 111, who: "rohanarun", h: 50.069, l2: -13.509, k: "8.5782e-5" },
+  { pr: 112, who: "jamesyc", h: 50.179, l2: -13.604, k: "8.0325e-5" },
+  { pr: 113, who: "rohanarun", h: 50.226, l2: -13.378, k: "9.3907e-5" },
+  { pr: 114, who: "eumemic", h: 50.394, l2: -12.978, k: "1.2399e-4" },
+  { pr: 115, who: "icekylinx", h: 50.449, l2: -13.398, k: "9.2634e-5" },
+  { pr: 116, who: "rohanarun", h: 50.567, l2: -13.307, k: "9.8699e-5" },
+  { pr: 117, who: "eumemic", h: 50.656, l2: -13.224, k: "1.0449e-4" },
+  { pr: 118, who: "rohanarun", h: 50.78, l2: -13.169, k: "1.0854e-4" },
+  { pr: 119, who: "seanabreau", h: 50.918, l2: -13.373, k: "9.428e-5" },
+  { pr: 120, who: "eumemic", h: 50.943, l2: -13.162, k: "1.0912e-4" },
+  { pr: 121, who: "Th0rgal", h: 51.091, l2: -13.604, k: "8.0325e-5" },
+  { pr: 122, who: "SovereignSteak", h: 51.193, l2: -13.158, k: "1.0942e-4" },
+  { pr: 123, who: "rohanarun", h: 51.249, l2: -13.16, k: "1.0929e-4" },
+  { pr: 124, who: "jamesyc", h: 51.317, l2: -13.145, k: "1.1038e-4" },
+  { pr: 125, who: "GamingPuzzled", h: 51.337, l2: -13.142, k: "1.1059e-4" },
+  { pr: 126, who: "DanieleCorso", h: 51.413, l2: -13.135, k: "1.1119e-4" },
+  { pr: 127, who: "GamingPuzzled", h: 51.576, l2: -13.119, k: "1.124e-4" },
+  { pr: 128, who: "an664", h: 51.589, l2: -12.988, k: "1.231e-4" },
+  { pr: 129, who: "eumemic", h: 52.124, l2: -12.918, k: "1.2919e-4" },
+  { pr: 130, who: "icekylinx", h: 52.484, l2: -11.634, k: "3.146e-4", note: "three-stage Cayley cover" },
+  { pr: 131, who: "eumemic", h: 52.698, l2: -11.556, k: "3.3221e-4" },
+  { pr: 132, who: "ikeboy", h: 52.778, l2: -11.515, k: "3.4162e-4" },
+  { pr: 133, who: "Th0rgal", h: 52.851, l2: -13.13, k: "1.1151e-4" },
+  { pr: 134, who: "GamingPuzzled", h: 52.867, l2: -11.488, k: "3.481e-4" },
+  { pr: 135, who: "DanieleCorso", h: 52.969, l2: -11.431, k: "3.6211e-4" },
+  { pr: 136, who: "geckods", h: 53.223, l2: -11.431, k: "3.6211e-4" },
+  { pr: 137, who: "eumemic", h: 53.309, l2: -11.239, k: "4.136e-4", note: "posted on X by @dysmemic, eumemic's account" },
+  { pr: 138, who: "geckods", h: 53.411, l2: -11.239, k: "4.136e-4" },
+  { pr: 139, who: "DanieleCorso", h: 53.484, l2: -11.117, k: "4.502e-4" },
+  { pr: 140, who: "sennemmi", h: 53.6, l2: -13.139, k: "1.1088e-4" },
+  { pr: 141, who: "chafreaky", h: 53.664, l2: -13.114, k: "1.128e-4" },
+  { pr: 142, who: "eumemic", h: 53.789, l2: -11.217, k: "4.2015e-4" },
+  { pr: 143, who: "eumemic", h: 54.159, l2: -11.201, k: "4.2483e-4" },
+  { pr: 144, who: "icekylinx", h: 54.326, l2: -11.083, k: "4.6092e-4", note: "merged to main at 05:06 UTC" },
+  { pr: 145, who: "Th0rgal", h: 54.356, l2: -11.533, k: "3.3755e-4" },
+  { pr: 146, who: "Th0rgal", h: 54.758, l2: -11.083, k: "4.6103e-4" },
+  { pr: 147, who: "hpst3r", h: 54.824, l2: -11.072, k: "4.6466e-4" },
+  { pr: 148, who: "gupt1156", h: 54.831, l2: -11.083, k: "4.6113e-4" },
+  { pr: 150, who: "DaysSky", h: 55.429, l2: -11.05, k: "4.7181e-4" },
+  { pr: 151, who: "SovereignSteak", h: 55.759, l2: -11.048, k: "4.7215e-4" },
+  { pr: 152, who: "eumemic", h: 56.085, l2: -10.935, k: "5.1083e-4" },
+  { pr: 153, who: "geckods", h: 56.194, l2: -10.935, k: "5.1083e-4" },
+  { pr: 155, who: "eumemic", h: 56.674, l2: -10.826, k: "5.5081e-4" },
+  { pr: 157, who: "eumemic", h: 56.901, l2: -10.814, k: "5.555e-4" },
+  { pr: 158, who: "geckods", h: 57.117, l2: -10.813, k: "5.5573e-4" },
+  { pr: 160, who: "GamingPuzzled", h: 57.205, l2: -10.798, k: "5.6164e-4" },
+  { pr: 161, who: "eumemic", h: 57.394, l2: -10.732, k: "5.8787e-4" },
+  { pr: 162, who: "DaysSky", h: 57.634, l2: -10.727, k: "5.9019e-4" },
+  { pr: 163, who: "chafreaky", h: 57.737, l2: -10.717, k: "5.9397e-4" },
+  { pr: 164, who: "eumemic", h: 58.081, l2: -10.717, k: "5.9404e-4" },
+  { pr: 165, who: "chafreaky", h: 58.139, l2: -10.717, k: "5.9427e-4" },
+  { pr: 168, who: "eumemic", h: 58.371, l2: -10.574, k: "6.5589e-4", note: "updated in place; its three earlier versions claimed 6.0964e-4, 6.4571e-4 and 6.4891e-4" },
+  { pr: 169, who: "GamingPuzzled", h: 58.608, l2: -10.678, k: "6.1056e-4" },
+  { pr: 170, who: "huxint", h: 58.788, l2: -10.71, k: "5.9682e-4" },
+  { pr: 171, who: "jon314159", h: 58.961, l2: -10.676, k: "6.1107e-4" },
+  { pr: 173, who: "GamingPuzzled", h: 59.302, l2: -10.672, k: "6.1297e-4" },
+  { pr: 176, who: "chafreaky", h: 59.92, l2: -10.59, k: "6.4894e-4" },
+  { pr: 177, who: "gabriele-nespoli", h: 60.054, l2: -11.082, k: "4.6114e-4" },
+  { pr: 178, who: "rohanarun", h: 60.483, l2: -10.574, k: "6.5592e-4" },
+  { pr: 179, who: "chafreaky", h: 60.684, l2: -10.574, k: "6.5592e-4" },
 ]
 
 // Each move of main: the PR that supplied the witness, when it was opened, and when GitHub
@@ -170,6 +270,16 @@ const MAIN: MainMove[] = [
     url: "https://github.com/CrocSwap/integer-mult-bounds/pull/61",
     from: { h: 43.687, l2: -14.259 },
   },
+  {
+    who: "Colkitt",
+    h: 55.1,
+    l2: -11.083,
+    k: "4.609169e-4",
+    note: "PR #144 (icekylinx) merged into main through #149 · d1d6c07 · three-stage cover with paired cubes, reviewed",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/144",
+    from: { h: 54.326, l2: -11.083 },
+  },
 ]
 
 const JAIN_REPO = "https://github.com/Swapnil-jain/integer-mult-kappa"
@@ -180,6 +290,10 @@ const JAIN: Pt[] = [
   { who: "Jain", h: 37.167, l2: -16.35, k: "1.1972e-5", note: "round 4 · PR #24's bit network", url: "https://x.com/SJ_Swapnil_Jain/status/2108152926959284315" },
   { who: "Jain", h: 38.665, l2: -15.979, k: "1.5479e-5", note: "round 5 · flag basis · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108175552549118371" },
   { who: "Jain", h: 40.055, l2: -14.735, k: "3.6666e-5", note: "round 6 · copied centres · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108196538568851574" },
+  { who: "Jain", h: 46.949, l2: -13.932, k: "6.397e-5", note: "round 7 · deferred garbage readout · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108300632738386419" },
+  { who: "Jain", h: 54.294, l2: -12.953, k: "1.2613e-4", note: "round 8 · opposite bank orders, shared cores · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108411540672336133" },
+  { who: "Jain", h: 55.425, l2: -11.066, k: "4.6637e-4", note: "round 9 · his bit word inside PR #144's three-stage cover · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108428623191605299" },
+  { who: "Jain", h: 59.836, l2: -10.666, k: "6.1534e-4", note: "round 10 · paired-cube words with birth reuse · Lean-checked arithmetic", lean: true, url: "https://x.com/SJ_Swapnil_Jain/status/2108495221369757968" },
 ]
 
 const PALETTE: Record<string, string> = {
@@ -202,10 +316,10 @@ const L = 48
 const R = 14
 const T = 14
 const B = 34
-// Two views: the whole race, and the last ten hours, where everything after 2^-17 lives.
+// Two views: the whole race, and everything from 10:00 UTC on Oct 8, where everything after 2^-17 lives.
 type View = { h0: number; h1: number; y0: number; y1: number }
-const FULL: View = { h0: -0.5, h1: 46.5, y0: -190, y1: 0 }
-const ZOOM: View = { h0: 36, h1: 46.5, y0: -17.5, y1: -13.9 }
+const FULL: View = { h0: -0.5, h1: 61.5, y0: -190, y1: 0 }
+const ZOOM: View = { h0: 36, h1: 61.5, y0: -17.5, y1: -10 }
 
 const EXTRA_A = { h: 15.933, l2: -78 }
 const EXTRA_B = { h: 21.583, l2: -59 }
@@ -260,34 +374,33 @@ export function KappaRace() {
       : sel.who === "Jain"
         ? "Swapnil Jain (own repo)"
         : sel.who
-  const ticksY = zoom ? [-17, -16, -15, -14] : [-180, -150, -120, -90, -60, -30, 0]
+  const ticksY = zoom ? [-17, -16, -15, -14, -13, -12, -11] : [-180, -150, -120, -90, -60, -30, 0]
   const ticksX = zoom
     ? [
-        { h: 36, label: "Oct 8 10:00" },
-        { h: 38, label: "12:00" },
-        { h: 40, label: "14:00" },
-        { h: 42, label: "16:00" },
+        { h: 38, label: "Oct 8 12:00" },
         { h: 44, label: "18:00" },
-        { h: 46, label: "20:00" },
+        { h: 50, label: "Oct 9 00:00" },
+        { h: 56, label: "06:00" },
       ]
     : [
         { h: 2, label: "Oct 7 00:00" },
         { h: 14, label: "12:00" },
         { h: 26, label: "Oct 8 00:00" },
         { h: 38, label: "12:00" },
+        { h: 50, label: "Oct 9 00:00" },
       ]
 
   return (
     <figure className="not-prose my-8 rounded-xl border border-border bg-card p-4">
       <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
-        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s six rounds, Oct 6 to Oct 8 (UTC)
-        {zoom ? " · zoomed to 10:00–20:30 on Oct 8" : ""}
+        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s ten rounds, Oct 6 to 11:00 UTC on Oct 9
+        {zoom ? " · zoomed to 10:00 UTC on Oct 8 onward" : ""}
       </figcaption>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause there for about three hours, then climb again after 16:30 to about 2 to the minus 14.24 by 19:45. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47 at 2 to the minus 14.57, and a reviewed batch of pull requests 50 to 62 at 18:36 at 2 to the minus 14.26. Swapnil Jain's separate track, six diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC to 2 to the minus 14.7 at 14:03 UTC; its last two points are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows only the last ten hours."
+        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, and to 2 to the minus 10.57 by 08:22. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, and pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08. Swapnil Jain's separate track, ten diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9; rounds five to ten are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
       >
         {ticksY.map((t) => (
           <g key={t}>
@@ -437,7 +550,7 @@ export function KappaRace() {
           aria-pressed={zoom}
           className={cn("rounded-md border px-2 py-0.5 font-mono", zoom ? "border-foreground" : "border-border text-muted-foreground")}
         >
-          zoom: last ten hours
+          zoom: from Oct 8, 10:00
         </button>
         <button
           type="button"
