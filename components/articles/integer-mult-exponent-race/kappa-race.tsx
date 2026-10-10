@@ -27,6 +27,14 @@ import { cn } from "@/lib/utils"
 //     title as it read then. Omitted: PRs whose titles claim no kappa (#180, an audit draft;
 //     #183, #190, #192, #201, #203, #208, #209, #212, #214, #215, ceilings, tooling and research)
 //     and #200 and #204, whose titles state a bit-side saving or a priced target, not a kappa.
+//   #218 to #300 were added at 11:35 UTC on Oct 10 from the GitHub REST API, kappa from each
+//     title as it read then. Omitted: titles with no kappa or "no new κ" (#218, #225, #229, #231,
+//     #233, #236 (a Lean check of #144's 4.609169e-4), #239, #241, #245, #250, #256, #274, #278,
+//     #288, #294, #301), and the priced targets that say they are not witnesses (#219, #224, #232,
+//     #246, #262). #275 was opened at 04:17 UTC claiming 7.13690108083058e-4 and retitled five
+//     times; it is plotted at its 11:31:42 rename, 7.51075693834608e-4, the best open claim then.
+//     Main did not move: GitHub's main is still 3b6b668 (selected-result.json at 27d82eb), although
+//     Colkitt posted at 04:13 UTC on Oct 10 that he had verified and merged #210 at about 7.10046e-4.
 //   A fifth move of main: GitHub's push log has d1d6c07 -> 27d82eb at 12:57:37 UTC on Oct 9;
 //     certificates/selected-result.json gives 330942774629799/(5*10^17), PR #186 (Dugongue),
 //     imported as a package (GitHub still shows #186 open). The same push carried the
@@ -262,11 +270,71 @@ const PRS: Pt[] = [
   { pr: 205, who: "rohanarun", h: 65.778, l2: -10.516, k: "6.8306e-4" },
   { pr: 206, who: "EcmaXp", h: 65.83, l2: -10.516, k: "6.8306e-4" },
   { pr: 207, who: "Dugongue", h: 66.004, l2: -10.515, k: "6.8319e-4" },
-  { pr: 210, who: "eumemic", h: 66.983, l2: -10.514, k: "6.8396e-4" },
+  { pr: 210, who: "eumemic", h: 66.983, l2: -10.514, k: "6.8396e-4", note: "its claim at 18:50 UTC on Oct 9; retitled overnight to 7.1007e-4 with five-stage banks, and the PR Colkitt said he merged at 04:13 UTC on Oct 10" },
   { pr: 211, who: "rohanarun", h: 67.249, l2: -10.514, k: "6.8385e-4" },
   { pr: 213, who: "sennemmi", h: 67.55, l2: -10.514, k: "6.8385e-4" },
   { pr: 216, who: "Dugongue", h: 68.467, l2: -10.514, k: "6.8386e-4" },
-  { pr: 217, who: "hcg890", h: 68.637, l2: -10.512, k: "6.847e-4", note: "best open claim at 18:50 UTC" },
+  { pr: 217, who: "hcg890", h: 68.637, l2: -10.512, k: "6.847e-4", note: "best open claim at 18:50 UTC on Oct 9" },
+  { pr: 223, who: "ikeboy", h: 69.774, l2: -10.497, k: "6.9214e-4" },
+  { pr: 226, who: "pCwOrM", h: 70.111, l2: -14.563, k: "4.1311e-5" },
+  { pr: 227, who: "Dugongue", h: 70.559, l2: -10.491, k: "6.9478e-4" },
+  { pr: 228, who: "tehruhn", h: 70.609, l2: -10.559, k: "6.6283e-4" },
+  { pr: 230, who: "sennemmi", h: 70.831, l2: -10.491, k: "6.9479e-4" },
+  { pr: 234, who: "hcg890", h: 72.097, l2: -10.473, k: "7.037e-4", note: "first five-stage κ: Sussman's bridged layout on the multiplication side" },
+  { pr: 235, who: "gabriele-nespoli", h: 72.129, l2: -10.463, k: "7.0858e-4" },
+  { pr: 237, who: "rohanarun", h: 72.338, l2: -10.463, k: "7.0858e-4" },
+  { pr: 238, who: "amanforindia", h: 72.858, l2: -10.559, k: "6.6268e-4" },
+  { pr: 240, who: "rohanarun", h: 73.01, l2: -10.461, k: "7.0942e-4" },
+  { pr: 242, who: "Dugongue", h: 73.488, l2: -10.46, k: "7.1005e-4", note: "the source527 line Colkitt said he merged at 04:13 UTC (main had not moved on GitHub by 11:35)" },
+  { pr: 243, who: "rohanarun", h: 73.56, l2: -10.461, k: "7.0942e-4" },
+  { pr: 244, who: "eumemic", h: 73.727, l2: -10.459, k: "7.1035e-4" },
+  { pr: 247, who: "sennemmi", h: 74.008, l2: -10.459, k: "7.1035e-4" },
+  { pr: 248, who: "rohanarun", h: 74.089, l2: -10.459, k: "7.1035e-4" },
+  { pr: 249, who: "eumemic", h: 74.106, l2: -10.459, k: "7.1039e-4" },
+  { pr: 251, who: "eumemic", h: 74.464, l2: -10.459, k: "7.1043e-4" },
+  { pr: 252, who: "rohanarun", h: 74.504, l2: -10.459, k: "7.1039e-4" },
+  { pr: 253, who: "sennemmi", h: 75.023, l2: -10.459, k: "7.1043e-4" },
+  { pr: 254, who: "Dugongue", h: 75.234, l2: -10.459, k: "7.1047e-4" },
+  { pr: 255, who: "hvaliconAI", h: 75.593, l2: -10.459, k: "7.1047e-4" },
+  { pr: 257, who: "sennemmi", h: 75.711, l2: -10.459, k: "7.1047e-4" },
+  { pr: 258, who: "amanforindia", h: 75.866, l2: -10.459, k: "7.1047e-4" },
+  { pr: 259, who: "Dugongue", h: 75.923, l2: -10.458, k: "7.1103e-4" },
+  { pr: 260, who: "rohanarun", h: 76.028, l2: -10.459, k: "7.1044e-4" },
+  { pr: 261, who: "sennemmi", h: 76.263, l2: -10.458, k: "7.1103e-4" },
+  { pr: 263, who: "rohanarun", h: 76.469, l2: -10.458, k: "7.1103e-4" },
+  { pr: 264, who: "dataisfire", h: 76.612, l2: -10.56, k: "6.625e-4" },
+  { pr: 265, who: "rohanarun", h: 76.676, l2: -10.458, k: "7.1103e-4" },
+  { pr: 266, who: "chafreaky", h: 77.009, l2: -10.452, k: "7.1403e-4" },
+  { pr: 267, who: "Dugongue", h: 77.016, l2: -10.458, k: "7.1107e-4" },
+  { pr: 268, who: "eumemic", h: 77.033, l2: -10.457, k: "7.1119e-4" },
+  { pr: 269, who: "rohanarun", h: 77.28, l2: -10.457, k: "7.1143e-4" },
+  { pr: 270, who: "utcorvusvolat-dotcom", h: 77.428, l2: -10.457, k: "7.1146e-4" },
+  { pr: 271, who: "evmckinney9", h: 77.697, l2: -10.452, k: "7.1366e-4" },
+  { pr: 272, who: "Dugongue", h: 77.701, l2: -10.456, k: "7.1207e-4" },
+  { pr: 273, who: "rohanarun", h: 77.846, l2: -10.456, k: "7.1195e-4" },
+  { pr: 275, who: "lydakis", h: 85.528, l2: -10.379, k: "7.5108e-4", note: "opened 04:17 at 7.1369e-4 and retitled five times; plotted at its 11:31 claim, the best open claim then" },
+  { pr: 276, who: "DreamingOfClouds", h: 78.299, l2: -10.434, k: "7.2287e-4", note: "gen4: a new paired-cube bit word in the five-stage banks" },
+  { pr: 277, who: "hcg890", h: 78.334, l2: -10.458, k: "7.1105e-4" },
+  { pr: 279, who: "rohanarun", h: 78.689, l2: -10.432, k: "7.241e-4" },
+  { pr: 280, who: "utcorvusvolat-dotcom", h: 78.903, l2: -10.431, k: "7.2419e-4" },
+  { pr: 281, who: "rohanarun", h: 79.214, l2: -10.43, k: "7.2511e-4" },
+  { pr: 282, who: "chafreaky", h: 79.338, l2: -10.43, k: "7.2473e-4" },
+  { pr: 283, who: "Dugongue", h: 79.52, l2: -10.428, k: "7.2611e-4" },
+  { pr: 284, who: "chafreaky", h: 80.624, l2: -10.427, k: "7.2629e-4" },
+  { pr: 285, who: "DreamingOfClouds", h: 81.169, l2: -10.395, k: "7.4279e-4", note: "gen5: annealed modules on the gen4 word" },
+  { pr: 286, who: "GamingPuzzled", h: 81.564, l2: -10.427, k: "7.2632e-4" },
+  { pr: 287, who: "rohanarun", h: 81.774, l2: -10.392, k: "7.4414e-4" },
+  { pr: 289, who: "gupt1156", h: 82.629, l2: -10.392, k: "7.4413e-4" },
+  { pr: 290, who: "chafreaky", h: 82.665, l2: -10.391, k: "7.4471e-4" },
+  { pr: 291, who: "rohanarun", h: 83.264, l2: -10.391, k: "7.4473e-4" },
+  { pr: 292, who: "sannidhi-hemanth", h: 83.356, l2: -10.391, k: "7.4472e-4" },
+  { pr: 293, who: "jacklightChen", h: 83.558, l2: -10.391, k: "7.4473e-4" },
+  { pr: 295, who: "chafreaky", h: 83.676, l2: -10.389, k: "7.4551e-4" },
+  { pr: 296, who: "chafreaky", h: 83.787, l2: -10.387, k: "7.4671e-4", note: "gen5b" },
+  { pr: 297, who: "rohanarun", h: 83.936, l2: -10.39, k: "7.4529e-4" },
+  { pr: 298, who: "M6LI", h: 84.058, l2: -10.391, k: "7.4471e-4" },
+  { pr: 299, who: "chafreaky", h: 84.212, l2: -10.381, k: "7.499e-4" },
+  { pr: 300, who: "rohanarun", h: 84.674, l2: -10.381, k: "7.4992e-4" },
 ]
 
 // Each move of main: the PR that supplied the witness, when it was opened, and when GitHub
@@ -362,8 +430,8 @@ const T = 14
 const B = 34
 // Two views: the whole race, and everything from 10:00 UTC on Oct 8, where everything after 2^-17 lives.
 type View = { h0: number; h1: number; y0: number; y1: number }
-const FULL: View = { h0: -0.5, h1: 69.5, y0: -190, y1: 0 }
-const ZOOM: View = { h0: 36, h1: 69.5, y0: -17.5, y1: -10 }
+const FULL: View = { h0: -0.5, h1: 87, y0: -190, y1: 0 }
+const ZOOM: View = { h0: 36, h1: 87, y0: -17.5, y1: -10 }
 
 const EXTRA_A = { h: 15.933, l2: -78 }
 const EXTRA_B = { h: 21.583, l2: -59 }
@@ -422,11 +490,10 @@ export function KappaRace() {
   const ticksX = zoom
     ? [
         { h: 38, label: "Oct 8 12:00" },
-        { h: 44, label: "18:00" },
         { h: 50, label: "Oct 9 00:00" },
-        { h: 56, label: "06:00" },
         { h: 62, label: "12:00" },
-        { h: 68, label: "18:00" },
+        { h: 74, label: "Oct 10 00:00" },
+        { h: 86, label: "12:00" },
       ]
     : [
         { h: 2, label: "Oct 7 00:00" },
@@ -435,19 +502,21 @@ export function KappaRace() {
         { h: 38, label: "12:00" },
         { h: 50, label: "Oct 9 00:00" },
         { h: 62, label: "12:00" },
+        { h: 74, label: "Oct 10 00:00" },
+        { h: 86, label: "12:00" },
       ]
 
   return (
     <figure className="not-prose my-8 rounded-xl border border-border bg-card p-4">
       <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
-        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s eleven rounds, Oct 6 to 18:50 UTC on Oct 9
+        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s eleven rounds, Oct 6 to 11:35 UTC on Oct 10
         {zoom ? " · zoomed to 10:00 UTC on Oct 8 onward" : ""}
       </figcaption>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, and to 2 to the minus 10.51 by 18:38. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, and pull request 186 at 12:57 UTC at 2 to the minus 10.56. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
+        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, to 2 to the minus 10.51 by 18:38, to 2 to the minus 10.47 at 22:06 with the first five-stage claim, to 2 to the minus 10.40 by 07:10 UTC on October 10 and to 2 to the minus 10.38 by 11:31. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, and pull request 186 at 12:57 UTC at 2 to the minus 10.56, where it still stood on GitHub at 11:35 UTC on October 10. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
       >
         {ticksY.map((t) => (
           <g key={t}>
