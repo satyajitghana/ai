@@ -128,7 +128,9 @@ function discoverClones(cloneRoot: string): string[] {
 // Licence detection — conservative on purpose
 // ---------------------------------------------------------------------------
 
-const LICENSE_FILE_RE = /^(licen[sc]e|copying)(-[\w.]+)?(\.(md|txt|rst))?$/i
+// LICENSE, LICENSE.md, LICENSE-MIT, COPYING.txt and suffixed forms such as
+// LICENSE.APACHE (strands-agents/harness-sdk); .md/.txt/.rst stay optional.
+const LICENSE_FILE_RE = /^(licen[sc]e|copying)([-.][\w.]+)?$/i
 
 /**
  * SPDX identifier when the text is unmistakable, `"custom"` when there is a
