@@ -35,6 +35,20 @@ import { cn } from "@/lib/utils"
 //     times; it is plotted at its 11:31:42 rename, 7.51075693834608e-4, the best open claim then.
 //     Main did not move: GitHub's main is still 3b6b668 (selected-result.json at 27d82eb), although
 //     Colkitt posted at 04:13 UTC on Oct 10 that he had verified and merged #210 at about 7.10046e-4.
+//   #301 to #485 were added at 19:40 UTC on Oct 11 from the GitHub REST API, kappa from each
+//     title as it read then, except #376 and #434, plotted at their opening titles (9.3191e-4
+//     and 1.12825e-3) from GitHub's rename events: #376 was retitled fifteen times, past 1e-3
+//     at 06:59:21 UTC, ten minutes before #390 opened. Omitted: titles with no kappa, supplier-only
+//     or "no new κ" PRs, tooling, audits and archives (#301, #302, #304, #318, #324, #327, #333,
+//     #349, #363, #365, #367, #368, #371, #379, #393, #397, #417, #430, #446, #449, #452, #468,
+//     #474, #475, #477, #479, #481, #484, #485), #377 (its title is a projection; its body says the
+//     combined kappa stays 8.048e-4) and #453 (its author withdrew the gain). #448, #450, #464, #469
+//     and #480 rest on #448's cross-copy residual split, which #451 challenges with an exact trace
+//     computation; they are drawn hollow and left out of the green best-claim line.
+//   A sixth move of main: GitHub marks #276 merged at 14:08:25 UTC on Oct 10, when main took
+//     PR #279's first four commits (Rohan Arun on DreamingOfClouds' gen4 word);
+//     certificates/selected-result.json gives 90446448750933/(1.25*10^17). The audited #210
+//     (710046193349537/10^18) was imported in the same push as a historical checkpoint only.
 //   A fifth move of main: GitHub's push log has d1d6c07 -> 27d82eb at 12:57:37 UTC on Oct 9;
 //     certificates/selected-result.json gives 330942774629799/(5*10^17), PR #186 (Dugongue),
 //     imported as a package (GitHub still shows #186 open). The same push carried the
@@ -73,6 +87,7 @@ type Pt = {
   note?: string
   lean?: boolean
   merged?: boolean
+  contested?: boolean
   url?: string
 }
 
@@ -335,6 +350,160 @@ const PRS: Pt[] = [
   { pr: 298, who: "M6LI", h: 84.058, l2: -10.391, k: "7.4471e-4" },
   { pr: 299, who: "chafreaky", h: 84.212, l2: -10.381, k: "7.499e-4" },
   { pr: 300, who: "rohanarun", h: 84.674, l2: -10.381, k: "7.4992e-4" },
+  { pr: 303, who: "rohanarun", h: 85.971, l2: -10.381, k: "7.4998e-4" },
+  { pr: 305, who: "eumemic", h: 86.296, l2: -10.379, k: "7.5114e-4" },
+  { pr: 306, who: "chafreaky", h: 87.013, l2: -10.378, k: "7.5146e-4" },
+  { pr: 307, who: "rohanarun", h: 87.149, l2: -10.379, k: "7.5115e-4" },
+  { pr: 308, who: "rohanarun", h: 87.431, l2: -10.378, k: "7.5147e-4" },
+  { pr: 309, who: "Dugongue", h: 87.489, l2: -10.378, k: "7.515e-4" },
+  { pr: 310, who: "utcorvusvolat-dotcom", h: 88.23, l2: -10.375, k: "7.5289e-4", note: "Design T: a redesigned w3 bit word that frees helpers" },
+  { pr: 311, who: "rohanarun", h: 88.862, l2: -10.374, k: "7.5351e-4" },
+  { pr: 312, who: "chafreaky", h: 89.55, l2: -10.372, k: "7.5455e-4" },
+  { pr: 313, who: "rohanarun", h: 89.716, l2: -10.373, k: "7.5408e-4" },
+  { pr: 314, who: "rohanarun", h: 89.873, l2: -10.371, k: "7.5512e-4" },
+  { pr: 315, who: "DreamingOfClouds", h: 89.921, l2: -10.354, k: "7.6423e-4" },
+  { pr: 316, who: "rohanarun", h: 90.249, l2: -10.352, k: "7.6515e-4" },
+  { pr: 317, who: "eumemic", h: 90.446, l2: -10.346, k: "7.6817e-4" },
+  { pr: 319, who: "eumemic", h: 90.719, l2: -10.346, k: "7.6826e-4" },
+  { pr: 320, who: "chafreaky", h: 90.85, l2: -10.344, k: "7.6955e-4" },
+  { pr: 321, who: "Dugongue", h: 92.038, l2: -10.344, k: "7.6921e-4" },
+  { pr: 322, who: "eumemic", h: 92.084, l2: -10.344, k: "7.6956e-4" },
+  { pr: 323, who: "eumemic", h: 92.173, l2: -10.344, k: "7.6956e-4" },
+  { pr: 325, who: "DreamingOfClouds", h: 92.442, l2: -10.343, k: "7.6968e-4" },
+  { pr: 326, who: "eumemic", h: 92.484, l2: -10.344, k: "7.6957e-4" },
+  { pr: 328, who: "eumemic", h: 93.187, l2: -10.339, k: "7.7229e-4" },
+  { pr: 329, who: "chafreaky", h: 93.295, l2: -10.331, k: "7.7652e-4" },
+  { pr: 330, who: "eumemic", h: 93.654, l2: -10.331, k: "7.7652e-4" },
+  { pr: 331, who: "eumemic", h: 93.939, l2: -10.331, k: "7.7652e-4" },
+  { pr: 332, who: "eumemic", h: 94.298, l2: -10.329, k: "7.7727e-4" },
+  { pr: 334, who: "eumemic", h: 95.257, l2: -10.329, k: "7.776e-4" },
+  { pr: 335, who: "eumemic", h: 95.581, l2: -10.329, k: "7.7761e-4" },
+  { pr: 336, who: "eumemic", h: 96.247, l2: -10.329, k: "7.7763e-4" },
+  { pr: 337, who: "eumemic", h: 96.319, l2: -10.329, k: "7.7765e-4" },
+  { pr: 338, who: "eumemic", h: 96.69, l2: -10.329, k: "7.7767e-4" },
+  { pr: 339, who: "eumemic", h: 96.711, l2: -10.328, k: "7.777e-4" },
+  { pr: 340, who: "rohanarun", h: 96.883, l2: -10.329, k: "7.7766e-4" },
+  { pr: 341, who: "eumemic", h: 97.074, l2: -10.328, k: "7.7771e-4" },
+  { pr: 342, who: "eumemic", h: 97.217, l2: -10.328, k: "7.7773e-4" },
+  { pr: 343, who: "eumemic", h: 97.338, l2: -10.328, k: "7.7775e-4" },
+  { pr: 344, who: "eumemic", h: 97.476, l2: -10.328, k: "7.7795e-4" },
+  { pr: 345, who: "eumemic", h: 97.733, l2: -10.328, k: "7.7809e-4" },
+  { pr: 346, who: "LJH-217", h: 97.761, l2: -10.301, k: "7.9258e-4", note: "#310's Design T ported to p = 10; the complex side becomes the wall" },
+  { pr: 347, who: "eumemic", h: 97.771, l2: -10.328, k: "7.781e-4" },
+  { pr: 348, who: "chafreaky", h: 98.295, l2: -10.3, k: "7.9339e-4" },
+  { pr: 350, who: "rohanarun", h: 98.639, l2: -10.3, k: "7.9347e-4" },
+  { pr: 351, who: "eumemic", h: 98.696, l2: -10.3, k: "7.9339e-4" },
+  { pr: 352, who: "DaysSky", h: 99.063, l2: -10.286, k: "8.0108e-4", note: "Sussman's Lean-checked E8 unit as the complex supplier; the bit side binds again" },
+  { pr: 353, who: "rohanarun", h: 99.423, l2: -10.285, k: "8.016e-4" },
+  { pr: 354, who: "chafreaky", h: 99.551, l2: -10.282, k: "8.0314e-4" },
+  { pr: 355, who: "Dugongue", h: 99.863, l2: -10.284, k: "8.0197e-4" },
+  { pr: 356, who: "eumemic", h: 99.965, l2: -10.282, k: "8.0316e-4" },
+  { pr: 357, who: "rohanarun", h: 100.116, l2: -10.281, k: "8.0365e-4" },
+  { pr: 358, who: "eumemic", h: 100.245, l2: -10.281, k: "8.0368e-4" },
+  { pr: 359, who: "chafreaky", h: 100.374, l2: -10.28, k: "8.043e-4" },
+  { pr: 360, who: "Dugongue", h: 100.485, l2: -10.281, k: "8.0351e-4" },
+  { pr: 361, who: "chafreaky", h: 100.917, l2: -10.279, k: "8.0485e-4" },
+  { pr: 362, who: "rohanarun", h: 100.949, l2: -10.279, k: "8.0485e-4" },
+  { pr: 364, who: "rohanarun", h: 101.608, l2: -10.279, k: "8.0488e-4" },
+  { pr: 366, who: "rohanarun", h: 102.387, l2: -10.279, k: "8.0494e-4" },
+  { pr: 369, who: "applecrusher", h: 102.766, l2: -10.279, k: "8.0495e-4" },
+  { pr: 370, who: "utcorvusvolat-dotcom", h: 103.096, l2: -10.158, k: "8.7548e-4", note: "first E8 bit word: the 120 root lines of E8 in Q⁸" },
+  { pr: 372, who: "DesmondForward", h: 103.287, l2: -10.433, k: "7.2357e-4" },
+  { pr: 373, who: "DaysSky", h: 103.438, l2: -10.068, k: "9.3191e-4", note: "E8 bit word with the E8 complex unit in a seven-stage bridged word" },
+  { pr: 374, who: "rohanarun", h: 103.678, l2: -10.033, k: "9.544e-4" },
+  { pr: 375, who: "DaysSky", h: 103.718, l2: -10.033, k: "9.5424e-4" },
+  { pr: 376, who: "applecrusher", h: 103.734, l2: -10.068, k: "9.3191e-4", note: "opened at 9.3191e-4 (plotted); retitled 15 times, to 1.00005e-3 at 06:59 UTC and 1.1209e-3 by 12:40" },
+  { pr: 378, who: "chafreaky", h: 103.911, l2: -10.033, k: "9.5465e-4" },
+  { pr: 380, who: "rohanarun", h: 104.125, l2: -10.014, k: "9.6726e-4" },
+  { pr: 381, who: "DaysSky", h: 104.241, l2: -9.972, k: "9.9566e-4" },
+  { pr: 382, who: "chafreaky", h: 104.311, l2: -9.968, k: "9.9824e-4" },
+  { pr: 383, who: "rohanarun", h: 104.417, l2: -9.97, k: "9.9676e-4" },
+  { pr: 384, who: "chafreaky", h: 104.459, l2: -9.968, k: "9.9863e-4" },
+  { pr: 385, who: "rohanarun", h: 104.565, l2: -9.968, k: "9.9839e-4" },
+  { pr: 386, who: "jacklightChen", h: 104.684, l2: -9.968, k: "9.9824e-4" },
+  { pr: 387, who: "rohanarun", h: 104.763, l2: -9.968, k: "9.9863e-4" },
+  { pr: 388, who: "eumemic", h: 104.789, l2: -9.975, k: "9.9395e-4" },
+  { pr: 389, who: "ai-nanachi", h: 105.008, l2: -9.968, k: "9.9863e-4" },
+  { pr: 390, who: "Dugongue", h: 105.163, l2: -9.965, k: "1.0002e-3", note: "first PR opened above 10⁻³ (07:09:46 UTC): prefix restoration on the E8 complex word" },
+  { pr: 391, who: "eumemic", h: 105.233, l2: -9.975, k: "9.9395e-4" },
+  { pr: 392, who: "rohanarun", h: 105.293, l2: -9.965, k: "1.0002e-3" },
+  { pr: 394, who: "chafreaky", h: 105.633, l2: -9.965, k: "1.0004e-3" },
+  { pr: 395, who: "rohanarun", h: 105.692, l2: -9.964, k: "1.0013e-3" },
+  { pr: 396, who: "rohanarun", h: 105.879, l2: -9.964, k: "1.0011e-3" },
+  { pr: 398, who: "Dugongue", h: 105.968, l2: -9.962, k: "1.0025e-3" },
+  { pr: 399, who: "chafreaky", h: 106.18, l2: -9.962, k: "1.0027e-3" },
+  { pr: 400, who: "rohanarun", h: 106.447, l2: -9.962, k: "1.0027e-3" },
+  { pr: 401, who: "Dugongue", h: 106.744, l2: -9.947, k: "1.0133e-3" },
+  { pr: 402, who: "chafreaky", h: 107.089, l2: -9.947, k: "1.0134e-3" },
+  { pr: 403, who: "rohanarun", h: 107.147, l2: -9.947, k: "1.0134e-3" },
+  { pr: 404, who: "Dugongue", h: 107.278, l2: -9.942, k: "1.0164e-3" },
+  { pr: 405, who: "rohanarun", h: 107.302, l2: -9.947, k: "1.0134e-3" },
+  { pr: 406, who: "rohanarun", h: 107.442, l2: -9.942, k: "1.0165e-3" },
+  { pr: 407, who: "chafreaky", h: 107.575, l2: -9.942, k: "1.0165e-3" },
+  { pr: 408, who: "eumemic", h: 107.674, l2: -9.941, k: "1.017e-3" },
+  { pr: 409, who: "rohanarun", h: 107.691, l2: -9.941, k: "1.0173e-3" },
+  { pr: 410, who: "eumemic", h: 107.963, l2: -9.941, k: "1.0176e-3" },
+  { pr: 411, who: "eumemic", h: 108.047, l2: -9.941, k: "1.0176e-3" },
+  { pr: 412, who: "chafreaky", h: 108.195, l2: -9.94, k: "1.0178e-3" },
+  { pr: 413, who: "rohanarun", h: 108.21, l2: -9.941, k: "1.0177e-3" },
+  { pr: 414, who: "eumemic", h: 108.336, l2: -9.941, k: "1.0177e-3" },
+  { pr: 415, who: "rohanarun", h: 108.353, l2: -9.94, k: "1.0178e-3" },
+  { pr: 416, who: "eumemic", h: 108.409, l2: -9.94, k: "1.0178e-3" },
+  { pr: 418, who: "rohanarun", h: 108.628, l2: -9.94, k: "1.0179e-3" },
+  { pr: 419, who: "chafreaky", h: 108.668, l2: -9.94, k: "1.018e-3" },
+  { pr: 420, who: "eumemic", h: 108.679, l2: -9.94, k: "1.0178e-3" },
+  { pr: 421, who: "eumemic", h: 108.854, l2: -9.94, k: "1.0179e-3" },
+  { pr: 422, who: "rohanarun", h: 108.865, l2: -9.939, k: "1.0185e-3" },
+  { pr: 423, who: "eumemic", h: 108.934, l2: -9.94, k: "1.0183e-3" },
+  { pr: 424, who: "chafreaky", h: 109.17, l2: -9.939, k: "1.0185e-3" },
+  { pr: 425, who: "jacklightChen", h: 109.228, l2: -9.898, k: "1.048e-3", note: "Hamming packets replace the E8 complex circuit (783 → 680 helpers)" },
+  { pr: 426, who: "ai-nanachi", h: 109.285, l2: -9.939, k: "1.0188e-3" },
+  { pr: 427, who: "eumemic", h: 109.291, l2: -9.94, k: "1.0184e-3" },
+  { pr: 428, who: "eumemic", h: 109.37, l2: -9.939, k: "1.0184e-3" },
+  { pr: 429, who: "rohanarun", h: 109.467, l2: -9.938, k: "1.0196e-3" },
+  { pr: 431, who: "rohanarun", h: 109.639, l2: -9.886, k: "1.057e-3" },
+  { pr: 432, who: "chafreaky", h: 109.871, l2: -9.938, k: "1.0198e-3" },
+  { pr: 433, who: "icekylinx", h: 109.916, l2: -9.801, k: "1.1209e-3", note: "split centres (complex) and source-centre reuse (bit)" },
+  { pr: 434, who: "rohanarun", h: 110.346, l2: -9.792, k: "1.1283e-3", note: "opened at 1.1283e-3 (plotted); retitled to 1.2490e-3 after #442" },
+  { pr: 435, who: "rohanarun", h: 110.356, l2: -9.791, k: "1.1288e-3" },
+  { pr: 436, who: "eumemic", h: 110.364, l2: -9.791, k: "1.129e-3" },
+  { pr: 437, who: "eumemic", h: 110.441, l2: -9.791, k: "1.1289e-3" },
+  { pr: 438, who: "rohanarun", h: 110.606, l2: -9.785, k: "1.1335e-3" },
+  { pr: 439, who: "chafreaky", h: 110.776, l2: -9.784, k: "1.1339e-3" },
+  { pr: 440, who: "eumemic", h: 111.071, l2: -9.781, k: "1.1364e-3" },
+  { pr: 441, who: "eumemic", h: 111.291, l2: -9.778, k: "1.1388e-3" },
+  { pr: 442, who: "DaysSky", h: 111.316, l2: -9.658, k: "1.2376e-3", note: "idle-axis hosting: helper residuals ride on idle data arrays (+9.2%)" },
+  { pr: 443, who: "chafreaky", h: 111.57, l2: -9.778, k: "1.1388e-3" },
+  { pr: 444, who: "chafreaky", h: 111.894, l2: -9.648, k: "1.2461e-3" },
+  { pr: 445, who: "chafreaky", h: 112.26, l2: -9.629, k: "1.2634e-3" },
+  { pr: 447, who: "rohanarun", h: 112.442, l2: -9.626, k: "1.2658e-3" },
+  { pr: 448, who: "higherbeing", h: 112.862, l2: -9.554, k: "1.3307e-3", contested: true, note: "cross-copy hosting; its key identity is challenged by #451's trace obstruction" },
+  { pr: 450, who: "DreamingOfClouds", h: 113.042, l2: -9.535, k: "1.3477e-3", contested: true, note: "rests on #448's challenged cross-copy slot" },
+  { pr: 451, who: "chafreaky", h: 113.115, l2: -9.626, k: "1.2659e-3" },
+  { pr: 454, who: "chafreaky", h: 113.723, l2: -9.625, k: "1.2665e-3" },
+  { pr: 455, who: "Dugongue", h: 114.196, l2: -9.625, k: "1.2665e-3" },
+  { pr: 456, who: "rohanarun", h: 114.199, l2: -9.625, k: "1.2666e-3" },
+  { pr: 457, who: "rohanarun", h: 114.248, l2: -9.625, k: "1.2663e-3" },
+  { pr: 458, who: "chafreaky", h: 114.527, l2: -9.616, k: "1.274e-3" },
+  { pr: 459, who: "rohanarun", h: 114.564, l2: -9.625, k: "1.2665e-3" },
+  { pr: 460, who: "rohanarun", h: 114.708, l2: -9.616, k: "1.2744e-3" },
+  { pr: 461, who: "Srikrishnabalaji", h: 114.835, l2: -9.616, k: "1.274e-3" },
+  { pr: 462, who: "rohanarun", h: 114.956, l2: -9.616, k: "1.2745e-3" },
+  { pr: 463, who: "DreamingOfClouds", h: 114.993, l2: -9.606, k: "1.2835e-3" },
+  { pr: 464, who: "ahrazzle", h: 115.02, l2: -9.535, k: "1.3477e-3", contested: true, note: "rests on #448's challenged cross-copy slot" },
+  { pr: 465, who: "Srikrishnabalaji", h: 115.147, l2: -9.606, k: "1.2835e-3" },
+  { pr: 466, who: "rohanarun", h: 115.199, l2: -9.616, k: "1.2744e-3" },
+  { pr: 467, who: "rohanarun", h: 115.29, l2: -9.599, k: "1.2893e-3", note: "Rohan Arun's 'new best', the best claim then that avoids the challenged cross-copy slot" },
+  { pr: 469, who: "ahrazzle", h: 115.547, l2: -9.532, k: "1.3506e-3", contested: true, note: "rests on #448's challenged cross-copy slot" },
+  { pr: 470, who: "rohanarun", h: 115.587, l2: -9.597, k: "1.2915e-3" },
+  { pr: 471, who: "Dugongue", h: 115.726, l2: -9.616, k: "1.2745e-3" },
+  { pr: 472, who: "chafreaky", h: 115.832, l2: -9.596, k: "1.2921e-3" },
+  { pr: 473, who: "rohanarun", h: 116.049, l2: -9.592, k: "1.2956e-3" },
+  { pr: 476, who: "Dugongue", h: 116.242, l2: -9.597, k: "1.2915e-3" },
+  { pr: 478, who: "Dugongue", h: 116.526, l2: -9.592, k: "1.2955e-3" },
+  { pr: 480, who: "higherbeing", h: 116.669, l2: -9.509, k: "1.3726e-3", contested: true, note: "highest claim of the day; rests on #448's challenged cross-copy slot" },
+  { pr: 482, who: "eumemic", h: 117.316, l2: -9.741, k: "1.1689e-3" },
+  { pr: 483, who: "Dugongue", h: 117.554, l2: -9.591, k: "1.2966e-3", note: "best claim at 19:40 UTC that avoids the challenged slot" },
 ]
 
 // Each move of main: the PR that supplied the witness, when it was opened, and when GitHub
@@ -391,6 +560,16 @@ const MAIN: MainMove[] = [
     url: "https://github.com/CrocSwap/integer-mult-bounds/pull/186",
     from: { h: 61.9, l2: -10.561 },
   },
+  {
+    who: "Colkitt",
+    h: 88.14,
+    l2: -10.433,
+    k: "7.23571590007464e-4",
+    note: "PR #279 (Rohan Arun) on PR #276's gen4 bit word · 91e29e7 · reviewed; #210's audited 7.10046e-4 imported alongside as a historical checkpoint",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/279",
+    from: { h: 78.689, l2: -10.433 },
+  },
 ]
 
 const JAIN_REPO = "https://github.com/Swapnil-jain/integer-mult-kappa"
@@ -430,8 +609,12 @@ const T = 14
 const B = 34
 // Two views: the whole race, and everything from 10:00 UTC on Oct 8, where everything after 2^-17 lives.
 type View = { h0: number; h1: number; y0: number; y1: number }
-const FULL: View = { h0: -0.5, h1: 87, y0: -190, y1: 0 }
-const ZOOM: View = { h0: 36, h1: 87, y0: -17.5, y1: -10 }
+const FULL: View = { h0: -0.5, h1: 120, y0: -190, y1: 0 }
+const ZOOM: View = { h0: 36, h1: 120, y0: -17.5, y1: -9 }
+
+// kappa = 10^-3, and the first PR opened above it: Dugongue's #390 at 07:09:46 UTC on Oct 11.
+const MILLI = -9.965784284662087 // log2(10^-3), precomputed
+const FIRST_MILLI = { h: 105.163, l2: -9.965 }
 
 const EXTRA_A = { h: 15.933, l2: -78 }
 const EXTRA_B = { h: 21.583, l2: -59 }
@@ -465,7 +648,7 @@ export function KappaRace() {
   const frontier: Pt[] = []
   let best = -Infinity
   for (const p of [...PRS].sort((a, b) => a.h - b.h)) {
-    if (p.l2 > best) {
+    if (!p.contested && p.l2 > best) {
       best = p.l2
       frontier.push(p)
     }
@@ -486,37 +669,36 @@ export function KappaRace() {
       : sel.who === "Jain"
         ? "Swapnil Jain (own repo)"
         : sel.who
-  const ticksY = zoom ? [-17, -16, -15, -14, -13, -12, -11] : [-180, -150, -120, -90, -60, -30, 0]
+  const ticksY = zoom ? [-17, -16, -15, -14, -13, -12, -11, -10, -9] : [-180, -150, -120, -90, -60, -30, 0]
   const ticksX = zoom
     ? [
         { h: 38, label: "Oct 8 12:00" },
-        { h: 50, label: "Oct 9 00:00" },
+        { h: 50, label: "Oct 9" },
         { h: 62, label: "12:00" },
-        { h: 74, label: "Oct 10 00:00" },
+        { h: 74, label: "Oct 10" },
         { h: 86, label: "12:00" },
+        { h: 98, label: "Oct 11" },
+        { h: 110, label: "12:00" },
       ]
     : [
-        { h: 2, label: "Oct 7 00:00" },
-        { h: 14, label: "12:00" },
-        { h: 26, label: "Oct 8 00:00" },
-        { h: 38, label: "12:00" },
-        { h: 50, label: "Oct 9 00:00" },
-        { h: 62, label: "12:00" },
-        { h: 74, label: "Oct 10 00:00" },
-        { h: 86, label: "12:00" },
+        { h: 2, label: "Oct 7" },
+        { h: 26, label: "Oct 8" },
+        { h: 50, label: "Oct 9" },
+        { h: 74, label: "Oct 10" },
+        { h: 98, label: "Oct 11" },
       ]
 
   return (
     <figure className="not-prose my-8 rounded-xl border border-border bg-card p-4">
       <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
-        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s eleven rounds, Oct 6 to 11:35 UTC on Oct 10
+        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s eleven rounds, Oct 6 to 19:40 UTC on Oct 11
         {zoom ? " · zoomed to 10:00 UTC on Oct 8 onward" : ""}
       </figcaption>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, to 2 to the minus 10.51 by 18:38, to 2 to the minus 10.47 at 22:06 with the first five-stage claim, to 2 to the minus 10.40 by 07:10 UTC on October 10 and to 2 to the minus 10.38 by 11:31. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, and pull request 186 at 12:57 UTC at 2 to the minus 10.56, where it still stood on GitHub at 11:35 UTC on October 10. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
+        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, to 2 to the minus 10.51 by 18:38, to 2 to the minus 10.47 at 22:06 with the first five-stage claim, to 2 to the minus 10.40 by 07:10 UTC on October 10, to 2 to the minus 10.38 by 11:31, to 2 to the minus 10.30 by midnight and, with the E8 units, to 2 to the minus 10.16 at 05:05 UTC on October 11. A dotted line marks kappa equals 10 to the minus 3; the first pull request opened above it is number 390 at 07:09 UTC. The best claims reach 2 to the minus 9.60 at 17:17 with pull request 467 and 2 to the minus 9.59 by 19:33; hollow circles up to 2 to the minus 9.51 rest on a contested residual split. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, pull request 186 at 12:57 UTC at 2 to the minus 10.56, and pull request 279 at 14:08 UTC on October 10 at 2 to the minus 10.43, where it still stood at 19:40 UTC on October 11. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
       >
         {ticksY.map((t) => (
           <g key={t}>
@@ -537,6 +719,42 @@ export function KappaRace() {
           </clipPath>
         </defs>
         <g clipPath="url(#kappa-race-plot)">
+        <line
+          x1={L}
+          x2={W - R}
+          y1={y(MILLI)}
+          y2={y(MILLI)}
+          stroke="oklch(0.62 0.16 150)"
+          strokeDasharray="1 3"
+          strokeWidth={1.2}
+        />
+        {zoom ? (
+          <text x={L + 4} y={y(MILLI) - 4} fontSize={10} fill="oklch(0.55 0.16 150)" className="font-mono">
+            κ = 10⁻³
+          </text>
+        ) : null}
+        {zoom ? (
+          <g>
+            <line
+              x1={x(FIRST_MILLI.h)}
+              x2={x(FIRST_MILLI.h)}
+              y1={y(FIRST_MILLI.l2) - 6}
+              y2={y(FIRST_MILLI.l2) - 22}
+              stroke="oklch(0.55 0.16 150)"
+              strokeWidth={1}
+            />
+            <text
+              x={x(FIRST_MILLI.h) - 3}
+              y={y(FIRST_MILLI.l2) - 25}
+              textAnchor="end"
+              fontSize={10}
+              fill="oklch(0.55 0.16 150)"
+              className="font-mono"
+            >
+              first PR past 10⁻³ · #390, Oct 11 07:09
+            </text>
+          </g>
+        ) : null}
         {showLine ? (
           <g>
             <line
@@ -610,6 +828,21 @@ export function KappaRace() {
               />
             )
           }
+          if (p.contested) {
+            return (
+              <circle
+                key={i}
+                cx={x(p.h)}
+                cy={y(p.l2)}
+                r={on ? 6 : 3.6}
+                fill="var(--background)"
+                stroke={on ? "var(--foreground)" : colour(p.who)}
+                strokeWidth={on ? 2 : 1.4}
+                style={{ cursor: "pointer" }}
+                onClick={() => setSel(p)}
+              />
+            )
+          }
           return (
             <circle
               key={i}
@@ -629,6 +862,7 @@ export function KappaRace() {
       <div className="mt-2 rounded-md border border-border p-2 font-mono text-xs">
         <span style={{ color: colour(sel.who) }}>{sel.merged ? "■" : "●"}</span> {who} · {stamp(sel.h)} · κ = {sel.k} · log₂ κ = {sel.l2.toFixed(2)}
         {sel.note ? ` · ${sel.note}` : ""}
+        {sel.contested && !sel.note ? " · contested" : ""}
         {sel.merged ? (
           <>
             {" "}·{" "}
@@ -720,6 +954,9 @@ export function KappaRace() {
         ))}
         <span>
           <span style={{ color: PALETTE.Colkitt }}>■</span> main moves, each after the maintainer&apos;s review (dashed from the PR&apos;s opening)
+        </span>
+        <span>
+          <span style={{ color: OTHER }}>○</span> rests on #448&apos;s cross-copy split, which #451 challenges (left out of the green best-claim line)
         </span>
         <span>
           <span style={{ color: JAIN_COLOUR }}>◆</span> Jain (own repo)
