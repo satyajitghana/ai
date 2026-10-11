@@ -1,0 +1,224 @@
+---
+title: "DeepGEMM: the 300-line FP8 kernel grew into a 35,000-line library"
+description: "DeepSeek's DeepGEMM shipped during Open Source Week 2025 as one Hopper FP8 kernel of about 300 lines, built around two ideas: scale FP8 per 128 elements, and drain the tensor-core accumulator into FP32 on the CUDA cores every 128 steps because Hopper only keeps about 14 bits. I cloned the repo today and counted 34,994 lines across 157 files: Blackwell tcgen05 kernels, FP4, MoE grouped GEMMs in two layouts, the lightning-indexer MQA kernels, and a 1,528-line fused mega-MoE that carries its own all-to-all. The two original ideas survived intact; almost everything around them was replaced, including the SASS-patching hack, which nvcc 12.9 made redundant."
+date: 2026-10-11
+tags:
+  - kernels
+  - gpu
+  - quantization
+  - mixture-of-experts
+  - inference
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Reads the current DeepGEMM source, not the famous README: what survived of the 300-line kernel, what Blackwell changed, and where the old benchmark tables went."
+topic: gpu-systems
+kind: tool
+level: research
+runsOn: datacenter
+licence: MIT
+---
+
+import { ScaleGranularity } from "@/components/articles/deepgemm/scale-granularity"
+import { AccumPromote } from "@/components/articles/deepgemm/accum-promote"
+
+I went looking for the thing everyone quotes about DeepGEMM — "one core kernel function comprising around **~300 lines of code**" — and found that the sentence has not been in the README since April 2025. The repository it describes is still there in the history, and it really was that small. What is on `master` today is a different object: 157 tracked files, 34,994 lines, nineteen kernel implementations, a fused mixture-of-experts kernel that does its own network communication, and attention scoring kernels that have nothing to do with GEMM.
+
+So this is a reading of the current source rather than the famous one, with the obvious question in mind: of the ideas that made the February 2025 release interesting, which ones turned out to be load-bearing? The answer is a short list. Scale FP8 finely, and do not trust the tensor core's accumulator. Everything else — the JIT, the SASS patching, the kernel structure, even the architecture it runs on — has been replaced at least once.
+
+<RepoCard repo="deepseek-ai/DeepGEMM" />
+
+If you want the Huawei side of this story, I wrote it up separately: [DeepGEMM-Ascend is the same library ported off NVIDIA](/articles/deepgemm-ascend), and it is worth reading after this one, because what the port had to rebuild tells you which parts here are CUDA-shaped.
+
+## The problem FP8 actually has
+
+<Figure src="/articles/deepgemm/fig3.png" alt="A diagram of one linear layer in mixed precision: the input activation and the weight are cast to FP8 for the forward matrix multiply, the output accumulates in BF16 or FP32, and master weights, gradients and optimizer states stay in higher precision." caption="Where an FP8 GEMM sits inside a training step: only the matrix multiply runs in FP8, and its output comes back out in BF16 or FP32 (DeepSeek-V3 paper, Figure 6)." />
+
+A GEMM is `D = A·B`: every output element is a dot product of length K, and in a transformer K is the model width — 7,168 in DeepSeek-V3, 16,384 if you are multiplying through a wide MLP. FP8 halves the bytes you move and doubles the tensor-core throughput against BF16. The catch is that FP8 is a very small format, and there are two separate ways it loses you the answer.
+
+The first is range. `e4m3` has four exponent bits and three mantissa bits: the largest finite value is 448, the smallest normal value is `2^-6`, and subnormals run down to `2^-9`. The standard way to use it is to divide the tensor by a scale that maps its largest absolute value onto 448. Do that for a whole tensor and you have implicitly declared that everything in it lives inside a band 229,376 wide — and only the top 28,672 of that band keeps a full three-bit mantissa.
+
+Transformer activations do not oblige. A handful of channels run orders of magnitude hotter than the rest, and with one scale per tensor those outliers set the ceiling and push the ordinary values toward the floor. DeepSeek-V3's fix, which is the reason DeepGEMM exists at all, is to make the scale local: activations get one scale per token per 128 channels (a 1&times;128 tile), weights get one per 128&times;128 block.
+
+<ScaleGranularity />
+
+The widget is worth a minute because it corrects the usual hand-wave. Fine-grained scaling is *not* mainly about mantissa precision — E4M3 is floating point, so three mantissa bits buy the same relative accuracy wherever a value sits, and at modest outliers the two schemes differ by tenths of a percent. It is about the floor. One outlier three decades above the rest of its row drops a third of the row below the subnormal threshold with a single shared scale; with a scale per group, only the outlier's own group pays.
+
+Here is the paper's own version of the picture, with the quantisation on the left and the fix I am coming to next on the right:
+
+<Figure src="/articles/deepgemm/fig1.png" alt="Two panels: (a) a GEMM where activations are scaled in 1x128 tiles and weights in 128x128 blocks before the FP8 cast; (b) a tensor-core MMA whose partial sums are copied into FP32 CUDA-core registers every 128 elements of K and scaled there." caption="Fine-grained quantization (a) and promotion to the CUDA cores every N_C = 128 elements (b) (DeepSeek-V3 paper, Figure 7)." />
+
+The cost of local scales is that the scale now varies *along K*, inside the dot product. A standard FP8 GEMM cannot express that: the tensor core accumulates a long run of products and you apply one scale at the end. To apply a different scale every 128 elements, something has to interrupt the accumulation 128 elements at a time. That turns out to be the same operation you need for an entirely different reason.
+
+## The accumulator only keeps about 14 bits
+
+This is the claim in DeepSeek-V3 that made FP8 training plausible, and it is worth quoting exactly, because it is a statement about the hardware that NVIDIA does not advertise:
+
+> we observe that the accumulation precision of FP8 GEMM on NVIDIA H800 GPUs is limited to retaining around 14 bits, which is significantly lower than FP32 accumulation precision.
+
+Fourteen bits of significand, where FP32 carries 24. The paper reports that with K = 4096 and random matrices, this alone produced a maximum relative error of nearly 2%.
+
+The arithmetic of why is simple enough to simulate. Every addition into a fixed-width significand rounds, and the quantum of a running sum grows with the sum, so the thousandth term is snapped to a coarser grid than the first. With random-signed terms the errors partly cancel and the total drifts like a random walk; with terms of one sign they accumulate. Either way the error grows with K, which is exactly the direction model width has been going.
+
+<AccumPromote />
+
+DeepGEMM's answer, following CUTLASS, is two-level accumulation: let the tensor core accumulate a block of 128 elements of K in whatever precision it has, then copy the partial sums into FP32 registers and add them there, on the CUDA cores. The dequantisation multiply rides along for free — the per-128 scale is just a factor applied to the block's partial sum at exactly the moment it is promoted. Fine-grained scaling and accumulation precision are the same mechanism viewed from two sides, which is the neatest thing about the design.
+
+In the SM90 kernel the promotion is thirteen lines. `scale_a_*` are the activation tile's scales, `scale_b_*` the weight block's, `accum` the registers the WGMMA wrote, and `shifted_accum` the FP32 running sum (`deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d2d.cuh:331-345`):
+
+```cpp
+float scale_0_0 = scale_a_0 * scale_b_0, scale_1_0 = scale_a_1 * scale_b_0;
+float scale_0_1, scale_1_1;
+if constexpr (not kMustUseUniformedScaleB)
+    scale_0_1 = scale_a_0 * scale_b_1, scale_1_1 = scale_a_1 * scale_b_1;
+
+auto shifted_accum = final_accum + WGMMA::kNumAccum * local_idx;
+#pragma unroll
+for (uint32_t i = 0; i < WGMMA::kNumAccum / 4; ++ i) {
+    // NOTES: for unrolled `num_former_iters` cases, we expect the compiler to automatically make it a constant
+    const bool predicate = kMustUseUniformedScaleB or i < num_former_iters;
+    shifted_accum[i * 4 + 0] += (predicate ? scale_0_0 : scale_0_1) * accum[i * 4 + 0];
+    shifted_accum[i * 4 + 1] += (predicate ? scale_0_0 : scale_0_1) * accum[i * 4 + 1];
+    shifted_accum[i * 4 + 2] += (predicate ? scale_1_0 : scale_1_1) * accum[i * 4 + 2];
+    shifted_accum[i * 4 + 3] += (predicate ? scale_1_0 : scale_1_1) * accum[i * 4 + 3];
+}
+```
+
+The 128 is not a tuning knob. It is asserted at the top of the kernel (`sm90_fp8_gemm_1d2d.cuh:56`):
+
+```cpp
+DG_STATIC_ASSERT(BLOCK_K == 128, "Only support per-128-channel FP8 scaling");
+```
+
+One WGMMA on Hopper consumes 32 elements of K, so a 128-element block is four of them — the interval DeepSeek-V3 settled on as "the minimal accumulation interval that can significantly improve precision without introducing substantial overhead". Slide the interval in the widget above and you can see the shape of that trade: below 128 the accuracy keeps improving, but each drain is CUDA-core work the tensor cores have to wait behind.
+
+Which is where warp specialisation comes in, and why this is a kernel rather than a library call.
+
+## The pipeline: who waits for whom
+
+<Figure src="/articles/deepgemm/fig2.png" alt="A timeline with three lanes. The top lane, TMA warps, shows three overlapping pairs of TMA Issue followed by a longer Data load. The two lower lanes, Math warps 0 and Math warps 1, alternate WGMMA and Promotion blocks, staggered so that one warpgroup promotes while the other issues its matrix multiply." caption="DeepGEMM's persistent warp specialisation: one TMA warp keeps loads in flight while two math warpgroups alternate WGMMA and CUDA-core promotion (DeepGEMM, figures/design.png from the February 2025 release; deleted from the repository in the July 2025 multi-architecture refactor)." />
+
+Three roles, all resident in one block. A single thread of a TMA warp issues asynchronous copies from global memory into shared memory, one stage ahead of the maths. Two math warpgroups take turns: while one is inside a WGMMA, the other is doing its promotion on the CUDA cores, so the tensor cores never idle waiting for FP32 adds. The V3 paper makes this dependency explicit — "while one warpgroup performs the promotion operation, the other is able to execute the MMA operation" — and it is why the promotion is nearly free in practice despite halving the WGMMA issue rate of a single warpgroup.
+
+The warps are told apart by index and then given different register budgets, which is the part that makes it fit (`sm90_fp8_gemm_1d2d.cuh:145-146` and `:165-171`): 40 registers for the TMA warps, 232 or 248 for the maths. The loader is deliberately warp 2 of the TMA group, not warp 0, with the comment "we use the third warp, as warp 0/1 may be doing WGMMA with `BLOCK_M == 32`".
+
+"Persistent" means the block does not exist per output tile. It loops, asking a scheduler for the next tile until there are none left (`deep_gemm/include/deep_gemm/scheduler/gemm.cuh:186`):
+
+```cpp
+const auto next_block_idx = (++ current_iter) * kNumSMs + blockIdx.x;
+```
+
+Launch exactly as many blocks as you have SMs, and each one chews through tiles strided by the SM count. The scheduler does not hand them out in row-major order, though. It walks groups of 8 or 16 tiles along one axis before moving along the other, so that consecutive tiles share an operand and find it in L2 — the rasterisation trick from CUTLASS. The group size is chosen at compile time by minimising the bytes a group touches (`scheduler/gemm.cuh:14-26`):
+
+```cpp
+for (const auto candidate: {8u, 16u}) {
+    const auto usage = kIsMulticastOnA ?
+        candidate * BLOCK_N + math::constexpr_ceil_div(kNumSMs, candidate) * BLOCK_M: // Grouping on N
+        candidate * BLOCK_M + math::constexpr_ceil_div(kNumSMs, candidate) * BLOCK_N; // Grouping on M
+```
+
+On top of that, tiles in the same cluster can share a load: TMA multicast delivers one global read into two CTAs' shared memory. DeepGEMM decides per tile whether multicast is legal, since the tail of a matrix may not have a partner (`sm90_fp8_gemm_1d2d.cuh:176-178`), and the SM90 path can turn it off dynamically — a freedom the Blackwell path loses, as the scheduler notes at `scheduler/gemm.cuh:120-122`: "for SM90 only, as SM90 can dynamically disable TMA multicast while SM100 uses 2-CTA, which can not be dynamically disabled".
+
+## The two tricks everyone remembers, audited
+
+**Unaligned block sizes.** The original README's example: with M = 256 and N = 7,168, the natural 128&times;128 tiling gives `(256/128) * (7168/128) = 112` tiles for 132 SMs, so twenty SMs sit out the whole GEMM. Use `BLOCK_N = 112` and you get 128 tiles instead. This is still here, generalised: the SM90 heuristic no longer special-cases 112, it enumerates every multiple of 16 up to a per-kernel ceiling and scores them all (`csrc/jit_kernels/heuristics/sm90.hpp:40-57`). The ceiling is 192 for the 1D2D kernel and 160 for the 1D1D one, justified in the source by a two-word comment: `// Register spills`. The scoring is a small analytic cost model over L1 and L2 bytes per tile, divided by wave efficiency (`sm90.hpp:202-239`) — no autotuning, no benchmark loop, one deterministic choice per shape.
+
+**The FFMA SASS hack.** This one is gone, and the story is good. In the February 2025 release DeepGEMM shipped `deep_gemm/jit/interleave_ffma.py`, 138 lines that ran `cuobjdump` over the freshly compiled cubin, found runs of at least eight consecutive `FFMA` instructions, and flipped two bits in alternating instructions:
+
+```python
+# Modify the `reuse` and `yield` bits
+assert high_hex & 0x0800200000000000, f"{hex(high_hex)}"
+high_hex ^= 0x0800200000000000
+```
+
+Those are the `yield` and register-`reuse` control bits, identified by comparing nvcc 12.2 and 12.3 output against an open-source CUDA assembler. The README claimed "10%+ in some cases" for fine-grained-scaling FP8 GEMMs, by creating more opportunities to overlap the promotion FFMAs with the MMAs. It is the most DeepSeek thing in the repository: they diffed two compilers' assembly, inferred what a bit did, and patched the binary. The obituary is one line in today's README: "As NVCC 12.9 will automatically do the FFMA interleaving, all post optimizations will be no longer supported." The file is not in the tree any more. The compiler caught up — which is the normal and correct ending for a hack like this, and a reason the current CUDA requirement is 12.9 or higher.
+
+**The JIT.** Still fully just-in-time: nothing CUDA is compiled at install time, and shapes, block sizes and stage counts arrive as template parameters so the compiler can unroll the mainloop completely. What changed is who does it. The Python JIT became a C++ module in July 2025, and in September 2026 that module moved out into its own repository, [DeepJIT](https://github.com/deepseek-ai/DeepJIT) — a header-only C++20 runtime with CUDA and Ascend backends, which DeepGEMM now initialises in thirty lines (`csrc/runtime/jit.hpp:14-30`). Its disk cache defaults to `$HOME/.dj` and can be a colon-separated list shared across a cluster. The NVRTC path that landed in May 2025 — its PR claimed compile time down about 80% without a precompiled header and 90% with one — was switched off in the July 2025 refactor and never came back. I grepped both repositories and there is no NVRTC reference left anywhere. Everything goes through nvcc.
+
+## MoE: two layouts, because prefill and decode are different problems
+
+A mixture-of-experts layer is many small GEMMs, one per expert, over whatever tokens the router sent it. Unlike CUTLASS's grouped GEMM, DeepGEMM groups only along M: N and K are fixed, because in an MoE every expert has the same shape. That restriction is what lets one scheduler serve both the dense and the grouped kernels.
+
+The two layouts correspond exactly to the two phases of serving.
+
+**Contiguous**, for training and prefill. Concatenate every expert's tokens into one tall matrix, pad each expert's segment up to the block size, and pass a per-row `grouped_layout` saying which expert owns each row. The scheduler reads the expert id straight out of that array at the start of each tile and uses it to offset into the weights (`scheduler/gemm.cuh:152`):
+
+```cpp
+const auto offset = kWithGroupOffset ? cute::max(0, grouped_layout[m_block_idx * BLOCK_M]) : 0;
+```
+
+A negative entry means "skip this block", which is how masked-out padding costs nothing. The alignment requirement is a real constraint on the caller: 128 on Hopper, and `get_theoretical_mk_alignment_for_contiguous_layout` returns 256 on Blackwell because the newly supported `UMMA_N = 256` allows it (`csrc/jit_kernels/heuristics/runtime.hpp:57-63`).
+
+**Masked**, for decode under CUDA graphs. During decoding the CPU does not know how many tokens each expert got — and with a captured CUDA graph it cannot find out without breaking the capture. So the shape is fixed at an upper bound and a device-side `masked_m` tensor says how many rows of each expert are real. The scheduler walks the groups on the GPU, computing each one's block count from the mask as it goes (`scheduler/gemm.cuh:188-202`), and tiles past the live rows are simply never scheduled. Nothing on the host needs to know the routing.
+
+That second mode exists because of [DeepEP](https://github.com/deepseek-ai/DeepEP), DeepSeek's expert-parallel communication library: its low-latency decode kernels hand back exactly this layout — a padded per-expert buffer plus a count — and the README names that as the intended usage. Dispatch, GEMM and combine stay inside one graph replay.
+
+## Blackwell, which is not a port
+
+The SM100 kernel is not the SM90 kernel with different instructions. It is a different machine model, and reading the two side by side is the clearest explanation of what `tcgen05` changed that I have found.
+
+On Hopper, the accumulator lives in the math warps' registers; that is why promotion is a loop over `accum[i]`, and why register budgets are carved up by hand. On Blackwell there is **tensor memory**: a separate on-chip store that the MMA writes into, allocated explicitly by a warp at kernel start (`deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh:188-191`) and measured in columns, with the kernel's whole layout problem being how to fit accumulators plus scale factors into 512 of them. The MMA is issued by *one elected thread of one warp* on behalf of the pair of CTAs — `2x1SM` instructions, where one leader drives both SMs' tensor cores over a shared operand.
+
+That reshuffles the roles completely. The SM100 FP8/FP4 kernel runs four roles: a TMA load warp, an MMA issue warp that only exists on the leader CTA, one or two warps that do nothing but transpose scale factors in shared memory into the layout the `UTCCP` copy instruction wants, and 128 epilogue threads that read tensor memory and store the result. The scale factors no longer ride in registers next to the maths — they are copied into tensor memory by a dedicated instruction and named by index inside each MMA's descriptor.
+
+The scaling format changes too. SM90 takes FP32 scales; SM100 takes `UE8M0` — a power-of-two exponent and nothing else — four of them packed into one `int32`. The repo's own layout document is blunt about the constraint (`docs/scaling-factor-format.md:33`): every scale must be an exact power of two, "sign bit and mantissa must be zero; this is asserted on device". That is the microscaling convention Blackwell's tensor cores implement natively, and it is the format [NVFP4 and MXFP8 are built on](/articles/nemotron-nvfp4).
+
+And FP4 is real. The SM100 kernel dispatches between two MMA families on the operand types (`sm100_fp8_fp4_gemm_1d1d.cuh:51-54`):
+
+```cpp
+// NOTES: an FP4xFP4 pair uses the dedicated MXF4 MMA (packed 4-bit operands, K-major only, UMMA_K=64);
+//        all other combinations use the MXF8F6F4 MMA (unpacked operands, UMMA_K=32)
+```
+
+With both operands FP4 the block along K doubles to 256 and each MMA step covers 64 elements instead of 32. Mixed FP8&times;FP4 — activations in FP8, weights in FP4 — is a first-class path, which is what the mega-MoE kernel uses by default.
+
+## What DeepGEMM is now, beyond GEMM
+
+The name has stopped being accurate, and the current README says so in its first sentence: "GEMMs (FP8, FP4, BF16), fused MoE with overlapped communication (Mega MoE), MQA scoring for the lightning indexer, HyperConnection (HC), and more". Nineteen kernels live in `deep_gemm/include/deep_gemm/impls/`, and only five of them are plain GEMMs: 2,224 lines of the 16,220 in the device headers, against 2,844 for the two mega-MoE kernels alone.
+
+The two additions that matter:
+
+**Indexer kernels.** DeepSeek-V3.2's sparse attention needs a cheap score for every (query, key) pair so it can pick which keys to attend to. That scorer is a multi-query dot product followed by a weighted ReLU sum, and it is now a DeepGEMM kernel family: `fp8_fp4_mqa_logits` for prefill, a paged variant for decode, and since September 2026 a hierarchical "sparse indexer" on top. These are attention kernels sitting in a GEMM library because they are shaped like a GEMM and need the same FP8 plumbing. I covered the [agent that won a kernel-writing contest on exactly this operator](/articles/auto-gpu-kernel) separately; this is the reference implementation it was being measured against.
+
+**Mega MoE.** The largest file in the repository, `sm100_fp8_fp4_mega_moe.cuh` at 1,528 lines, fuses the entire expert layer — expert-parallel dispatch, the up-projection, SwiGLU, the down-projection, and the combine — into one kernel, with NVLink traffic overlapping tensor-core work inside the same launch. It needs a symmetric memory buffer and a multi-process launch, which tells you what it is: not a library call you drop into a model, but the inference stack's inner loop written as a single kernel. Its warp roles include dedicated dispatch warps doing the communication while the GEMM warps compute.
+
+There is also a `cublaslt_gemm` fallback now, used for plain BF16 GEMMs when nothing fancy is required and the caller has not restricted the SM count (`csrc/apis/gemm.hpp:519-522`), and a `use_deterministic_algorithms()` switch that defaults to `False` — which is itself a notable change, since the September 2026 release notes admit that before it, "all kernels were fully deterministic and batch-invariant" and now some are not unless you ask.
+
+## The performance numbers, and where they went
+
+This is the part where I have to be straight with you: **there is no GPU on this machine, so nothing below is mine.** I can read the code and the history; I cannot rerun a single kernel.
+
+What the repository published, and then unpublished, goes like this. The February 2025 README carried three tables of H800 results against "our internally and carefully optimized implementation based on CUTLASS 3.6". The headline 2.7&times; that circulated came from one row: M = 64, N = 2,112, K = 7,168, at 206 TFLOPS. That is a skinny decode-shaped GEMM, the case where a library tuned for big matrices does worst — the same table's large shapes, M = 4,096, sat at 1.0-1.2&times;. Reading the speedup column top to bottom, the pattern is unambiguous: DeepGEMM's win was concentrated where M is small, which is to say in inference, which is what it was written for.
+
+Those tables improved through March and April — 1,520 TFLOPS at 4,096&times;7,168&times;16,384 by 9 April, up from 1,358 at the first release — and then, on 14 April 2025, commit `37aa127` deleted them. The PR note is one line: "Remove performance report on README for maintenance simplicity", alongside "Peak TFLOPS 1503 -&gt; 1519 TFLOPS, the original 1520 is on another 'good' GPU". That parenthetical is more honest than most published benchmarks. The only number left in the README is a news line from 18 April 2025: 1,550 TFLOPS on an H800.
+
+The one current benchmark table is for mega-MoE, in PR #316, and it is reported against "legacy" — DeepSeek's own previous implementation, not a third party. At EP8 on a DeepSeek-V4-Flash configuration (256 experts, top-6, hidden 4,096), it lists 1,283.1 &micro;s and 1,928 TFLOPS at 8,192 tokens per rank for a 1.56&times; speedup, and 56.5 &micro;s at a single token for 1.96&times;. On a V4-Pro configuration (384 experts, hidden 7,168) it reaches 2,438 TFLOPS at 32,768 tokens per rank. No GPU is named in the PR; the kernel is SM100-only, so it is Blackwell-class hardware. The September 2026 notes add percentages without tables: Mega Gate "30-75% speedups", Mega mHC "45-85%", MoE backward GEMMs "~20%", and for the locality-domain work, "Saving 100W power and boosting 5-10% GPU frequency for heavy workload".
+
+I could not find an independent third-party benchmark of current DeepGEMM against cuBLAS or CUTLASS that I would be willing to cite — the numbers in circulation trace back to these tables. Treat all of it as the authors' own measurements on their own hardware, which is how they present it.
+
+## Who actually runs this
+
+Two data points I can check without a GPU. vLLM carries `vllm/utils/deep_gemm.py`, a compatibility wrapper whose docstring says "Users of vLLM should always import **only** these wrappers" — it binds `fp8_gemm_nt`, both grouped GEMMs, and the whole `fp8_fp4_*_mqa_logits` family, with per-model Blackwell exclusions. SGLang pins `sgl-deep-gemm==0.2.2` in its `pyproject.toml`, a repackaged build. Both treat DeepGEMM as the FP8 blockwise path for DeepSeek-architecture models, with a fallback when it is unavailable — which is the right shape for a dependency whose API has broken several times. Teams building their own stacks lean on it the same way: Z.ai's writeup of [the inference infrastructure behind GLM](/articles/glm-built-its-own-inference-infra) and the [Halo post-training framework](/articles/halo) both list DeepGEMM among the kernels they did not write.
+
+The licence is MIT, with no patent grant and no field-of-use restriction. Today the repo shows 8,936 stars, 1,404 forks and 197 commits since it was created on 13 February 2025, the first public commit landing on the 25th — a small number of large merges, most of them titled "Public release" and squashed from an internal repository. You do not get to watch this code evolve; you get quarterly drops with the archaeology removed. For a reader trying to learn from it, that is a real cost, and the reason the February 2025 commit is still the best teaching artefact in the tree.
+
+## What I would take from it
+
+Two ideas transfer to any quantised kernel you write, on any hardware:
+
+Pick the scale granularity from the *dynamic range* your format gives you, not from a feeling about outliers. FP8 E4M3's usable band is about 28,672:1 before mantissa bits start disappearing; measure your tensor's spread against that number and the group size falls out. Do the same sum for FP4 and you get the far tighter per-32 blocks that Blackwell's microscaling formats use.
+
+And do not assume your accumulator is as wide as your output type. DeepSeek found about 14 bits of significand where an FP32 accumulate implies 24, and the fix — drain to a wider accumulator at a fixed interval, folding the dequantisation into the same step — costs one extra pass over the registers and nothing in tensor-core throughput if you have two warpgroups to interleave. [TileLang](/articles/tilelang) and the other kernel DSLs now expose block-scaled GEMM semantics partly because this pattern turned out to be general. Whether it needs to stay hand-written CUDA is a separate question, and the answer keeps moving: Meta's [Triton rewrite of the table-batched embedding kernels](/articles/fbtriton-table-batched-embeddings) is the same argument fought on different ground.
+
+The third lesson is the one the repository keeps teaching by accident. The SASS patch was brilliant and lasted five months. The 300-line kernel was beautiful and is now one of nineteen. What survived is not the cleverness; it is the two numerical facts underneath it, which were true about the hardware rather than about the code.
+
+## How I checked
+
+Shallow-cloned `deepseek-ai/DeepGEMM` at `057ca59` (30 September 2026) and `deepseek-ai/DeepJIT` at `68c0888`, plus a blobless clone of the full DeepGEMM history for the February 2025 release and the README's revisions. Line counts are `git ls-files` (162 entries) minus the five `third-party/` paths, counted with Python: 157 files, 34,994 lines, of which 16,220 are `.cuh` device headers and 10,164 are host C++ under `csrc/`. The original kernel function is lines 36-341 of `deep_gemm/include/deep_gemm/fp8_gemm.cuh` at commit `a6d97a1` — 306 lines, which is where "~300 lines" came from. Quantisation and accumulation numbers in the two widgets are simulations in the browser, not measurements: E4M3 rounding and a 14-bit significand modelled in double precision. The FP8 accumulation and fine-grained quantisation claims are from the DeepSeek-V3 paper ([arXiv:2412.19437](https://arxiv.org/abs/2412.19437), section 3.3.2). Benchmark figures are quoted from the repository's git history and from the linked pull requests, all of them DeepSeek's own measurements; star, fork and commit counts are from the GitHub API on 11 October 2026. I have no Hopper or Blackwell hardware here and ran none of this code.
