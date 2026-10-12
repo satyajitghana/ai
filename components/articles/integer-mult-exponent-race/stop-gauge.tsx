@@ -241,7 +241,8 @@ export function StopGauge() {
       draw(s)
       const settled = s.bit === target.bit && s.complex === target.complex && s.main === target.main
       if (readout.current) {
-        const text = settled ? readoutOf(m) : `loading ${m.name}`
+        // the reading belongs to the selected milestone; the collars ease toward it
+        const text = readoutOf(m)
         if (readout.current.textContent !== text) readout.current.textContent = text
       }
       const waiting = !calm && !s.touring && s.clock < Math.max(s.holdUntil, TOUR_DELAY) + 0.1
