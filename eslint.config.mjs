@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored skill, kept as upstream wrote it (see its VENDORED.md).
+    "brand-crew/skills/isometric-figures/**",
   ]),
 ]);
 
