@@ -59,9 +59,10 @@ export function ExpertStall() {
       </div>
 
       <div className="space-y-4 p-3 sm:p-4">
-        <label className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground">
-          <span className="whitespace-nowrap">already resident when the router fires: {resident} of 8</span>
+        <label className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[11px] text-muted-foreground">
+          <span>already resident when the router fires: {resident} of 8</span>
           <Range
+            className="min-w-[10rem] flex-1"
             min={0}
             max={8}
             step={1}

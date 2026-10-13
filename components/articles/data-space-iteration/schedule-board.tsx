@@ -94,11 +94,21 @@ export function ScheduleBoard() {
   )
 }
 
+// A label like "flow-renoise 2.84" is ~102 px at 10 px mono; the narrowest
+// track (390 px phone) is ~267 px. Over half the track, the fill is at least
+// ~133 px and the label sits inside it; at or under half, it sits just past
+// the fill's end and still ends inside the track (≤ ~241 px).
 function Bar({ color, width, label }: { color: string; width: string; label: string }) {
+  const inside = parseFloat(width) > 50
   return (
     <div className="relative h-5 rounded bg-muted/30">
       <div className="absolute inset-y-0 left-0 rounded" style={{ width, background: color, opacity: 0.75 }} />
-      <span className="absolute inset-y-0 left-2 flex items-center font-mono text-[10px] text-foreground">{label}</span>
+      <span
+        className="absolute inset-y-0 flex items-center whitespace-nowrap font-mono text-[10px] text-foreground"
+        style={{ left: inside ? "0.5rem" : `calc(${width} + 0.375rem)` }}
+      >
+        {label}
+      </span>
     </div>
   )
 }

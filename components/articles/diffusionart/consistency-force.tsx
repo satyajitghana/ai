@@ -38,8 +38,9 @@ function Arrow({
   width = 2.2,
   dashed = false,
   label,
-  dx = 6,
-  dy = -6,
+  anchor = "start",
+  dx = "0.5em",
+  dy = "-0.5em",
 }: {
   from: V
   to: V
@@ -47,8 +48,10 @@ function Arrow({
   width?: number
   dashed?: boolean
   label?: string
-  dx?: number
-  dy?: number
+  anchor?: "start" | "end"
+  // label offsets in em, so they scale with the svg's responsive font size
+  dx?: string
+  dy?: string
 }) {
   const ang = matan2(to[1] - from[1], to[0] - from[0])
   const L = mhypot(to[0] - from[0], to[1] - from[1])
@@ -73,9 +76,11 @@ function Arrow({
       />
       {label ? (
         <text
-          x={(to[0] + dx).toFixed(1)}
-          y={(to[1] + dy).toFixed(1)}
-          fontSize={12}
+          x={to[0].toFixed(1)}
+          y={to[1].toFixed(1)}
+          dx={dx}
+          dy={dy}
+          textAnchor={anchor}
           fill={colour}
           fontFamily="ui-monospace, monospace"
         >
@@ -107,10 +112,14 @@ export function ConsistencyForce() {
   const angleOff = Math.abs((matan2(fNft[1], fNft[0]) - matan2(g[1], g[0])) * (180 / Math.PI))
   const angleNorm = angleOff > 180 ? 360 - angleOff : angleOff
 
+  // Labels take their size from the svg's font size: 18 units on phones
+  // (18 * 358 / 640 = 10 px), 12 units from sm up. O and S are chosen so the
+  // extremes of the sliders (NFT tip at x = -3.35 units with its end-anchored
+  // label, e at 1.5 units, the 21-glyph v_old label) all stay inside 640 at 18.
   const W = 640
-  const H = 330
-  const O: V = [470, 175]
-  const S = 95
+  const H = 332
+  const O: V = [410, 166]
+  const S = 90
   const P = (v: V): V => [O[0] + v[0] * S, O[1] + v[1] * S]
 
   return (
@@ -124,19 +133,19 @@ export function ConsistencyForce() {
         </span>
       </div>
       <div className="p-3 sm:p-4">
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" className="max-w-full">
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" className="max-w-full text-[18px] sm:text-[12px]">
           <title>
             {`At q = ${q.toFixed(2)}, the positive branch force g + q e and the negative branch force g − (1 − q) e add to 2g + (2q − 1) e, which points ${angleNorm.toFixed(0)} degrees away from the reward direction g. DiffusionART's force is G along g with no e term.`}
           </title>
           <circle cx={O[0]} cy={O[1]} r={5} fill="currentColor" />
-          <text x={O[0] + 8} y={O[1] + 18} fontSize={11} fill="currentColor" fillOpacity={0.7} fontFamily="ui-monospace, monospace">
+          <text x={O[0]} y={O[1]} dx="0.7em" dy="1.6em" fontSize="0.9em" fill="currentColor" fillOpacity={0.7} fontFamily="ui-monospace, monospace">
             v_old (current state)
           </text>
           <Arrow from={O} to={P(e)} colour={GAP} dashed label="e (gap)" />
-          <Arrow from={O} to={P(fPos)} colour={POS} label="F₊" dy={-8} />
-          <Arrow from={O} to={P(fNeg)} colour={NEG} label="F₋" dy={16} />
-          <Arrow from={O} to={P(fArt)} colour={G_COL} width={3} label="ART: G" dx={-10} dy={22} />
-          <Arrow from={O} to={P(fNft)} colour={NFT} width={3} label="NFT sum" dx={-70} dy={-10} />
+          <Arrow from={O} to={P(fPos)} colour={POS} label="F₊" dy="-0.65em" />
+          <Arrow from={O} to={P(fNeg)} colour={NEG} label="F₋" dy="1.35em" />
+          <Arrow from={O} to={P(fArt)} colour={G_COL} width={3} label="ART: G" dx="-0.8em" dy="1.8em" />
+          <Arrow from={O} to={P(fNft)} colour={NFT} width={3} label="NFT sum" anchor="end" dx="-1.6em" dy="-0.8em" />
           {Math.abs(2 * q - 1) * eMag > 0.02 ? (
             <Arrow from={P(fArt)} to={P(add(fArt, residual))} colour={NFT} dashed width={1.4} />
           ) : null}
