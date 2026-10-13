@@ -1,0 +1,502 @@
+---
+title: "MiniCPM-V 4.7: Qwen3.6's own brain, new eyes, and experts read off a phone's flash"
+description: "OpenBMB's MiniCPM-V 4.7 35B-A3B is being passed around as a Qwen3.6-35B replacement. Its config.json says something more interesting: the language model is Qwen3.6-35B-A3B's, layer for layer. What OpenBMB changed is the eyes (a 27-layer SigLIP2 encoder that can quarter its own tokens after layer 6) and the runtime (Lookahead Expert Scheduling, which streams 13.8 GB of 3-bit experts off flash). I counted the weights from the safetensors headers, ported the image processor to count visual tokens, read the llama.cpp fork and the iOS app that run it, and checked the benchmark claims against OpenBMB's own charts."
+date: 2026-10-13
+tags:
+  - multimodal
+  - vision-language-models
+  - mixture-of-experts
+  - on-device
+  - quantization
+  - speculative-decoding
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 2
+  unique: 2
+  why: "Shows from config and code that 4.7 is Qwen3.6-35B-A3B with a new vision stack, and rebuilds the phone runtime's 3 GB and 5x claims from the app's source."
+topic: multimodal
+kind: model
+level: practitioner
+runsOn: phone
+licence: Apache-2.0
+---
+
+import { VisualTokens } from "@/components/articles/minicpm-v-4-7/visual-tokens"
+import { BenchDelta } from "@/components/articles/minicpm-v-4-7/bench-delta"
+import { ExpertStall } from "@/components/articles/minicpm-v-4-7/expert-stall"
+
+The post that sent me here was a reply to OpenBMB's launch: "We got a Qwen3.6-35B
+replacement." OpenBMB's own thread, posted on 12 October, is more careful. It
+announces MiniCPM-V 4.7 as an open multimodal series in two sizes, a 35B-A3B
+mixture-of-experts and a 1B, and leads with a phone: 13+ tokens per second on an
+iPhone 17 Pro Max, 17+ on an iPad Pro M4 with 16 GB, "while costing only 3GB
+memory", thanks to a scheduling trick called LES that gives a "5× speedup ... with
+byte-for-byte identical outputs".
+
+A 35B model on a phone is the part I cared about. Before reading any benchmark I
+opened `config.json`, because "replacement" is a strong word for a model whose
+acknowledgements thank Qwen3.5 and Qwen3.6 "for providing the language backbone".
+
+<ModelCard repo="openbmb/MiniCPM-V-4.7-35B-A3B" />
+
+## The replacement is the original
+
+I diffed the language half of the 35B config against
+`Qwen/Qwen3.6-35B-A3B/config.json`. Every field matches: 40 layers, hidden size
+2048, the 3:1 pattern of Gated DeltaNet linear-attention layers to full-attention
+layers, 256 routed experts with 8 picked per token, one shared expert, 512-wide
+expert MLPs, the same M-RoPE sections, the same rope theta of 10,000,000. The only
+difference is the vocabulary, trimmed from 248,320 rows to 248,144. The
+`model_type` inside `text_config` is literally `qwen3_5_moe_text`.
+
+The 1B is the same story one size down. Its text config matches `Qwen3.5-0.8B`
+field for field, except that MiniCPM unties the output head from the embedding
+table, which Qwen ties. That one change adds a 254M-parameter matrix, and it
+matters for the naming below.
+
+So "Qwen3.6-35B replacement" is true in the least surprising way possible: it is
+Qwen3.6-35B-A3B's language model with a different vision stack bolted on and
+OpenBMB's own multimodal post-training. I don't mean that as a criticism. It tells you
+where to look for whatever is new, and it is not the transformer. It is the eyes
+and the runtime.
+
+### Counting the weights
+
+I read the safetensors headers of both repos with HTTP range requests (eight
+bytes for the header length, then the JSON header, never the weights) and summed
+the shapes. All tensors are BF16.
+
+| | MiniCPM-V 4.7 35B-A3B | MiniCPM-V 4.7 1B |
+|---|---:|---:|
+| total parameters | 35,212,875,824 | 1,554,476,272 |
+| routed experts | 32,212,254,720 (91.48%) | none, dense |
+| vision tower + projector | 552,986,032 | 548,266,416 |
+| token embedding | 508,200,912 | 254,048,256 |
+| output head (untied) | 508,200,912 | 254,048,256 |
+| active per token, excluding embedding and vision | 2.95B | dense |
+
+The 35B name is honest: 35.21B on disk. So is A3B. Per token the model touches
+attention (1.01B in the DeltaNet layers, 0.27B in the full-attention ones), the
+shared experts, the routers, 8 of 256 routed experts in each of 40 layers and the
+output head, which comes to 2.95B. Each routed expert is a gate, up and down
+projection of 2048 by 512, so 3,145,728 parameters, and each layer carries 256 of
+them. The config also declares one multi-token-prediction layer, but there are no
+MTP tensors in the checkpoint; OpenBMB ships a separate DSpark drafter instead.
+
+The 1B is a different matter. It is 1.55B parameters. OpenBMB's own benchmark
+chart labels it "1.3B", which is exactly the total minus the untied output head
+(1,300,428,016). Call it whatever you like, but note what the table above shows:
+the vision tower is 548M of those parameters, more than a third of the model. A
+dense 0.8B language model wearing a 0.55B encoder is a very different animal from
+Qwen3.5-0.8B, whose own vision tower is 12 layers of width 768, and the 1B's
+headline comparison is against exactly that model.
+
+## The eyes: a SigLIP2 that compresses itself halfway through
+
+The vision config is SigLIP2-shaped: 27 layers, width 1152, 14-pixel patches,
+position embeddings for a 70 by 70 grid. Two fields are not SigLIP: `insert_layer_id: 6`
+and `downsample_mode: "16x"`. The model card credits "the intra-ViT early
+compression technique from LLaVA-UHD v4" and says 4.7 supports "mixed 4x/16x
+visual token compression". I wanted to know what is actually mixed, so I read the
+modeling code. 4.7 inherits its vision path unchanged from MiniCPM-V 4.6 in
+`transformers`:
+
+```python
+# transformers/src/transformers/models/minicpmv4_6/modular_minicpmv4_6.py:418-423
+insert_layer_id = self.config.insert_layer_id if use_vit_merger else -1
+if use_vit_merger and insert_layer_id >= 0:
+    for layer_index, encoder_layer in enumerate(self.encoder.layers):
+        hidden_states = encoder_layer(hidden_states, **attn_kwargs)
+        if layer_index == insert_layer_id:
+            hidden_states = self.vit_merger(hidden_states, target_sizes, **kwargs)
+```
+
+and a few lines further down, the switch:
+
+```python
+# modular_minicpmv4_6.py:559
+use_vit_merger = downsample_mode != "4x"
+```
+
+So the image goes through seven SigLIP layers (indices 0 to 6) at full
+resolution. Then `vit_merger` runs: a self-attention restricted to each 2 by 2
+window of patches, after which the four patch vectors are concatenated (4,608
+wide), pushed through an MLP and added to their mean. One vector per window
+leaves. The remaining 20 encoder layers run on a quarter of the tokens. At the
+end a second 2 by 2 merge, the projector, folds four more into one and maps them
+to the language model's width of 2048. Sixteen patches in, one token out.
+
+The 4x mode simply skips the first merger. All 27 layers run at full resolution
+and only the projector merges, so four patches become one token. You can see this
+in the GGUF repo too: `mmproj-model-f16-4x.gguf` is 209,084,192 bytes smaller than
+`mmproj-model-f16.gguf`, which is the 104.5M parameters of `vit_merger` at two
+bytes each. The 4x file just does not carry it.
+
+Two details in that merger are worth a sentence. Its first MLP layer is
+initialised block-diagonally, so at the start of training each of the four
+patches in a window passes through its own slice and nothing is mixed yet; mixing
+is learned. And the residual is the mean of the window, so the merger starts from
+a plain 2 by 2 average and learns corrections to it. Placing it after layer 6 rather than at the end is the
+whole efficiency argument: the last 20 of 27 layers are where most of the encoder
+compute is, and they now run on a quarter of the sequence.
+
+Then there is slicing, which decides how many patches you have in the first
+place. The processor targets 448 by 448 pixels per crop. A large image is cut
+into a grid of up to `max_slice_nums` slices (9 by default, the card recommends 36
+for images), picked to match the aspect ratio, plus one downscaled overview of the
+whole image. Every crop is snapped to multiples of 56 pixels so that both 2 by 2
+merges divide evenly.
+
+I ported that processor into the widget below, rounding rules included, and
+checked it against a Python run of the same functions.
+
+<VisualTokens />
+
+The default case is the photo from OpenBMB's own before-and-after clip, 1227 by
+920. It becomes a 2 by 3 grid plus an overview, seven crops, 7,152 patches, and
+447 tokens at 16x. That number is a nice cross-check: a comment in the MiniCPM-V
+iOS app's source says a 9-slice image costs "about 447 tokens". At 4x the same
+photo is 1,788 tokens.
+
+On the encoder side, 16x does seven layers of full work and twenty at a quarter,
+so it costs 12/27 of the 4x mode's patch-layers, 44.4%, before counting that
+attention inside each crop is quadratic in its length. On the language side it
+sends a quarter of the tokens. For a model whose language half is a 3B-active
+MoE, that second saving is what decides prefill time on a phone.
+
+### What 16x costs in accuracy
+
+OpenBMB publishes both modes side by side, which I appreciate. Averaged over the
+24 non-MMHal rows of its vision-language table, 16x gives up 1.55 points. It is
+not uniform. The rows that lose the most are the ones that read small things:
+CharXiv reasoning drops 6.4 (75.60 to 69.20), TextVQA 3.27, CCOCR 2.85, OCRBench_v2
+2.8. General VQA barely moves (MMBench 0.85, MMMU 0.22). Merging pixels early
+should hurt exactly these rows, and the split is useful: use 16x for photos and
+scenes, 4x for charts, forms and dense text.
+
+## Did the new eyes buy anything?
+
+OpenBMB published this table for the 35B in instruct mode. Every number in
+it is theirs: the footnote says "Results are from public reports and our local
+evaluation using official checkpoints." I have not re-run any of it.
+
+<Figure
+  src="/articles/minicpm-v-4-7/fig2.png"
+  alt="Benchmark table for MiniCPM-V 4.7 35B-A3B at 4x and 16x visual token compression against Qwen3.6 35B-A3B, Qwen3.6 27B, Qwen3.8 27B and Gemma-4 31B across 26 vision-language benchmarks grouped into General, STEM, Document OCR and Chart, Multi-Image, Hallucination, Grounding and GUI, Instruction Following, and Video Understanding. MiniCPM's best cells are highlighted in blue."
+  caption="The vision-language comparison, instruct mode. Qwen3.6 35B-A3B is the column that shares MiniCPM's language model (MiniCPM-V 4.7 model card, vision-language performance chart)."
+/>
+
+The thread says "34 benchmarks". The vision table has 26 rows and the language
+table below has 8, so the count is right. The column to read is Qwen3.6 35B-A3B,
+because it is the same language model with Qwen's own vision encoder and
+post-training. Any difference between the two is the vision stack and OpenBMB's
+data, which makes this the cleanest comparison in the release.
+
+<BenchDelta />
+
+At 4x, MiniCPM is ahead on 19 of 26, behind on 6, tied on one (MathVision, 74.24
+each). At 16x, it is ahead on 16 and behind on 10. The wins are concentrated where
+you would hope a vision team would win. OmniDocBench is the outlier at +14.07
+(94.24 against 80.17), then CharXiv reasoning at +8.1, LongVideoBench +5.8,
+MMSI-Bench +5.3, OCRBench +5.2. The losses are mostly small, with one exception:
+ScreenSpot, GUI grounding, where MiniCPM trails by 5.95 at 4x and 7.93 at 16x. If
+you are building a computer-use agent, the "replacement" does not replace.
+
+### One claim in the thread does not add up
+
+The launch post says: "Even at 16× compression, 35B-A3B scores 90.4 on OCRBench,
+5.2 points ahead of Qwen3.6 35B-A3B." The chart has 90.40 at 16x and 86.00 for
+Qwen3.6 35B-A3B. The gap is 4.4 points. The 5.2-point gap is the 4x score, 91.20,
+minus 86.00. The thread put the 16x score next to the 4x margin. It is a small
+slip, and 16x still wins, but it is exactly the kind of number that gets copied
+into a hundred reposts.
+
+### The frontier chart, and what it leaves out
+
+<Figure
+  src="/articles/minicpm-v-4-7/fig1.png"
+  alt="Two scatter plots of score against inference time on a log scale. Top: MiniCPM-V 4.7 35B-A3B as a blue star near score 77 and 330 seconds, above a diagonal line, with Qwen3.5, Qwen3.6, Qwen3.8, Gemma4, GLM4.6-V, Step3-VL, Mimo-V2.5 and Qwen3-VL-235B models scattered around and below the line. Bottom: MiniCPM-V 4.7 1B as a star near score 57.6 and 105 seconds, against MiniCPM-V 4.6, InternVL, Gemma, DeepSeek-VL2 and Qwen3.5 small models."
+  caption="OpenBMB's performance-efficiency chart. Circles and stars are instruct mode, diamonds thinking mode; score is the average of MMStar, MMMU-Pro, CharXiv reasoning, BLINK and MathVista (MiniCPM-V 4.7 model card, frontier chart)."
+/>
+
+The footnote defines the score as the average of five benchmarks. I recomputed it
+from the table: MiniCPM at 4x averages 76.86, Qwen3.6 35B-A3B in instruct mode
+72.94, which matches where the star and the circle sit. So the star is the 4x
+model; at 16x the same average is 74.48. Two things the chart does not tell you.
+First, the hardware behind "inference time" is not stated anywhere I could find,
+so the x-axis is a relative measure from OpenBMB's own setup. Second, look at the
+diamonds: Qwen3.6 35B-A3B in thinking mode scores higher than MiniCPM's star, at
+about four times the time. "Higher score in less time than Qwen3.6 35B-A3B" is
+true of instruct against instruct. Against thinking mode it is a speed trade,
+which may well be the trade you want, but it is a trade.
+
+The language table is the eight benchmarks that make up the rest of the 34.
+
+<Figure
+  src="/articles/minicpm-v-4-7/fig3.png"
+  alt="Language benchmark table: MiniCPM-V 4.7 35B-A3B against Qwen3.6 35B-A3B, Qwen3.6 27B, Qwen3.8 27B and Gemma-4 31B on CMMLU, MMLU-Pro, SuperGPQA, IFBench, AIME26 at avg16, LiveCodeBench-v6, BFCL-V4 and tau-squared Bench. MiniCPM is highlighted on CMMLU at 90.21 and tau-squared Bench at 84.65."
+  caption="Text-only results, instruct mode (MiniCPM-V 4.7 model card, language performance chart)."
+/>
+
+Against its own base it wins five of eight: CMMLU, IFBench (47.67 against 35.33),
+AIME26, LiveCodeBench and tau-squared Bench (84.65 against 79.65). It loses
+MMLU-Pro, SuperGPQA and BFCL-V4 by under 2.2 points each. Multimodal post-training
+usually costs a language model some text ability; here the text side mostly held
+or improved. Gemma-4 31B still beats everyone on LiveCodeBench (71.24) and IFBench
+(54.33).
+
+### The 1B, against the model it is built on
+
+<Figure
+  src="/articles/minicpm-v-4-7/fig4.png"
+  alt="Benchmark table for MiniCPM-V 4.7 1B, labelled 1.3B, at 4x and 16x against MiniCPM-V 4.6 1.3B, Qwen3.5 0.8B, LFM2.5-VL 1.6B and Gemma-4-E2B 5.1B across 25 vision-language benchmarks."
+  caption="The 1B's comparison. Note the size row: 1.3B for both MiniCPM models, which is the parameter count without the untied output head (MiniCPM-V 4.7 model card, 1B performance chart)."
+/>
+
+The card says the 1B "substantially outperforms Qwen3.5 0.8B", and on this table it
+does: ahead on all 25 rows in both modes. Given that it is Qwen3.5-0.8B's own
+language model plus a 548M-parameter encoder, that is the expected result, and the
+comparison flatters it a little: it is a 1.55B model against a 0.8B one. The more
+honest yardstick is MiniCPM-V 4.6 at the same size, which the card says 4.7
+"continues to improve" on. At 4x it is ahead on 17 of 25 and behind on 7,
+including MathVista (74.30 against 75.50), OmniDocBench (85.39 against 86.93) and
+RefCOCO (84.85 against 86.70). An improvement on balance, not across the board.
+
+## The runtime: 13.8 GB of experts, read from flash
+
+Now the part that is new. A 35B MoE in BF16 is 70 GB. Even at 3 bits the routed
+experts alone do not fit in a phone's memory. OpenBMB's answer, which they call
+Lookahead Expert Scheduling, lives in a fork of llama.cpp
+(`tc-mb/llama.cpp-omni`) and in the iOS demo app (`OpenBMB/MiniCPM-V-Apps`). I
+read both. The app source turned out to be the better documentation: it is full
+of measured tables in its comments.
+
+First, the bytes. The app downloads a GGUF called
+`MiniCPM-V-4_7-35B-A3B-mix_q3gud_im-les.gguf` (1,662,732,800 bytes: everything
+except the routed experts) plus 40 files `experts/layer_000.bin` to
+`layer_039.bin`, each exactly 346,030,080 bytes
+(`MiniCPMModelConst.swift:369`). Divide by 256 experts and you get 1,351,680
+bytes per expert, which is 3,145,728 parameters at precisely 3.4375 bits: the
+llama.cpp Q3_K format. The public GGUF repo's `tensor-types.txt` for that
+quantization says the same thing in one line, `ffn_(gate|up|down)_exps=Q3_K`. All
+40 layers together are 13.84 GB of experts.
+
+Per token, 8 experts in each of 40 layers is 320 expert reads, about 432 MB if
+none of them is already in memory. At OpenBMB's own figure of roughly one
+millisecond per expert read, that is a third of a second per token
+spent waiting on flash. Their measured baseline, "expert weights loaded from SSD,
+no optimizations", is 2.97 tokens per second. The arithmetic and the measurement
+agree.
+
+<Figure
+  src="/articles/minicpm-v-4-7/fig5.png"
+  alt="Timing diagram titled LES: reuse the next layer router to predict its experts, prefetch from SSD. Layer L computes attention, router and expert compute. During it, the layer hidden state is multiplied by the next layer's router, the top 8 experts such as E151 and E43 are prefetched from SSD into memory slots, overlapping the previous FFN. A badge reads hit rate over 80 percent, next layer's 8 experts, about 6 to 7 already resident. Layer L+1 computes the 7 of 8 resident experts first and the last one after its read. A footer reads: read 1 expert about 1.00 ms, compute 1 layer 1.15 ms; no prefetch, 8 experts read serially, 8.0 ms per layer; with prefetch, I/O overlaps compute."
+  caption="LES in one picture. The prediction is the next layer's own router applied early; the result is a schedule, not a different set of experts (llama.cpp-omni, docs/les, LES diagram)."
+/>
+
+### Predicting the next layer with its own router
+
+The predictor is the part I expected to be complicated, and it is one line of
+graph code. While layer L runs, the fork multiplies layer L's post-attention
+hidden state by layer L+1's router weights and takes the top 8:
+
+```cpp
+// tc-mb/llama.cpp-omni src/models/qwen35moe.cpp:455-462
+if (moe_slots && moe_slots->lookahead_prefetch_enabled() && ubatch.n_tokens == 1 &&
+    il + 1 < n_layer && model.layers[il + 1].ffn_gate_inp != nullptr) {
+    ggml_tensor * prefetch_router_logits =
+        build_lora_mm(model.layers[il + 1].ffn_gate_inp, attn_post_norm);
+    lookahead_next = ggml_cont(ctx0, ggml_argsort_top_k(ctx0, prefetch_router_logits,
+                                    moe_slots->lookahead_prefetch_depth()));
+```
+
+The bet is that the residual stream changes little between two adjacent layers,
+so the next router, shown this layer's state, mostly picks what it will pick a
+millisecond later. OpenBMB's diagram puts the hit rate above 80%, six or seven of
+eight. I could not check that number; it is not in the repo's tables. Note the
+`n_tokens == 1` condition: prediction runs during decode only. Prefill, where one
+layer can need over a hundred distinct experts, takes a different path.
+
+This is where LES differs from [Edge0](/articles/edge0-streaming-moe), which
+solved the same problem on the same backbone a month earlier with a trained
+per-layer prerouter and ran it at four experts per token instead of eight. LES
+trains nothing and keeps all eight. The router that decides what gets computed is
+untouched; the prediction only decides what gets read early. A wrong guess costs
+a wasted read, never a wrong expert.
+
+### Most of the speed is a cache
+
+The diagram's interesting phrase is "already resident". A one-layer prefetch
+window of 1.15 ms cannot read eight experts at a millisecond each. What makes
+six or seven of them resident is a per-layer cache that survives from one token
+to the next. The engine gives every MoE layer its own window of expert slots
+with an LRU policy (`llama-moe-slot.cpp`, "decode window"), and the prefetched
+experts land in the same LRU. Consecutive tokens route heavily to the same
+experts, so most of what a layer needs was used a token or two ago.
+
+The app sizes that cache by device memory (`MiniCPMModelConst.swift:781-783`):
+128 slots per layer at 16 GB, 48 at 12 GB, 24 at 8 GB, with 8 extra slots per
+layer for prefetch (`defaultLookaheadPrefetchDepth = 8`, line 1193). A comment a
+few lines above records why it is on by default, from a real multimodal session
+with a 48-slot cache against no cache:
+
+| | cache on, 48 slots | cache off |
+|---|---:|---:|
+| decode speed (tok/s) | 12.57 / 13.34 / 14.29 | 9.30 / 9.47 |
+| steady-state misses | 14 / 33 / 74 | 173 / 224 |
+| critical-path reads | 17 / 42 / 95 MiB | 222 / 289 MiB |
+
+The same comment explains that a text-only benchmark (one paragraph repeated
+twelve times) had shown the opposite, because repeated text routes almost
+identically and the OS page cache alone was nearly perfect. The authors rolled
+back a default the same day and wrote down the lesson: tune with real prompts,
+not benchmark prompts. It is the most useful thing in the repository.
+
+The table is also where I found the source of "13+ tokens/s": the cached run lands
+between 12.57 and 14.29. The comment does not name the device.
+
+The widget models one layer with OpenBMB's two timings, so you can see why both
+pieces are needed.
+
+<ExpertStall />
+
+OpenBMB's diagram puts the fully serial case at 8.0 ms of reads per layer.
+With nothing resident and no overlap, the model gives 2.73 tokens per second,
+close to the measured 2.97 baseline, which is the sanity check. Slide to seven
+resident: waiting for the eighth expert before computing gives 11.6, and
+computing the seven while the eighth is read gives 17.8. Below about six resident
+the ordering hardly matters, because one expert read costs as much as the whole
+layer's compute and there is nothing left to hide it behind. The ordering is worth
+something only once the cache has done its job. The model leaves out the CPU-side
+bookkeeping, which the engine's own comments measure at 3.5 ms per single-token
+step, so treat its numbers as ceilings.
+
+### Where the 3 GB comes from
+
+The thread says "only 3GB memory". I could not find that number in any table,
+but the app's own sizing reproduces it. The cache is (slots + prefetch slots) x
+40 layers x bytes per expert. At the 12 GB tier that is (48 + 8) x 40 x 1,351,680
+bytes, 3,027,763,200 bytes, 3.03 GB. My reading is that "3 GB" is the expert
+cache, not the process. On top of it sit the 1.66 GB non-expert GGUF, which the
+engine memory-maps so its pages can be reclaimed, the 1.12 GB vision projector and
+the KV cache (small: only 10 of the 40 layers have one; the rest are DeltaNet
+state). On a 16 GB iPad at the default 128 slots, the same formula gives 7.4 GB of
+cache. The memory figure is a setting.
+
+### "5x with byte-for-byte identical outputs" is two claims
+
+The LES document has the ladder, measured on an iPad Pro 11-inch M4 with 16 GB:
+
+| stage | decode | step | total |
+|---|---:|---:|---:|
+| experts read from SSD, no optimisation | 2.97 tok/s | | 1.00x |
+| LES scheduling and load path | 9.81 tok/s | 3.30x | 3.30x |
+| plus layer-wise mixed-precision quantization | 14.92 tok/s | 1.52x | 5.02x |
+| plus DSpark speculative sampling | 17.39 tok/s | 1.17x | 5.86x |
+
+The scheduling stage is lossless by construction: the real router picks the
+experts, and prediction only changes when bytes arrive. It buys 3.30x. The 5x
+in the thread, 5.02x in the table, includes the next row, which is a change of
+quantization. A different quantization produces different weights and, at some
+point, different tokens than the baseline did. Each piece is fine on its own;
+the sentence that joins them claims identity for a speedup that is partly
+compression. The before-and-after clip on the model card cannot settle it either
+way: its two answers differ word for word, which is expected, because the
+model's `generation_config.json` samples at temperature 1.0.
+
+<Figure
+  src="/articles/minicpm-v-4-7/fig6.jpg"
+  alt="Two phone screenshots side by side, labelled Before Optimization and After Optimization, answering the same parking-sign question. The left answer has reached the line about Tuesdays and reads Decode speed 2.0 t/s; the right is three numbered points in and reads Decode speed 5.5 t/s."
+  caption="Last frame of OpenBMB's before-and-after clip: 2.0 against 5.5 tokens per second on the device it was recorded on. Neither is the 13+ headline, and the clip does not say which optimisations the right side runs (MiniCPM-V 4.7 model card, on-device comparison animation)."
+/>
+
+That clip is worth a second look for a different reason. Its decode counters
+read 2.0 and 5.5 tokens per second at the end. The headline numbers come from
+other runs, with the cache and the drafter switched on; the clip is the honest
+reminder that a phone running a 35B model is a configuration, and the default one
+is slower than the launch post.
+
+### Why speculative decoding only adds 17% here
+
+The drafter is a DSpark checkpoint (`MiniCPM-V-4.7-35B-A3B-DSpark`): 5 layers,
+389,223,169 parameters, reading hidden states from target layers 3, 11, 19, 27
+and 35, drafting 15 tokens a pass. Its card reports acceptance lengths of 5.098
+on MMMU, 6.126 on MathVista and 7.387 on code, which on a GPU is a big win. On the
+phone the app drafts only 4 tokens a round (`specDraftNMaxResolved`, default 4),
+and the reason is the MoE: verifying 5 tokens means 5 rows through every layer,
+and each row picks its own 8 experts, so a layer can need up to 40 distinct
+experts instead of 8. Every one of them has to be in the cache or read from
+flash. Speculation saves forward passes, but on flash-bound MoE a forward pass of
+5 rows is not much cheaper than 5 forward passes. The 1.17x is that tension
+showing. The site's pieces on [DSpark](/articles/deepseek-dspark) and
+[DFlash 2](/articles/dflash2) cover the drafter itself.
+
+## Self-Replay Fine-Tuning, briefly
+
+The release also points to a fine-tuning recipe, Self-Replay Fine-Tuning: before
+fine-tuning on a new task, sample the current model's own answers to general
+prompts, filter them, and mix them with the task data (OpenBMB's post gives a 4:1
+blend) so the model rehearses what it already knew. The post claims it "cuts
+forgetting by 80%+" and shows, on a counting task, MiniCPM-V 4.5's general-score
+drop shrinking from 9.25 to 1.80. It is a sensible, old idea (rehearsal with
+self-generated data) and I did not test it. If you fine-tune either model, it is
+cheap enough to try.
+
+## What I would use it for
+
+If you run Qwen3.6-35B-A3B for anything with documents, charts, scans or long
+video, try MiniCPM-V 4.7 at 4x. The language model is the same, the vision results
+on paper are better where it matters (OmniDocBench by 14 points, CharXiv by 8),
+and the text side did not regress much. The weights are Apache-2.0. If you build
+GUI agents, stay with Qwen: ScreenSpot is the one place 4.7 is clearly worse.
+Switch to 16x for photos and video frames, where it costs about a point and a half
+on average and a quarter of the tokens.
+
+The on-device story is real engineering and the code is open, but read it as a
+runtime with knobs: cache size per layer, prefetch depth, draft length,
+quantization. The launch numbers are those knobs set well on good hardware. The
+idea I will remember is simple: reuse the next layer's router a layer early,
+keep a small per-layer cache warm, and compute what you have while you fetch what
+you don't. None of it needs training, so nothing stops it being ported to any
+other MoE with the same shape.
+
+Related on this site: [MiniCPM5-2B](/articles/minicpm5-2b), OpenBMB's text model
+from September; [Edge0](/articles/edge0-streaming-moe), the trained-predictor
+take on streaming this exact backbone; [a 200 GB MoE on one RTX 3090](/articles/big-moe-one-3090),
+the desktop version of keeping experts out of fast memory;
+[LFM2.5-VL-3B](/articles/lfm2-5-vl-3b), another small VLM that appears in the 1B's
+comparison; and the [mixture-of-experts](/architectures/mixture-of-experts)
+explainer for why total and active parameters come apart.
+
+<RepoCard repo="OpenBMB/MiniCPM-V" />
+
+<ModelCard repo="openbmb/MiniCPM-V-4.7-1B" />
+
+## How I checked
+
+- **Weights:** read every safetensors header of `openbmb/MiniCPM-V-4.7-35B-A3B`
+  (16 shards) and `openbmb/MiniCPM-V-4.7-1B` with range requests and summed the
+  shapes; diffed both `config.json` text sections against `Qwen/Qwen3.6-35B-A3B`
+  and `Qwen/Qwen3.5-0.8B`. Expert bytes came from the app's constants and the GGUF
+  repo's file list and `tensor-types.txt`.
+- **Vision path:** read `modular_minicpmv4_6.py`, `modular_minicpmv4_7.py` and
+  `image_processing_minicpmv4_6.py` from `transformers` main, ported the slicing
+  to TypeScript and checked it against the same functions in Python.
+- **Runtime:** read `tc-mb/llama.cpp-omni` at commit `88bd37eb`
+  (`src/llama-moe-slot.cpp`, `src/models/qwen35moe.cpp`, `docs/les/`) and
+  `OpenBMB/MiniCPM-V-Apps` at `e356c17e`. I ran none of it; the iPad and iPhone
+  numbers are OpenBMB's.
+- **Benchmarks:** transcribed OpenBMB's four chart images from the MiniCPM-o
+  repository (`OpenBMB/MiniCPM-V` redirects there, at `1d6b7d68`), recounted the
+  34, recomputed the frontier chart's five-benchmark averages and the OCRBench
+  margin. All scores are OpenBMB's own evaluations; I did not run any benchmark.
+- **Not checked:** the 80% prediction hit rate, the inference-time axis of the
+  frontier chart (no hardware is given), the 13+ tok/s on a named iPhone (the
+  measurement table I found does not name its device) and Self-Replay
+  Fine-Tuning's numbers.
