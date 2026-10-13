@@ -16,7 +16,9 @@ import { Range } from "@/components/articles/ui/range"
 // the largest claim open when I read the repository, PR #144 (4609169/10^10), main's
 // witness from 05:06 UTC on Oct 9, PR #186 (330942774629799/(5*10^17)), main's from 12:57 UTC, PR #279
 // (90446448750933/(1.25*10^17)), main's from 14:08 UTC on Oct 10, and the open PR #467
-// (51571324647751/(4*10^16)) of Oct 11. Hidden constants are not modelled:
+// (51571324647751/(4*10^16)) of Oct 11, then main's #596 (16127213726553/10^16) from 17:00 UTC
+// on Oct 12, the checkpoint Colkitt posted, and #799 (1661634653669567/10^18) from 06:44 UTC on
+// Oct 13. Hidden constants are not modelled:
 // the real construction only starts below n log n at sizes far beyond the slider.
 
 const PRESETS = [
@@ -29,6 +31,8 @@ const PRESETS = [
   { id: "pr186", label: "6.62e-4", sub: "main, Oct 9 evening (PR #186)", kappa: 330942774629799 / 5e17 },
   { id: "pr279", label: "7.24e-4", sub: "main, Oct 10 (PR #279)", kappa: 90446448750933 / 1.25e17 },
   { id: "pr467", label: "1.29e-3", sub: "open PR #467, Oct 11", kappa: 51571324647751 / 4e16 },
+  { id: "pr596", label: "1.61e-3", sub: "main, Oct 12 (PR #596)", kappa: 16127213726553 / 1e16 },
+  { id: "pr799", label: "1.66e-3", sub: "main, Oct 13 (PR #799)", kappa: 1661634653669567 / 1e18 },
 ]
 
 const LANDMARKS = [

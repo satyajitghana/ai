@@ -313,7 +313,7 @@ export function StopGauge() {
           className="kgx-stage"
           tabIndex={0}
           role="slider"
-          aria-label="Stop gauge for the κ race. Arrow keys step through seven witnesses from 9 to 11 October."
+          aria-label="Stop gauge for the κ race. Arrow keys step through ten witnesses from 9 to 13 October."
           aria-valuemin={1}
           aria-valuemax={MILESTONES.length}
           aria-valuenow={selected + 1}
