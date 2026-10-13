@@ -1,0 +1,577 @@
+---
+title: "ReplaySSM: an SSM decoder that writes its state once every 16 tokens"
+description: "ReplaySSM, from Tri Dao's lab and NVIDIA, stops writing a Mamba-2 or Gated DeltaNet state back to memory after every token. It keeps a checkpoint plus a ring of the last few inputs and replays them, so most steps compute the output and write nothing. I derived the identity, read the released Triton kernels and the vLLM fork, recounted the state traffic from Nemotron-3-Super's config, checked every speedup against the paper's own tables, derived why the rounding of a low-precision read copy cannot accumulate, and reproduced that on a toy head. The speed numbers hold, at serving batch sizes only: 1.20-1.47x for standard decoding at batch 256, and a slight slowdown at batch 1. The 'up to 2.1x' for speculative decoding is the T=4, batch-512 cell of a grid whose abstract quotes about 1.8x and whose own maximum is 2.34x, measured against a vLLM baseline that falls below plain decoding. The adoption line is looser than the post: vLLM has merged the Mamba-2 paths but not the Gated DeltaNet ones, Kimi-K3 runs an independently designed cousin that writes its state every step, and the two-precision state that keeps rounding out of the recurrence ships in none of the four engines I checked."
+date: 2026-10-13
+tags:
+  - state-space-models
+  - linear-attention
+  - speculative-decoding
+  - quantization
+  - kernels
+  - inference
+  - vllm
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "ReplaySSM from first principles: the unrolled identity, the kernel's flush rule, a derived error bound, and which of its claims actually shipped where."
+topic: inference-serving
+kind: paper
+level: practitioner
+runsOn: datacenter
+licence: Apache-2.0
+---
+
+import { ReplayRing } from "@/components/articles/replayssm/replay-ring"
+import { ErrorLoop } from "@/components/articles/replayssm/error-loop"
+
+ReplaySSM has turned up on this site three times already, each time as a line item. It is in the
+optimisation list of [GLM-5.3-Flash](/articles/glm-5-3-flash), between tensor parallelism and W8A8. It
+is the change that made Z.ai's KDA decode kernel *slower*, 0.90x, in the version history of
+[how GLM built its own inference stack](/articles/glm-built-its-own-inference-infra). And it is the
+name of a maintainer note in the [Cinference](/articles/cinference) engine. Nobody, including me,
+had explained what it does.
+
+Yesterday Ze-Wei Liou [posted](https://x.com/zwljohnny/status/2109679465609470216) the paper, a joint
+NVIDIA blog post and the code, with Tri Dao and five NVIDIA engineers. The post makes four claims: it runs
+in production in GLM-5.3-Flash and Kimi-K3; it ships in TensorRT-LLM, vLLM, FlashInfer and SGLang; it
+speeds up standard decoding by up to 1.47x and speculative decoding by up to 2.1x; and it makes a
+low-precision SSM state possible "whose rounding error never propagates through the recurrence."
+
+I expected a kernel paper. What I found is a two-line algebraic identity and a careful account of
+what falls out of it. The identity is the kind of thing you can check on a napkin. The consequences
+are where the interesting engineering is, and also where the post's wording runs ahead of the
+evidence.
+
+## Why a fixed-size state is not cheap to decode
+
+A Mamba-2 layer keeps, per head, a state matrix $S_t \in \mathbb{R}^{d_v \times d_k}$ and updates it
+once per token:
+
+$$
+S_t = \alpha_t S_{t-1} + v_t k_t^{\top}, \qquad o_t = S_t q_t
+$$
+
+$\alpha_t \in (0,1)$ is a data-dependent decay, $v_t$, $k_t$, $q_t$ are this token's projections, and
+$o_t$ is the output. (Mamba-2's own names are $x$, $B$, $C$ for $v$, $k$, $q$; the paper and the kernels
+mix both.) Gated DeltaNet and Kimi Delta Attention add a delta-rule correction, which I come back to.
+
+The selling point of this layer is that $S_t$ does not grow with context. The catch is in how a decoder
+runs it. Every step loads $S_{t-1}$ from HBM, scales it, adds a rank-1 outer product, reads the output,
+and stores $S_t$ back. For one head the step does about $5 d_v d_k$ FLOPs and moves $2 \cdot 4 d_v d_k$
+bytes with an FP32 state, so the arithmetic intensity is about 0.63 FLOP per byte. An H100 wants around
+20 FLOP per byte to keep its FP32 cores busy. Batching does not help, because every sequence brings its
+own state and no element is reused. The step is a memory copy with a little arithmetic attached.
+
+That copy is not small. I pulled the released `config.json` of
+[Nemotron-3-Super-120B-A12B-NVFP4](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4)
+and counted its `hybrid_override_pattern`: 40 Mamba-2 layers, 8 attention layers and 40 MoE layers,
+with 128 Mamba heads of $d_v = 64$, $d_k = 128$, and `mamba_ssm_cache_dtype` set to `float32`. One
+layer's state for one sequence is $128 \times 64 \times 128 \times 4$ bytes, exactly 4 MiB; across 40 layers
+that is 160 MiB per sequence, and at batch 256 it is 40 GiB of state that has to be read and written on
+every decode step.
+
+Attention's KV cache in the same model is FP8 with 2 KV heads of dimension 128, so one token's entry
+is 0.5 KiB per layer. One Mamba state is the KV cache of 8,192 tokens. Attention only reads its cache
+while the SSM reads and writes, so the SSM layers move more bytes per step until $40 \times 8$ MiB equals
+$8 \times 0.5 N$ KiB, which is $N = 81{,}920$ tokens. The paper does this same arithmetic and then
+measures the crossover later, near 100K, which it puts down to attention kernels having had more
+optimisation. Their profile, the left panel below, shows the SSM layers as the largest slice of a
+decode step all the way out to 100K tokens of context. A hybrid model that was meant to be "mostly
+cheap layers" is mostly paying for state traffic.
+
+<Figure
+  src="/articles/replayssm/fig1.png"
+  alt="Top: conventional decoding loads S t minus 1, adds v t k t transpose, stores S t, reads o t with q t. ReplaySSM loads a checkpoint plus a short buffer of cached inputs, appends the current inputs, forms S t without storing it, and stores only on flush. Bottom left: a stacked area chart of milliseconds per decode step from 20K to 120K context, SSM 37 percent and attention 37 percent at 100K; below it, full-state writes per L steps, L for conventional and 1 for ReplaySSM. Bottom middle: conventional speculative decoding summarizes drafts d1 to d5 into the state with no rollback; ReplaySSM keeps d1 to d5 in a buffer and moves a pointer after d3. Bottom right: a shared low-precision state feeds its rounding back into the recurrence; ReplaySSM keeps a high-precision checkpoint for the recurrence and casts a low-precision copy for output reads."
+  caption="The whole paper on one page: the identity on top, and the three problems it is aimed at below. The latency breakdown is Nemotron-3-Super-120B-A12B-NVFP4 at batch 256 on one B300 (ReplaySSM paper, Figure 1)."
+/>
+
+## The identity
+
+Unroll the recurrence over the last $h$ tokens, starting from a checkpoint $S_{\text{ckpt}}$ taken
+before them. Write $\gamma_{i:j} = \prod_{\ell=i}^{j} \alpha_\ell$ for the decay accumulated between two
+positions, and $\gamma_h = \gamma_{1:h}$:
+
+$$
+S_t = \alpha_t S_{t-1} + v_t k_t^{\top} = \gamma_h S_{\text{ckpt}} + \sum_{j=1}^{h} \gamma_{j+1:h}\, v_j k_j^{\top}
+$$
+
+Both sides are the same matrix. The left side is how every SSM decoder runs: keep the summary, update
+it, throw the inputs away. The right side says you could instead keep an old summary and the last $h$
+inputs, $(\alpha_j, v_j, k_j)$, and rebuild the current state whenever you need it. Nothing about the
+model changes; outputs agree up to floating-point order of operations.
+
+ReplaySSM picks the right side. On a normal step (a *non-flush* step) it appends this token's inputs to
+a small buffer, computes the output from the checkpoint plus the buffer, and stores nothing but the new
+record. When the buffer holds $L$ records, a *flush* step folds them into the checkpoint, writes the
+checkpoint once, and empties the buffer. The paper uses $L = 16$.
+
+The saving falls straight out. Over a window of $L$ steps both schemes read the state $L$ times, because
+every output needs it. Conventional decoding also writes it $L$ times; ReplaySSM writes it once. So the
+state term goes from $8 L\, d_v d_k$ bytes to $4(L+1)\, d_v d_k$, a ratio of $(L+1)/2L$, just over a
+half. The buffer adds a little back: step $i$ reads the $i-1$ records before it, so a window reads
+$L(L-1)/2$ records and writes $L - 1$. The paper's Appendix C.3 prices a record per head at
+$2 d_v + 2 d_k + 4$ bytes and gets 0.58 of conventional traffic for Nemotron-3-Super. I reran it and
+get the same 0.581.
+
+That count is deliberately conservative, and the released kernel shows by how much. In
+`selective_state_update_replayssm_output_only.py` the buffer is three tensors: `x_cache` and `dt_cache`
+per value head, and `B_cache` per *group*, so the 128-wide key is stored once for the 16 heads that
+share it. For one Nemotron-3-Super layer a record is $128 \times (128 + 4) + 8 \times 256 = 18{,}944$
+bytes. Stepping that layout through a window in the widget further down, with one token verified per
+step, gives 4.40 MiB per token against 8 MiB for conventional decoding, about 0.55.
+
+### Output without a state
+
+The second trick is smaller and, I think, more consequential. On a non-flush step nobody will ever
+read the state of that step: the next step rebuilds from the checkpoint again. So the step only needs
+$o_t$, and a product of three things can be bracketed either way:
+
+$$
+o = (v k^{\top})\, q = v\, (k^{\top} q)
+$$
+
+The left side builds a $d_v \times d_k$ matrix and multiplies it by $q$. The right side computes one dot
+product and scales a vector. Applied to the whole window:
+
+$$
+o_t = \gamma_{h}\, S_{\text{ckpt}}\, q_t + \sum_{j=1}^{h} \gamma_{j+1:h}\, v_j\, (k_j^{\top} q_t)
+$$
+
+The checkpoint is read once, as a matrix-vector product. Everything else is dot products against
+cached keys, and because $k$ and $q$ are shared by every head in a group, the dot products are computed
+once per group. The paper counts the state-building term shrinking by $d_v d_k / (d_v + d_k)$, about 43
+for this model. That does not matter much for standard decoding, which is memory-bound either way. It
+matters a great deal for speculative decoding, below.
+
+<Figure
+  src="/articles/replayssm/fig2.png"
+  alt="Two diagrams. State-and-output route: the decayed checkpoint plus V times K transpose builds a materialized d by n state, which is multiplied by q to give the output. Output-only route: the checkpoint is read with q to give a vector, K is multiplied by q to give a vector s of t scalars, V is weighted by s and added, giving the output without ever forming the state."
+  caption="The two routes to the same output. The flush step takes the top one because it has to produce the new checkpoint; every other step takes the bottom one (Dao AI Lab, ReplaySSM blog post, Figure 5b)."
+/>
+
+Here is the non-flush branch of the released Mamba-2 kernel. It is the equation above, line for line:
+`ck_acc` is $S_{\text{ckpt}} q$ streamed over tiles of the state, `bc_cache` holds the precomputed
+$k_j^{\top} q$ (a small kernel computes them once per group), and the append that follows writes only
+`x`, `dt` and `B`:
+
+```python
+# vllm/model_executor/layers/mamba/ops/selective_state_update_replayssm_output_only.py, lines 309-357 (trimmed)
+ck_acc = tl.zeros([BLOCK_SIZE_M], dtype=tl.float32)
+for i in tl.static_range(NF_NDS):
+    ...
+    ck_acc += tl.sum(st.to(tl.float32) * c_chunk[None, :], axis=1)
+checkpoint_out = ck_acc * total_decay_cache
+bc_cache = tl.load(bc_pre_ptr + offs_k_cache * stride_bc_pre_pos, ...)
+cache_out = tl.sum(
+    x_all_cache.to(tl.float32) * (scale_cache * bc_cache)[None, :], axis=1
+)
+out = checkpoint_out + cache_out
+
+# Append the current token (x, dt, B) into the buffer at write_pos.
+tl.store(x_cache_ptr + offs_m * stride_x_cache_dim + write_pos * stride_x_cache_pos, x_cur, ...)
+```
+
+`scale_cache` is $\Delta_j\, e^{A(\text{total} - \text{cumsum}_j)}$, the per-record decay rebuilt from the cached
+`dt` values, so the kernel caches $\Delta_j$ rather than $\alpha_j$. The only full-state store in the
+file is inside the `else` branch that starts at line 358. One difference from the paper's main text:
+its Algorithm 1 materialises the state on every step, while the shipped kernel takes the output-only
+route on every non-flush step (the appendix counts both routes).
+
+### Why 16
+
+A larger window amortises the one write over more tokens, but every step reads more records. The paper
+writes traffic per committed token as a function of $L$ and minimises it:
+$L^{*} = \sqrt{2\bar{a}\,(M_S/r - T)}$, where $M_S/r$ is the state-to-record size ratio (84 for this
+model), $T$ the tokens verified per step and $\bar{a}$ the mean accepted. For standard decoding that
+is about 13; the sweep over 8, 16 and 32 lands on 16 for all four models. The June blog post had picked
+8 for Nemotron and 16 for Qwen; the October paper tunes vLLM's own launch configuration first and settles
+on 16 everywhere.
+
+### The delta-rule wrinkle
+
+Gated DeltaNet does not fit the template at first glance:
+
+$$
+S_t = \alpha_t S_{t-1}(I - \beta_t k_t k_t^{\top}) + \beta_t v_t k_t^{\top}
+$$
+
+Expanding the product gives $S_t = \alpha_t S_{t-1} + u_t k_t^{\top}$ with
+$u_t = \beta_t (v_t - \alpha_t S_{t-1} k_t)$, the same outer-product form with a corrected value. The
+correction depends on the previous state, so you cannot cache $v$ and replay; you cache $u$, which is
+computed once, on the step it belongs to, from the rebuilt state. That is why GDN takes the
+state-and-output route even on non-flush steps (it needs the state read at both $k$ and $q$), and why
+its speculative path needs a $T \times T$ triangular solve to get all draft corrections at once, the UT
+transform that delta-rule training kernels already use. KDA, with a per-channel decay, unrolls the
+same way; [the K3 architecture page](/architectures/kimi-k3) has its state at 414 MiB per sequence,
+which is the number ReplaySSM is trying not to copy.
+
+## Speculative decoding: rollback becomes a pointer
+
+Speculative decoding is where an SSM's summary-and-discard habit really hurts. A drafter proposes a
+few tokens, the target model verifies $T$ of them in one pass, and only afterwards do you learn how many
+were accepted. Attention handles the rejects by moving the end-of-sequence pointer in its KV cache back;
+the rejected keys are simply never read again. An SSM has already folded the drafts into its state, and
+the update has no cheap inverse.
+
+vLLM's answer is to write a snapshot of the state after each of the $T$ tokens and keep the one that
+matches the accepted prefix. That is one state read and $T$ state writes per step, on a path that was
+already memory-bound, plus $T$ state slots per request that cap how many requests fit. The paper's
+kernel measurement on Nemotron-3-Super at batch 256 has vLLM's verification costing 4.66 times a plain
+decoding step at $T = 8$.
+
+ReplaySSM gets rollback almost for free because the drafts were never summarised. It appends all $T$
+draft records behind the $h$ committed ones, computes all $T$ outputs with the output-only form (one
+read of the checkpoint against $T$ queries, $K^{\top} Q$ as one small matrix product, a causal mask over
+decays), and after sampling advances the committed pointer by $a$. Rejected records sit past the
+pointer and get overwritten. A flush, when it happens, folds only the *committed* records, so it can run
+before acceptance is known.
+
+The one subtle part is when to flush. The buffer is a ring of capacity $L + T$, and the rule is to flush
+when $h + T > L$: if this step did not flush and all $T$ were accepted, the next step's $T$ records
+would overrun committed ones. The rule depends only on $h$ and $T$, so it is known before the step
+runs and the decision can live inside a captured CUDA graph. In the vLLM fork the threshold is
+`spec_flush_threshold = replayssm_buffer_len + max_spec_len` (`mamba_attn.py` line 123), and the
+on-device commit kernel sets the next step's flag with
+`next_is_flush = ((new_wp + 2 * MAX_SPEC_LEN) > MAX_CACHE_LEN)` (`selective_state_update_replayssm_spec.py`
+line 810). Substitute the threshold and that is $h + T > L$. The June blog post states the rule as
+$h + 2T > L$ for a buffer of capacity $L$; it is the same rule with $L$ counting the whole ring.
+
+The widget below runs that bookkeeping. Pick how many tokens are verified per step, press a button to
+say how many the verifier accepted, and watch the pointer and the checkpoint. It also counts state
+traffic per committed token at the Nemotron-3-Super layer shape, for vLLM's snapshots, for plain
+decoding and for ReplaySSM.
+
+<ReplayRing />
+
+Two things are visible after a few presses. With $T = 4$ and every draft accepted, ReplaySSM moves
+1.30 MiB of state per committed token, against 5 MiB for the snapshot path and 8 MiB for plain decoding:
+four tokens share one checkpoint read, and the write comes once every few steps. With every draft
+rejected the ratio is worse but still well under the snapshots: 4.47 MiB against 20, because a
+rejected step still committed one token and still wrote no state. The other line is memory per
+request. Snapshots hold $T$ states; ReplaySSM holds one checkpoint and $L + T$ records. That second
+number is what lets ReplaySSM keep scaling with batch size after vLLM's speculative path runs out of
+room. The June post measured that as 3.0 to 3.3x more concurrent requests in the same memory.
+
+<Figure
+  src="/articles/replayssm/fig3.png"
+  alt="Left, baseline: five draft inputs d1 to d5 are summarized into the state S, the arrow back is crossed out as irreversible, raw inputs discarded. Right, ReplaySSM step 1: checkpoint S0 then cached d1 to d5, d1 to d3 accepted, d4 and d5 rejected, the pointer moves back to after d3. Step 2: the same buffer with three new drafts e1 to e3 appended after d3."
+  caption="Rollback as a pointer move: the rejected drafts are not undone, they are just behind the pointer when the next drafts are written (Dao AI Lab, ReplaySSM blog post, Figure 4)."
+/>
+
+ReplaySSM is not the first scheme to cache inputs for SSM speculation, and the paper spends an appendix
+being fair about it. The Mamba in the Llama, Snakes and Ladders and STree all avoid per-token snapshots
+by replaying the accepted tokens onto a checkpoint. They still write at least one state per step, and
+their replay is a serial recurrence that holds the state tile in registers for $T$ or $2T - 1$ steps.
+The authors re-tuned each one's launch configuration (which made them 1.4 to 3.0x faster than as
+released) and then measured all of them at batch 256. The result I did not expect: at $T \geq 4$
+STree and The Mamba in the Llama move 1.6 to 2.9x *fewer* bytes than vLLM's snapshots and are still not
+faster. Fewer bytes only help if the kernel can keep enough memory requests in flight, and a serial
+recurrence holding a state tile in registers cannot.
+
+<Figure
+  src="/articles/replayssm/fig6.png"
+  alt="Grouped bar chart of verification kernel latency relative to vLLM standard decoding, for T equals 2, 4, 6 and 8. vLLM: 1.52, 2.56, 3.62, 4.66. STree, algorithm, tuned: 2.75, 3.34, 4.02, 4.69. The Mamba in the Llama, tuned: 1.78 to 2.09, 2.68 to 2.84, 3.42 to 3.82, 4.52 to 5.73. ReplaySSM: 0.77 to 0.82, 0.88 to 1.01, 0.85 to 1.18, 0.89 to 1.21, all near or below the dashed line at 1."
+  caption="Verification kernel latency on Nemotron-3-Super at batch 256, as a multiple of one plain decoding step; bands run from all drafts rejected to all accepted. ReplaySSM verifies eight tokens for 0.89-1.21 of a single plain step (ReplaySSM paper, Figure 7)."
+/>
+
+## Checking the speed numbers
+
+The post says "up to 1.47x" for standard decoding and "up to 2.1x" for speculative decoding. Both are
+in the paper. Neither is the whole story, so here is where each one lives.
+
+Standard decoding first. The paper's Table 6 gives end-to-end decode-step speedup over vLLM with its
+best swept launch configuration. At batch 256 it is 1.47x for Nemotron-3-Nano-4B, 1.42x for
+Nemotron-3-Super-120B, 1.27x for Qwen3.5-4B and 1.20x for Qwen3.5-122B, which is the 1.20-1.47x in the
+abstract. The isolated SSM kernel is 1.46 to 1.80x faster at the same batch (Table 7). The gap between
+the two is just Amdahl: attention, the MoE GEMMs and everything else are untouched.
+
+<Figure
+  src="/articles/replayssm/fig4.png"
+  alt="Bar chart of speedup over vLLM at batch 256. Nemotron-3 4B BF16 on H100: kernel 1.80x, end-to-end 1.47x. Nemotron-3 120B-A12B NVFP4 on B300: kernel 1.53x, end-to-end 1.42x. Qwen3.5 4B BF16 on H100: kernel 1.68x, end-to-end 1.27x. Qwen3.5 122B-A10B NVFP4 on B300: kernel 1.46x, end-to-end 1.20x."
+  caption="Standard decoding at batch 256, window 16, FP32 state, against a tuned vLLM baseline; kernel numbers include flush costs (ReplaySSM paper, Figure 2)."
+/>
+
+The same tables show where it does not help. At batch 1 the end-to-end speedup is 0.96 to 0.99x, a
+slight slowdown, and the kernel alone is 0.41 to 0.88x. At that size the conventional kernel reaches
+only 21.6% of peak DRAM bandwidth on an H100 and 9.3% on a B300, so cutting its traffic saves nothing,
+while ReplaySSM still does the extra buffer reads and arithmetic. That fits the 0.90x Z.ai reported when
+they first added it to their KDA decode kernel (their post gives no batch size, so I cannot say more), and
+it does not contradict anything in the paper: the paper says plainly the method pays off only where the baseline is bandwidth-bound, from roughly batch
+128 up, where vLLM's kernel saturates at 84-86% of peak. If you run a hybrid model for one user on one
+GPU, this is not for you. Two other footnotes are worth knowing. The batch-512 cells of 1.72x and
+1.22x on the B300 models are marked as inflated by a 1,100 W power cap that throttled only the baseline.
+And against vLLM's shipped Mamba-2 defaults rather than the tuned baseline, the batch-256 numbers would
+have been a little better (1.49x rather than 1.47x on the 4B model); the authors chose the harder
+comparison.
+
+Now speculative decoding. The paper runs the two 120B-class models with their MTP heads as drafters on
+GSM8K prompts, 256 generated tokens each. The headline cell is $T = 4$ at batch 512: 1.85x the
+throughput of vLLM's speculative decoding on Nemotron-3-Super and 2.10x on Qwen3.5-122B. That is the
+"up to 2.1x". The abstract says "about 1.8x", which matches the batch-256 column of the same grid
+(1.77x and 1.79x). And the grid itself goes higher: Nemotron-3-Super at $T = 8$ and batch 512 is
+2.34x.
+
+| what the number is | Nemotron-3-Super | Qwen3.5-122B |
+|---|---:|---:|
+| over vLLM speculative, $T = 4$, batch 256 (the abstract's "about 1.8x") | 1.77x | 1.79x |
+| over vLLM speculative, $T = 4$, batch 512 (the post's "up to 2.1x") | 1.85x | 2.10x |
+| over vLLM speculative, $T = 8$, batch 512 (largest cell) | 2.34x | no result (out of memory) |
+| over plain decoding, $T = 4$, batch 512 | 2.16x | 1.90x |
+| over vLLM speculative, $T = 4$, batch 1 | 1.04x | 1.12x |
+
+The row I would quote is the fourth one. A speedup over vLLM's speculative path is partly a measure of
+how badly that path does at large batch: on Nemotron-3-Super at batch 256, conventional speculation
+peaks at $T = 2$ with 9,551 tokens per second and falls to 5,644 at $T = 8$, *below* plain decoding at
+6,807. On Qwen3.5-122B at batch 512 it is below plain decoding at $T = 4$ already. Against plain
+decoding, ReplaySSM's speculation is 2.16x and 1.90x, which is the honest "speculative decoding now
+works on hybrids at serving batch" number. Acceptance lengths match the baseline within 0.05 tokens in
+every cell, so none of it comes from accepting more drafts.
+
+<Figure
+  src="/articles/replayssm/fig5.png"
+  alt="Two line charts of throughput in tokens per second against batch size 1, 32, 128, 256 and 512. Nemotron-3-Super: ReplaySSM speculative rises to about 16K tokens per second at batch 512, vLLM speculative flattens near 9K, vLLM standard near 7.5K; the gap at 512 is marked 1.85x. Qwen3.5-122B: ReplaySSM speculative rises to about 20K, vLLM standard about 10K, vLLM speculative falls just below standard at 512; the gap is marked 2.10x."
+  caption="Speculative serving throughput with T = 4 and the MTP drafter. On Qwen3.5-122B the 2.10x arrow is measured against vLLM's speculative path, which at batch 512 has dropped below vLLM's plain decoding (ReplaySSM paper, Figure 3)."
+/>
+
+The June blog post, which used Nemotron-3-Ultra-550B as well, reported up to 1.48x for standard decoding and
+1.87-1.96x for speculative decoding over plain decoding. Those numbers differ from the October ones because
+the setups differ, starting with a buffer of 8 on Nemotron, not because anything got worse.
+
+## The precision argument, derived
+
+The third claim is the one I wanted to check by hand, because "rounding error never propagates" is a
+strong sentence.
+
+Start with a single low-precision state used for everything, the way you would naturally quantise an
+SSM cache. Let $S_t$ be the exact state and $\hat S_t$ the stored one, rounded after every update:
+$\hat S_t = \mathcal{Q}(\alpha_t \hat S_{t-1} + v_t k_t^{\top})$. Call the rounding error of step $t$
+$e_t$ and the accumulated deviation $D_t = \hat S_t - S_t$. Subtract the two recurrences:
+
+$$
+D_t = \alpha_t D_{t-1} + e_t = \sum_{j \leq t} \gamma_{j+1:t}\, e_j
+$$
+
+Every rounding error ever made is still in the state, decayed but never removed, and the output error
+is $D_t q_t$. With a constant decay $\alpha$ and independent per-step errors of bias $b$ and variance
+$\sigma^2$, the mean deviation settles at $b/(1-\alpha)$ and the variance at $\sigma^2/(1-\alpha^2)$. A
+head with long memory, $\alpha$ close to 1, amplifies its rounding error by a large factor, and it takes
+on the order of $1/(1-\alpha)$ tokens to get there. Round-to-nearest contributes through the bias term,
+which grows linearly; stochastic rounding is unbiased but its variance still accumulates. A KV cache
+has no such loop: an FP8 entry is written once and read many times, never fed back into itself. That
+is the reason, the post says, KV caches ship in FP8 while SSM states still ship in FP32.
+
+ReplaySSM changes this in two steps. First, with one low-precision checkpoint, rounding now happens once
+per window instead of once per step, so the same sum runs over flushes and the limits become
+$b/(1-\alpha^L)$ and $\sigma^2/(1-\alpha^{2L})$. Smaller, but the loop is still there.
+
+The second step is the real idea. Non-flush steps only *read* the checkpoint to make outputs; only
+flushes *update* it. So keep two copies. The flush starts from a high-precision checkpoint
+$S^{\text{HP}}$, folds in the buffer in FP32, and casts the result independently into both formats:
+$S^{\text{HP}}_m = \mathcal{Q}_{\text{HP}}(\cdot)$, $S^{\text{LP}}_m = \mathcal{Q}_{\text{LP}}(\cdot)$ from the same
+unrounded matrix. Non-flush steps read $S^{\text{LP}}$. The next flush reads $S^{\text{HP}}$, never
+$S^{\text{LP}}$.
+
+Take the recurrence copy as exact for a moment, so $S^{\text{HP}}_m = S_m$, and write
+$S^{\text{LP}}_m = S_m + \varepsilon_m$, where $\varepsilon_m$ is a single rounding of a clean state. A
+non-flush step $h$ positions into the next window outputs
+
+$$
+\hat o_t = \gamma_h (S_m + \varepsilon_m)\, q_t + \sum_{j=1}^{h} \gamma_{j+1:h}\, v_j (k_j^{\top} q_t) = o_t + \gamma_h\, \varepsilon_m\, q_t
+$$
+
+The error is $\gamma_h \varepsilon_m q_t$. It contains $\varepsilon_m$ and nothing else: no
+$\varepsilon_{m-1}$, no sum over history, because the previous low-precision copy was thrown away and
+never entered anything that survives. Since $\gamma_h \leq 1$, the error is bounded by one rounding of
+the last checkpoint, whatever the sequence length. That is the sense in which the read error does not
+propagate, and the derivation holds.
+
+What it does not say is that a low-precision state has no accumulating error at all. Two terms remain,
+and the paper names both. The recurrence copy is itself rounded at every flush unless you keep it in
+FP32; the paper's preferred configuration keeps it in FP16 with stochastic rounding, which re-enters the
+loop at $1/L$ of the per-step rate and at a precision where the loop is mild. And on GDN, the cached
+corrections $u$ on non-flush steps are computed from the low-precision read copy, so they carry its
+error into the rest of that window's outputs; the flush recomputes them from cached raw $v$ and the
+high-precision state, so the error stops there. The emulation kernel shows the separation plainly: on a
+flush it quantises `S_new` into `state_hi_ptr` with stochastic rounding and then, under the comment
+"Quantize the unrounded solution independently for the read copy", into `state_lo_ptr` with
+round-to-nearest (`emulation/mamba2_replay.py`, lines 150-174); a non-flush step loads `state_lo_ptr`
+and nothing else (line 176).
+
+I wanted to see the shape of this rather than take it from a plot, so I built a toy: one Mamba-2 head
+with an 8 by 32 state, Gaussian inputs, a fresh decay every step, run for 4,096 steps four ways (exact,
+rounded every step, one ReplaySSM checkpoint, and separate copies with an exact recurrence). The TypeScript
+version runs in your browser below, from a fixed seed, so you see the numbers I quote.
+
+<ErrorLoop />
+
+With an FP8 state, stochastic rounding, a window of 16 and a long-memory head (decays between 0.9995 and
+0.99999), the relative output error after 4,096 steps is 111% when the state is rounded every step,
+37% with one checkpoint rounded once per window, and 2.4% with separate copies. The first two are still
+climbing; the third went flat within the first few dozen steps and stays at one rounding's worth. Flip
+the head to short memory (decays between 0.9 and 0.95) and the picture changes: everything plateaus
+early, at 9.9%, 2.1% and 1.4%. For a head that forgets in a few dozen tokens, rounding once per window
+already captures most of the benefit, and the second copy buys a factor of about 1.5. The separation
+earns its keep on the slow heads, the ones carrying long-range information, which is exactly where the
+recurrence amplifies error. Switching to round-to-nearest shows the other thing the paper reports: per
+step, rounding to nearest is smaller than stochastic rounding early on (at around step 40 it is 10.7%
+against 15.3% for the every-step FP8 state) and much worse later (506% against 111% at step 4,096),
+because its bias adds linearly while stochastic rounding's noise adds in quadrature. The paper uses
+stochastic rounding for anything that feeds the recurrence and round-to-nearest for the read copy,
+which is rounded once and never fed back.
+
+The toy is a toy. Its inputs are random, not a language model's, and its error is not KL divergence.
+The paper measured the real thing: KL divergence of next-token distributions from FP32-state decoding,
+under teacher forcing on PG-19 books, out to 128K generated tokens.
+
+<Figure
+  src="/articles/replayssm/fig7.png"
+  alt="Log-scale line chart of KL divergence from the FP32 reference against generation length from 16 to 128K for Qwen3.5-4B. Shared NVFP4 plus stochastic rounding rises from about 2e-3 to about 0.14. Shared FP8 rises from 4e-4 to about 0.016. Separate NVFP4 read with FP32 or FP16 recurrence stays near 3e-3 to 5e-3 throughout. Separate FP8 read stays near 6e-4 to 8e-4, close to the FP32 floor. An arrow marks a 36x gap at 128K between shared NVFP4 and separate NVFP4."
+  caption="Output KL from FP32-state decoding on Qwen3.5-4B, window 16. At 128K tokens NVFP4 reads with an FP32 recurrence have KL 0.0038 against 0.136 for a shared NVFP4 checkpoint (ReplaySSM paper, Figure 5)."
+/>
+
+0.136 divided by 0.0038 is 35.8, the post's 36x. That is the best of the four models. On the other three
+the gap at the longest length is 13 to 29x, and on the two Nemotron models the separate curves still
+rise a few times over the range; the paper says so in as many words, "the growth is reduced rather than
+removed." The 120B-class models also have a KL floor about two orders of magnitude above the 4B ones,
+which the authors show is already there between two FP32 runs that differ only in eager versus CUDA-graph
+execution, so every curve there has to be read against its own floor.
+
+<Figure
+  src="/articles/replayssm/fig8.png"
+  alt="Three log-scale KL charts. Nemotron-3-Nano-4B to 32K: shared NVFP4 rises to about 2.5, separate NVFP4 near 0.09, a 29x gap. Nemotron-3-Super-120B to 128K: shared NVFP4 rises to about 1.1, separate NVFP4 rises to about 0.09, a 13x gap; the FP32 floor is around 0.02 to 0.03. Qwen3.5-122B to 128K: shared NVFP4 rises to about 0.18, separate NVFP4 near 0.013, a 14x gap."
+  caption="The same measurement on the other three models. The gaps are 13-29x, and on the Nemotron models the separate configurations still drift up with length (ReplaySSM paper, Figure 12)."
+/>
+
+Then accuracy. Averaged over the four models, a shared NVFP4 checkpoint loses 13.05 points on
+GPQA-Diamond, 5.88 on MMLU-Pro and 10.92 on Math-L5. NVFP4 reads with an FP16 recurrence cut those
+losses to 2.36, 0.15 and 0.10 points. The average hides one model: Nemotron-3-Nano-4B with separate
+NVFP4 reads and an FP16 recurrence still loses 6.7 points on GPQA-Diamond (against 31.3 with a shared
+state). Shared FP16 and FP8 checkpoints stay within benchmark noise of FP32, which means FP8 state
+storage was already close to fine; it is 4-bit where the separation decides whether the model works.
+
+The loss lands where the derivation says it should, in long generations. Split by the length of the FP32
+reference answer, the shared NVFP4 checkpoint on Nemotron-3-Super matches FP32 in the two shorter
+quartiles and falls 20.9 and 28.2 points behind in the two longer ones, ending at 23% against 51% in the
+quartile whose median answer is 61K tokens. Separate precisions keep those gaps at 2.0 and 3.4 points.
+
+<Figure
+  src="/articles/replayssm/fig9.png"
+  alt="Line chart of GPQA-Diamond accuracy against reference length quartile medians 1.2K, 3.2K, 10.7K and 61K for Nemotron-3-Super-NVFP4. FP32 reference falls from about 96 to 51 percent. Separate NVFP4 read with FP8 plus stochastic rounding recurrence tracks it closely, ending near 48 percent. Shared NVFP4 plus stochastic rounding drops faster, about 60 percent at 10.7K and 23 percent at 61K."
+  caption="GPQA-Diamond accuracy by length of the FP32 reference answer: the shared 4-bit state falls away exactly where generations get long (ReplaySSM paper, Figure 6)."
+/>
+
+There is a speed side too. A smaller read copy moves fewer bytes on every non-flush step: NVFP4 reads
+make the non-flush Mamba-2 kernel 3.83x faster than an FP32 state at batch 256, and 3.33x over a whole
+window at batch 512 once the high-precision flushes are paid for. Those numbers come from separate
+CuTe DSL kernels in the repository, not from the serving integration.
+
+## What actually shipped
+
+The post says ReplaySSM "now runs in production in GLM-5.3-Flash and Kimi-K3, and ships in TensorRT-LLM,
+vLLM, FlashInfer, and SGLang." I checked each pull request through the GitHub API. The picture is real,
+and narrower than that sentence.
+
+| system | what is merged | what is not |
+|---|---|---|
+| vLLM | Mamba-2 standard decoding, Triton kernel ([#48018](https://github.com/vllm-project/vllm/pull/48018), July 24); a FlashInfer ReplaySSM backend for Mamba-2 ([#52506](https://github.com/vllm-project/vllm/pull/52506)) and its MTP path ([#52928](https://github.com/vllm-project/vllm/pull/52928), September 30) | the authors' Gated DeltaNet standard and speculative PRs and their Triton Mamba-2 speculative PR were closed unmerged |
+| FlashInfer | Mamba-2 checkpointing kernels ([#3975](https://github.com/flashinfer-ai/flashinfer/pull/3975)), GDN speculative kernels ([#4081](https://github.com/flashinfer-ai/flashinfer/pull/4081)), prefix-cache materialisation, autotuning, and SM100 CuTe DSL GDN MTP kernels | the GDN "v cache" variant ([#4140](https://github.com/flashinfer-ai/flashinfer/pull/4140)) is open |
+| TensorRT-LLM | Mamba-2 MTP checkpointing replay ([#14203](https://github.com/NVIDIA/TensorRT-LLM/pull/14203), June 19) and GDN MTP replay ([#16464](https://github.com/NVIDIA/TensorRT-LLM/pull/16464)) | |
+| SGLang | GDN and KDA buffered output-only decode ([#28451](https://github.com/sgl-project/sglang/pull/28451), June 26) and GDN ring spec-verify ([#28695](https://github.com/sgl-project/sglang/pull/28695)), both written by an SGLang contributor rather than the authors | the post lists no SGLang PR |
+
+So for vLLM users the accurate statement is: Mamba-2 models such as Nemotron get it, including MTP
+through the FlashInfer backend; GDN models such as Qwen3.5 do not, in upstream vLLM, as of today. The
+repository's own README is more careful than the post. It says upstream vLLM has merged the Mamba-2
+standard decoding kernel and that "the other three decoding paths, the emulated quantization and the
+low-precision CuTe kernels are only available here." That last clause is the important one for the
+third claim: the low-precision state is a research result with emulated quantisation and standalone
+kernels. I found no two-precision ReplaySSM state cache in any of the four serving engines; a "quantized
+ReplaySSM state cache" PR exists only on a fork. (A single low-precision state is a different thing and
+does exist: vLLM's own `selective_state_update` kernel in `mamba_ssm.py` has an
+`enable_stochastic_rounding` option for an FP16 state, and the ReplaySSM kernel keeps it for its one flush
+write.)
+
+The production claims need the same care. GLM-5.3-Flash is a straightforward yes: the paper's
+appendix and Z.ai's own infrastructure report both say ReplaySSM was added to its KDA decode kernel. Kimi-K3 is
+different. Its technical report (Section 5.4.2) describes caching only the projected inputs of draft
+tokens, rebuilding the accepted states on-chip, and writing back "the states of the verified and bonus
+tokens", "a design independently proposed in the concurrent work ReplaySSM." That is input caching for
+rollback, but it writes a state every verification step, which puts it closer to the replay-then-verify
+family above than to ReplaySSM's write-once-per-window design. The paper's own appendix describes Kimi-K3
+accurately, as citing ReplaySSM as a concurrent approach. "Runs in production in Kimi-K3" compresses
+that into something stronger.
+
+And integration has a cost the paper does not dwell on: prefix caching. A cached prefix needs an exact
+state at a block boundary, and a ReplaySSM layer only has an exact state at a flush. The vLLM fork
+forces a flush on the step that completes a cache block (the `align_mode` branch next to
+`is_flush_cpu` in `mamba_attn.py`, lines 673-682), and FlashInfer merged a separate "materialization for
+prefix caching" kernel. In SGLang, an open issue from September 3 reports that `--enable-linear-replayssm`
+requires the `no_buffer` radix-cache strategy, which on a RAG-style benchmark with shared 2,048-token
+prefixes dropped the prefix hit rate from 88.2% to 65.9% and raised mean time-to-first-token from 226 ms
+to 1,063 ms. That is one user's measurement on Qwen3.8-27B, which I could not rerun, but the mechanism
+is real. One reply under the post says current implementations "seem to break/corrupt in many settings";
+the long list of open ReplaySSM bug-fix PRs in SGLang's tracker (ring cursors not reset after HiCache
+load-back, unflushed checkpoints, pending updates lost on CPU retraction) suggests the integration is
+still settling, though none of them says the method is wrong.
+
+## What I make of it
+
+The clever part is not the caching. Mamba in the Llama and STree already cached inputs. It is the
+observation that a decoder never needs the state of a step that nothing will resume from, so most steps
+can produce an output and no state at all. Everything else follows: roughly half the state traffic, rollback by
+pointer, verification as a small masked matrix product instead of a serial loop, and a read copy that
+can be as coarse as you like because no future step depends on it. The post's own framing is accurate: "Caching SSM inputs instead of the state is what ReplaySSM does.
+What it changes is that computing the output and updating the state can be separated during decoding."
+The derivation above is all it takes to see why.
+
+What I would use today: if you serve a Mamba-2 hybrid like Nemotron-3 at batches above roughly 32 in vLLM
+or TensorRT-LLM, turn it on, and turn on MTP speculation with it, because that combination is the one where
+the paper's numbers say speculation finally pays at serving batch. For GDN and KDA models the merged paths
+are in SGLang, FlashInfer and TensorRT-LLM; upstream vLLM does not have them yet. Either way, check your
+prefix-cache hit rate before and after. If you run one request at a time, leave it off; the paper's own
+table says it is a few percent slower there.
+
+What I would wait on: the 4-bit state. The derivation is sound and the accuracy table is convincing on
+three of four models, but it is measured with emulated quantisation, the 4B Nemotron still loses 6.7
+GPQA points, and no engine ships it. When one does, the thing to measure is long-generation accuracy by
+length quartile, the way the paper did, because short benchmarks will tell you nothing.
+
+[Mamba and state-space models](/architectures/mamba-ssm) has the layer itself, and
+[liquid time constants and gated delta rules](/articles/ltc-gated-delta) the recurrence family ReplaySSM
+unrolls. [KDA's half-life](/articles/kda-half-life) is the per-channel version of the "long memory" head
+in the toy above, and [how LLM inference works](/articles/how-llm-inference-works) covers why decode is a
+bandwidth problem in the first place. For training a model natively in the same 4-bit format, see
+[Nemotron in NVFP4](/articles/nemotron-nvfp4).
+
+<RepoCard repo="Johnny-Liou/ReplaySSM" />
+
+## How I checked
+
+I read the paper (arXiv [2610.13778](https://arxiv.org/abs/2610.13778), v1, all 35 pages including the
+appendices), the [NVIDIA blog post](https://developer.nvidia.com/blog/replayssm-rethinking-state-storage-for-faster-hybrid-model-decoding/),
+the [June Dao AI Lab post](https://dao-lab.ai/blog/2026/replayssm/) and the X thread with its replies. I
+found no earlier ReplaySSM paper on arXiv; the "earlier work" the post refers to is the June blog post and
+its code. I shallow-cloned [Johnny-Liou/ReplaySSM](https://github.com/Johnny-Liou/ReplaySSM) at commit
+`5d3ea59` (September 30), a vLLM fork, and read the Mamba-2 standard and speculative Triton kernels, the
+metadata builder that sets flush flags, and the emulation kernels; line numbers above are at that commit.
+I did not run any of its code.
+
+Recounted from primary files: Nemotron-3-Super's layer counts and shapes from its `config.json` on
+Hugging Face; the 4 MiB state, 8,192-token equivalence and 81,920-token crossover; the 0.581 traffic ratio
+and $L^{*} \approx 13$ from the paper's formulas; the 18,944-byte record from the kernel's buffer layout;
+the flush rule from the fork's code. Every speedup and accuracy figure above is read from the paper's
+Tables 2, 6, 7, 8, 9 and 12 and its text; 36x is my division of 0.136 by 0.0038. Merge status for each
+pull request came from the GitHub REST API on October 13; Kimi-K3's design from its report's Section 5.4.2.
+
+The error toy and the widget numbers are mine: a NumPy version first, then the same model in TypeScript
+(`components/articles/replayssm/sim.ts`), which is what the widget runs. Its FP8 and FP4 are simplified (a
+per-row or per-16 scale kept unrounded), it compares to an exact rather than an FP32 run, and it measures
+relative output error rather than KL, so it shows the mechanism, not the paper's magnitudes. I could not
+check the production claims beyond what Z.ai's and Moonshot's own documents say, and I could not rerun the
+SGLang prefix-cache measurement.
