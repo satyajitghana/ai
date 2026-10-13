@@ -1,6 +1,8 @@
 import type { NextConfig } from "next"
 import createMDX from "@next/mdx"
 
+import { LINK_HEADER } from "./lib/discovery"
+
 const nextConfig: NextConfig = {
   // Let .md / .mdx files act as pages/imports alongside ts/tsx.
   pageExtensions: ["ts", "tsx", "js", "jsx", "md", "mdx"],
@@ -71,6 +73,16 @@ const nextConfig: NextConfig = {
   // not vary on Accept. It is closed in vercel.json, which the CDN applies
   // after the function returns and Next cannot overwrite. If this ever moves
   // off Vercel, that header has to move with it.
+
+  // RFC 8288 discovery relations on every page. These used to be set by
+  // proxy.ts, which meant running a function on every request — including
+  // every CDN cache hit — purely to attach a header, and that was the bulk of
+  // the site's Fast Origin Transfer. A route header is applied by the CDN with
+  // no function call. /api/* keeps its own Link (with rel="deprecation") from
+  // the proxy, so it is excluded here rather than sent twice.
+  async headers() {
+    return [{ source: "/((?!api/).*)", headers: [{ key: "Link", value: LINK_HEADER }] }]
+  },
 
   // Clean `.md` variants for agents: /blog/foo.md -> /md/blog/foo, etc.
   async rewrites() {

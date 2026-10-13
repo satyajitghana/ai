@@ -226,11 +226,30 @@ export function proxy(req: NextRequest) {
   return res
 }
 
+// Run only where the proxy changes the response. It used to match every path,
+// which put a function call in front of every page view and every CDN cache hit
+// just to attach a Link header (now a route header in next.config.ts); on
+// Vercel that is billed as Fast Origin Transfer and paused the Hobby plan.
+// Ordinary browser page views now never reach it. The three cases that need it:
+//
+//   1. /api/*: RateLimit, API-Version and the problem+json 405.
+//   2. A client that names a markdown type in Accept: negotiation.
+//   3. A client that does not name HTML (curl, crawlers, SDKs) asking for a path
+//      outside the known routes: the markdown 404. The lookahead lists exactly
+//      what `isReserved` and `isUnknownPath` treat as known; keep the three in
+//      step with KNOWN_TOP. Matcher values must be literals (Next reads them
+//      statically), and header values are anchored as ^value$.
 export const config = {
   matcher: [
-    // Everything except build output and files with an extension, so unknown
-    // paths reach the 404 branch above. Route namespaces that own their own
-    // error representations are filtered inside `isReserved`.
-    "/((?!_next/static|_next/image).*)",
+    { source: "/api/:path*" },
+    {
+      source: "/((?!_next/static|_next/image).*)",
+      has: [{ type: "header", key: "accept", value: ".*(text/markdown|text/x-markdown|text/plain).*" }],
+    },
+    {
+      source:
+        "/((?!(?:_next|api|md|\\.well-known)(?:/|$)|(?:about|architectures|articles|arxiv|blog|changelog|colophon|contact|developers|github|health|logs|math|models|notes|now|patents|privacy|projects|publications|reading|resume|search|snippets|uses)(?:/[^/]+)?/?$|.*\\.[A-Za-z0-9]+$|.*(?:opengraph-image|twitter-image|icon|apple-icon|manifest|sitemap|robots)(?:-[a-z0-9]+)?$).+)",
+      missing: [{ type: "header", key: "accept", value: ".*(text/html|application/xhtml\\+xml).*" }],
+    },
   ],
 }

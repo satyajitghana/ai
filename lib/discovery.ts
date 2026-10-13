@@ -6,7 +6,7 @@
 // server card. Rather than restate those URLs in five files that will drift
 // apart, they are declared once here and each format is projected from them.
 
-import { siteUrl } from "@/lib/site"
+import { siteUrl } from "./site"
 
 const u = (path: string) => `${siteUrl}${path}`
 
