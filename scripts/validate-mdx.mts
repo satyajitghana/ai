@@ -16,6 +16,8 @@ import remarkFrontmatter from "remark-frontmatter"
 import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
 
+import remarkLazyWidgets from "../lib/mdx/remark-lazy-widgets.mjs"
+
 // @mdx-js/mdx is a transitive dep (via @next/mdx) and isn't hoisted to the top
 // level under pnpm, so resolve it from the pnpm store by its versioned directory.
 async function resolveCompile(): Promise<
@@ -59,7 +61,7 @@ async function main() {
     const source = readFileSync(file, "utf8")
     try {
       await compile(source, {
-        remarkPlugins: [remarkFrontmatter, remarkGfm, remarkMath],
+        remarkPlugins: [remarkFrontmatter, remarkGfm, remarkMath, remarkLazyWidgets],
         rehypePlugins: [],
       })
     } catch (err) {
