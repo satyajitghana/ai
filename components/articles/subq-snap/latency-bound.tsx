@@ -28,23 +28,29 @@ function predict(n: number, f: number): number {
 }
 
 // SVG geometry: x linear in context up to 400K, y linear in ms up to 5,000.
-const W = 560
-const H = 240
-const PADL = 48
-const PADB = 28
+// Two drawings: wide for sm and up, and a narrow one for phones, where an
+// 11-unit label in a 340-wide viewBox lands at about 10.5 px. On the narrow
+// one the 32K and 100K labels sit below and right of their dots, clear of the
+// y-axis labels they would otherwise run into.
+type Geo = { w: number; h: number; padL: number; padB: number; fs: number; below: Set<string> }
+const WIDE: Geo = { w: 560, h: 240, padL: 48, padB: 28, fs: 10, below: new Set() }
+const NARROW: Geo = { w: 340, h: 250, padL: 38, padB: 28, fs: 11, below: new Set(["32K", "100K"]) }
 const XMAX = 400000
 const YMAX = 5000
-const sx = (n: number) => PADL + (n / XMAX) * (W - PADL - 12)
-const sy = (t: number) => H - PADB - (Math.min(t, YMAX) / YMAX) * (H - PADB - 10)
+const sxOf = (g: Geo, n: number) => g.padL + (n / XMAX) * (g.w - g.padL - 12)
+const syOf = (g: Geo, t: number) => g.h - g.padB - (Math.min(t, YMAX) / YMAX) * (g.h - g.padB - 10)
 
 export function LatencyBound() {
   const [pct, setPct] = useState(0)
   const f = pct / 100
 
-  const path: string[] = []
-  for (let i = 0; i <= 80; i++) {
-    const n = (XMAX * i) / 80
-    path.push(`${i === 0 ? "M" : "L"}${sx(n).toFixed(1)},${sy(predict(n, f)).toFixed(1)}`)
+  const pathOf = (g: Geo) => {
+    const path: string[] = []
+    for (let i = 0; i <= 80; i++) {
+      const n = (XMAX * i) / 80
+      path.push(`${i === 0 ? "M" : "L"}${sxOf(g, n).toFixed(1)},${syOf(g, predict(n, f)).toFixed(1)}`)
+    }
+    return path.join(" ")
   }
   const at384 = predict(384000, f)
   const at100 = predict(100000, f)
@@ -74,30 +80,47 @@ export function LatencyBound() {
       </div>
 
       <div className="p-3">
-        <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" role="img" aria-label="Latency against context length">
-          {[0, 1000, 2000, 3000, 4000, 5000].map((t) => (
-            <g key={t}>
-              <line x1={PADL} x2={W - 12} y1={sy(t)} y2={sy(t)} className="stroke-muted-foreground/20" strokeWidth={1} />
-              <text x={PADL - 6} y={sy(t) + 3} textAnchor="end" className="fill-muted-foreground font-mono text-[9px]">
-                {t / 1000}s
+        {([WIDE, NARROW] as const).map((g) => (
+          <svg
+            key={g.w}
+            viewBox={`0 0 ${g.w} ${g.h}`}
+            className={g === WIDE ? "hidden h-auto w-full sm:block" : "mx-auto block h-auto w-full max-w-[480px] sm:hidden"}
+            role="img"
+            aria-label="Latency against context length"
+          >
+            {[0, 1000, 2000, 3000, 4000, 5000].map((t) => (
+              <g key={t}>
+                <line x1={g.padL} x2={g.w - 12} y1={syOf(g, t)} y2={syOf(g, t)} className="stroke-muted-foreground/20" strokeWidth={1} />
+                <text x={g.padL - 6} y={syOf(g, t) + 3.5} textAnchor="end" fontSize={g.fs} className="fill-muted-foreground font-mono">
+                  {t / 1000}s
+                </text>
+              </g>
+            ))}
+            {[0, 100000, 200000, 300000, 400000].map((n) => (
+              <text key={n} x={sxOf(g, n)} y={g.h - 10} textAnchor={n === XMAX ? "end" : "middle"} dx={n === XMAX ? 12 : 0} fontSize={g.fs} className="fill-muted-foreground font-mono">
+                {n / 1000}K
               </text>
-            </g>
-          ))}
-          {[0, 100000, 200000, 300000, 400000].map((n) => (
-            <text key={n} x={sx(n)} y={H - 10} textAnchor="middle" className="fill-muted-foreground font-mono text-[9px]">
-              {n / 1000}K
-            </text>
-          ))}
-          <path d={path.join(" ")} fill="none" className="stroke-sky-500" strokeWidth={2} />
-          {POINTS.map(([n, t, lab]) => (
-            <g key={lab}>
-              <circle cx={sx(n)} cy={sy(t)} r={4.5} className="fill-rose-500" />
-              <text x={sx(n) - 8} y={sy(t) - 8} textAnchor="end" className="fill-foreground font-mono text-[9px]">
-                {lab}: {t >= 1000 ? `${t / 1000} s` : `${t} ms`}
-              </text>
-            </g>
-          ))}
-        </svg>
+            ))}
+            <path d={pathOf(g)} fill="none" className="stroke-sky-500" strokeWidth={2} />
+            {POINTS.map(([n, t, lab]) => {
+              const below = g.below.has(lab)
+              return (
+                <g key={lab}>
+                  <circle cx={sxOf(g, n)} cy={syOf(g, t)} r={4.5} className="fill-rose-500" />
+                  <text
+                    x={sxOf(g, n) + (below ? 7 : -8)}
+                    y={syOf(g, t) + (below ? 15 : -8)}
+                    textAnchor={below ? "start" : "end"}
+                    fontSize={g.fs}
+                    className="fill-foreground font-mono"
+                  >
+                    {lab}: {t >= 1000 ? `${t / 1000} s` : `${t} ms`}
+                  </text>
+                </g>
+              )
+            })}
+          </svg>
+        ))}
       </div>
 
       <div className="grid gap-1 border-t p-3 font-mono text-[11px] sm:grid-cols-3">

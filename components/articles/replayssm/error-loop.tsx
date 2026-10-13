@@ -17,9 +17,11 @@ import { errorRun, type Format, type Memory } from "./sim"
 // in the browser from a fixed seed, so the first render matches the server.
 
 const STEPS = 4096
-const W = 640
-const H = 230
-const PAD = { l: 44, r: 12, t: 12, b: 30 }
+// Two drawings of the same chart: wide for sm and up, narrow for phones, where
+// an 11-unit label in a 360-wide viewBox lands at about 10.5 px.
+type Geo = { w: number; h: number; pad: { l: number; r: number; t: number; b: number }; fs: number }
+const WIDE: Geo = { w: 640, h: 230, pad: { l: 44, r: 22, t: 12, b: 30 }, fs: 10 }
+const NARROW: Geo = { w: 360, h: 250, pad: { l: 46, r: 22, t: 12, b: 30 }, fs: 11 }
 const YMIN = -5
 const YMAX = 1
 
@@ -41,12 +43,12 @@ const log2int = (n: number) => {
   // linear interpolation inside the octave is enough for placing a point
   return e + (x - 1)
 }
-const xs = (step: number) => PAD.l + ((log2int(step) - 4) / 8) * (W - PAD.l - PAD.r)
-const yLog = (v: number) => {
+const xsOf = (g: Geo, step: number) => g.pad.l + ((log2int(step) - 4) / 8) * (g.w - g.pad.l - g.pad.r)
+const yLogOf = (g: Geo, v: number) => {
   const c = Math.max(YMIN, Math.min(YMAX, v))
-  return PAD.t + ((YMAX - c) / (YMAX - YMIN)) * (H - PAD.t - PAD.b)
+  return g.pad.t + ((YMAX - c) / (YMAX - YMIN)) * (g.h - g.pad.t - g.pad.b)
 }
-const ys = (err: number) => yLog(err > 0 ? mlog10(err) : YMIN)
+const ysOf = (g: Geo, err: number) => yLogOf(g, err > 0 ? mlog10(err) : YMIN)
 const TICKS: [number, string][] = [
   [-5, "0.001%"],
   [-4, "0.01%"],
@@ -121,36 +123,43 @@ export function ErrorLoop() {
       </div>
 
       <div className="px-2 pt-3 sm:px-4" role="img" aria-label={desc}>
-        <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" aria-hidden="true">
-          {TICKS.map(([e, lab]) => (
-            <g key={e}>
-              <line x1={PAD.l} x2={W - PAD.r} y1={yLog(e)} y2={yLog(e)} className="stroke-border" strokeDasharray="2 3" />
-              <text x={PAD.l - 6} y={yLog(e) + 3} textAnchor="end" className="fill-muted-foreground font-mono text-[10px]">
-                {lab}
+        {([WIDE, NARROW] as const).map((g) => (
+          <svg
+            key={g.w}
+            viewBox={`0 0 ${g.w} ${g.h}`}
+            className={g === WIDE ? "hidden h-auto w-full sm:block" : "mx-auto block h-auto w-full max-w-[480px] sm:hidden"}
+            aria-hidden="true"
+          >
+            {TICKS.map(([e, lab]) => (
+              <g key={e}>
+                <line x1={g.pad.l} x2={g.w - g.pad.r} y1={yLogOf(g, e)} y2={yLogOf(g, e)} className="stroke-border" strokeDasharray="2 3" />
+                <text x={g.pad.l - 5} y={yLogOf(g, e) + 3.5} textAnchor="end" fontSize={g.fs} className="fill-muted-foreground font-mono">
+                  {lab}
+                </text>
+              </g>
+            ))}
+            {[16, 64, 256, 1024, 4096].map((t) => (
+              <text key={t} x={xsOf(g, t)} y={g.h - 10} textAnchor="middle" fontSize={g.fs} className="fill-muted-foreground font-mono">
+                {t.toLocaleString("en-US")}
               </text>
-            </g>
-          ))}
-          {[16, 64, 256, 1024, 4096].map((t) => (
-            <text key={t} x={xs(t)} y={H - 10} textAnchor="middle" className="fill-muted-foreground font-mono text-[10px]">
-              {t.toLocaleString("en-US")}
-            </text>
-          ))}
-          {SERIES.map((sr2) => {
-            const vals = r[sr2.key]
-            const pts = r.binSteps.map((st, i) => `${xs(st).toFixed(1)},${ys(vals[i]).toFixed(1)}`).join(" ")
-            return (
-              <polyline
-                key={sr2.key}
-                points={pts}
-                fill="none"
-                strokeWidth={2}
-                strokeDasharray={sr2.dash}
-                className={sr2.cls}
-                strokeLinejoin="round"
-              />
-            )
-          })}
-        </svg>
+            ))}
+            {SERIES.map((sr2) => {
+              const vals = r[sr2.key]
+              const pts = r.binSteps.map((st, i) => `${xsOf(g, st).toFixed(1)},${ysOf(g, vals[i]).toFixed(1)}`).join(" ")
+              return (
+                <polyline
+                  key={sr2.key}
+                  points={pts}
+                  fill="none"
+                  strokeWidth={2}
+                  strokeDasharray={sr2.dash}
+                  className={sr2.cls}
+                  strokeLinejoin="round"
+                />
+              )
+            })}
+          </svg>
+        ))}
       </div>
 
       <div className="space-y-1 px-4 pb-3 font-mono text-[10.5px]">
