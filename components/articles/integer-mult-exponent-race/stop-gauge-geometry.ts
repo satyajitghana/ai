@@ -37,14 +37,14 @@ const ROD_TO = 124
 
 // The scale: x of a saving given in units of 1e-4.
 const X0 = -96
-const UNIT = 20
+const UNIT = 15
 export const xOf = (per1e4: number) => X0 + (per1e4 - SCALE.from) * UNIT
 
 const DRUM = { x: 116, y: 0, r: 6 }
 const BAND = { y: 5.5, d: 0.5, z0: 5.6, z1: 10.4 }
 
 export const P = k.fitProjection(
-  [...k.boxCorners(PLATE, -PLATE_H - FOOT_H, 0), [xOf(4.6) - 17, 0, 23], [xOf(13) - 17, 0, 23], [xOf(13) + 4, ROD_Y.complex, 21], [-142, -28, 18]],
+  [...k.boxCorners(PLATE, -PLATE_H - FOOT_H, 0), [xOf(4.6) - 17, 0, 23], [xOf(SCALE.to) - 17, 0, 23], [xOf(SCALE.to) + 4, ROD_Y.complex, 21], [-142, -28, 18]],
   WIDTH,
   HEIGHT,
   { pad: 14, azimuth: AZIMUTH },
