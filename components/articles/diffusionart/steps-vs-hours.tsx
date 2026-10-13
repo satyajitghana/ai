@@ -114,7 +114,32 @@ export function StepsVsHours() {
         </div>
 
         {ms ? (
-          <div className="mt-3 overflow-x-auto">
+          <div className="mt-3">
+            {/* Phone: one card per method, the two per-unit costs first. */}
+            <ul className="space-y-2 font-mono text-[11px] sm:hidden">
+              {ms.rows.map((r) => {
+                const roll = r.steps / PER_ROLLOUT[r.m]
+                return (
+                  <li key={r.m} className="border-t border-border/60 pt-1.5">
+                    <div style={{ color: COL[r.m] }}>{r.m}</div>
+                    <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5">
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">GPU-h / step</dt>
+                        <dd className="tabular-nums">{(r.hours / r.steps).toFixed(2)}</dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">GPU-h / rollout</dt>
+                        <dd className="tabular-nums">{(r.hours / roll).toFixed(2)}</dd>
+                      </div>
+                    </dl>
+                    <div className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
+                      {r.steps} steps · {r.hours.toFixed(1)} GPU-h · {roll % 1 === 0 ? roll : roll.toFixed(1)} rollouts
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+            <div className="hidden overflow-x-auto sm:block">
             <table className="w-full min-w-[520px] border-collapse font-mono text-[11px]">
               <thead>
                 <tr className="text-left text-muted-foreground">
@@ -144,6 +169,7 @@ export function StepsVsHours() {
                 })}
               </tbody>
             </table>
+            </div>
             <div className="mt-3 space-y-1.5">
               {ms.rows
                 .filter((r) => r.m !== "DiffusionART")
@@ -154,7 +180,7 @@ export function StepsVsHours() {
                   const ro = r.steps / PER_ROLLOUT[r.m] / (art.steps / 2)
                   const max = Math.max(s, h, ro)
                   return (
-                    <div key={r.m} className="grid grid-cols-[9.5rem_1fr] items-center gap-2 text-[10px]">
+                    <div key={r.m} className="grid grid-cols-1 items-center gap-x-2 gap-y-0.5 text-[10px] sm:grid-cols-[9.5rem_1fr]">
                       <span className="font-mono" style={{ color: COL[r.m] }}>
                         ART vs {r.m.replace(" (EMA)", "")}
                       </span>
@@ -188,7 +214,7 @@ export function StepsVsHours() {
               const ro = (r.steps * 2) / PER_ROLLOUT[r.m]
               const max = Math.max(r.steps, r.hours, ro)
               return (
-                <div key={r.m} className="grid grid-cols-[9.5rem_1fr] items-center gap-2 text-[10px]">
+                <div key={r.m} className="grid grid-cols-1 items-center gap-x-2 gap-y-0.5 text-[10px] sm:grid-cols-[9.5rem_1fr]">
                   <span className="font-mono" style={{ color: COL[r.m] }}>
                     ART vs {r.m.replace(" (EMA)", "")}
                   </span>

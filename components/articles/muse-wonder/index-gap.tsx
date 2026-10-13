@@ -114,7 +114,9 @@ export function IndexGap() {
 
   const W = 720
   const ROW = 26
-  const LABEL = 196
+  // "Omniscience hallucination *" is 27 mono glyphs at 11 px, ~182 px from x=4;
+  // the weight is right-anchored at LABEL - 8, so LABEL leaves it ~25 px clear.
+  const LABEL = 230
   const MID = LABEL + (W - LABEL - 70) / 2
   const HALF = (W - LABEL - 70) / 2 - 6
   const H = rows.length * ROW + 30
@@ -184,7 +186,53 @@ export function IndexGap() {
           </div>
         </div>
 
-        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`Per-evaluation contribution difference between ${a.name} and ${b.name}. ${rows.map((r) => `${r.c.name} ${sgn(r.d)}`).join(", ")}. Total gap ${sgn(gap)} index points.`}>
+        {/* Phone: HTML rows, so names and values keep their real type size. */}
+        <ul className="space-y-1 font-mono text-[11px] sm:hidden" aria-label={`Per-evaluation contribution difference between ${a.name} and ${b.name}`}>
+          {rows.map((r) => {
+            const pct = (Math.abs(r.d) / maxAbs) * 50
+            const pos = r.d >= 0
+            const hot = r.c.key === nudgeKey
+            return (
+              <li key={r.c.key}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNudgeKey(r.c.key)
+                    setNudge(0)
+                  }}
+                  aria-pressed={hot}
+                  className={`w-full rounded-md px-1.5 py-1 text-left ${hot ? "bg-muted/60" : ""}`}
+                >
+                  <span className="flex items-baseline justify-between gap-2">
+                    <span className="min-w-0 truncate text-foreground">
+                      {`${r.c.name}${r.c.priv ? " *" : ""}`}{" "}
+                      <span className="text-muted-foreground">{`${r.c.w}%`}</span>
+                    </span>
+                    <span className="shrink-0 text-foreground">{sgn(r.d)}</span>
+                  </span>
+                  <span className="relative mt-1 block h-2.5">
+                    <span className="absolute inset-y-0 left-1/2 w-px bg-border" />
+                    <span
+                      className="absolute inset-y-0 rounded-sm"
+                      style={{
+                        left: pos ? "50%" : `${50 - pct}%`,
+                        width: `max(1px, ${pct}%)`,
+                        background: pos ? META : OTHER,
+                        opacity: 0.85,
+                      }}
+                    />
+                  </span>
+                </button>
+              </li>
+            )
+          })}
+          <li className="flex justify-between gap-2 px-1.5 pt-1 text-[10px]">
+            <span style={{ color: OTHER }}>{`← ${b.name} ahead`}</span>
+            <span className="text-right" style={{ color: META }}>{`${a.name} ahead →`}</span>
+          </li>
+        </ul>
+
+        <svg viewBox={`0 0 ${W} ${H}`} className="hidden w-full sm:block" role="img" aria-label={`Per-evaluation contribution difference between ${a.name} and ${b.name}. ${rows.map((r) => `${r.c.name} ${sgn(r.d)}`).join(", ")}. Total gap ${sgn(gap)} index points.`}>
           <line x1={MID} y1={4} x2={MID} y2={H - 22} stroke="var(--border)" strokeWidth={1} />
           <text x={MID - 8} y={H - 6} textAnchor="end" fontSize={10} className="font-mono" fill={OTHER}>
             {`← ${b.name} ahead`}

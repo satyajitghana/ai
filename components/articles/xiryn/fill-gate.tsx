@@ -223,7 +223,7 @@ export function FillGate() {
           {scenario.checks.map((check) => (
             <li
               key={check.label}
-              className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-0.5 border-l-2 pl-3"
+              className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-0.5 border-l-2 pl-3"
               style={{ borderColor: TONE[check.verdict] }}
             >
               <span className="font-mono text-[11px]" style={{ color: TONE[check.verdict] }}>
@@ -231,7 +231,7 @@ export function FillGate() {
               </span>
               <span className="text-[12px] text-foreground">{check.label}</span>
               <span />
-              <span className="font-mono text-[10px] break-all text-muted-foreground">
+              <span className="font-mono text-[10px] break-words text-muted-foreground">
                 {check.code}
                 {check.note ? ` · ${check.note}` : ""}
               </span>
