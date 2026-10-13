@@ -11,7 +11,8 @@
 // Every value below is in the article's prose, as an exact fraction or a
 // decimal (sections "The margin that binds", "Which side binds, and which
 // margin", "The wall changes sides", "What E8 is in this race", "#467, and the
-// claims it leaves out", "`main` moved once"). `kappa` is the claimed value,
+// claims it leaves out", "`main` moved once", "13 October: main catches the
+// frontier"). `kappa` is the claimed value,
 // not recomputed; stop-gauge-model.test asserts the formula reproduces it.
 
 import { mlog10 } from "@/lib/dmath"
@@ -115,6 +116,39 @@ export const MILESTONES: Milestone[] = [
     main: 90446448750933 / 1.25e17,
     note: "Rohan's #467, past one in a thousand. The two stops sit almost level and the bit side binds; main is where the pin is.",
   },
+  {
+    id: "535",
+    name: "#535 on main",
+    when: "13:11 UTC, 12 Oct",
+    bit: 396861776523137034277 / 2.5e23,
+    complex: 1589991533606044174031 / 1e24,
+    kappa: 1584931111785787 / 1e18,
+    assembly: "s/(1+s)",
+    main: 1584931111785787 / 1e18,
+    note: "icekylinx's rank-four kernels lift the complex side 0.16% past the bit word, so the bit stop holds the carriage, now with main right under it.",
+  },
+  {
+    id: "596",
+    name: "#596 hyperplane",
+    when: "17:01 UTC, 12 Oct",
+    bit: 413456747036699736067 / 2.5e23,
+    complex: 1615326444135573078563 / 1e24,
+    kappa: 16127213726553 / 1e16,
+    assembly: "s/(1+s)",
+    main: 16127213726553 / 1e16,
+    note: "Jeremy Kothe's hyperplane-ended helpers on the complex side, with eumemic's R420 bit word 2.4% ahead. The checkpoint Colkitt posted that evening.",
+  },
+  {
+    id: "799",
+    name: "#799 X4",
+    when: "06:44 UTC, 13 Oct",
+    bit: 1733427039589844234749 / 1e24,
+    complex: 1664400278850482327913 / 1e24,
+    kappa: 1661634653669567 / 1e18,
+    assembly: "s/(1+s)",
+    main: 1661634653669567 / 1e18,
+    note: "Read exchanges on Chafik Boukhalfa's SW4 frames. The bit side has 4.1% to spare, the complex collar is the wall, and main is the frontier.",
+  },
 ]
 
 export const REST_INDEX = MILESTONES.length - 1
@@ -127,7 +161,7 @@ export const savingOf = (m: Pick<Milestone, "bit" | "complex">) => Math.min(m.bi
 export const kappaOf = (s: number, assembly: Assembly) => (assembly === "a/(1+2a)" ? s / (1 + 2 * s) : s / (1 + s))
 
 // The scale: units of 1e-4 along the rails. 10^-3 is a major line on it.
-export const SCALE = { from: 4, to: 13.5, thousandth: 10 }
+export const SCALE = { from: 4, to: 17.5, thousandth: 10 }
 export const per1e4 = (value: number) => value * 1e4
 
 // x = 1.2893e-3 as "1.289283×10⁻³", in the article's own digits.
@@ -144,10 +178,10 @@ export function sci(value: number, digits: number) {
 
 // How many digits each value is shown with: the precision the article prints.
 export const SHOWN = {
-  kappa: { "144": 6, r10: 4, r11: 4, "346": 5, "352": 4, "370": 5, "467": 6 } as Record<string, number>,
-  bit: { "144": 4, r10: 4, r11: 4, "346": 5, "352": 5, "370": 4, "467": 4 } as Record<string, number>,
-  complex: { "144": 6, r10: 4, r11: 4, "346": 2, "352": 4, "370": 4, "467": 3 } as Record<string, number>,
-  main: { "144": 6, r10: 6, r11: 5, "346": 5, "352": 5, "370": 5, "467": 5 } as Record<string, number>,
+  kappa: { "144": 6, r10: 4, r11: 4, "346": 5, "352": 4, "370": 5, "467": 6, "535": 6, "596": 6, "799": 6 } as Record<string, number>,
+  bit: { "144": 4, r10: 4, r11: 4, "346": 5, "352": 5, "370": 4, "467": 4, "535": 5, "596": 4, "799": 4 } as Record<string, number>,
+  complex: { "144": 6, r10: 4, r11: 4, "346": 2, "352": 4, "370": 4, "467": 3, "535": 5, "596": 6, "799": 6 } as Record<string, number>,
+  main: { "144": 6, r10: 6, r11: 5, "346": 5, "352": 5, "370": 5, "467": 5, "535": 6, "596": 6, "799": 6 } as Record<string, number>,
 }
 
 export const kappaText = (m: Milestone) => sci(m.kappa, SHOWN.kappa[m.id] ?? 4)
