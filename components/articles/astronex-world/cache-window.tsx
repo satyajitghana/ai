@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useId, useMemo, useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
 import { mcos, msin } from "@/lib/dmath"
@@ -19,7 +19,9 @@ const ROLE: Record<Slot["role"], { label: string; color: string; text: string }>
   recent: { label: "recent, pinned", color: "oklch(0.72 0.03 255)", text: "black" },
   kept: { label: "kept by recency", color: "oklch(0.82 0.03 255)", text: "black" },
   retrieved: { label: "kept for overlap", color: "oklch(0.72 0.16 55)", text: "black" },
-  new: { label: "current block", color: "oklch(0.35 0.02 255)", text: "white" },
+  // Dark slate on a light page, light teal on a dark one: set per theme on the
+  // figure as --cw-new / --cw-new-text.
+  new: { label: "current block", color: "var(--cw-new)", text: "var(--cw-new-text)" },
 }
 
 const W = 360
@@ -30,36 +32,76 @@ export function CacheWindow() {
   const [path, setPath] = useState<PathId>("strafe")
   const [retrieval, setRetrieval] = useState(true)
   const [block, setBlock] = useState(4)
+  const clipId = `cw-clip-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`
 
   const sim = useMemo(() => simulate(path, retrieval), [path, retrieval])
   const state = sim.blocks[Math.min(block, sim.blocks.length - 1)]
   const roleOf = new Map(state.slots.map((s) => [s.frame, s]))
-  const last = sim.poses[state.newFrames[state.newFrames.length - 1]]
 
-  // Fit the path and the current frustum into the plot.
-  const pts = sim.poses.map((p) => [p.x, p.y])
-  const fl = [mcos(last.yaw - HALF_FOV), msin(last.yaw - HALF_FOV)]
-  const fr = [mcos(last.yaw + HALF_FOV), msin(last.yaw + HALF_FOV)]
-  const reach = DEPTH / mcos(HALF_FOV)
-  const wedge = [
-    [last.x, last.y],
-    [last.x + fl[0] * reach, last.y + fl[1] * reach],
-    [last.x + fr[0] * reach, last.y + fr[1] * reach],
-  ]
-  const all = [...pts, ...wedge]
+  // Lay the path out for display. The plot is fitted to the path, not to the
+  // view wedge (which reaches DEPTH/cos(FOV) and would shrink the path to a
+  // few overlapping dots); the wedge is drawn at full reach and clipped.
+  //  - A path that runs mostly along y is turned a quarter so it runs along the
+  //    wide axis of the panel.
+  //  - A path that comes back over itself (strafe out and back) has each frame
+  //    nudged across the path in proportion to its index, so the return leg
+  //    sits beside the outbound one instead of on top of it.
+  //  - A camera that never moves (pan) is drawn as a fan: each frame a dot
+  //    along its own heading, further out the later it is.
+  const n = sim.poses.length
+  const rawX = sim.poses.map((p) => p.x)
+  const rawY = sim.poses.map((p) => p.y)
+  const spanX = Math.max(...rawX) - Math.min(...rawX)
+  const spanY = Math.max(...rawY) - Math.min(...rawY)
+  const turn = spanY > spanX
+  const view = sim.poses.map((p) => (turn ? { x: p.y, y: -p.x, yaw: p.yaw - Math.PI / 2 } : { ...p }))
+  const major = Math.max(spanX, spanY)
+  const fan = major < 1e-6
+  let hub: [number, number] | null = null
+  let dp: [number, number][]
+  let revisits = false
+  if (fan) {
+    hub = [0, 0]
+    dp = view.map((p, f) => {
+      const r = 0.45 + (0.55 * f) / Math.max(1, n - 1)
+      return [mcos(p.yaw) * r, msin(p.yaw) * r]
+    })
+  } else {
+    revisits = view.some((p, f) => view.some((q, g) => g > f && Math.abs(p.x - q.x) < 1e-6 && Math.abs(p.y - q.y) < 1e-6))
+    const lane = revisits ? (0.4 * major) / Math.max(1, n - 1) : 0
+    dp = view.map((p, f) => [p.x, p.y + lane * f])
+  }
+  const lastIdx = state.newFrames[state.newFrames.length - 1]
+  const apex: [number, number] = hub ?? dp[lastIdx]
+  const lastYaw = view[lastIdx].yaw
+  const fl = [mcos(lastYaw - HALF_FOV), msin(lastYaw - HALF_FOV)]
+  const fr = [mcos(lastYaw + HALF_FOV), msin(lastYaw + HALF_FOV)]
+  // Only a stub of the wedge is fitted, so its direction is always on screen.
+  // The stub is fitted at every frame, not just this block's, so the scale
+  // holds still while the slider moves.
+  const stub = fan ? 0.5 : 0.35 * major
+  const stubs = view.flatMap((p, f) => {
+    const a = hub ?? dp[f]
+    return [p.yaw - HALF_FOV, p.yaw + HALF_FOV].map((t) => [a[0] + mcos(t) * stub, a[1] + msin(t) * stub])
+  })
+  const all = [...dp, apex, ...stubs]
   const xs = all.map((p) => p[0])
   const ys = all.map((p) => p[1])
   const minX = Math.min(...xs), maxX = Math.max(...xs)
   const minY = Math.min(...ys), maxY = Math.max(...ys)
-  const pad = 14
+  const pad = 16
   const scale = Math.min((W - 2 * pad) / Math.max(1e-6, maxX - minX), (H - 2 * pad) / Math.max(1e-6, maxY - minY))
   const ox = (W - (maxX - minX) * scale) / 2
   const oy = (H - (maxY - minY) * scale) / 2
   const sx = (x: number) => ox + (x - minX) * scale
   const sy = (y: number) => H - (oy + (y - minY) * scale)
+  // Full reach in world units (or past the panel edge for the fan); the clip
+  // path below trims it to the plot.
+  const reach = fan ? (W + H) / scale : DEPTH / mcos(HALF_FOV)
+  const wedge = [apex, [apex[0] + fl[0] * reach, apex[1] + fl[1] * reach], [apex[0] + fr[0] * reach, apex[1] + fr[1] * reach]]
 
   return (
-    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
+    <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent [--cw-new-text:white] [--cw-new:oklch(0.35_0.02_255)] dark:[--cw-new-text:black] dark:[--cw-new:oklch(0.8_0.11_190)]">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
         <span>causal kv cache · {CACHE} latent frames, sink included</span>
         <span>--trajectory &apos;{PATHS[path].cmd}&apos;</span>
@@ -132,41 +174,60 @@ export function CacheWindow() {
           ))}
         </div>
 
-        <svg viewBox={`0 0 ${W} ${H}`} className="w-full rounded-lg border bg-background/60" role="img" aria-label="Top-down view of the camera path. Dots are latent frames; coloured dots are frames whose keys and values are in the cache for this block; the wedge is the current view, pushed to depth three, which the overlap score is measured against.">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full rounded-lg border bg-background/60" role="img" aria-label="Top-down view of the camera path. Dots are latent frames; coloured dots are frames whose keys and values are in the cache for this block; the wedge is the current view, pushed to depth three, which the overlap score is measured against. A path that doubles back is drawn with the return leg offset beside the outbound one; a camera that only turns is drawn as a fan of headings, later frames further out.">
+          <defs>
+            <clipPath id={clipId}>
+              <rect x={1} y={1} width={W - 2} height={H - 2} />
+            </clipPath>
+          </defs>
           <polygon
             points={wedge.map((p) => `${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(" ")}
             fill="oklch(0.72 0.16 55)"
             opacity={0.12}
             stroke="oklch(0.72 0.16 55)"
             strokeOpacity={0.5}
+            clipPath={`url(#${clipId})`}
           />
-          <polyline
-            points={sim.poses.map((p) => `${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ")}
-            fill="none"
-            stroke="currentColor"
-            strokeOpacity={0.15}
-          />
-          {sim.poses.map((p, f) => {
+          {fan ? null : (
+            <polyline
+              points={dp.map((p) => `${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(" ")}
+              fill="none"
+              stroke="currentColor"
+              strokeOpacity={0.15}
+            />
+          )}
+          {hub ? <circle cx={sx(hub[0])} cy={sy(hub[1])} r={2.5} fill="currentColor" opacity={0.5} /> : null}
+          {dp.map((p, f) => {
             const s = roleOf.get(f)
-            const future = f > state.newFrames[state.newFrames.length - 1]
+            const future = f > lastIdx
             if (future) return null
             const color = s ? ROLE[s.role].color : "currentColor"
             const len = 7
+            const yaw = view[f].yaw
             return (
               <g key={f} opacity={s ? 1 : 0.22}>
                 <line
-                  x1={sx(p.x)}
-                  y1={sy(p.y)}
-                  x2={sx(p.x) + mcos(p.yaw) * len}
-                  y2={sy(p.y) - msin(p.yaw) * len}
+                  x1={sx(p[0])}
+                  y1={sy(p[1])}
+                  x2={sx(p[0]) + mcos(yaw) * len}
+                  y2={sy(p[1]) - msin(yaw) * len}
                   stroke={color}
                   strokeWidth={1}
                 />
-                <circle cx={sx(p.x)} cy={sy(p.y)} r={s ? 3 : 2} fill={color} />
+                <circle cx={sx(p[0])} cy={sy(p[1])} r={s ? 2.6 : 1.8} fill={color} />
               </g>
             )
           })}
         </svg>
+        <p className="-mt-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          {fan
+            ? "the camera stays put while it turns: each frame is drawn along its own heading, later frames further out."
+            : turn
+              ? "drawn turned a quarter, so the walk runs left to right."
+              : revisits
+                ? "the return leg is drawn just above the outbound one so neither hides the other."
+                : null}
+        </p>
 
         <p className="font-mono text-[11px] leading-relaxed text-muted-foreground">
           {state.evicted.length

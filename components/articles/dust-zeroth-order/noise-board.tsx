@@ -37,11 +37,21 @@ const ROWS: { optimizer: string; entries: Entry[] }[] = [
 const TARGET = 4.2
 const LO = 3.6
 const HI = 6.2
-const W = 640
-const X0 = 24
-const X1 = W - 24
+const TICKS = [3.6, 4.0, 4.4, 4.8, 5.2, 5.6, 6.0]
 const r2 = (n: number) => Math.round(n * 100) / 100
-const sx = (loss: number) => r2(X0 + ((loss - LO) / (HI - LO)) * (X1 - X0))
+
+// Two drawings of the same strip: a wide one for sm and up, and a narrow one
+// for phones whose 11-unit type lands at about 11 px in a 358 px column.
+type Geo = { w: number; x0: number; x1: number; fs: number }
+const WIDE: Geo = { w: 640, x0: 24, x1: 616, fs: 11 }
+const NARROW: Geo = { w: 340, x0: 12, x1: 328, fs: 11 }
+const sxOf = (g: Geo, loss: number) => r2(g.x0 + ((loss - LO) / (HI - LO)) * (g.x1 - g.x0))
+// Keep a centred label inside the strip: estimate its width from the
+// monospace advance (about 0.62 em) and slide it in from either edge.
+const labelX = (g: Geo, x: number, text: string) => {
+  const half = (text.length * g.fs * 0.62) / 2 + 2
+  return r2(Math.min(Math.max(x, half), g.w - half))
+}
 
 // log10 of each work count, precomputed: Math.log10 may differ by an ULP between server and client.
 const LOG10: Record<number, number> = { 3: 0.477, 11712: 4.069, 16384: 4.214, 32768: 4.515 }
@@ -90,47 +100,61 @@ export function NoiseBoard() {
                     <span>{row.optimizer}</span>
                     <span>Dust trails backprop by {gap} nats</span>
                   </div>
-                  <svg
-                    viewBox={`0 0 ${W} 56`}
-                    className="w-full"
-                    role="img"
-                    aria-label={`${row.optimizer}: ${row.entries.map((e) => `${e.label} ${e.loss}`).join(", ")}. Speedrun target ${TARGET}.`}
-                  >
-                    <line x1={X0} y1={28} x2={X1} y2={28} stroke="currentColor" strokeOpacity={0.15} />
-                    <line x1={sx(TARGET)} y1={6} x2={sx(TARGET)} y2={50} stroke="currentColor" strokeOpacity={0.45} strokeDasharray="3 3" />
-                    {row.entries.map((e, i) => (
-                      <g key={e.label}>
-                        <circle
-                          cx={sx(e.loss)}
-                          cy={28}
-                          r={6}
-                          fill={e.dashed ? "none" : e.color}
-                          stroke={e.color}
-                          strokeWidth={2}
-                        />
-                        <text
-                          x={sx(e.loss)}
-                          y={i % 2 ? 50 : 14}
-                          textAnchor="middle"
-                          className="font-mono"
-                          fontSize={11}
-                          fill={e.color}
-                        >
-                          {e.label} {e.loss.toFixed(3)}
-                        </text>
-                      </g>
-                    ))}
-                  </svg>
+                  {([WIDE, NARROW] as const).map((g) => (
+                    <svg
+                      key={g.w}
+                      viewBox={`0 0 ${g.w} 56`}
+                      className={g === WIDE ? "hidden w-full sm:block" : "mx-auto block w-full max-w-[480px] sm:hidden"}
+                      role="img"
+                      aria-label={`${row.optimizer}: ${row.entries.map((e) => `${e.label} ${e.loss}`).join(", ")}. Speedrun target ${TARGET}.`}
+                    >
+                      <line x1={g.x0} y1={28} x2={g.x1} y2={28} stroke="currentColor" strokeOpacity={0.15} />
+                      {/* The target line stays between the label rows, so no label sits on it. */}
+                      <line x1={sxOf(g, TARGET)} y1={19} x2={sxOf(g, TARGET)} y2={37} stroke="currentColor" strokeOpacity={0.45} strokeDasharray="3 3" />
+                      {row.entries.map((e, i) => {
+                        const text = `${e.label} ${e.loss.toFixed(3)}`
+                        return (
+                          <g key={e.label}>
+                            <circle
+                              cx={sxOf(g, e.loss)}
+                              cy={28}
+                              r={6}
+                              fill={e.dashed ? "none" : e.color}
+                              stroke={e.color}
+                              strokeWidth={2}
+                            />
+                            <text
+                              x={labelX(g, sxOf(g, e.loss), text)}
+                              y={i % 2 ? 51 : 13}
+                              textAnchor="middle"
+                              className="font-mono"
+                              fontSize={g.fs}
+                              fill={e.color}
+                            >
+                              {text}
+                            </text>
+                          </g>
+                        )
+                      })}
+                    </svg>
+                  ))}
                 </div>
               )
             })}
-            <svg viewBox={`0 0 ${W} 18`} className="w-full" aria-hidden>
-              {[3.6, 4.0, 4.4, 4.8, 5.2, 5.6, 6.0].map((t) => (
-                <text key={t} x={sx(t)} y={12} textAnchor="middle" className="fill-muted-foreground/70 font-mono" fontSize={11}>
-                  {t.toFixed(1)}
-                </text>
-              ))}
-            </svg>
+            {([WIDE, NARROW] as const).map((g) => (
+              <svg
+                key={g.w}
+                viewBox={`0 0 ${g.w} 18`}
+                className={g === WIDE ? "hidden w-full sm:block" : "mx-auto block w-full max-w-[480px] sm:hidden"}
+                aria-hidden
+              >
+                {TICKS.map((t) => (
+                  <text key={t} x={labelX(g, sxOf(g, t), t.toFixed(1))} y={12} textAnchor="middle" className="fill-muted-foreground/70 font-mono" fontSize={g.fs}>
+                    {t.toFixed(1)}
+                  </text>
+                ))}
+              </svg>
+            ))}
             <p className="mt-1 font-mono text-[11px] text-muted-foreground">
               dashed line: the speedrun target, {TARGET}. Lower is better. Open circles are backprop, outside the
               competition.
