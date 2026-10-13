@@ -810,12 +810,11 @@ const JAIN_COLOUR = "oklch(0.45 0.2 295)"
 const OTHER = "oklch(0.60 0.04 260)"
 const colour = (who: string) => (who === "Jain" ? JAIN_COLOUR : (PALETTE[who] ?? OTHER))
 
-const W = 680
-const H = 340
-const L = 48
-const R = 14
-const T = 14
-const B = 34
+// Two chart geometries over the same data: the wide one for sm and up, and a
+// narrow one for a phone column (~330 px), drawn near 1:1 so its type stays legible.
+type Geo = { W: number; H: number; L: number; R: number; T: number; B: number; fs: number; narrow: boolean; clip: string }
+const WIDE: Geo = { W: 680, H: 340, L: 48, R: 14, T: 14, B: 34, fs: 10, narrow: false, clip: "kappa-race-plot" }
+const NARROW: Geo = { W: 340, H: 300, L: 46, R: 8, T: 14, B: 30, fs: 10.5, narrow: true, clip: "kappa-race-plot-narrow" }
 // Two views: the whole race, and everything from 10:00 UTC on Oct 8, where everything after 2^-17 lives.
 type View = { h0: number; h1: number; y0: number; y1: number }
 const FULL: View = { h0: -0.5, h1: 156, y0: -190, y1: 0 }
@@ -830,7 +829,7 @@ const EXTRA_B = { h: 21.583, l2: -59 }
 const SLOPE = (EXTRA_B.l2 - EXTRA_A.l2) / (EXTRA_B.h - EXTRA_A.h)
 const HIT_ONE = EXTRA_B.h - EXTRA_B.l2 / SLOPE
 
-const scales = (v: View) => ({
+const scales = (v: View, { W, H, L, R, T, B }: Geo) => ({
   x: (h: number) => L + ((h - v.h0) / (v.h1 - v.h0)) * (W - L - R),
   y: (l2: number) => T + ((v.y1 - l2) / (v.y1 - v.y0)) * (H - T - B),
   inside: (p: { h: number; l2: number }) => p.h >= v.h0 && p.h <= v.h1 && p.l2 >= v.y0 && p.l2 <= v.y1,
@@ -852,7 +851,7 @@ export function KappaRace() {
   const [zoom, setZoom] = useState(false)
   const [sel, setSel] = useState<Pt>(PRS[11])
   const view = zoom ? ZOOM : FULL
-  const { x, y, inside } = scales(view)
+  const { inside } = scales(view, WIDE)
 
   const frontier: Pt[] = []
   let best = -Infinity
@@ -862,11 +861,6 @@ export function KappaRace() {
       frontier.push(p)
     }
   }
-  const path = frontier.map((p, i) => (i === 0 ? `M${x(p.h)},${y(p.l2)}` : `H${x(p.h)}V${y(p.l2)}`)).join("")
-
-  const jainPath = JAIN.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.h)},${y(p.l2)}`).join("")
-
-  const mainPath = MAIN.map((p, i) => (i === 0 ? `M${x(p.h)},${y(p.l2)}` : `H${x(p.h)}V${y(p.l2)}`)).join("") + `H${x(view.h1)}`
   const last = MAIN[MAIN.length - 1]
 
   const all = [ORIGIN, ...COLKITT, ...MAIN, ...(showPrs ? PRS : []), ...(showJain ? JAIN : [])]
@@ -902,37 +896,38 @@ export function KappaRace() {
         { h: 146, label: "Oct 13" },
       ]
 
-  return (
-    <figure className="not-prose my-8 rounded-xl border border-border bg-card p-4">
-      <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
-        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s eleven rounds, Oct 6 to 07:20 UTC on Oct 13
-        {zoom ? " · zoomed to 10:00 UTC on Oct 8 onward" : ""}
-      </figcaption>
+  const chart = (g: Geo) => {
+    const { W, H, L, R, T, B } = g
+    const { x, y } = scales(view, g)
+    const path = frontier.map((p, i) => (i === 0 ? `M${x(p.h)},${y(p.l2)}` : `H${x(p.h)}V${y(p.l2)}`)).join("")
+    const jainPath = JAIN.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.h)},${y(p.l2)}`).join("")
+    const mainPath = MAIN.map((p, i) => (i === 0 ? `M${x(p.h)},${y(p.l2)}` : `H${x(p.h)}V${y(p.l2)}`)).join("") + `H${x(view.h1)}`
+    return (
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="w-full"
+        className={g.narrow ? "mx-auto block w-full max-w-md sm:hidden" : "hidden w-full sm:block"}
         role="img"
         aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, to 2 to the minus 10.51 by 18:38, to 2 to the minus 10.47 at 22:06 with the first five-stage claim, to 2 to the minus 10.40 by 07:10 UTC on October 10, to 2 to the minus 10.38 by 11:31, to 2 to the minus 10.30 by midnight and, with the E8 units, to 2 to the minus 10.16 at 05:05 UTC on October 11. A dotted line marks kappa equals 10 to the minus 3; the first pull request opened above it is number 390 at 07:09 UTC. The best claims reach 2 to the minus 9.60 at 17:17 with pull request 467 and 2 to the minus 9.59 by 19:33; hollow circles up to 2 to the minus 9.51 rest on a contested residual split. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, pull request 186 at 12:57 UTC at 2 to the minus 10.56, and pull request 279 at 14:08 UTC on October 10 at 2 to the minus 10.43, where it still stood at 19:40 UTC on October 11. Then main moves eight times in under thirty-one hours: pull request 531 at 01:56 UTC on October 12 at 2 to the minus 9.36, pull request 535 at 13:11, pull request 588 at 15:46, pull request 596 at 17:01 at 2 to the minus 9.28, pull request 617 at 21:02, pull request 626 at 22:37, pull request 741 at 06:11 UTC on October 13 and pull request 799 at 06:44 at 2 to the minus 9.23. The open claims meanwhile run from 2 to the minus 9.59 through 2 to the minus 9.36 at 01:25 UTC on October 12 and reach 2 to the minus 9.23 with pull request 799, which main took fifty-five minutes after it opened, so at 07:20 UTC on October 13 the red and green lines end at the same point. Two more hollow circles, near 2 to the minus 9.44, rest on the same contested split. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
       >
         {ticksY.map((t) => (
           <g key={t}>
             <line x1={L} x2={W - R} y1={y(t)} y2={y(t)} stroke="var(--border)" strokeWidth={t === 0 ? 1.2 : 0.6} />
-            <text x={L - 6} y={y(t) + 3} textAnchor="end" fontSize={10} className="fill-muted-foreground font-mono">
+            <text x={L - 6} y={y(t) + 3} textAnchor="end" fontSize={g.fs} className="fill-muted-foreground font-mono">
               {t === 0 ? "κ=1" : `2^${t}`}
             </text>
           </g>
         ))}
-        {ticksX.map((t) => (
-          <text key={t.h} x={x(t.h)} y={H - 12} textAnchor="middle" fontSize={10} className="fill-muted-foreground font-mono">
+        {(g.narrow ? ticksX.filter((t) => t.label.startsWith("Oct")) : ticksX).map((t) => (
+          <text key={t.h} x={x(t.h)} y={H - 12} textAnchor="middle" fontSize={g.fs} className="fill-muted-foreground font-mono">
             {t.label}
           </text>
         ))}
         <defs>
-          <clipPath id="kappa-race-plot">
+          <clipPath id={g.clip}>
             <rect x={L} y={T - 2} width={W - L - R} height={H - T - B + 4} />
           </clipPath>
         </defs>
-        <g clipPath="url(#kappa-race-plot)">
+        <g clipPath={`url(#${g.clip})`}>
         <line
           x1={L}
           x2={W - R}
@@ -943,7 +938,7 @@ export function KappaRace() {
           strokeWidth={1.2}
         />
         {zoom ? (
-          <text x={L + 4} y={y(MILLI) - 4} fontSize={10} fill="oklch(0.55 0.16 150)" className="font-mono">
+          <text x={L + 4} y={y(MILLI) - 4} fontSize={g.fs} fill="oklch(0.55 0.16 150)" className="font-mono">
             κ = 10⁻³
           </text>
         ) : null}
@@ -953,19 +948,19 @@ export function KappaRace() {
               x1={x(FIRST_MILLI.h)}
               x2={x(FIRST_MILLI.h)}
               y1={y(FIRST_MILLI.l2) - 6}
-              y2={y(FIRST_MILLI.l2) - 22}
+              y2={y(FIRST_MILLI.l2) - (g.narrow ? 11 : 22)}
               stroke="oklch(0.55 0.16 150)"
               strokeWidth={1}
             />
             <text
               x={x(FIRST_MILLI.h) - 3}
-              y={y(FIRST_MILLI.l2) - 25}
+              y={y(FIRST_MILLI.l2) - (g.narrow ? 14 : 25)}
               textAnchor="end"
-              fontSize={10}
+              fontSize={g.fs}
               fill="oklch(0.55 0.16 150)"
               className="font-mono"
             >
-              first PR past 10⁻³ · #390, Oct 11 07:09
+              {g.narrow ? "#390 · first past 10⁻³" : "first PR past 10⁻³ · #390, Oct 11 07:09"}
             </text>
           </g>
         ) : null}
@@ -981,9 +976,22 @@ export function KappaRace() {
               strokeWidth={1.6}
             />
             <line x1={x(HIT_ONE)} y1={y(0)} x2={W - R} y2={y(0)} stroke="oklch(0.6 0.15 250)" strokeDasharray="3 4" strokeWidth={1.6} />
-            <text x={x(HIT_ONE) - 6} y={y(0) + 14} textAnchor="end" fontSize={10} fill="oklch(0.6 0.15 250)" className="font-mono">
-              extrapolated: κ=1 at {stamp(HIT_ONE)}
-            </text>
+            {/* Below and right of where the line meets κ=1, in the empty space
+                under the post-Oct-8 cluster. Left of the meeting point the label
+                ran into Jain's ringed rounds and past the plot's left edge; the
+                band above the cluster is too thin once the Lean rings are drawn. */}
+            {g.narrow ? (
+              <text x={x(HIT_ONE) + 14} y={y(0) + 44} fontSize={g.fs} fill="oklch(0.6 0.15 250)" className="font-mono">
+                extrapolated: κ=1
+                <tspan x={x(HIT_ONE) + 14} dy={g.fs * 1.25}>
+                  at {stamp(HIT_ONE)}
+                </tspan>
+              </text>
+            ) : (
+              <text x={x(HIT_ONE) + 16} y={y(0) + 48} fontSize={g.fs} fill="oklch(0.6 0.15 250)" className="font-mono">
+                extrapolated: κ=1 at {stamp(HIT_ONE)}
+              </text>
+            )}
           </g>
         ) : null}
         {showPrs ? <path d={path} fill="none" stroke="oklch(0.62 0.16 150)" strokeWidth={1.2} opacity={0.6} /> : null}
@@ -1000,7 +1008,7 @@ export function KappaRace() {
           />
         ))}
         <path d={mainPath} fill="none" stroke={PALETTE.Colkitt} strokeWidth={1.4} opacity={0.75} />
-        <text x={x(last.h) - 4} y={y(last.l2) + (zoom ? -10 : 22)} textAnchor="end" fontSize={10} fill={PALETTE.Colkitt} className="font-mono">
+        <text x={x(last.h) - 4} y={y(last.l2) + (zoom ? -10 : 22)} textAnchor="end" fontSize={g.fs} fill={PALETTE.Colkitt} className="font-mono">
           main
         </text>
         {showJain ? <path d={jainPath} fill="none" stroke={JAIN_COLOUR} strokeWidth={1.2} opacity={0.7} /> : null}
@@ -1072,6 +1080,17 @@ export function KappaRace() {
           )
         })}
       </svg>
+    )
+  }
+
+  return (
+    <figure className="not-prose my-8 rounded-xl border border-border bg-card p-3 sm:p-4">
+      <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
+        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s eleven rounds, Oct 6 to 07:20 UTC on Oct 13
+        {zoom ? " · zoomed to 10:00 UTC on Oct 8 onward" : ""}
+      </figcaption>
+      {chart(WIDE)}
+      {chart(NARROW)}
 
       <div className="mt-2 rounded-md border border-border p-2 font-mono text-xs">
         <span style={{ color: colour(sel.who) }}>{sel.merged ? "■" : "●"}</span> {who} · {stamp(sel.h)} · κ = {sel.k} · log₂ κ = {sel.l2.toFixed(2)}

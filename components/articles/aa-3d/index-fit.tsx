@@ -64,9 +64,13 @@ function ols(xs: number[], ys: number[]) {
   return { n, slope, icpt: my - slope * mx, r: sxy / Math.sqrt(sxx * syy) }
 }
 
-const W = 600
-const H = 320
-const P = { l: 46, r: 14, t: 14, b: 38 }
+// Two plot geometries over the same rows: the wide one for sm and up, and a
+// narrow one for a phone column (~340 px), drawn near 1:1 so the whole scatter
+// fits and the type stays legible. A point label that would run past the right
+// edge sits to the left of its point instead (0.62 em per monospace glyph).
+type Geo = { W: number; H: number; P: { l: number; r: number; t: number; b: number }; fs: number; titleFs: number; narrow: boolean }
+const WIDE: Geo = { W: 600, H: 320, P: { l: 46, r: 14, t: 14, b: 38 }, fs: 9, titleFs: 9.5, narrow: false }
+const NARROW: Geo = { W: 340, H: 300, P: { l: 40, r: 10, t: 14, b: 38 }, fs: 10.5, titleFs: 10.5, narrow: true }
 const Y0 = 500
 const Y1 = 1250
 
@@ -79,8 +83,6 @@ export function IndexFit() {
     rows.map((r) => r[axis]),
     rows.map((r) => r.elo),
   )
-  const sx = (v: number) => P.l + ((v - ax.lo) / (ax.hi - ax.lo)) * (W - P.l - P.r)
-  const sy = (v: number) => P.t + (1 - (v - Y0) / (Y1 - Y0)) * (H - P.t - P.b)
   const resid = rows
     .map((r) => ({ name: r.name, d: r.elo - (fitR.icpt + fitR.slope * r[axis]) }))
     .sort((a, b) => b.d - a.d)
@@ -88,6 +90,75 @@ export function IndexFit() {
   const bottom = resid.slice(-2).reverse()
   const yTicks = [600, 800, 1000, 1200]
   const xTicks = [0, 1, 2, 3, 4].map((k) => ax.lo + ((ax.hi - ax.lo) * k) / 4)
+  const chart = (g: Geo) => {
+    const { W, H, P } = g
+    const sx = (v: number) => P.l + ((v - ax.lo) / (ax.hi - ax.lo)) * (W - P.l - P.r)
+    const sy = (v: number) => P.t + (1 - (v - Y0) / (Y1 - Y0)) * (H - P.t - P.b)
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} className={g.narrow ? "mx-auto block w-full max-w-md sm:hidden" : "hidden w-full sm:block"} role="img" aria-label={desc}>
+        {yTicks.map((t) => (
+          <g key={t}>
+            <line x1={P.l} x2={W - P.r} y1={sy(t)} y2={sy(t)} stroke="currentColor" className="text-muted-foreground" strokeOpacity={0.15} />
+            <text x={P.l - 6} y={sy(t) + 3} textAnchor="end" className="fill-muted-foreground font-mono" fontSize={g.fs}>
+              {t}
+            </text>
+          </g>
+        ))}
+        {xTicks.map((t) => (
+          <text key={t} x={sx(t)} y={H - P.b + 14} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={g.fs}>
+            {t.toFixed(0)}
+          </text>
+        ))}
+        <text x={(P.l + W - P.r) / 2} y={H - 6} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={g.titleFs}>
+          {ax.label} ({ax.unit})
+        </text>
+        <text x={10} y={P.t + 4} className="fill-muted-foreground font-mono" fontSize={g.titleFs}>
+          Elo
+        </text>
+        <line
+          x1={sx(ax.lo)}
+          x2={sx(ax.hi)}
+          y1={sy(fitR.icpt + fitR.slope * ax.lo)}
+          y2={sy(fitR.icpt + fitR.slope * ax.hi)}
+          stroke="oklch(0.58 0.14 250)"
+          strokeWidth={1.5}
+          strokeDasharray="5 4"
+        />
+        {ROWS.map((r) => {
+          const out = drop && WEAKEST.has(r.name)
+          const yy = Math.max(P.t, Math.min(H - P.b, sy(r.elo)))
+          const labelled = top.some((t) => t.name === r.name) || bottom.some((t) => t.name === r.name)
+          const flip = sx(r[axis]) + 7 + r.name.length * g.fs * 0.62 > W - 2
+          return (
+            <g key={r.name} opacity={out ? 0.25 : 1}>
+              <circle
+                cx={sx(r[axis])}
+                cy={yy}
+                r={4}
+                fill={r.text ? "none" : "currentColor"}
+                stroke="currentColor"
+                className={labelled ? "text-sky-600 dark:text-sky-400" : "text-foreground/70"}
+              >
+                <title>{`${r.name}: Elo ${r.elo.toFixed(0)}, ${ax.label} ${r[axis].toFixed(1)}`}</title>
+              </circle>
+              {labelled && !out ? (
+                <text
+                  x={flip ? sx(r[axis]) - 7 : sx(r[axis]) + 7}
+                  y={yy + 3}
+                  textAnchor={flip ? "end" : "start"}
+                  className="fill-sky-700 font-mono dark:fill-sky-300"
+                  fontSize={g.fs}
+                >
+                  {r.name}
+                </text>
+              ) : null}
+            </g>
+          )
+        })}
+      </svg>
+    )
+  }
+
   const desc = `AA-3D Elo against ${ax.label} for ${fitR.n} models: ${fitR.slope.toFixed(1)} Elo per ${
     ax.unit === "%" ? "percentage point" : "point"
   }, Pearson r ${fitR.r.toFixed(2)}.`
@@ -129,61 +200,9 @@ export function IndexFit() {
           {drop ? "three weakest dropped" : "drop the three weakest"}
         </button>
       </div>
-      <div className="overflow-x-auto px-4 pt-2 pb-1">
-        <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[520px]" role="img" aria-label={desc}>
-          {yTicks.map((t) => (
-            <g key={t}>
-              <line x1={P.l} x2={W - P.r} y1={sy(t)} y2={sy(t)} stroke="currentColor" className="text-muted-foreground" strokeOpacity={0.15} />
-              <text x={P.l - 6} y={sy(t) + 3} textAnchor="end" className="fill-muted-foreground font-mono" fontSize={9}>
-                {t}
-              </text>
-            </g>
-          ))}
-          {xTicks.map((t) => (
-            <text key={t} x={sx(t)} y={H - P.b + 14} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9}>
-              {t.toFixed(0)}
-            </text>
-          ))}
-          <text x={(P.l + W - P.r) / 2} y={H - 6} textAnchor="middle" className="fill-muted-foreground font-mono" fontSize={9.5}>
-            {ax.label} ({ax.unit})
-          </text>
-          <text x={10} y={P.t + 4} className="fill-muted-foreground font-mono" fontSize={9.5}>
-            Elo
-          </text>
-          <line
-            x1={sx(ax.lo)}
-            x2={sx(ax.hi)}
-            y1={sy(fitR.icpt + fitR.slope * ax.lo)}
-            y2={sy(fitR.icpt + fitR.slope * ax.hi)}
-            stroke="oklch(0.58 0.14 250)"
-            strokeWidth={1.5}
-            strokeDasharray="5 4"
-          />
-          {ROWS.map((r) => {
-            const out = drop && WEAKEST.has(r.name)
-            const yy = Math.max(P.t, Math.min(H - P.b, sy(r.elo)))
-            const labelled = top.some((t) => t.name === r.name) || bottom.some((t) => t.name === r.name)
-            return (
-              <g key={r.name} opacity={out ? 0.25 : 1}>
-                <circle
-                  cx={sx(r[axis])}
-                  cy={yy}
-                  r={4}
-                  fill={r.text ? "none" : "currentColor"}
-                  stroke="currentColor"
-                  className={labelled ? "text-sky-600 dark:text-sky-400" : "text-foreground/70"}
-                >
-                  <title>{`${r.name}: Elo ${r.elo.toFixed(0)}, ${ax.label} ${r[axis].toFixed(1)}`}</title>
-                </circle>
-                {labelled && !out ? (
-                  <text x={sx(r[axis]) + 7} y={yy + 3} className="fill-sky-700 font-mono dark:fill-sky-300" fontSize={9}>
-                    {r.name}
-                  </text>
-                ) : null}
-              </g>
-            )
-          })}
-        </svg>
+      <div className="px-2 pt-2 pb-1 sm:px-4">
+        {chart(WIDE)}
+        {chart(NARROW)}
       </div>
       <div className="grid gap-x-6 gap-y-1 border-t px-4 py-3 font-mono text-[11px] sm:grid-cols-2">
         <p className="my-0">
