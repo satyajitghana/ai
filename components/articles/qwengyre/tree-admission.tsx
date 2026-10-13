@@ -122,7 +122,7 @@ export function TreeAdmission() {
             const prior = new Set<string>()
             if (p) for (const q of picks) if (q.order < p.order) for (const n of path(q.id)) prior.add(n.id)
             return (
-              <div key={leaf.id} className={cn("grid grid-cols-[1.6rem_1fr] items-center gap-2 sm:grid-cols-[1.6rem_15rem_1fr_4.5rem]", !p && "opacity-45")}>
+              <div key={leaf.id} className={cn("grid grid-cols-[1.6rem_1fr] items-center gap-2 sm:grid-cols-[1.6rem_15rem_1fr_4.5rem]", !p && "opacity-55 dark:opacity-70")}>
                 <span className="text-center font-mono text-[11px] text-muted-foreground">{p ? `#${p.order}` : "–"}</span>
                 <span className="text-[12px] leading-tight">
                   {leaf.label}

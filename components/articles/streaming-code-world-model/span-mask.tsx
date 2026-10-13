@@ -76,6 +76,90 @@ export function SpanMask() {
   const W = LAB + N * CELL + 8
   const H = LAB + N * CELL + 8
 
+  // Chip i of the stream strip. Wide: one row of 14 at a 44-unit pitch.
+  // Narrow (phone, ~330 px): two rows of 7 at a 48-unit pitch in a 340-wide box.
+  const strip = (narrow: boolean) => {
+    const cols = narrow ? 7 : MAX_K + 1
+    const pitch = narrow ? 48 : 44
+    const chipW = pitch - 4
+    const x0 = narrow ? 4 : 8
+    const rowH = 50
+    const fsNum = narrow ? 11 : 10
+    const fsPos = narrow ? 10.5 : 9
+    const W = narrow ? 340 : 640
+    const H = narrow ? (released ? 124 : 104) : 58
+    const at = (i: number) => ({ x: x0 + (i % cols) * pitch, y: 10 + Math.floor(i / cols) * rowH })
+    // the released window covers 124/17 chips; on two rows it wraps after chip 6
+    const winChips = 124 / 17
+    return (
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        role="img"
+        className={narrow ? "mx-auto block w-full max-w-md sm:hidden" : "hidden w-full max-w-[640px] sm:block"}
+      >
+        <title>
+          {released
+            ? "The released model works on 124-frame windows that overlap by 34 frames; every frame of a window is denoised together."
+            : `Stream chunks 0 to ${MAX_K}. Chunk ${k} is being generated inside the span of chunks ${j} to ${k}. Chunks before ${j} have left the cache.`}
+        </title>
+        {Array.from({ length: MAX_K + 1 }, (_, i) => {
+          const { x, y } = at(i)
+          const gone = !released && i < j
+          const inSpan = !released && i >= j && i <= k
+          const future = !released && i > k
+          return (
+            <g key={i}>
+              <rect
+                x={x}
+                y={y}
+                width={chipW}
+                height={22}
+                rx={4}
+                fill={released ? C_V : i === k ? C_Q : inSpan ? C_V : "transparent"}
+                fillOpacity={released ? 0.35 : i === k ? 0.85 : inSpan ? 0.45 : 0}
+                stroke="currentColor"
+                strokeOpacity={gone || future ? 0.2 : 0.5}
+                strokeDasharray={future ? "3 3" : undefined}
+              />
+              <text
+                x={x + chipW / 2}
+                y={y + 15}
+                textAnchor="middle"
+                className="fill-current font-mono"
+                fontSize={fsNum}
+                opacity={gone ? 0.3 : 0.9}
+              >
+                {i}
+              </text>
+              {inSpan && (
+                <text x={x + chipW / 2} y={y + 38} textAnchor="middle" className="fill-current font-mono" fontSize={fsPos} opacity={0.7}>
+                  pos {i - j}
+                </text>
+              )}
+            </g>
+          )
+        })}
+        {released &&
+          (narrow ? (
+            <>
+              <rect x={x0} y={10 + 26} width={cols * pitch - 4} height={6} rx={3} fill={C_P} fillOpacity={0.6} />
+              <rect x={x0} y={10 + rowH + 26} width={(winChips - cols) * pitch - 4} height={6} rx={3} fill={C_P} fillOpacity={0.6} />
+              <text x={x0} y={10 + 2 * rowH + 8} className="fill-current font-mono" fontSize={fsPos} opacity={0.7}>
+                one 124-frame window, proxy for all of it up front
+              </text>
+            </>
+          ) : (
+            <>
+              <rect x={8} y={36} width={winChips * 44 - 4} height={6} rx={3} fill={C_P} fillOpacity={0.6} />
+              <text x={8 + winChips * 44 + 4} y={42} className="fill-current font-mono" fontSize={9} opacity={0.7}>
+                one 124-frame window, proxy for all of it up front
+              </text>
+            </>
+          ))}
+      </svg>
+    )
+  }
+
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
@@ -125,61 +209,10 @@ export function SpanMask() {
           />
         </label>
 
-        {/* the stream, with the span bracket */}
-        <div className="overflow-x-auto">
-          <svg viewBox="0 0 640 58" width={640} height={58} role="img" className="min-w-[520px] max-w-full">
-            <title>
-              {released
-                ? "The released model works on 124-frame windows that overlap by 34 frames; every frame of a window is denoised together."
-                : `Stream chunks 0 to ${MAX_K}. Chunk ${k} is being generated inside the span of chunks ${j} to ${k}. Chunks before ${j} have left the cache.`}
-            </title>
-            {Array.from({ length: MAX_K + 1 }, (_, i) => {
-              const x = 8 + i * 44
-              const gone = !released && i < j
-              const inSpan = !released && i >= j && i <= k
-              const future = !released && i > k
-              return (
-                <g key={i}>
-                  <rect
-                    x={x}
-                    y={10}
-                    width={40}
-                    height={22}
-                    rx={4}
-                    fill={released ? C_V : i === k ? C_Q : inSpan ? C_V : "transparent"}
-                    fillOpacity={released ? 0.35 : i === k ? 0.85 : inSpan ? 0.45 : 0}
-                    stroke="currentColor"
-                    strokeOpacity={gone || future ? 0.2 : 0.5}
-                    strokeDasharray={future ? "3 3" : undefined}
-                  />
-                  <text
-                    x={x + 20}
-                    y={25}
-                    textAnchor="middle"
-                    className="fill-current font-mono"
-                    fontSize={10}
-                    opacity={gone ? 0.3 : 0.9}
-                  >
-                    {i}
-                  </text>
-                  {inSpan && (
-                    <text x={x + 20} y={48} textAnchor="middle" className="fill-current font-mono" fontSize={9} opacity={0.7}>
-                      pos {i - j}
-                    </text>
-                  )}
-                </g>
-              )
-            })}
-            {released && (
-              <>
-                <rect x={8} y={36} width={(124 / 17) * 44 - 4} height={6} rx={3} fill={C_P} fillOpacity={0.6} />
-                <text x={8 + (124 / 17) * 44 + 4} y={42} className="fill-current font-mono" fontSize={9} opacity={0.7}>
-                  one 124-frame window, proxy for all of it up front
-                </text>
-              </>
-            )}
-          </svg>
-        </div>
+        {/* the stream, with the span bracket: one row of 14 chips from sm up,
+            two rows of 7 on a phone so every chip and "pos" label stays legible */}
+        {strip(false)}
+        {strip(true)}
 
         <div className="flex flex-wrap items-start gap-4">
           <div className="overflow-x-auto">
@@ -197,17 +230,17 @@ export function SpanMask() {
                     textAnchor="end"
                     transform={`rotate(-60 ${LAB + i * CELL + CELL / 2} ${LAB - 6})`}
                     className="fill-current font-mono"
-                    fontSize={9}
+                    fontSize={10.5}
                     opacity={present(i) || released ? 0.85 : 0.3}
                   >
                     {label(i)}
                   </text>
                   <text
                     x={LAB - 4}
-                    y={LAB + i * CELL + CELL / 2 + 3}
+                    y={LAB + i * CELL + CELL / 2 + 3.5}
                     textAnchor="end"
                     className="fill-current font-mono"
-                    fontSize={9}
+                    fontSize={10.5}
                     fontWeight={!released && i === qRow ? 700 : 400}
                     opacity={present(i) || released ? 0.85 : 0.3}
                   >

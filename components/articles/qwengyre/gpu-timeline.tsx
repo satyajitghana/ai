@@ -19,13 +19,18 @@ const ORDER: { k: Policy; label: string; note: string }[] = [
   { k: "elastic", label: "Elastic (QwenGyre rules)", note: "cells leave rollout one at a time" },
 ]
 
-const W = 720
 const LEFT = 8
 const ROW = 7
 const GAP = 1.5
 const PANEL_H = K * (ROW + GAP)
-const PANEL_GAP = 30
-const TOP = 16
+
+// Two geometries over the same simulation: the wide one for sm and up, and a
+// narrow one for a phone column (~330 px), drawn near 1:1 so the whole run fits
+// without scrolling and the type stays legible. The narrow one puts each
+// panel's note on its own line.
+type Geo = { W: number; TOP: number; PANEL_GAP: number; fs: number; noteFs: number; tickFs: number; narrow: boolean }
+const WIDE: Geo = { W: 720, TOP: 16, PANEL_GAP: 30, fs: 10.5, noteFs: 9.5, tickFs: 9, narrow: false }
+const NARROW: Geo = { W: 340, TOP: 30, PANEL_GAP: 44, fs: 10.5, noteFs: 10.5, tickFs: 10.5, narrow: true }
 
 function fill(code: number) {
   if (code === TRAIN) return "oklch(0.68 0.15 18)"
@@ -41,6 +46,7 @@ function Panel({
   label,
   note,
   hatch,
+  g,
 }: {
   r: SimResult
   y: number
@@ -48,17 +54,31 @@ function Panel({
   label: string
   note: string
   hatch: string
+  g: Geo
 }) {
+  const W = g.W
   const sx = (t: number) => LEFT + ((W - LEFT - 4) * t) / maxT
+  const headY = g.narrow ? y - 18 : y - 5
   return (
     <g>
-      <text x={LEFT} y={y - 5} className="fill-foreground" fontSize={10.5} fontFamily="var(--font-mono, monospace)">
-        {label}
-        <tspan className="fill-muted-foreground" dx={8} fontSize={9.5}>
-          {note}
-        </tspan>
-      </text>
-      <text x={W - 4} y={y - 5} textAnchor="end" className="fill-foreground" fontSize={10.5} fontFamily="var(--font-mono, monospace)">
+      {g.narrow ? (
+        <>
+          <text x={LEFT} y={headY} className="fill-foreground" fontSize={g.fs} fontFamily="var(--font-mono, monospace)">
+            {label}
+          </text>
+          <text x={LEFT} y={y - 5} className="fill-muted-foreground" fontSize={g.noteFs} fontFamily="var(--font-mono, monospace)">
+            {note}
+          </text>
+        </>
+      ) : (
+        <text x={LEFT} y={headY} className="fill-foreground" fontSize={g.fs} fontFamily="var(--font-mono, monospace)">
+          {label}
+          <tspan className="fill-muted-foreground" dx={8} fontSize={g.noteFs}>
+            {note}
+          </tspan>
+        </text>
+      )}
+      <text x={W - 4} y={headY} textAnchor="end" className="fill-foreground" fontSize={g.fs} fontFamily="var(--font-mono, monospace)">
         {r.hours.toFixed(1)} h
       </text>
       {Array.from({ length: K }, (_, c) => (
@@ -120,9 +140,33 @@ export function GpuTimeline() {
   const tickEvery = maxT > 24 ? 4 : 2
   const ticks: number[] = []
   for (let t = 0; t <= maxT; t += tickEvery) ticks.push(t)
-  const H = TOP + 3 * PANEL_H + 2 * PANEL_GAP + 22
-  const panelY = (i: number) => TOP + i * (PANEL_H + PANEL_GAP)
-  const sx = (t: number) => LEFT + ((W - LEFT - 4) * t) / maxT
+
+  const chart = (g: Geo) => {
+    const { W, TOP, PANEL_GAP } = g
+    const H = TOP + 3 * PANEL_H + 2 * PANEL_GAP + 22
+    const panelY = (i: number) => TOP + i * (PANEL_H + PANEL_GAP)
+    const sx = (t: number) => LEFT + ((W - LEFT - 4) * t) / maxT
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} className={g.narrow ? "mx-auto block w-full max-w-md text-foreground sm:hidden" : "hidden w-full text-foreground sm:block"} role="img" aria-label="Cell roles over time for Colocate, Async and Elastic scheduling">
+        <defs>
+          <pattern id={`${hatch}${g.narrow ? "n" : "w"}`} width={4} height={4} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <line x1={0} y1={0} x2={0} y2={4} stroke="currentColor" strokeOpacity={0.25} strokeWidth={1} />
+          </pattern>
+        </defs>
+        {ORDER.map((o, i) => (
+          <Panel key={o.k} r={res[o.k]} y={panelY(i)} maxT={maxT} label={o.label} note={o.k === "async" && streaming ? "fixed 4 / 4, streaming" : o.note} hatch={`${hatch}${g.narrow ? "n" : "w"}`} g={g} />
+        ))}
+        {ticks.map((t) => (
+          <g key={t}>
+            <line x1={sx(t).toFixed(2)} x2={sx(t).toFixed(2)} y1={H - 20} y2={H - 16} stroke="currentColor" strokeOpacity={0.5} />
+            <text x={sx(t).toFixed(2)} y={H - 6} textAnchor={sx(t) > W - 14 ? "end" : "middle"} className="fill-muted-foreground" fontSize={g.tickFs} fontFamily="var(--font-mono, monospace)">
+              {t}h
+            </text>
+          </g>
+        ))}
+      </svg>
+    )
+  }
 
   const vs = (p: Policy) => (res[p].hours / res.elastic.hours).toFixed(2)
   const btn = "cursor-pointer rounded-md border px-2 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground"
@@ -159,26 +203,8 @@ export function GpuTimeline() {
           <span className="font-mono text-[11px] text-muted-foreground">draw #{seed}</span>
         </div>
 
-        <div className="overflow-x-auto">
-          <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[560px] text-foreground" role="img" aria-label="Cell roles over time for Colocate, Async and Elastic scheduling">
-            <defs>
-              <pattern id={hatch} width={4} height={4} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                <line x1={0} y1={0} x2={0} y2={4} stroke="currentColor" strokeOpacity={0.25} strokeWidth={1} />
-              </pattern>
-            </defs>
-            {ORDER.map((o, i) => (
-              <Panel key={o.k} r={res[o.k]} y={panelY(i)} maxT={maxT} label={o.label} note={o.k === "async" && streaming ? "fixed 4 / 4, streaming" : o.note} hatch={hatch} />
-            ))}
-            {ticks.map((t) => (
-              <g key={t}>
-                <line x1={sx(t).toFixed(2)} x2={sx(t).toFixed(2)} y1={H - 20} y2={H - 16} stroke="currentColor" strokeOpacity={0.5} />
-                <text x={sx(t).toFixed(2)} y={H - 6} textAnchor="middle" className="fill-muted-foreground" fontSize={9} fontFamily="var(--font-mono, monospace)">
-                  {t}h
-                </text>
-              </g>
-            ))}
-          </svg>
-        </div>
+        {chart(WIDE)}
+        {chart(NARROW)}
 
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10.5px] text-muted-foreground">
           <span className="flex items-center gap-1.5">
