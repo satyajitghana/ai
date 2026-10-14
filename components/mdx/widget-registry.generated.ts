@@ -234,6 +234,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "first-order-rl/routing-replay": () => import("@/components/articles/first-order-rl/routing-replay"),
   "fish-audio-s2/dual-ar-stepper": () => import("@/components/articles/fish-audio-s2/dual-ar-stepper"),
   "fish-audio-s2/param-ledger": () => import("@/components/articles/fish-audio-s2/param-ledger"),
+  "fish-drama-3/direction-explorer": () => import("@/components/articles/fish-drama-3/direction-explorer"),
+  "fish-drama-3/frame-path": () => import("@/components/articles/fish-drama-3/frame-path"),
   "flasepformer-jaec/sequence-cost": () => import("@/components/articles/flasepformer-jaec/sequence-cost"),
   "flasepformer-jaec/variant-ladder": () => import("@/components/articles/flasepformer-jaec/variant-ladder"),
   "flash-attention-3/fp8-constraints": () => import("@/components/articles/flash-attention-3/fp8-constraints"),
