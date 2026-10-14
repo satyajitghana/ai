@@ -1015,6 +1015,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "tensorfold-strata-engines/decode-roofline": () => import("@/components/articles/tensorfold-strata-engines/decode-roofline"),
   "tensorfold-strata-engines/row-cost": () => import("@/components/articles/tensorfold-strata-engines/row-cost"),
   "ternary15m/signed-accumulate": () => import("@/components/articles/ternary15m/signed-accumulate"),
+  "tev-gym/group-advantage": () => import("@/components/articles/tev-gym/group-advantage"),
   "tgrep/breakeven-chart": () => import("@/components/articles/tgrep/breakeven-chart"),
   "tgrep/trigram-decomposer": () => import("@/components/articles/tgrep/trigram-decomposer"),
   "thomson-n7-lean/case-tree": () => import("@/components/articles/thomson-n7-lean/case-tree"),
