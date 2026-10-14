@@ -496,6 +496,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "ling-3-0-flash-fin/source-verification-board": () => import("@/components/articles/ling-3-0-flash-fin/source-verification-board"),
   "ling-3-0-flash/architecture": () => import("@/components/articles/ling-3-0-flash/architecture"),
   "ling-3-0-flash/kv-vs-state": () => import("@/components/articles/ling-3-0-flash/kv-vs-state"),
+  "ling-3-1-flash/memory-planner": () => import("@/components/articles/ling-3-1-flash/memory-planner"),
   "liquid-open-d1/latency-explorer": () => import("@/components/articles/liquid-open-d1/latency-explorer"),
   "liquid-open-d1/readout-compare": () => import("@/components/articles/liquid-open-d1/readout-compare"),
   "lithos-metal/decode-budget": () => import("@/components/articles/lithos-metal/decode-budget"),
