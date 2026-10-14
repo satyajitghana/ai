@@ -1052,6 +1052,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "ultra-fineweb/data-tiers": () => import("@/components/articles/ultra-fineweb/data-tiers"),
   "ultra-fineweb/filter-comparison": () => import("@/components/articles/ultra-fineweb/filter-comparison"),
   "ultra-fineweb/verification-loop": () => import("@/components/articles/ultra-fineweb/verification-loop"),
+  "ultrabert-embed/encoder-block-compare": () => import("@/components/articles/ultrabert-embed/encoder-block-compare"),
+  "ultrabert-embed/similarity-matrix": () => import("@/components/articles/ultrabert-embed/similarity-matrix"),
   "ultradata-code/selection-floor": () => import("@/components/articles/ultradata-code/selection-floor"),
   "unconventional-un-0/kuramoto-field": () => import("@/components/articles/unconventional-un-0/kuramoto-field"),
   "unconventional-un-0/phase-dials": () => import("@/components/articles/unconventional-un-0/phase-dials"),
