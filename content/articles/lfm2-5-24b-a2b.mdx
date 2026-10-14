@@ -1,0 +1,394 @@
+---
+title: "LFM2.5-24B-A2B: thirty convolutions, ten attention layers, and a 2B that is 2.45B"
+description: "Liquid AI's largest LFM2.5 is a 24B mixture-of-experts that runs 4 of 64 experts per token through a stack of 30 gated short convolutions and 10 grouped-query attention layers. I counted it from the safetensors headers: 23.97B stored, 2.45B active with the tied output head and 2.19B without, so \"A2B\" is the second number and the card's own spec line is the first. The hybrid keeps 20,480 bytes of KV cache per token, 2.5 GiB at 131K, a quarter of an all-attention stack of the same depth and exactly what Qwen3.6-35B-A3B keeps. Against that model it wins 8 of 16 reported benchmarks and loses 8, leads the tool-calling ones and trails on SWE-Bench by 15 points; its 184 tok/s on an M5 Max is about 283 GB/s of Q4_K_M weight reads."
+date: 2026-10-14
+tags:
+  - liquid-ai
+  - mixture-of-experts
+  - hybrid-attention
+  - on-device
+  - kv-cache
+  - agents
+  - tool-calling
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 2
+  unique: 1
+  why: "Counts the 24B-A2B from its headers and GGUF: what 2B active excludes, why its KV cache matches Qwen3.6's, and what 184 tok/s costs in bandwidth."
+topic: llm-architecture
+kind: model
+level: practitioner
+runsOn: workstation
+licence: custom
+---
+
+import { LayerMap } from "@/components/articles/lfm2-5-24b-a2b/layer-map"
+import { ActiveLedger } from "@/components/articles/lfm2-5-24b-a2b/active-ledger"
+
+Liquid AI's thread on 13 October opens with a list: "24B total parameters, 2B
+active per token", a 131K context, a 128K-token vocabulary, 33T pretraining tokens,
+a reasoning model, and the line that will get quoted: it "Performs competitively
+with Qwen3.6-35B-A3B, a model with ~50% more total and active parameters, on
+agentic and tool-use tasks." The next posts add 184 tokens per second on an Apple
+M5 Max, over 21k output tokens per second on one NVIDIA B300, and reinforcement
+learning inside four agent harnesses.
+
+I read the checkpoint instead of the thread. Every tensor shape below comes from
+the ten safetensors headers, fetched with HTTP range requests (eight bytes for the
+header length, then the JSON header, never the weights). The quantized numbers come
+the same way from the header of the published Q4_K_M GGUF. Where a number is mine I
+say **measured**; where it is Liquid's and I did not re-run it, **reported**; where
+it is arithmetic on the other two, **reasoned**.
+
+<ModelCard repo="LiquidAI/LFM2.5-24B-A2B" />
+
+## The shape, from config.json
+
+`config.json` declares `Lfm2MoeForCausalLM`, `hidden_size` 2048, 40 layers, and a
+`layer_types` list that reads `conv, conv, full_attention` and then `conv, conv,
+conv, full_attention` nine more times, ending on a `conv`. So 30 convolution
+blocks and 10 attention blocks (**measured**), attention at layers 2, 6, 10 and so
+on up to 38. The card says the same: "40 (30 double-gated short convolution blocks
++ 10 GQA)". The blog says the architecture is unchanged from LFM2-24B-A2B; what
+changed is a context window grown from 32,768 to 131,072 tokens and a vocabulary
+doubled from 65K to 128K.
+
+Each block is a mixer followed by a feed-forward network, both pre-normed. The
+mixers are of two kinds.
+
+**The attention blocks** are ordinary grouped-query attention with QK-norm: 32
+query heads of 64 dimensions, 8 key/value heads, so `k_proj` and `v_proj` are
+512 by 2048 (**measured**). Four query heads share each KV head. These ten
+layers are the only ones that look further back than two tokens.
+
+**The convolution blocks** are what makes this an LFM. I read the block in
+`transformers`' `modeling_lfm2_moe.py`. An input projection widens the
+2048-dimensional token to three 2048-dimensional vectors, `B`, `C` and `x`. Then:
+
+$$
+y = \mathrm{out}\big(C \odot \mathrm{conv}_3(B \odot x)\big)
+$$
+
+where $\odot$ is elementwise multiplication and $\mathrm{conv}_3$ is a causal
+depthwise convolution with a kernel of three (`conv_L_cache: 3`): each of the
+2048 channels mixes the current token with the two before it, with its own three
+weights. `B` gates what goes into the convolution and `C` gates what comes out,
+which is the "double-gated" in the card. There is no softmax, no state that grows
+with the sequence and no look-up past two tokens. The cost per token is two
+matrix multiplies and 6,144 multiply-adds for the taps.
+
+Why build most of a model from something this short-sighted? Liquid's bet is that
+much of what a mixer does is local, and the three-tap convolution does local
+mixing with a cache that never grows: decode keeps the last
+three inputs per channel, 12,288 bytes per layer in BF16 (**reasoned**, from the
+shapes). The ten attention layers carry everything long-range. This is the same
+bet Qwen3.6 makes with Gated DeltaNet and Mamba hybrids make with state-space
+layers; Liquid's version does the least work per token of the three. The LFM2 technical
+report ([arXiv:2511.23404](https://arxiv.org/abs/2511.23404), cited by the card)
+is where Liquid argues for it; the background on attention caches is in
+[attention and the KV cache, byte by byte](/architectures/attention-kv), and on
+selective state spaces in [Mamba from first principles](/architectures/mamba-ssm).
+
+**The feed-forward side.** Layers 0 and 1 have a dense SwiGLU FFN, 2048 to 11,776
+and back (`num_dense_layers: 2`). The other 38 have a mixture of experts: 64
+experts, each a SwiGLU of 2048 to 1,536 and back (9,437,184 parameters), a
+2048-by-64 router, and top-4 routing (**measured**). There is no shared expert in
+the checkpoint. The router, per the `transformers` code, scores experts with a
+sigmoid, adds a learned per-expert bias (the 38 F32 `expert_bias` tensors, 64
+values each) to decide *which* four run, then weights the four by their unbiased
+scores renormalized to sum to one. The bias changes the selection, not the mix:
+that is the auxiliary-loss-free load-balancing trick DeepSeek-V3 popularized.
+The [mixture-of-experts explainer](/architectures/mixture-of-experts) covers the
+general mechanism.
+
+<LayerMap />
+
+The widget lays out the 40 blocks as the config orders them; click one for its
+parameters. One thing it makes plain: a conv mixer (16,783,360 parameters) is
+larger than an attention mixer (10,485,760), because its input projection is
+three times the hidden size where attention's K and V are a quarter of it. The
+conv blocks are cheap in cache and in sequence-length scaling, not in weights.
+
+## Counting the parameters
+
+The ten headers hold 7,610 tensors. Summing their shapes gives
+**23,971,587,712 parameters (measured)**, all BF16 except the 2,432 F32 expert
+biases. That is the 24B, honestly rounded. Of it, 22,951,231,488 (95.7%) are
+routed-expert weights (**measured**). Everything that is not an expert, the
+mixers, the two dense FFNs, the routers, norms and the embedding, is about 1.02B.
+
+The embedding is 128,000 by 2,048, 262,144,000 parameters, and `tie_word_embeddings`
+is true: the same matrix is the input embedding and the output head. There is no
+`lm_head` tensor in the files.
+
+"Active" depends on whether you count that matrix. A token's embedding is one
+row looked up, not a matrix multiply. But the output head multiplies the final
+hidden state by the whole 128,000-row matrix, every token. Here is what one
+token runs through:
+
+| Part | Parameters run per token |
+|---|---:|
+| 4 of 64 experts in each of 38 MoE layers | 1,434,451,968 |
+| 30 short-conv mixers | 503,500,800 |
+| dense FFN, layers 0 and 1 | 144,703,488 |
+| 10 GQA attention mixers | 104,857,600 |
+| routers, norms, expert biases | 5,150,336 |
+| **subtotal, without the output head** | **2,192,664,192** |
+| output head (tied embedding) | 262,144,000 |
+| **total, with the output head** | **2,454,808,192** |
+
+All **measured**. The card's spec line says "Active parameters: 2.45B", which is
+the second total to the digit: Liquid counts the head. The model's name, the
+thread and the docs say "2B active", which is the first total (2.19B) rounded
+down. Neither is wrong. They are two different numbers, and the "~50% more"
+claim below only works with one of them.
+
+<ActiveLedger />
+
+Toggle the head and the share of the checkpoint a token touches moves from 10.2%
+to 9.1% (**measured**). The other 60 experts in every MoE layer, 21.5B
+parameters, sit in memory and do nothing for that token, and they are why a 2B-active model
+needs 15 GB of RAM.
+
+## The cache: a quarter of an all-attention stack, the same as Qwen3.6
+
+Decode memory that grows with context lives in the ten attention layers. Each
+stores a key and a value per token: 8 heads by 64 dimensions, twice, at 2 bytes.
+That is 2,048 bytes per layer and **20,480 bytes per token (reasoned)**. At the
+full 131,072 tokens it is 2,684,354,560 bytes, **2.5 GiB (reasoned)**. The 30
+conv layers add 368,640 bytes, fixed.
+
+Two comparisons, both **reasoned** from the configs:
+
+- **The same 40 layers, all attention** with the same 8 KV heads: 81,920 bytes per
+  token, 10 GiB at 131K. The hybrid saves three quarters, exactly the share of
+  layers it replaced. Drop the grouping too (32 KV heads, plain multi-head) and an
+  all-attention stack would need 40 GiB.
+- **Qwen3.6-35B-A3B**, the model the thread compares against, is also a hybrid: its
+  config lists 30 `linear_attention` (Gated DeltaNet) layers and 10
+  `full_attention` layers, every fourth. Its attention has 2 KV heads of 256
+  dimensions. 10 layers × 2 heads × 256 × 2 × 2 bytes is again **20,480 bytes per
+  token**. The two models keep an identical KV cache per token. Qwen's DeltaNet layers carry a
+  fixed recurrent state instead, 32 heads of 128 by 128 in FP32 per layer
+  (`mamba_ssm_dtype: float32`), about 60 MiB across 30 layers, against LFM2.5's
+  0.35 MiB of conv taps.
+
+So the long-context story is not "hybrid versus attention" in this comparison;
+both sides made the same 3:1 trade. Where the conv blocks differ from DeltaNet is
+in work per token, not cache: three multiply-adds per channel against a
+128-by-128 state update per head. For the KV arithmetic done the same way on a
+dense model, see [MiniCPM5-2B's 2 KV heads](/articles/minicpm5-2b).
+
+## "~50% more total and active parameters"
+
+The thread's comparison is Qwen3.6-35B-A3B. I summed its headers too: the
+checkpoint is 35,951,822,704 parameters (**measured**), of which 446,571,248 are a
+vision tower and 844,640,768 a multi-token-prediction layer; the language model
+proper is about 34.66B. LFM2.5-24B-A2B is text-only.
+
+- **Total**: 35.95 / 23.97 = 1.50 for the whole checkpoint, 34.66 / 23.97 = 1.45
+  for the language model alone (**reasoned**). "~50% more total" holds.
+- **Active**: by the names, 3 / 2 = 1.5. By the counts, Qwen3.6 runs about 2.95B
+  per token, the figure [our MiniCPM-V 4.7 teardown](/articles/minicpm-v-4-7)
+  measured from the same headers (MiniCPM-V 4.7's language model is Qwen3.6's, layer for
+  layer). Against LFM2.5's own 2.45B that is 1.20 (**reasoned**). "~50% more
+  active" holds only if you take the "2B" from the name against a figure that
+  includes Qwen's output head. Counted the same way on both sides, Qwen3.6 runs
+  about 20% more per token, not 50%.
+
+That matters for the claim's force. Matching a model with 50% more compute per
+token is a stronger result than matching one with 20% more. The total-parameter
+half of the comparison is honest; the active half is generous by the card's own
+spec line.
+
+## The benchmarks
+
+<Figure
+  src="/articles/lfm2-5-24b-a2b/fig2.png"
+  alt="A grid of sixteen bar charts comparing LFM2.5-24B-A2B (purple) with Qwen3.6-35B-A3B, Gemma-4-26B-A4B-it and Nemotron-3.5-Lightning (30B-A3B). LFM2.5 is tallest on AutomationBench at 27.69 against 8.72, 5.46 and 2.61, and leads on BFCLv4, ToolSandbox, LiveClaw, tau-cubed Bench Banking, IFEval, IFBench and Multi-IF. Qwen3.6 is tallest on PinchBench, WebArena Verified, GPQA Diamond, MATH-500, SWE-Bench Verified and SciCode."
+  caption="Sixteen benchmarks, four MoE models, all run by Liquid with vLLM. Every bar is Liquid's own number; none is re-run here (LiquidAI/LFM2.5-24B-A2B model card)."
+/>
+
+All numbers in this section are **reported**: Liquid ran every model itself with
+vLLM, and I have not re-run any. Against Qwen3.6-35B-A3B, row by row:
+
+| Benchmark | LFM2.5-24B-A2B | Qwen3.6-35B-A3B | Difference |
+|---|---:|---:|---:|
+| AutomationBench | 27.69 | 8.72 | +18.97 |
+| LiveClaw | 48.09 | 38.19 | +9.90 |
+| ToolSandbox | 80.71 | 75.02 | +5.69 |
+| τ³-Bench Banking | 8.04 | 7.63 | +0.41 |
+| BFCLv4 | 65.01 | 65.00 | +0.01 |
+| PinchBench | 83.18 | 89.93 | −6.75 |
+| WebArena Verified | 26.75 | 37.62 | −10.87 |
+| SWE-Bench Verified (OpenCode) | 51.00 | 66.20 | −15.20 |
+| IFBench | 74.69 | 64.21 | +10.48 |
+| IFEval | 96.75 | 93.06 | +3.69 |
+| Multi-IF | 84.38 | 81.53 | +2.85 |
+| GPQA Diamond | 74.42 | 83.69 | −9.27 |
+| SciCode | 32.71 | 37.35 | −4.64 |
+| MATH-500 | 96.04 | 96.73 | −0.69 |
+| AA-Omniscience | −24.90 | −24.35 | −0.55 |
+| HLE | 7.40 | 7.69 | −0.29 |
+
+Counting rows (**measured**, from the published table): LFM2.5 scores higher on 8
+of 16 and lower on 8. The blog frames it as leading or matching on "five of eight"
+tool-use and agentic benchmarks. It does not list the eight; the seven tool and
+agent rows above plus SWE-Bench run through OpenCode make eight, and the five
+wins are AutomationBench, BFCLv4, ToolSandbox, LiveClaw and τ³-Bench Banking.
+
+Three things to read into the wins:
+
+- **Two of the five are ties.** BFCLv4 is 65.01 against 65.00. τ³-Bench Banking is
+  8.04 against 7.63, with every model between 4.54 and 8.04; no confidence
+  intervals are published. Neither separates the models.
+- **The real margins are AutomationBench and LiveClaw**, and AutomationBench is
+  extreme: more than three times Qwen3.6's score, and more than ten times
+  Nemotron's 2.61. Liquid also trained this model with RL "inside agent
+  harnesses" including OpenClaw. I cannot tell from the release whether either
+  benchmark's tasks or tool formats overlap that training. The model learning a
+  harness's conventions is the stated goal; it also makes harness-shaped
+  benchmarks the ones it should win.
+- **The settings differ by benchmark.** LiveClaw ran at temperature 1.0 ("vLLM
+  default; the agent sets no temperature") with 8,192 output tokens; BFCLv4 at
+  0.001; most others at 0.6. The same settings applied to all four models, so the
+  comparison is fair within a row.
+
+And the losses: the longest-horizon agentic tasks, WebArena Verified (−10.87) and
+SWE-Bench Verified (−15.20), go to Qwen3.6, and so does knowledge (GPQA Diamond
+−9.27). Liquid says so itself: "Larger models keep an edge on knowledge-heavy
+benchmarks ... and on coding benchmarks", and the card recommends pairing the
+model with retrieval. If your agent is a coding agent, the table argues for
+Qwen3.6. If it is a tool-dispatch loop over APIs, it argues for this.
+
+One more thing from the blog belongs next to the benchmarks. During teacher
+specialization the model showed "well-known reward-hacking behaviors: searching for
+the final answer in a repository's git history or on platforms like GitHub, PyPI,
+and Hugging Face", and "it even figured out it was in a sandbox". Liquid says it
+tightened the sandboxes and that "all reported results below come from sealed
+evaluation environments". That is a disclosure worth having, and I cannot check it.
+
+## How it was trained
+
+<Figure
+  src="/articles/lfm2-5-24b-a2b/fig1.png"
+  alt="A flow diagram titled LFM2.5-24B-A2B Post-Training Recipe. In a Generalist lane: Base model, SFT, MOPD non-agentic, MOPD agentic, Agentic RL, Final model. In a Specialists lane below, a Teacher Specialization box holds several SFT then RL pairs branching from the generalist SFT; the upper pairs feed the non-agentic MOPD stage and the lower pairs feed the agentic MOPD stage."
+  caption="Post-training: SFT, a set of specialist teachers each trained with SFT and RL, two on-policy distillation stages that pull the teachers back into one model, then agentic RL inside the harnesses (LiquidAI/LFM2.5-24B-A2B model card)."
+/>
+
+All **reported**. Pre-training was 33T tokens, up from 17T for LFM2-24B-A2B. Mid-training
+ran 2T tokens at 32K context, then 300B tokens at 131K. Post-training is the
+five stages in the figure: supervised fine-tuning, teacher specialization
+(specialists trained with SFT then RL from the SFT checkpoint), two
+multi-domain on-policy distillation (MOPD) stages, one non-agentic and one
+agentic, where the generalist learns from the specialists on its own samples, and
+finally agentic RL inside OpenClaw, Hermes Agent, Pi and OpenCode.
+
+One inconsistency: the card's spec list gives a "Training budget: 36 trillion
+tokens". The three phases sum to 35.3T (**reasoned**), so 36 is a round-up of the
+same budget, not a different run. The thread's "33T" is pre-training alone.
+
+The model is reasoning-only: the chat template opens every assistant turn with a
+`<think>` tag. The card's sampling defaults are `temperature: 0.1`, `top_k: 50`,
+`repetition_penalty: 1.05`. The docs warn that MLX needs `mlx-lm>=0.32.0`, because "earlier versions route the
+experts incorrectly", which is the kind of note worth reading before blaming the
+model. The card also lists an LFM2.5-24B-A2B-DSpark draft model for speculative
+decoding as "Coming soon"; for how that family of drafters behaved on the smaller
+LFM2.5 models, see [LFM2.5-DSpark](/articles/lfm25-dspark).
+
+## 184 tokens per second, in bytes
+
+<Figure
+  src="/articles/lfm2-5-24b-a2b/fig3.png"
+  alt="Three rows of bar charts for Apple M5 Max, Mac Studio and AMD Ryzen AI Max+ 395, each with prefill tokens per second, decode tokens per second and memory in GB for four models. On M5 Max LFM2.5-24B-A2B shows 4,318 prefill, 184 decode and 15 GB, against Qwen3.6-35B-A3B at 3,111, 118 and 22 GB. On the Ryzen it shows 114 decode against 67, 55 and 66."
+  caption="Edge inference with llama.cpp, Q4_K_M and a 4K-token input context, on Liquid's Pipette infrastructure. Liquid's measurements (LiquidAI/LFM2.5-24B-A2B model card)."
+/>
+
+The card's settings: llama.cpp, Q4_K_M, a 4K-token input, collected on
+[Pipette](/articles/pipette), Liquid's device benchmarking setup. On an M5 Max the
+model decodes 184 tok/s against Qwen3.6's 118, and prefills 4,318 against 3,111
+(**reported**). "Up to 1.7x faster than the next-best model" is the Ryzen AI Max+
+395 row: 114 against 67 is 1.70. On the M5 Max the ratio is 1.56, on the Mac
+Studio 1.47 (**reasoned**, from the chart's labels).
+
+What does 184 tok/s cost in memory bandwidth? Decode at batch one is mostly
+reading weights. I parsed the header of the published
+`LFM2.5-24B-A2B-Q4_K_M.gguf` (14,526,258,464 bytes). Its 428 tensors take
+14,518,008,320 bytes (**measured**): the expert gate and up projections at 4.50
+bits per weight, the expert down projections at 5.48, the embedding at 6.56, an
+average of 4.85. The routed experts are 13.84 GB of that; everything else is
+0.67 GB, including the tied embedding the output head reads in full.
+
+One token reads the non-expert 0.67 GB plus 4/64 of the experts' 13.84 GB:
+**about 1.54 GB per token (reasoned)**. At 184 tok/s that is **about 283 GB/s
+(reasoned)**, plus 80 MiB of KV cache per token at a 4K context. Apple sells the
+M5 Max at 460 GB/s (32-core GPU) and 614 GB/s (40-core); the card does not say
+which. That is 46% or 62% of peak, plausible for llama.cpp's MoE path on Metal.
+The 15 GB memory reading matches the file.
+
+The same arithmetic does not explain the gap to Qwen3.6. At a similar 4.85 bits,
+Qwen's 2.95B active parameters would be about 1.79 GB per token (**reasoned**, an
+assumption about its quant mix), 16% more bytes, while the reported decode gap is
+56%. The rest is per-layer work that is not weight reads: 256-expert routing,
+DeltaNet's state update, kernel launches. That is consistent with
+[Pipette](/articles/pipette)'s finding that bytes alone mispredict MoE decode, and I
+cannot attribute it further without profiling.
+
+<Figure
+  src="/articles/lfm2-5-24b-a2b/fig4.png"
+  alt="A line chart of output throughput in tokens per second against concurrency from 1 to 1024 on a log axis, for four models on one B300 with SGLang 0.5.22, BF16, 1024 input and 256 output tokens. All four lines overlap below concurrency 32; above it LFM2.5-24B-A2B pulls away to about 21K at 1024, while Qwen3.6-35B-A3B reaches about 12.6K, Nemotron about 11.3K and Gemma about 8.7K."
+  caption="GPU throughput on one B300: total output tokens over wall time, holding a fixed number of requests in flight. Liquid's measurements (LiquidAI/LFM2.5-24B-A2B model card)."
+/>
+
+The B300 number is a server number. SGLang 0.5.22, BF16, 1,024 input tokens and
+up to 256 output tokens per request, with the target concurrency kept full
+(**reported**). The "over 21K output tokens per second" is at 1,024 concurrent
+requests, about 20.6 tok/s for each one (**reasoned**). Below 32 concurrent
+requests the four models' lines overlap, and at 8 and 16 Qwen3.6's sits slightly
+above LFM2.5's (read off the chart). The advantage is a high-concurrency one,
+where smaller active weights and a small per-token cache let more requests share
+each weight read: 1,024 sequences of 1,280 tokens hold about 25 GiB of LFM2.5's KV
+cache (**reasoned**). Output tokens also undercount the work: each request
+prefills at least four times as many tokens as it emits.
+
+## The licence
+
+The `LICENSE` file is the **LFM Open License v1.0**, the same one on the earlier
+LFM2.5 releases ([covered for the Open-D1 release](/articles/liquid-open-d1)). It
+is Apache-2.0-shaped, with patent grant and redistribution terms, plus Section 5:
+"The rights granted under this License for Commercial Use are conditioned upon You
+or Your Legal Entity not exceeding the Threshold", where the Threshold is "annual
+revenue of 10 million United States dollars (\$10,000,000) or more". Above it,
+"Any Commercial Use of the Work or a Derivative Work by a Legal Entity that
+exceeds the Threshold is not licensed under this Agreement." Qualified non-profits
+are exempt for non-commercial or research use. For an individual or a small
+company it is permissive; for a company over the line it is not an open licence.
+The thread's "Open base and post-trained weights" is true of the weights; the
+licence is the condition.
+
+## What I'd take from it
+
+The architecture is the interesting part, and it is not new in this release: it
+is LFM2-24B-A2B's, with a longer window and a bigger vocabulary. Thirty three-tap
+gated convolutions and ten GQA layers give a cache of 20,480 bytes per token, and
+a 64-expert, top-4 MoE keeps the work per token at 2.19B parameters plus a
+262M-parameter head. 95.7% of the model is experts that a given token never
+touches, which is why it fits in 15 GB at Q4_K_M and decodes faster than its
+rivals on a laptop.
+
+The claims mostly survive contact with the files. 24B is 23.97B. "2B active" is
+2.19B without the head and 2.45B with it, and the card itself uses 2.45B. "~50%
+more total" holds; "~50% more active" holds only by the names, and is about 20%
+counted consistently. The benchmarks are an even 8–8 split against Qwen3.6, with
+the wins concentrated in tool dispatch and instruction following and the losses in
+coding, browsing and knowledge. For an agent that calls APIs on a Mac, that is a
+good trade. For one that edits a repository, the table says otherwise. And since
+the model was trained inside specific harnesses, test it inside yours: harnesses
+differ a lot in how many model calls a task costs, as
+[OpenHuman's cross-harness numbers](/articles/openhuman) show.
