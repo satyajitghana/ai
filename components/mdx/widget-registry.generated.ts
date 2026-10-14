@@ -231,6 +231,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "fbtriton-table-batched-embeddings/tbe-toy": () => import("@/components/articles/fbtriton-table-batched-embeddings/tbe-toy"),
   "fframes/frame-scrubber": () => import("@/components/articles/fframes/frame-scrubber"),
   "fframes/render-cost-bar": () => import("@/components/articles/fframes/render-cost-bar"),
+  "fineenvs-multilingual/reward-explorer": () => import("@/components/articles/fineenvs-multilingual/reward-explorer"),
   "first-order-rl/approx-gap": () => import("@/components/articles/first-order-rl/approx-gap"),
   "first-order-rl/routing-replay": () => import("@/components/articles/first-order-rl/routing-replay"),
   "fish-audio-s2/dual-ar-stepper": () => import("@/components/articles/fish-audio-s2/dual-ar-stepper"),
