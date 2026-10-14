@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { LightningIcon, MagnifyingGlassIcon, XIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { Range } from "@/components/articles/ui/range"
+import { mediaUrl } from "@/lib/media"
 import { cn } from "@/lib/utils"
 
 import { buildAdjacency, stepActivity, totalActivity, type ActivityAdjacency } from "./activity"
@@ -434,7 +435,7 @@ export function NeuronExplorer({ className, initialType, caption }: NeuronExplor
   const edgesLoading = selection != null && !edgeInfoMatches
   const edgeCount = edgeInfoMatches ? (edgeInfo?.edgeCount ?? null) : null
 
-  const poster = "/articles/fly-connectome-computing/poster.png"
+  const poster = mediaUrl("/articles/fly-connectome-computing/poster.png")
   const staticCaption =
     caption ??
     "All 141,781 recovered somas of the male Drosophila central nervous system (FlyEM MaleCNS v1.0), coloured by region: central brain (orange), the two optic lobes (blue), and the ventral nerve cord (pink); neurons that bridge regions -- ascending/descending and visual-projection cells -- sit in a fourth grey \"other\" bucket rather than being forced into either side. The brain sits at top with its two bilateral optic lobes; the neck connective narrows below it into the thoracic and abdominal ganglia of the cord. Data: Janelia FlyEM Male CNS connectome v1.0, in collaboration with the Cambridge Drosophila Connectomics Group / MRC LMB and Google Connectomics, served via neuPrint. Licensed CC BY 4.0."
