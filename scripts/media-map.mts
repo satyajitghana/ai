@@ -58,8 +58,24 @@ type Index = { commit?: string; files: Record<string, string> }
 async function loadIndex(quiet = false): Promise<Index | null> {
   try {
     if (process.env.MEDIA_INDEX) return JSON.parse(readFileSync(process.env.MEDIA_INDEX, "utf8")) as Index
-    const res = await fetch(`${base}/index.json?t=${Date.now()}`, { signal: AbortSignal.timeout(15_000), cache: "no-store" })
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+    // A named User-Agent and a few retries: the bucket sits behind Cloudflare,
+    // whose bot rules can challenge an anonymous Node request from a build
+    // machine, and a silent miss here serves every file from Vercel instead.
+    let res: Response | null = null
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      res = await fetch(`${base}/index.json?t=${Date.now()}`, {
+        signal: AbortSignal.timeout(15_000),
+        cache: "no-store",
+        headers: { "user-agent": "ai.thesatyajit.com media-map (build)", accept: "application/json" },
+      }).catch(() => null)
+      if (res?.ok) break
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 2_000 * attempt))
+    }
+    if (!res) throw new Error("network error after 3 attempts")
+    if (!res.ok) {
+      const mitigated = res.headers.get("cf-mitigated")
+      throw new Error(`${res.status} ${res.statusText}${mitigated ? ` (Cloudflare cf-mitigated: ${mitigated})` : ""}`)
+    }
     const d = (await res.json()) as Partial<Index>
     if (!d.files || typeof d.files !== "object") throw new Error("no files in index")
     return { commit: d.commit, files: d.files }

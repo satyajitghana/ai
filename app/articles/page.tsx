@@ -8,6 +8,7 @@ import { displayTags } from "@/data/taxonomy"
 import { getArticles } from "@/lib/content"
 import { highlights } from "@/lib/content/rating"
 import { articleScores, compareByLens } from "@/lib/content/signals"
+import { snippet } from "@/lib/seo"
 import { getThumb } from "@/lib/thumbs"
 
 import { type ArticleCard, ArticlesList } from "./articles-list"
@@ -34,7 +35,10 @@ export default function Page() {
       return {
         slug: a.slug,
         title: a.title,
-        description: a.description,
+        // Only the search box reads it (every rated card shows `why`), and the
+        // whole corpus of descriptions was a third of this page's payload. Its
+        // opening sentences are what a search for the subject needs.
+        description: snippet(a.description, 320),
         why: a.rating?.why ?? null,
         date: a.date,
         updated: a.updated ?? null,
