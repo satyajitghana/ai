@@ -42,6 +42,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "angelspec/d-cut-budget": () => import("@/components/articles/angelspec/d-cut-budget"),
   "antares/search-trace": () => import("@/components/articles/antares/search-trace"),
   "antares/stage-lift": () => import("@/components/articles/antares/stage-lift"),
+  "anthropic-source-control/merge-queue-sim": () => import("@/components/articles/anthropic-source-control/merge-queue-sim"),
   "antidoom/doom-loop": () => import("@/components/articles/antidoom/doom-loop"),
   "antidoom/final-token": () => import("@/components/articles/antidoom/final-token"),
   "anyapi-scrape-router/ladder-replay": () => import("@/components/articles/anyapi-scrape-router/ladder-replay"),
