@@ -110,6 +110,19 @@ function literalPaths(): Set<string> {
     }
   }
   for (const d of ["components", "app", "lib"]) if (existsSync(join(ROOT, d))) walk(join(ROOT, d))
+  // A raw <img>, <video> or <source> in an MDX file with a literal path does not
+  // go through mediaUrl either. Four article images 404'd in production once the
+  // map started working, because this scan only covered code. <Figure> and
+  // <Video> are not matched: they route their src through mediaUrl themselves.
+  const walkMdx = (d: string) => {
+    for (const f of readdirSync(d)) {
+      const p = join(d, f)
+      if (statSync(p).isDirectory()) walkMdx(p)
+      else if (f.endsWith(".mdx"))
+        for (const m of readFileSync(p, "utf8").matchAll(/<(?:img|video|source)\b[^>]*?\b(?:src|poster)=["'](\/(?:articles|films|thumbs|projects)\/[^"']+)["']/g)) out.add(m[1])
+    }
+  }
+  if (existsSync(join(ROOT, "content"))) walkMdx(join(ROOT, "content"))
   return out
 }
 
