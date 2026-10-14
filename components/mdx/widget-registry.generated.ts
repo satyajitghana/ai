@@ -471,6 +471,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "levjepa/flop-matched-comparison": () => import("@/components/articles/levjepa/flop-matched-comparison"),
   "lexing-on-the-gpu/scan-merge": () => import("@/components/articles/lexing-on-the-gpu/scan-merge"),
   "lexing-on-the-gpu/throughput-ledger": () => import("@/components/articles/lexing-on-the-gpu/throughput-ledger"),
+  "lfm2-5-24b-a2b/active-ledger": () => import("@/components/articles/lfm2-5-24b-a2b/active-ledger"),
+  "lfm2-5-24b-a2b/layer-map": () => import("@/components/articles/lfm2-5-24b-a2b/layer-map"),
   "lfm2-5-encoders/forward-pass-vs-decode": () => import("@/components/articles/lfm2-5-encoders/forward-pass-vs-decode"),
   "lfm2-5-encoders/sigmoid-vs-softmax": () => import("@/components/articles/lfm2-5-encoders/sigmoid-vs-softmax"),
   "lfm2-5-vl-3b/edge-budget": () => import("@/components/articles/lfm2-5-vl-3b/edge-budget"),
