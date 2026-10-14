@@ -1,4 +1,6 @@
 import type { NextConfig } from "next"
+import { join } from "node:path"
+
 import createMDX from "@next/mdx"
 
 import { LINK_HEADER } from "./lib/discovery"
@@ -116,7 +118,10 @@ const nextConfig: NextConfig = {
 // same file can be both gray-matter-read (data layer) and dynamic-import-rendered.
 const withMDX = createMDX({
   options: {
-    remarkPlugins: ["remark-frontmatter", "remark-gfm", "remark-math"],
+    // The last one is local: it lazy-loads each article's client widgets
+    // (see lib/mdx/remark-lazy-widgets.mjs). An absolute path: plugins are named,
+    // and Turbopack resolves a relative one from outside the project root.
+    remarkPlugins: ["remark-frontmatter", "remark-gfm", "remark-math", join(process.cwd(), "lib/mdx/remark-lazy-widgets.mjs")],
     rehypePlugins: [
       "rehype-slug",
       ["rehype-pretty-code", { theme: "github-dark-dimmed" }],
