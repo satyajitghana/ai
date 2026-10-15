@@ -391,6 +391,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "jacobian-lens/unembed-readout": () => import("@/components/articles/jacobian-lens/unembed-readout"),
   "jepa-anything/domain-atlas": () => import("@/components/articles/jepa-anything/domain-atlas"),
   "jepa-anything/synthesis-geometry": () => import("@/components/articles/jepa-anything/synthesis-geometry"),
+  "jev-alternatives-week-five/permutation-tester": () => import("@/components/articles/jev-alternatives-week-five/permutation-tester"),
+  "jev-alternatives-week-five/reuse-calculator": () => import("@/components/articles/jev-alternatives-week-five/reuse-calculator"),
   "jev-alternatives-week-four/d1-ledger": () => import("@/components/articles/jev-alternatives-week-four/d1-ledger"),
   "jev-alternatives-week-four/readout-explorer": () => import("@/components/articles/jev-alternatives-week-four/readout-explorer"),
   "jev-alternatives-week-four/thx-ticket-ledger": () => import("@/components/articles/jev-alternatives-week-four/thx-ticket-ledger"),
