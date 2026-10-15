@@ -251,6 +251,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "flex-pi/task-ladder": () => import("@/components/articles/flex-pi/task-ladder"),
   "flux-3-action/replan-clock": () => import("@/components/articles/flux-3-action/replan-clock"),
   "flux-3-action/token-ledger": () => import("@/components/articles/flux-3-action/token-ledger"),
+  "flux-3-image-klein/layout-builder": () => import("@/components/articles/flux-3-image-klein/layout-builder"),
+  "flux-3-image-klein/memory-ledger": () => import("@/components/articles/flux-3-image-klein/memory-ledger"),
   "flux-3/flow-steps": () => import("@/components/articles/flux-3/flow-steps"),
   "flux-3/joint-attention": () => import("@/components/articles/flux-3/joint-attention"),
   "fly-connectome-computing/activation-vs-weight": () => import("@/components/articles/fly-connectome-computing/activation-vs-weight"),
