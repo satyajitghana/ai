@@ -56,6 +56,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "arcee-open-models-api/price-ladder": () => import("@/components/articles/arcee-open-models-api/price-ladder"),
   "astronex-world/cache-window": () => import("@/components/articles/astronex-world/cache-window"),
   "astronex-world/realtime-budget": () => import("@/components/articles/astronex-world/realtime-budget"),
+  "atria-dawn/metric-explorer": () => import("@/components/articles/atria-dawn/metric-explorer"),
+  "atria-dawn/moe-ledger": () => import("@/components/articles/atria-dawn/moe-ledger"),
   "attention-mechanisms/cross-attention": () => import("@/components/articles/attention-mechanisms/cross-attention"),
   "attention-mechanisms/differential-attention": () => import("@/components/articles/attention-mechanisms/differential-attention"),
   "attention-mechanisms/family-map": () => import("@/components/articles/attention-mechanisms/family-map"),
