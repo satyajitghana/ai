@@ -561,6 +561,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "marin-535b/gate-dial": () => import("@/components/articles/marin-535b/gate-dial"),
   "marin-535b/hyperball": () => import("@/components/articles/marin-535b/hyperball"),
   "marin-535b/run-timeline": () => import("@/components/articles/marin-535b/run-timeline"),
+  "matrix-game-4/frame-budget": () => import("@/components/articles/matrix-game-4/frame-budget"),
   "matryoshka-attribution/nested-mask-lab": () => import("@/components/articles/matryoshka-attribution/nested-mask-lab"),
   "matryoshka-lm-suites/draft-economics": () => import("@/components/articles/matryoshka-lm-suites/draft-economics"),
   "matryoshka-lm-suites/junction": () => import("@/components/articles/matryoshka-lm-suites/junction"),
