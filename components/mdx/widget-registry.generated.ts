@@ -794,6 +794,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "prime-inference/kv-row-bytes": () => import("@/components/articles/prime-inference/kv-row-bytes"),
   "project-maya/tier-simulator": () => import("@/components/articles/project-maya/tier-simulator"),
   "pruna-superpoint/prune-stack": () => import("@/components/articles/pruna-superpoint/prune-stack"),
+  "ps5lm/decode-ceiling": () => import("@/components/articles/ps5lm/decode-ceiling"),
+  "ps5lm/pool-fit": () => import("@/components/articles/ps5lm/pool-fit"),
   "ptxbench-kda-kernels/reward-gauntlet": () => import("@/components/articles/ptxbench-kda-kernels/reward-gauntlet"),
   "ptxbench-kda-kernels/speedup-line": () => import("@/components/articles/ptxbench-kda-kernels/speedup-line"),
   "quantui-rs/block-lab": () => import("@/components/articles/quantui-rs/block-lab"),
