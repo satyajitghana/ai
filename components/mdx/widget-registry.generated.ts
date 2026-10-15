@@ -968,6 +968,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "sparda/selection-cost": () => import("@/components/articles/sparda/selection-cost"),
   "spark-x2-5-4b/kv-budget": () => import("@/components/articles/spark-x2-5-4b/kv-budget"),
   "spark-x2-5-4b/vetting-checklist": () => import("@/components/articles/spark-x2-5-4b/vetting-checklist"),
+  "spatiallm/scene-script-viewer": () => import("@/components/articles/spatiallm/scene-script-viewer"),
+  "spatiallm/token-budget": () => import("@/components/articles/spatiallm/token-budget"),
   "spec-ptc/shadow-repl": () => import("@/components/articles/spec-ptc/shadow-repl"),
   "spec-ptc/spec-timeline": () => import("@/components/articles/spec-ptc/spec-timeline"),
   "spec-ptc/variance-trap": () => import("@/components/articles/spec-ptc/variance-trap"),
