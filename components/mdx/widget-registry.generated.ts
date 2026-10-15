@@ -907,6 +907,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "sam-3-1-object-multiplex/memory-scaling": () => import("@/components/articles/sam-3-1-object-multiplex/memory-scaling"),
   "sana-video2/attention-scaling": () => import("@/components/articles/sana-video2/attention-scaling"),
   "sana-video2/hybrid-stack": () => import("@/components/articles/sana-video2/hybrid-stack"),
+  "sana-wm/camera-rays": () => import("@/components/articles/sana-wm/camera-rays"),
+  "sana-wm/context-cost": () => import("@/components/articles/sana-wm/context-cost"),
   "sana/chi-window": () => import("@/components/articles/sana/chi-window"),
   "sana/linear-tradeoff": () => import("@/components/articles/sana/linear-tradeoff"),
   "sana/sprint-schedule": () => import("@/components/articles/sana/sprint-schedule"),
