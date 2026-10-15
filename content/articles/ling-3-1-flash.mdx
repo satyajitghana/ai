@@ -1,0 +1,185 @@
+---
+title: "Ling-3.1-flash: a 560B hybrid-attention MoE, counted from its safetensors headers"
+description: "inclusionAI's Ling-3.1-flash is an MIT-licensed 560B-total, ~25B-active mixture of experts that interleaves 63 Kimi Delta Attention layers with 9 Gated MLA layers over 512 experts. I read all 54 safetensors headers by range request and recount it: the parameter totals hold, the '534GB to 292GB' MXFP4 claim reproduces to the decimal once you read it as GiB, the experts are 95% of the bytes but only about a third of what a token reads, four H100s barely hold it, and the shipped config stops at 262,144 positions rather than 1M."
+date: 2026-10-14
+tags:
+  - mixture-of-experts
+  - linear-attention
+  - hybrid-attention
+  - quantization
+  - long-context
+  - kv-cache
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Ling-3.1-flash recounted from all 54 safetensors headers: MXFP4 534→292 reproduced as GiB, expert bytes vs per-token reads, a GPU memory planner, 1M vs 262K."
+topic: inference-serving
+kind: model
+level: practitioner
+runsOn: datacenter
+licence: MIT
+---
+
+import { MemoryPlanner } from "@/components/articles/ling-3-1-flash/memory-planner"
+
+On 2026-10-14 inclusionAI (Ant Group's Ling team) put [Ling-3.1-flash](https://huggingface.co/inclusionAI/Ling-3.1-flash) on Hugging Face under MIT. The [launch thread](https://x.com/AntLingAGI/status/2110390124743970952) leads with three numbers: **~560B total parameters, ~25B active per token, up to 1M context**. The second post carries the claim I care about as someone who has to fit models onto GPUs: MXFP4 experts plus block-FP8 dense layers "cut weights from ~534GB to ~292GB", and a tested Hopper setup "moved from 8 GPUs to 4".
+
+That claim is checkable without downloading a byte of weights. A safetensors file starts with an 8-byte length and a JSON header listing every tensor's dtype and shape. I pulled those headers from all 54 shards with HTTP range requests (16.9 MB of JSON for 214,025 tensors), summed them, and rebuilt the model's parameter budget group by group. Every number below is labelled: **measured** (I computed it from the files), **reported** (someone else's figure, not re-run), or **reasoned** (my arithmetic on the other two).
+
+<ModelCard repo="inclusionAI/Ling-3.1-flash" />
+
+## What is in the files
+
+The headers sum to **573,753,281,152 bytes** (measured), exactly the `total_size` in `model.safetensors.index.json`. The release is FP8: `config.json` declares `quant_method: fp8`, E4M3 weights in 128×128 blocks with one fp32 scale per block, and keeps the embeddings, `lm_head`, the routers and a few gates in BF16.
+
+The architecture is `BailingMoeV3ForCausalLM`, `model_type: bailing_hybrid`. It is the same family as [Ling-3.0-flash](/articles/ling-3-0-flash), scaled up roughly 4.5x. Read from config and code:
+
+- **72 layers, hidden size 4096, 64 heads, vocabulary 157,184** (measured from config).
+- **Attention is hybrid.** `modeling_bailing_moe_v3.py` makes a layer full attention when `(layer_idx + 1) % 8 == 0`, and [Kimi Delta Attention](/articles/kda-half-life) (KDA) otherwise. The headers agree: MLA tensors exist in layers **7, 15, 23, 31, 39, 47, 55, 63 and 71**, so it is **63 KDA + 9 Gated MLA, a 7:1 ratio** (measured). Ling-3.0-flash was 5:1.
+- **The FFN is a 512-expert MoE**, 8 routed experts per token plus 1 shared expert, each expert a SwiGLU of width 1280. Routing is sigmoid-scored, grouped (8 groups, top 4 groups), with an expert bias instead of an auxiliary loss (`topk_method: noaux_tc`). The first **4** layers use a dense FFN of width 10,240 instead (measured from config and headers).
+- **One multi-token-prediction layer**, layer 72 in the files, with MLA attention and its own full 512-expert MoE. SGLang and vLLM use it as the speculative-decoding draft head.
+
+If any of this is new, the [MoE explainer](/architectures/mixture-of-experts) and the [attention and KV-cache explainer](/architectures/attention-kv) cover the basics; the [linear-attention roundup](/articles/linear-attention-state-roundup) covers why a fixed-size state is attractive and lossy.
+
+### How KDA and MLA split the work
+
+KDA is a gated delta-rule linear attention. Each head keeps a 128×128 state matrix and, per token, decays it channel by channel and writes the new key-value association into it:
+
+$$
+S_t = \mathrm{Diag}(\alpha_t)\, S_{t-1} + \beta_t\, k_t v_t^{\top}, \qquad o_t = S_t^{\top} q_t
+$$
+
+Here $S_t$ is the state, $\alpha_t$ the per-channel decay (the `f_proj` and `A_log` tensors), $\beta_t$ the write strength (`b_proj`, one scalar per head), and $q_t, k_t, v_t$ come through a short causal convolution of width 4. The state does not grow with the sequence. Gated MLA is ordinary softmax attention over a compressed cache: each token stores a 512-dim latent plus a 64-dim RoPE key, and a sigmoid gate per head (`g_proj`, 64 outputs) scales the result.
+
+One detail separates this from the published KDA: `no_kda_lora: true`. Kimi's version produces the decay and output gates through a low-rank bottleneck. Ling-3.1-flash uses full 4096→8192 projections for both. Each KDA layer therefore carries six 8192×4096 matrices (q, k, v, decay, gate, output), **201M parameters per layer and 12.68B across the 63 layers** (measured). That choice matters later.
+
+## Counting the parameters
+
+Grouping every tensor in the headers (measured):
+
+| Group | Parameters | Release dtype |
+|---|---:|---|
+| Routed experts, 68 MoE layers × 512 | 547.61B | FP8 block |
+| KDA layers, 63 | 12.71B | FP8 block; convs, gates' small parts BF16/fp32 |
+| Shared experts | 1.07B | FP8 block |
+| Gated MLA, 9 layers | 0.63B | FP8 block |
+| Dense FFN, first 4 layers | 0.50B | FP8 block |
+| Embeddings + `lm_head` (untied) | 1.29B | BF16 |
+| Routers and norms | 0.14B | BF16 |
+| **Main model** | **563.95B** | |
+| MTP layer | 8.17B | mixed |
+| **Everything in the files** | **572.12B** | |
+
+So **"~560B" holds**: 563.9B for the main model, 572.1B if you count the MTP layer, which on its own is larger than many complete open models.
+
+Active per token is the non-expert parameters plus 8/512 of the routed ones: 16.34B + 8.56B = **24.9B** (measured; 24.25B if you do not count the input embedding, which is a row lookup, not a matmul). **"~25B active" holds.** The [SGLang cookbook page](https://docs.sglang.io/cookbook/autoregressive/InclusionAI/Ling-3.1-flash) says "about 17B active" (reported); I cannot find any grouping of these tensors that produces 17B, and the model card says 25B.
+
+The surprise is where the active parameters sit. KDA's full-rank projections are **12.7B of the 24.9B**, about half, while the eight routed experts contribute 8.56B (reasoned). On most fine-grained MoEs the experts dominate the per-token compute. On this one, the attention layers do.
+
+## Reproducing 534 GB to 292 GB
+
+**MXFP4** (OCP Microscaling) stores weights as 4-bit E2M1 values in blocks of 32 that share one 8-bit power-of-two (E8M0) scale. That costs $4 + 8/32 = 4.25$ bits per weight. **Block FP8** here is 8 bits plus one fp32 scale per 128×128 tile, $8 + 32/16384 \approx 8.002$ bits. Ling's earlier [Ling-3.0-flash-fp4](https://huggingface.co/inclusionAI/Ling-3.0-flash-fp4) release spells the recipe out in its config: `routed_experts_quant_method: mxfp4`, group size 32, `e8m0` scales, re-quantized from `fp8_block_128x128`, everything else left in block FP8. I assume 3.1 follows it; no Ling-3.1-flash FP4 checkpoint is published yet (measured from the Hugging Face model listing on 2026-10-14).
+
+Apply it to the measured groups:
+
+| Configuration | Bytes | In GiB |
+|---|---:|---:|
+| Release: FP8 block, BF16 kept | 573.75 GB | **534.35 GiB** |
+| MXFP4 routed experts (incl. MTP), rest unchanged | 313.15 GB | **291.64 GiB** |
+| Same, MTP layer dropped | 308.72 GB | 287.51 GiB |
+| Everything BF16 | 1,144.24 GB | 1,065.66 GiB |
+
+The thread's ~534 and ~292 match the GiB column to the unit (reasoned from measured counts). They are gibibytes written as "GB". The decimal figures are 574 GB and 313 GB. That is not a gotcha, since GPU memory is also sold in binary units, but if you size a disk or a download from the thread you will be 7% short.
+
+The cut is **45.4%** of the bytes (reasoned), and almost all of it comes from one group: the routed experts are **95.4%** of the release's bytes (measured). Dense parts stay in FP8 because they are small and every token touches them; experts go to 4 bits because they are huge and each one is touched rarely.
+
+### What the cut does not buy
+
+Storage and decode traffic are different things. At batch size 1, a decode step reads every dense weight but only the 8 experts the router picked. In the FP8 release that is about **14.9 GB of dense weights, 1.6 GB of BF16 head, routers and norms, and 8.6 GB of experts: ~25.1 GB per token** (reasoned from the measured groups). With MXFP4 experts the expert share falls to 4.5 GB and the total to ~21.1 GB. **A 45% smaller checkpoint reads only about 16% fewer bytes per token** at batch 1. The experts are 95% of the storage but about a third of a single token's reads, because KDA's full-rank projections are so large.
+
+The saving grows with batch size, since a batch of tokens touches more distinct experts. And on Hopper there is no FP4 tensor-core path, so MXFP4 experts have to be unpacked to FP8 or BF16 inside the GEMM (reasoned). On H100 and H200 MXFP4 saves memory, not FLOPs. That is consistent with the thread pitching it as "8 GPUs to 4", a memory claim, rather than a speed one.
+
+## Does 292 GiB fit on four Hopper GPUs?
+
+Weights are only part of the bill. The two attention types cost memory differently:
+
+- **Gated MLA cache:** 576 values per token per MLA layer. In BF16 that is 1,152 bytes; across the 9 MLA layers, **10,368 bytes per token**, or 11,520 with the MTP layer (reasoned from config). One 1,048,576-token sequence needs 11.25 GiB. The latent is shared by all heads, so with plain tensor parallelism every GPU keeps a full copy; more GPUs do not shrink it.
+- **KDA state:** 63 layers × 64 heads × 128×128 in fp32 is **252 MiB per sequence**, plus 9 MB of convolution tails, whatever the length (reasoned). It splits across GPUs by head.
+
+Add a reserve for activations, CUDA graphs and communication buffers. I use 6 GiB per GPU, an assumption, not a measurement. Then (reasoned):
+
+- **4×H100 80GB, MXFP4 experts:** 72.9 GiB of weights per GPU, about 1 GiB left for cache. That is roughly **96K tokens** of BF16 MLA cache with the MTP layer loaded, about 213K without it, double either with an FP8 cache. It boots. It is not a long-context server.
+- **4×H200 141GB, MXFP4 experts:** about 62 GiB per GPU free for cache, room for several million tokens. Comfortable.
+- **4×H200, FP8 release:** 133.6 GiB of weights per GPU, about 1.35 GiB free. It technically loads, which is why the cookbook's FP8 recipe is 8×H200.
+
+So "8 GPUs to 4" is plainly true on H200 and only nominally true on H100. The thread does not say which Hopper part it tested. Try the combinations:
+
+<MemoryPlanner />
+
+Everything in the planner is in the prose above: the measured parameter groups, the per-token MLA cost, the per-sequence KDA state, and the reserve. The verdict is for one GPU, because that is where an out-of-memory error happens.
+
+## The serving numbers are not one experiment
+
+The thread's next sentence: "In separate tests, 8 GPUs averaged 604ms to first token and 4 GPUs reached ~1.36 QPS. Workloads differed." Taken literally, these are two different experiments that measure two different things. Time to first token is a latency at some prompt length and concurrency. Queries per second is a throughput at some request mix. Neither prompt lengths, output lengths, concurrency, GPU model nor checkpoint precision is given for either. **They cannot be compared with each other or with anyone else's numbers** (reasoned). The thread says as much, which is more candour than most launch posts manage.
+
+The numbers that do come with a recipe are SGLang's (reported, not re-run): on 8×H200 with TP8, EP8 and MTP speculative decoding, batch-size-1 output is **251.2 tokens/s**; on GB300, 180.0 tokens/s at 5.14 ms per output token. MTP acceptance length is 2.61 on random tokens and 2.13 on real-text prompts. The vLLM recipe in the card uses three speculative tokens from the same MTP layer.
+
+## Context: 1M in the claims, 262,144 in the config
+
+The card, the thread and Artificial Analysis all say a 1M-token context. The open checkpoint's `config.json` says `max_position_embeddings: 262144` with `rope_scaling: null` and `rope_theta: 6000000` (measured), and the SGLang cookbook states "a context limit of 262,144 tokens" (reported).
+
+Position only enters this model in the 9 MLA layers, through 64 of each head's 192 query-key dimensions; the KDA layers have no positional encoding and order tokens through their recurrence. So extending to 1M is a question about 9 layers' [RoPE](/architectures/rope), the kind of change YaRN-style frequency scaling addresses. The model code supports YaRN scaling, but the release ships with none configured and documents no 1M recipe. The 1M figure is what inclusionAI's own API serves; with the open weights as shipped, plan for 256K.
+
+## Artificial Analysis and Design Arena
+
+The thread cites two leaderboards. I could reach [Artificial Analysis's model page](https://artificialanalysis.ai/models/ling-3-1-flash) (reported, read 2026-10-14):
+
+- **Intelligence Index 41**, against a median of 13 among comparable models. Running the index took 220M output tokens against a median of 95M, about \$1.00 per task: it gets there by thinking at length.
+- **209.3 output tokens/s** and **1.87 s** time to first token, measured on InclusionAI's own API.
+- **\$0.30 per 1M input and \$0.90 per 1M output.** The "~\$0.19 blended" uses Artificial Analysis's 7:2:1 cache-hit/input/output blend. Back-solving puts the cache-hit price near 5-6 cents per 1M. On the older 3:1 input/output blend the same prices come to \$0.45 (reasoned).
+- The page also lists the model as proprietary with weights "not publicly available". That is stale; the weights are on Hugging Face and ModelScope.
+
+<Figure
+  src="/articles/ling-3-1-flash/fig1.jpg"
+  alt="Scatter plot of Artificial Analysis Intelligence Index against output tokens per second for 18 models. Ling 3.1 Flash sits at about 41 on the index and about 210 tokens per second, on the dotted Pareto line inside the shaded 'most attractive' quadrant, near DeepSeek V4.1 Flash and DeepSeek V4 Flash; Claude Opus 5.5 and GLM-5.3 score higher but are slower."
+  caption="Intelligence Index vs output speed. Ling 3.1 Flash sits on the Pareto line at about 41 and 210 tokens/s; speed is measured on each vendor's API, not on self-hosted weights (Artificial Analysis chart, posted in the @AntLingAGI launch thread)."
+/>
+
+<Figure
+  src="/articles/ling-3-1-flash/fig2.jpg"
+  alt="Scatter plot of output speed against blended price per million tokens. Ling 3.1 Flash sits near 0.19 dollars and 210 tokens per second, clustered with DeepSeek V4 Flash and V4.1 Flash, inside the shaded quadrant; Kimi K3 and Claude Opus 5.5 sit far to the right at higher prices and lower speeds."
+  caption="Output speed vs blended price. The blend is Artificial Analysis's 7:2:1 cache-hit/input/output mix, which favours cache-heavy pricing (Artificial Analysis chart, posted in the @AntLingAGI launch thread)."
+/>
+
+Design Arena is a human-preference arena for generated front-end work. The thread's composite shows the Open Weights boards (reported): Ling-3.1-flash scores **1198 in React Native and 1341 in 3D Design (#3 in both), 1277 in SVG (#4), 1299 in Website (#5)**, plus 1295 in Data Visualization and 1335 in Game Dev, both #3. Kimi K3 is first on all six.
+
+<Figure
+  src="/articles/ling-3-1-flash/fig3.jpg"
+  alt="Six Design Arena Open Weights leaderboards as bar charts: Data Visualization, React Native, 3D Design, Game Dev, SVG and Website. Ling-3.1-flash is a highlighted, enlarged bar in each, scoring 1295, 1198, 1341, 1335, 1277 and 1299, ranked third, third, third, third, fourth and fifth; Kimi K3 is first on all six."
+  caption="Design Arena Open Weights boards. The highlighted Ling bar is drawn taller than bars that outscore it (1341 stands above Kimi K3's 1388 on 3D Design), so read the numbers, not the heights (composite posted in the @AntLingAGI launch thread; Design Arena data)."
+/>
+
+One thing to read carefully in that composite: the highlighted bar is styled larger, and on every board it stands taller than the higher-scoring bars to its left. The printed numbers and the ranks in the thread agree with each other; the bar heights do not (read from the figure itself).
+
+The card also names results on GDPVal-AA V2.1, HealthBench Professional, FrontierSWE, Terminal-Bench 4.0 and SWE-bench Pro. Its result images are hosted on an Ant-internal domain that redirects to a login, so I could not read or reproduce them. Treat those as claims.
+
+## Licence
+
+The Hugging Face card's metadata says `license: mit`, and so does the ModelScope mirror. Neither repository contains a LICENSE file, and there is no tech report; the [inclusionAI/Ling](https://github.com/inclusionAI/Ling) GitHub repository is MIT but has not been updated for this family (measured: its last commit is from May 2025). MIT with no added use restrictions is as permissive as open weights get. The card also links a training-content summary PDF, which it says does not replace the licence.
+
+## What I take from it
+
+- **The parameter claims hold.** 563.9B main model, 572.1B with MTP, 24.9B active (measured). Ignore the cookbook's "17B active".
+- **The quantization arithmetic is exact, in GiB.** 534.35 GiB to 291.64 GiB comes straight out of the headers with 4.25-bit experts and 8-bit everything else (reasoned).
+- **The architecture puts its active weight in attention.** Full-rank KDA gates make KDA half of every token's parameters, which is why 4-bit experts shrink the checkpoint by 45% but a batch-1 decode step by only ~16% (reasoned).
+- **Four GPUs means H200.** On four H100s the MXFP4 build loads with about 1 GiB per GPU of headroom (reasoned).
+- **Plan for 256K, not 1M,** with the weights as shipped (measured from config).
+
+Compared with [Kimi K3](/articles/kimi-k3) and [GLM-5.3-Flash](/articles/glm-5-3-flash), this is the same convergent recipe, linear attention for most layers, a few full-attention layers for exact recall, very sparse experts, at a size where a single 8-GPU node still serves it in FP8. For background on block-scaled 4-bit formats, the [Nemotron NVFP4 article](/articles/nemotron-nvfp4) covers the sibling format, and [how LLM inference works](/articles/how-llm-inference-works) covers why decode is a memory-bandwidth problem in the first place.
