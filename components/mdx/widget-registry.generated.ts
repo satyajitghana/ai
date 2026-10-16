@@ -130,6 +130,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "colibri/expert-streaming": () => import("@/components/articles/colibri/expert-streaming"),
   "colibri/memory-budget": () => import("@/components/articles/colibri/memory-budget"),
   "colibri/throughput-ladder": () => import("@/components/articles/colibri/throughput-ladder"),
+  "comet-60b/comet-budget": () => import("@/components/articles/comet-60b/comet-budget"),
+  "comet-60b/expert-map": () => import("@/components/articles/comet-60b/expert-map"),
   "confidence-gated-fraud-detection/base-rate": () => import("@/components/articles/confidence-gated-fraud-detection/base-rate"),
   "confidence-gated-fraud-detection/review-budget": () => import("@/components/articles/confidence-gated-fraud-detection/review-budget"),
   "context-language-models/context-file-panel": () => import("@/components/articles/context-language-models/context-file-panel"),
