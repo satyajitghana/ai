@@ -572,6 +572,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "magi-2-preview/active-budget": () => import("@/components/articles/magi-2-preview/active-budget"),
   "magi-2-preview/checkpoint-ledger": () => import("@/components/articles/magi-2-preview/checkpoint-ledger"),
   "magi-2-preview/layer-stack": () => import("@/components/articles/magi-2-preview/layer-stack"),
+  "mai-2/compute-reconciler": () => import("@/components/articles/mai-2/compute-reconciler"),
+  "mai-2/multi-round-moe": () => import("@/components/articles/mai-2/multi-round-moe"),
   "mai-image-2-5-voice-2/deploy-map": () => import("@/components/articles/mai-image-2-5-voice-2/deploy-map"),
   "male-fly-connectome/completeness-grid": () => import("@/components/articles/male-fly-connectome/completeness-grid"),
   "male-fly-connectome/pipeline-explorer": () => import("@/components/articles/male-fly-connectome/pipeline-explorer"),
