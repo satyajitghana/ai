@@ -402,6 +402,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "iquest-q1/kv-stack": () => import("@/components/articles/iquest-q1/kv-stack"),
   "jacobian-lens/lens-tangent": () => import("@/components/articles/jacobian-lens/lens-tangent"),
   "jacobian-lens/unembed-readout": () => import("@/components/articles/jacobian-lens/unembed-readout"),
+  "jais-3/fertility-comparator": () => import("@/components/articles/jais-3/fertility-comparator"),
   "jepa-anything/domain-atlas": () => import("@/components/articles/jepa-anything/domain-atlas"),
   "jepa-anything/synthesis-geometry": () => import("@/components/articles/jepa-anything/synthesis-geometry"),
   "jev-alternatives-week-five/permutation-tester": () => import("@/components/articles/jev-alternatives-week-five/permutation-tester"),
