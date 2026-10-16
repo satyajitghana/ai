@@ -781,6 +781,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "pdf-inspector/vector-text-classifier": () => import("@/components/articles/pdf-inspector/vector-text-classifier"),
   "penjing-27b/allocation-map": () => import("@/components/articles/penjing-27b/allocation-map"),
   "penjing-27b/quality-ladder": () => import("@/components/articles/penjing-27b/quality-ladder"),
+  "perplexity-space/egress-path": () => import("@/components/articles/perplexity-space/egress-path"),
+  "perplexity-space/sandbox-lifecycle": () => import("@/components/articles/perplexity-space/sandbox-lifecycle"),
   "personaplex-full-duplex/frame-tape": () => import("@/components/articles/personaplex-full-duplex/frame-tape"),
   "personaplex-full-duplex/loop-deck": () => import("@/components/articles/personaplex-full-duplex/loop-deck"),
   "personaplex-full-duplex/scoreboard": () => import("@/components/articles/personaplex-full-duplex/scoreboard"),
