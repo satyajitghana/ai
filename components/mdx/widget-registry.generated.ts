@@ -345,6 +345,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "hauhaucs-qwen-fastmtp/quant-ledger": () => import("@/components/articles/hauhaucs-qwen-fastmtp/quant-ledger"),
   "hauhaucs-qwen-fastmtp/signature-chain": () => import("@/components/articles/hauhaucs-qwen-fastmtp/signature-chain"),
   "hauhaucs-qwen-fastmtp/vocab-trim": () => import("@/components/articles/hauhaucs-qwen-fastmtp/vocab-trim"),
+  "hesai-kosmo/depth-drift": () => import("@/components/articles/hesai-kosmo/depth-drift"),
+  "hesai-kosmo/point-budget": () => import("@/components/articles/hesai-kosmo/point-budget"),
   "hilti-slam-dataset/score-cliff": () => import("@/components/articles/hilti-slam-dataset/score-cliff"),
   "hindsight-agent-memory/memory-recall-demo": () => import("@/components/articles/hindsight-agent-memory/memory-recall-demo"),
   "holo4/agent-loop": () => import("@/components/articles/holo4/agent-loop"),
