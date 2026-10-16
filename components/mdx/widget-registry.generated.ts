@@ -1048,6 +1048,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "tencentdb-agent-memory/recall-caps": () => import("@/components/articles/tencentdb-agent-memory/recall-caps"),
   "tensorfold-strata-engines/decode-roofline": () => import("@/components/articles/tensorfold-strata-engines/decode-roofline"),
   "tensorfold-strata-engines/row-cost": () => import("@/components/articles/tensorfold-strata-engines/row-cost"),
+  "terminal-rsi/rsi-loop": () => import("@/components/articles/terminal-rsi/rsi-loop"),
+  "terminal-rsi/sota-check": () => import("@/components/articles/terminal-rsi/sota-check"),
   "ternary15m/signed-accumulate": () => import("@/components/articles/ternary15m/signed-accumulate"),
   "tev-gym/group-advantage": () => import("@/components/articles/tev-gym/group-advantage"),
   "tgrep/breakeven-chart": () => import("@/components/articles/tgrep/breakeven-chart"),
