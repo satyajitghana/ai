@@ -93,6 +93,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "bm25/tf-saturation": () => import("@/components/articles/bm25/tf-saturation"),
   "bonsai-2-27b/bit-budget": () => import("@/components/articles/bonsai-2-27b/bit-budget"),
   "bonsai-2-27b/frontier": () => import("@/components/articles/bonsai-2-27b/frontier"),
+  "bonsai-2-small/byte-budget": () => import("@/components/articles/bonsai-2-small/byte-budget"),
+  "bonsai-2-small/decode-ceiling": () => import("@/components/articles/bonsai-2-small/decode-ceiling"),
   "bonsai-27b/footprint": () => import("@/components/articles/bonsai-27b/footprint"),
   "bonsai-27b/precision-map": () => import("@/components/articles/bonsai-27b/precision-map"),
   "bonsai-27b/retention": () => import("@/components/articles/bonsai-27b/retention"),
