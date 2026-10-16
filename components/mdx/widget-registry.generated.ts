@@ -646,6 +646,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "muse-glimmer/bench-ledger": () => import("@/components/articles/muse-glimmer/bench-ledger"),
   "muse-glimmer/memory-budget": () => import("@/components/articles/muse-glimmer/memory-budget"),
   "muse-glimmer/spec-decode": () => import("@/components/articles/muse-glimmer/spec-decode"),
+  "muse-spark-open/fit-calculator": () => import("@/components/articles/muse-spark-open/fit-calculator"),
+  "muse-spark-open/param-budget": () => import("@/components/articles/muse-spark-open/param-budget"),
   "muse-wonder/index-gap": () => import("@/components/articles/muse-wonder/index-gap"),
   "muse-wonder/source-ledger": () => import("@/components/articles/muse-wonder/source-ledger"),
   "nac/context-lifecycle": () => import("@/components/articles/nac/context-lifecycle"),
