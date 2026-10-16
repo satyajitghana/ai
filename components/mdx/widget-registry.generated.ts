@@ -507,6 +507,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "ling-3-0-flash/architecture": () => import("@/components/articles/ling-3-0-flash/architecture"),
   "ling-3-0-flash/kv-vs-state": () => import("@/components/articles/ling-3-0-flash/kv-vs-state"),
   "ling-3-1-flash/memory-planner": () => import("@/components/articles/ling-3-1-flash/memory-planner"),
+  "liquid-d1-ultra/index-calibration": () => import("@/components/articles/liquid-d1-ultra/index-calibration"),
+  "liquid-d1-ultra/threshold-gate": () => import("@/components/articles/liquid-d1-ultra/threshold-gate"),
   "liquid-open-d1/latency-explorer": () => import("@/components/articles/liquid-open-d1/latency-explorer"),
   "liquid-open-d1/readout-compare": () => import("@/components/articles/liquid-open-d1/readout-compare"),
   "lithos-metal/decode-budget": () => import("@/components/articles/lithos-metal/decode-budget"),
