@@ -158,6 +158,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "dart-realtime-detection/student-tradeoff": () => import("@/components/articles/dart-realtime-detection/student-tradeoff"),
   "data-space-iteration/iteration-toy": () => import("@/components/articles/data-space-iteration/iteration-toy"),
   "data-space-iteration/schedule-board": () => import("@/components/articles/data-space-iteration/schedule-board"),
+  "datadog-scout/incident-walk": () => import("@/components/articles/datadog-scout/incident-walk"),
+  "datadog-scout/results-board": () => import("@/components/articles/datadog-scout/results-board"),
   "dcformer/compose-cost": () => import("@/components/articles/dcformer/compose-cost"),
   "dcformer/compose-vectors": () => import("@/components/articles/dcformer/compose-vectors"),
   "deepgemm-ascend/megamoe-fusion": () => import("@/components/articles/deepgemm-ascend/megamoe-fusion"),
