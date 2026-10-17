@@ -380,6 +380,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "impeccable-design-skill/rule-ledger": () => import("@/components/articles/impeccable-design-skill/rule-ledger"),
   "impeccable-design-skill/slop-bench": () => import("@/components/articles/impeccable-design-skill/slop-bench"),
   "index-translate/syllable-budget": () => import("@/components/articles/index-translate/syllable-budget"),
+  "infinisplat-2/opacity-prune": () => import("@/components/articles/infinisplat-2/opacity-prune"),
   "injective-language-models/measure-zero-map": () => import("@/components/articles/injective-language-models/measure-zero-map"),
   "injective-language-models/sip-it-walker": () => import("@/components/articles/injective-language-models/sip-it-walker"),
   "inkling-small/on-policy-distillation": () => import("@/components/articles/inkling-small/on-policy-distillation"),
