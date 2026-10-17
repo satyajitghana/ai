@@ -1166,6 +1166,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "zdtaichu-5-9b/entropy-gate": () => import("@/components/articles/zdtaichu-5-9b/entropy-gate"),
   "zdtaichu-5-9b/panel-pick": () => import("@/components/articles/zdtaichu-5-9b/panel-pick"),
   "zdtaichu-5-9b/precision-map": () => import("@/components/articles/zdtaichu-5-9b/precision-map"),
+  "zephon-torchtitan/lane-map": () => import("@/components/articles/zephon-torchtitan/lane-map"),
   "zuna-1-1/channel-agnostic": () => import("@/components/articles/zuna-1-1/channel-agnostic"),
   "zuna-1-1/diffusion-autoencoder": () => import("@/components/articles/zuna-1-1/diffusion-autoencoder"),
   "zvec/nav-graph": () => import("@/components/articles/zvec/nav-graph"),
