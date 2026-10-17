@@ -174,6 +174,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "deepseek-harness/profile-layers": () => import("@/components/articles/deepseek-harness/profile-layers"),
   "deepseek-harness/repo-discipline": () => import("@/components/articles/deepseek-harness/repo-discipline"),
   "deepseek-harness/turn-flow": () => import("@/components/articles/deepseek-harness/turn-flow"),
+  "deepseek-v4-1-flash-1017/spark-fit": () => import("@/components/articles/deepseek-v4-1-flash-1017/spark-fit"),
+  "deepseek-v4-1-flash-1017/version-diff": () => import("@/components/articles/deepseek-v4-1-flash-1017/version-diff"),
   "dense-correspondence-flux2/correspondence-explorer": () => import("@/components/articles/dense-correspondence-flux2/correspondence-explorer"),
   "depth-anything-3-ros2/aspect-box": () => import("@/components/articles/depth-anything-3-ros2/aspect-box"),
   "depth-anything-3-ros2/scale-seam": () => import("@/components/articles/depth-anything-3-ros2/scale-seam"),
