@@ -937,6 +937,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "rsi-anything/rsi-loop": () => import("@/components/articles/rsi-anything/rsi-loop"),
   "rsi-inference-bench/results-board": () => import("@/components/articles/rsi-inference-bench/results-board"),
   "rsi-inference-bench/task-anatomy": () => import("@/components/articles/rsi-inference-bench/task-anatomy"),
+  "rsi-top/collapse-toy": () => import("@/components/articles/rsi-top/collapse-toy"),
+  "rsi-top/kernel-stall-explorer": () => import("@/components/articles/rsi-top/kernel-stall-explorer"),
   "runtime-abliteration/refusal-rates": () => import("@/components/articles/runtime-abliteration/refusal-rates"),
   "runtime-abliteration/residual-map": () => import("@/components/articles/runtime-abliteration/residual-map"),
   "runtime-dynamic-compression/bit-gap": () => import("@/components/articles/runtime-dynamic-compression/bit-gap"),
