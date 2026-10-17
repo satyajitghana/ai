@@ -790,6 +790,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "paw/cost-crossover": () => import("@/components/articles/paw/cost-crossover"),
   "paw/paw-compiler": () => import("@/components/articles/paw/paw-compiler"),
   "pdf-inspector/vector-text-classifier": () => import("@/components/articles/pdf-inspector/vector-text-classifier"),
+  "pele/bench-explorer": () => import("@/components/articles/pele/bench-explorer"),
   "penjing-27b/allocation-map": () => import("@/components/articles/penjing-27b/allocation-map"),
   "penjing-27b/quality-ladder": () => import("@/components/articles/penjing-27b/quality-ladder"),
   "perplexity-space/egress-path": () => import("@/components/articles/perplexity-space/egress-path"),
