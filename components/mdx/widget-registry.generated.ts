@@ -1007,6 +1007,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "spec-ptc/shadow-repl": () => import("@/components/articles/spec-ptc/shadow-repl"),
   "spec-ptc/spec-timeline": () => import("@/components/articles/spec-ptc/spec-timeline"),
   "spec-ptc/variance-trap": () => import("@/components/articles/spec-ptc/variance-trap"),
+  "speech-cpp/sample-player": () => import("@/components/articles/speech-cpp/sample-player"),
+  "speech-cpp/stream-budget": () => import("@/components/articles/speech-cpp/stream-budget"),
   "speech-to-speech/backend-matrix": () => import("@/components/articles/speech-to-speech/backend-matrix"),
   "speech-to-speech/smart-turn": () => import("@/components/articles/speech-to-speech/smart-turn"),
   "splash-engine/bandwidth-roof": () => import("@/components/articles/splash-engine/bandwidth-roof"),
