@@ -928,6 +928,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "rrsi-harness-evolution/evolve-gate": () => import("@/components/articles/rrsi-harness-evolution/evolve-gate"),
   "rsi-anything/claim-ledger": () => import("@/components/articles/rsi-anything/claim-ledger"),
   "rsi-anything/rsi-loop": () => import("@/components/articles/rsi-anything/rsi-loop"),
+  "rsi-inference-bench/results-board": () => import("@/components/articles/rsi-inference-bench/results-board"),
+  "rsi-inference-bench/task-anatomy": () => import("@/components/articles/rsi-inference-bench/task-anatomy"),
   "runtime-abliteration/refusal-rates": () => import("@/components/articles/runtime-abliteration/refusal-rates"),
   "runtime-abliteration/residual-map": () => import("@/components/articles/runtime-abliteration/residual-map"),
   "runtime-dynamic-compression/bit-gap": () => import("@/components/articles/runtime-dynamic-compression/bit-gap"),
