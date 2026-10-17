@@ -152,6 +152,9 @@ function detectLicense(raw: string): string {
   if (/gnu general public license,? version 2/.test(t)) return "GPL-2.0"
   if (/apache license,? version 2\.0/.test(t)) return "Apache-2.0"
   if (/mozilla public license,? version 2\.0/.test(t)) return "MPL-2.0"
+  // A file that opens by naming itself MIT is MIT, even when it then appends a
+  // bundled dependency's ISC notice (obsidianmd/pele carries Lucide's).
+  if (/^mit license/.test(t)) return "MIT"
   if (
     /permission to use, copy, modify, and\/or distribute this software for any purpose/.test(
       t
