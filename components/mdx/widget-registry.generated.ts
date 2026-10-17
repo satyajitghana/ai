@@ -1072,6 +1072,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "tiel-coder-35b-a3b/quant-ladder": () => import("@/components/articles/tiel-coder-35b-a3b/quant-ladder"),
   "tiktok-5-6b-videos/query-cost": () => import("@/components/articles/tiktok-5-6b-videos/query-cost"),
   "tilelang/tile-budget": () => import("@/components/articles/tilelang/tile-budget"),
+  "timestral/dhf-mask": () => import("@/components/articles/timestral/dhf-mask"),
+  "timestral/quantile-fan": () => import("@/components/articles/timestral/quantile-fan"),
   "tinfield-1/engram-lookup": () => import("@/components/articles/tinfield-1/engram-lookup"),
   "tinfield-1/score-lattice": () => import("@/components/articles/tinfield-1/score-lattice"),
   "tiny-browser-models/inference-cost-model": () => import("@/components/articles/tiny-browser-models/inference-cost-model"),
