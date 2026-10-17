@@ -51,6 +51,27 @@ import { cn } from "@/lib/utils"
 //     Lean checks of an older kappa (#487, #488), DreamingOfClouds' #595 ceiling, and replays or
 //     independent verifications of someone else's kappa (#586, #594, #611, #613, #777, #826).
 //     #494 and #499 rest on #448's cross-copy split and are drawn hollow.
+//   #845 to #2909 were added at 10:15 UTC on Oct 16 without the GitHub API, which was unreachable.
+//     Titles and logins come from docs/research/pr-ledger.json on main at 0706e74 (titles as they
+//     read in that snapshot), or, for PRs not yet in it, the head commit's subject. Times are not
+//     opening times: each point sits at the earliest commit unique to that PR (not on main and not
+//     in a lower-numbered PR head), moved later to the time of any higher-placed PR its title builds
+//     on; merged PRs, whose commits are on main, sit at their head commit time. Omitted: titles with
+//     no kappa, "no new κ", "kappa unchanged", text-only, replay, audit and verification PRs.
+//   #2864 to #3204 were added at 17:35 UTC on Oct 17, again without the GitHub API: titles,
+//     logins and states from docs/research/pr-ledger.json on main at 463113d (to #3197), else the
+//     head commit's subject and author. Times as for #845 onward; "MERGED" PRs from #2908 on are
+//     the maintainer's source archives ("does not admit a supplier, outer theorem or improved
+//     kappa"), not selections, so they sit at their head commit time like the rest. Omitted:
+//     titles with no kappa or "no new kappa", #3021 (no kappa in its title), #3135 (a precision
+//     refinement with no kappa stated). #3184, #3190, #3198 and #3200 rest on #3184's idle-star
+//     move, for which #3187 gives an exact physical-operator counterexample; they are drawn
+//     hollow and left out of the green best-claim line. main did not move: selected-result.json
+//     is still #1094 at 463113d (16:52 UTC on Oct 17).
+//   Four more moves of main on Oct 13, at the committer times of the selection commits (no
+//     merged_at without the API): #890 3b83e4f 13:30:30, #942 3825dc0 15:06:01, #1042 87db776
+//     18:05:11, #1094 0a31ad8 18:45:23; kappa from certificates/selected-result.json at each.
+//     main had not moved again by 0706e74 (10:07 UTC on Oct 16).
 //   Eight more moves of main, at GitHub's merged_at times on Oct 12 and 13: #531 (with #523 and
 //     #493) 01:55:39, #535 (with #510) 13:10:49, #588 (with #543) 15:45:41, #596 17:00:38,
 //     #617 21:01:43, #626 22:36:46, #741 06:10:35 and #799 06:44:20; kappa from
@@ -632,6 +653,178 @@ const PRS: Pt[] = [
   { pr: 699, who: "jeremykothe2", h: 150.396, l2: -9.234, k: "1.6607e-3" },
   { pr: 741, who: "chafreaky", h: 151.021, l2: -9.234, k: "1.6612e-3" },
   { pr: 799, who: "jeremykothe2", h: 151.83, l2: -9.233, k: "1.6616e-3" },
+  { pr: 869, who: "jeremykothe2", h: 154.188, l2: -9.233, k: "1.6619e-3" },
+  { pr: 870, who: "jeremykothe2", h: 154.580, l2: -9.233, k: "1.6620e-3" },
+  { pr: 890, who: "chafreaky", h: 156.973, l2: -9.233, k: "1.6620e-3" },
+  { pr: 942, who: "jon314159", h: 159.781, l2: -9.233, k: "1.6620e-3" },
+  { pr: 962, who: "GamingPuzzled", h: 160.188, l2: -9.233, k: "1.6620e-3" },
+  { pr: 1004, who: "jeremykothe2", h: 161.838, l2: -9.231, k: "1.6642e-3" },
+  { pr: 1005, who: "jeremykothe2", h: 162.311, l2: -9.225, k: "1.6714e-3" },
+  { pr: 1030, who: "AlexS-scale", h: 162.500, l2: -9.233, k: "1.6620e-3" },
+  { pr: 1019, who: "1337isnot1337", h: 162.694, l2: -9.233, k: "1.6620e-3" },
+  { pr: 1022, who: "jeremykothe2", h: 162.787, l2: -9.224, k: "1.6721e-3" },
+  { pr: 1028, who: "jeremykothe2", h: 162.903, l2: -9.224, k: "1.6722e-3" },
+  { pr: 1031, who: "jeremykothe2", h: 162.956, l2: -9.224, k: "1.6722e-3" },
+  { pr: 1072, who: "davidNbreslauer", h: 163.019, l2: -9.233, k: "1.6620e-3" },
+  { pr: 1042, who: "jeremykothe2", h: 163.102, l2: -9.224, k: "1.6722e-3" },
+  { pr: 1050, who: "jeremykothe2", h: 163.207, l2: -9.224, k: "1.6722e-3" },
+  { pr: 1148, who: "tomdif", h: 163.265, l2: -9.221, k: "1.6756e-3" },
+  { pr: 1053, who: "jeremykothe2", h: 163.281, l2: -9.224, k: "1.6722e-3" },
+  { pr: 1055, who: "jeremykothe2", h: 163.319, l2: -9.224, k: "1.6723e-3" },
+  { pr: 1056, who: "rohanarun", h: 163.392, l2: -9.224, k: "1.6723e-3" },
+  { pr: 1061, who: "jeremykothe2", h: 163.418, l2: -9.224, k: "1.6726e-3" },
+  { pr: 1065, who: "jeremykothe2", h: 163.495, l2: -9.224, k: "1.6726e-3" },
+  { pr: 1063, who: "rohanarun", h: 163.539, l2: -9.224, k: "1.6723e-3" },
+  { pr: 1068, who: "jeremykothe2", h: 163.560, l2: -9.224, k: "1.6727e-3" },
+  { pr: 987, who: "rohanarun", h: 163.640, l2: -9.233, k: "1.6620e-3" },
+  { pr: 1018, who: "jeremykothe2", h: 163.640, l2: -9.224, k: "1.6717e-3" },
+  { pr: 1074, who: "jeremykothe2", h: 163.683, l2: -9.224, k: "1.6727e-3" },
+  { pr: 1087, who: "jeremykothe2", h: 163.851, l2: -9.224, k: "1.6727e-3" },
+  { pr: 1082, who: "rohanarun", h: 163.855, l2: -9.224, k: "1.6727e-3" },
+  { pr: 1090, who: "1337isnot1337", h: 163.949, l2: -9.224, k: "1.6724e-3" },
+  { pr: 1094, who: "rohanarun", h: 164.109, l2: -9.224, k: "1.6727e-3" },
+  { pr: 1104, who: "jeremykothe2", h: 164.224, l2: -9.224, k: "1.6727e-3" },
+  { pr: 1107, who: "jeremykothe2", h: 164.299, l2: -9.224, k: "1.6728e-3" },
+  { pr: 1111, who: "seslly", h: 164.381, l2: -9.224, k: "1.6728e-3" },
+  { pr: 1117, who: "jeremykothe2", h: 164.502, l2: -9.223, k: "1.6728e-3" },
+  { pr: 1121, who: "jeremykothe2", h: 164.604, l2: -9.223, k: "1.6730e-3" },
+  { pr: 1124, who: "jeremykothe2", h: 164.659, l2: -9.223, k: "1.6730e-3" },
+  { pr: 1129, who: "aliromman", h: 164.706, l2: -9.222, k: "1.6741e-3" },
+  { pr: 1130, who: "jeremykothe2", h: 164.761, l2: -9.223, k: "1.6730e-3" },
+  { pr: 1131, who: "chafreaky", h: 164.806, l2: -9.222, k: "1.6741e-3" },
+  { pr: 1172, who: "midhatn", h: 165.141, l2: -9.224, k: "1.6728e-3" },
+  { pr: 1152, who: "chafreaky", h: 165.168, l2: -9.222, k: "1.6743e-3" },
+  { pr: 1150, who: "rohanarun", h: 165.173, l2: -9.224, k: "1.6727e-3" },
+  { pr: 1154, who: "Dugongue", h: 165.227, l2: -9.223, k: "1.6733e-3" },
+  { pr: 1157, who: "rohanarun", h: 165.314, l2: -9.222, k: "1.6741e-3" },
+  { pr: 1169, who: "rohanarun", h: 165.461, l2: -9.221, k: "1.6756e-3" },
+  { pr: 1364, who: "GamingPuzzled", h: 165.526, l2: -9.222, k: "1.6751e-3" },
+  { pr: 1176, who: "Dugongue", h: 165.680, l2: -9.221, k: "1.6752e-3" },
+  { pr: 1178, who: "rohanarun", h: 165.745, l2: -9.221, k: "1.6752e-3" },
+  { pr: 1204, who: "GamingPuzzled", h: 165.775, l2: -9.221, k: "1.6756e-3" },
+  { pr: 1183, who: "rohanarun", h: 165.801, l2: -9.221, k: "1.6756e-3" },
+  { pr: 1193, who: "jeremydiviney", h: 165.874, l2: -9.221, k: "1.6758e-3" },
+  { pr: 1196, who: "chafreaky", h: 165.920, l2: -9.221, k: "1.6756e-3" },
+  { pr: 1192, who: "rohanarun", h: 165.921, l2: -9.221, k: "1.6757e-3" },
+  { pr: 1195, who: "mdumitrean", h: 165.930, l2: -9.221, k: "1.6757e-3" },
+  { pr: 1201, who: "rohanarun", h: 166.013, l2: -9.221, k: "1.6758e-3" },
+  { pr: 1225, who: "rohanarun", h: 166.080, l2: -9.221, k: "1.6756e-3" },
+  { pr: 1207, who: "rohanarun", h: 166.156, l2: -9.221, k: "1.6758e-3" },
+  { pr: 1239, who: "GamingPuzzled", h: 166.284, l2: -9.221, k: "1.6758e-3" },
+  { pr: 1218, who: "rohanarun", h: 166.342, l2: -9.221, k: "1.6758e-3" },
+  { pr: 1268, who: "jeremykothe2", h: 167.379, l2: -9.221, k: "1.6760e-3" },
+  { pr: 1274, who: "jeremykothe2", h: 167.494, l2: -9.221, k: "1.6761e-3" },
+  { pr: 1280, who: "jeremykothe2", h: 167.586, l2: -9.220, k: "1.6764e-3" },
+  { pr: 1286, who: "rohanarun", h: 167.751, l2: -9.220, k: "1.6763e-3" },
+  { pr: 1297, who: "rohanarun", h: 167.954, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1305, who: "jeremykothe2", h: 168.205, l2: -9.220, k: "1.6772e-3" },
+  { pr: 1319, who: "rohanarun", h: 168.603, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1324, who: "jeremykothe2", h: 168.634, l2: -9.220, k: "1.6774e-3" },
+  { pr: 1377, who: "jeremykothe2", h: 169.654, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1549, who: "midhatn", h: 172.764, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1574, who: "rohanarun", h: 173.220, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1582, who: "midhatn", h: 173.363, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1625, who: "mdumitrean", h: 174.285, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1644, who: "jeremykothe2", h: 174.588, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1640, who: "midhatn", h: 174.727, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1718, who: "Pseudoataraxia", h: 175.200, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1661, who: "midhatn", h: 175.611, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1672, who: "jeremykothe2", h: 176.119, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1673, who: "Vlado-V", h: 176.228, l2: -9.220, k: "1.6772e-3" },
+  { pr: 1677, who: "midhatn", h: 176.437, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1681, who: "jeremykothe2", h: 176.532, l2: -9.220, k: "1.6772e-3" },
+  { pr: 1683, who: "jeremykothe2", h: 176.756, l2: -9.220, k: "1.6772e-3" },
+  { pr: 1688, who: "jeremykothe2", h: 177.042, l2: -9.220, k: "1.6773e-3" },
+  { pr: 1692, who: "midhatn", h: 177.222, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1699, who: "chafreaky", h: 177.345, l2: -9.219, k: "1.6776e-3" },
+  { pr: 1712, who: "jeremykothe2", h: 177.499, l2: -9.219, k: "1.6776e-3" },
+  { pr: 1721, who: "jeremykothe2", h: 177.841, l2: -9.219, k: "1.6778e-3" },
+  { pr: 1724, who: "midhatn", h: 177.972, l2: -9.220, k: "1.6769e-3" },
+  { pr: 1725, who: "jeremykothe2", h: 177.978, l2: -9.219, k: "1.6780e-3" },
+  { pr: 1731, who: "jeremykothe2", h: 178.079, l2: -9.219, k: "1.6781e-3" },
+  { pr: 1754, who: "jeremykothe2", h: 178.712, l2: -9.219, k: "1.6783e-3" },
+  { pr: 1758, who: "jeremykothe2", h: 178.917, l2: -9.218, k: "1.6797e-3" },
+  { pr: 1786, who: "chafreaky", h: 179.928, l2: -9.218, k: "1.6798e-3" },
+  { pr: 1789, who: "midhatn", h: 180.026, l2: -9.219, k: "1.6780e-3" },
+  { pr: 1175, who: "gvconly", h: 180.242, l2: -9.221, k: "1.6753e-3" },
+  { pr: 1800, who: "jeremykothe2", h: 180.277, l2: -9.218, k: "1.6798e-3" },
+  { pr: 1839, who: "jeremykothe2", h: 181.816, l2: -9.218, k: "1.6798e-3" },
+  { pr: 1875, who: "rohanarun", h: 182.870, l2: -9.218, k: "1.6798e-3" },
+  { pr: 1904, who: "jeremykothe2", h: 183.613, l2: -9.218, k: "1.6798e-3" },
+  { pr: 1905, who: "jeremykothe2", h: 183.653, l2: -9.218, k: "1.6798e-3" },
+  { pr: 1928, who: "jeremykothe2", h: 183.911, l2: -9.218, k: "1.6798e-3" },
+  { pr: 2044, who: "jeremykothe2", h: 186.819, l2: -9.218, k: "1.6798e-3" },
+  { pr: 2161, who: "dataisfire", h: 191.448, l2: -9.218, k: "1.6798e-3" },
+  { pr: 2180, who: "dataisfire", h: 192.404, l2: -9.218, k: "1.6798e-3" },
+  { pr: 2220, who: "jeremykothe2", h: 194.005, l2: -9.218, k: "1.6798e-3" },
+  { pr: 2260, who: "Dugongue", h: 196.564, l2: -9.217, k: "1.6805e-3" },
+  { pr: 2269, who: "jeremykothe2", h: 196.909, l2: -9.203, k: "1.6962e-3" },
+  { pr: 2265, who: "DreamingOfClouds", h: 196.948, l2: -9.214, k: "1.6834e-3" },
+  { pr: 2281, who: "jeremykothe2", h: 197.294, l2: -9.203, k: "1.6962e-3" },
+  { pr: 2284, who: "Dugongue", h: 197.429, l2: -9.214, k: "1.6836e-3" },
+  { pr: 2288, who: "jeremykothe2", h: 197.632, l2: -9.203, k: "1.6963e-3" },
+  { pr: 2302, who: "jeremykothe2", h: 198.201, l2: -9.203, k: "1.6964e-3" },
+  { pr: 2309, who: "Dugongue", h: 198.504, l2: -9.203, k: "1.6965e-3" },
+  { pr: 2312, who: "jeremykothe2", h: 198.792, l2: -9.203, k: "1.6969e-3" },
+  { pr: 2322, who: "Vlado-V", h: 199.235, l2: -9.203, k: "1.6971e-3" },
+  { pr: 2349, who: "jeremykothe2", h: 200.076, l2: -9.203, k: "1.6971e-3" },
+  { pr: 2363, who: "mason-hale", h: 200.636, l2: -9.203, k: "1.6971e-3" },
+  { pr: 2374, who: "jeremykothe2", h: 200.853, l2: -9.203, k: "1.6972e-3" },
+  { pr: 2435, who: "jeremykothe2", h: 203.648, l2: -9.202, k: "1.6985e-3" },
+  { pr: 2530, who: "zxv", h: 204.213, l2: -9.189, k: "1.7137e-3" },
+  { pr: 2447, who: "jeremykothe2", h: 204.724, l2: -9.202, k: "1.6985e-3" },
+  { pr: 2462, who: "jeremykothe2", h: 205.364, l2: -9.197, k: "1.7036e-3" },
+  { pr: 2474, who: "jeremykothe2", h: 205.949, l2: -9.197, k: "1.7037e-3" },
+  { pr: 2526, who: "jeremykothe2", h: 207.556, l2: -9.197, k: "1.7037e-3" },
+  { pr: 2559, who: "philippeVV", h: 207.969, l2: -9.196, k: "1.7044e-3" },
+  { pr: 2169, who: "philippeVV", h: 208.028, l2: -9.223, k: "1.6736e-3" },
+  { pr: 2571, who: "rohanarun", h: 208.874, l2: -9.189, k: "1.7138e-3" },
+  { pr: 2575, who: "jeremykothe2", h: 208.883, l2: -9.189, k: "1.7139e-3" },
+  { pr: 2588, who: "jeremykothe2", h: 209.365, l2: -9.188, k: "1.7143e-3" },
+  { pr: 2621, who: "themilkman216", h: 209.365, l2: -9.188, k: "1.7143e-3" },
+  { pr: 2679, who: "philippeVV", h: 209.758, l2: -9.188, k: "1.7149e-3" },
+  { pr: 2673, who: "jeremykothe2", h: 210.788, l2: -9.188, k: "1.7146e-3" },
+  { pr: 2733, who: "mdumitrean", h: 211.397, l2: -9.187, k: "1.7163e-3" },
+  { pr: 2696, who: "mason-hale", h: 211.664, l2: -9.187, k: "1.7156e-3" },
+  { pr: 2745, who: "jeremykothe2", h: 213.527, l2: -9.187, k: "1.7161e-3" },
+  { pr: 2751, who: "tekuuu", h: 214.075, l2: -9.186, k: "1.7171e-3" },
+  { pr: 2767, who: "jeremykothe2", h: 214.692, l2: -9.186, k: "1.7173e-3" },
+  { pr: 2766, who: "DavidAriasC", h: 214.885, l2: -9.186, k: "1.7173e-3" },
+  { pr: 2802, who: "mdumitrean", h: 216.193, l2: -9.185, k: "1.7178e-3" },
+  { pr: 2818, who: "jeremykothe2", h: 217.507, l2: -9.185, k: "1.7178e-3" },
+  { pr: 2824, who: "Dugongue", h: 217.968, l2: -9.185, k: "1.7178e-3" },
+  { pr: 2827, who: "Dugongue", h: 218.425, l2: -9.185, k: "1.7178e-3" },
+  { pr: 2833, who: "jeremykothe2", h: 218.831, l2: -9.185, k: "1.7187e-3" },
+  { pr: 2843, who: "mdumitrean", h: 218.978, l2: -9.185, k: "1.7187e-3" },
+  { pr: 2848, who: "Lyy-iiis", h: 220.356, l2: -9.185, k: "1.7187e-3" },
+  { pr: 2856, who: "mdumitrean", h: 220.528, l2: -9.184, k: "1.7194e-3" },
+  { pr: 2852, who: "dataisfire", h: 220.823, l2: -9.185, k: "1.7187e-3" },
+  { pr: 2853, who: "philippeVV", h: 220.836, l2: -9.184, k: "1.7194e-3" },
+  { pr: 2857, who: "Lyy-iiis", h: 221.837, l2: -9.183, k: "1.7201e-3" },
+  { pr: 2863, who: "Dugongue", h: 222.761, l2: -9.183, k: "1.7201e-3" },
+  { pr: 2894, who: "jeremykothe2", h: 225.549, l2: -9.183, k: "1.7202e-3", note: "commit predates my 10:15 UTC look on Oct 16, but it was not on the chart then; since closed" },
+  { pr: 2908, who: "jeremydiviney", h: 228.109, l2: -9.183, k: "1.7204e-3", note: "commit predates my 10:15 UTC look on Oct 16, but it was not on the chart then" },
+  { pr: 2917, who: "mason-hale", h: 228.862, l2: -9.182, k: "1.7216e-3" },
+  { pr: 2930, who: "mdumitrean", h: 230.299, l2: -9.181, k: "1.7225e-3" },
+  { pr: 2942, who: "mdumitrean", h: 231.161, l2: -9.181, k: "1.7228e-3" },
+  { pr: 2948, who: "jeremykothe2", h: 231.388, l2: -9.181, k: "1.7234e-3" },
+  { pr: 2957, who: "jeremykothe2", h: 231.986, l2: -9.180, k: "1.7237e-3" },
+  { pr: 2966, who: "jeremykothe2", h: 232.462, l2: -9.180, k: "1.7240e-3" },
+  { pr: 2969, who: "Dugongue", h: 233.003, l2: -9.180, k: "1.7240e-3" },
+  { pr: 2979, who: "mdumitrean", h: 233.981, l2: -9.176, k: "1.7290e-3", note: "joint rank-7 end frames; +0.29% over #2969, the day's one real jump" },
+  { pr: 3015, who: "jeremykothe2", h: 235.442, l2: -9.176, k: "1.7292e-3" },
+  { pr: 3157, who: "rohanarun", h: 236.897, l2: -9.176, k: "1.7292e-3" },
+  { pr: 3042, who: "dcharb78", h: 238.239, l2: -9.175, k: "1.7297e-3" },
+  { pr: 3051, who: "jeremydiviney", h: 238.868, l2: -9.175, k: "1.7297e-3" },
+  { pr: 3064, who: "dataisfire", h: 239.583, l2: -9.175, k: "1.7297e-3" },
+  { pr: 3115, who: "dataisfire", h: 244.771, l2: -9.175, k: "1.7297e-3" },
+  { pr: 3133, who: "dcharb78", h: 248.914, l2: -9.175, k: "1.7298e-3" },
+  { pr: 3143, who: "Gonzalo-Mier", h: 250.088, l2: -9.175, k: "1.7298e-3" },
+  { pr: 3148, who: "jeremydiviney", h: 251.483, l2: -9.175, k: "1.7298e-3", note: "T740 packing cap on #3133's words; the best claim not refuted at 17:35 UTC on Oct 17" },
+  { pr: 3184, who: "rohanarun", h: 257.371, l2: -9.175, k: "1.7302e-3", contested: true, note: "idle rank-48 star exchanges, idea credited to OpenCode; #3187 gives an exact operator counterexample 25 minutes later" },
+  { pr: 3190, who: "rohanarun", h: 258.164, l2: -9.172, k: "1.7334e-3", contested: true, note: "bit-bound; inherits #3184's refuted idle move" },
+  { pr: 3198, who: "rohanarun", h: 258.874, l2: -9.171, k: "1.7348e-3", contested: true, note: "R438 bit supplier; inherits #3184's refuted idle move" },
+  { pr: 3200, who: "rohanarun", h: 259.175, l2: -9.171, k: "1.7348e-3", contested: true, note: "inherits #3184's refuted idle move" },
 ]
 
 // Each move of main: the PR that supplied the witness, when it was opened, and when GitHub
@@ -778,6 +971,46 @@ const MAIN: MainMove[] = [
     url: "https://github.com/CrocSwap/integer-mult-bounds/pull/799",
     from: { h: 151.83, l2: -9.233 },
   },
+  {
+    who: "Colkitt",
+    h: 159.508,
+    l2: -9.233,
+    k: "1.661957774647029e-3",
+    note: "PR #890 (Chafik Boukhalfa) on Jeremy Kothe's U8 word · 3b83e4f · T21 whole-owner packing",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/890",
+    from: { h: 156.973, l2: -9.233 },
+  },
+  {
+    who: "Colkitt",
+    h: 161.1,
+    l2: -9.233,
+    k: "1.661960547713947e-3",
+    note: "PR #942 (Jonathan Capalbo) · 3825dc0 · the same word hosted across 37 replicas",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/942",
+    from: { h: 159.781, l2: -9.233 },
+  },
+  {
+    who: "Colkitt",
+    h: 164.086,
+    l2: -9.224,
+    k: "1.672188119205421e-3",
+    note: "PR #1042 (Jeremy Kothe) · 87db776 · mutable-leaver cells, seven triangle-hybrid slots and T16 owner packing",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/1042",
+    from: { h: 163.102, l2: -9.224 },
+  },
+  {
+    who: "Colkitt",
+    h: 164.756,
+    l2: -9.224,
+    k: "1.672660197076918e-3",
+    note: "PR #1094 (Rohan Arun) · 0a31ad8 · rare-pattern T16 exchanges; still the selected record at 17:35 UTC on Oct 17",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/1094",
+    from: { h: 164.109, l2: -9.224 },
+  },
 ]
 
 const JAIN_REPO = "https://github.com/Swapnil-jain/integer-mult-kappa"
@@ -817,8 +1050,8 @@ const WIDE: Geo = { W: 680, H: 340, L: 48, R: 14, T: 14, B: 34, fs: 10, narrow: 
 const NARROW: Geo = { W: 340, H: 300, L: 46, R: 8, T: 14, B: 30, fs: 10.5, narrow: true, clip: "kappa-race-plot-narrow" }
 // Two views: the whole race, and everything from 10:00 UTC on Oct 8, where everything after 2^-17 lives.
 type View = { h0: number; h1: number; y0: number; y1: number }
-const FULL: View = { h0: -0.5, h1: 156, y0: -190, y1: 0 }
-const ZOOM: View = { h0: 36, h1: 156, y0: -17.5, y1: -9 }
+const FULL: View = { h0: -0.5, h1: 262, y0: -190, y1: 0 }
+const ZOOM: View = { h0: 36, h1: 262, y0: -17.5, y1: -9 }
 
 // kappa = 10^-3, and the first PR opened above it: Dugongue's #390 at 07:09:46 UTC on Oct 11.
 const MILLI = -9.965784284662087 // log2(10^-3), precomputed
@@ -875,25 +1108,23 @@ export function KappaRace() {
   const ticksY = zoom ? [-17, -16, -15, -14, -13, -12, -11, -10, -9] : [-180, -150, -120, -90, -60, -30, 0]
   const ticksX = zoom
     ? [
-        { h: 38, label: "Oct 8 12:00" },
         { h: 50, label: "Oct 9" },
-        { h: 62, label: "12:00" },
         { h: 74, label: "Oct 10" },
-        { h: 86, label: "12:00" },
         { h: 98, label: "Oct 11" },
-        { h: 110, label: "12:00" },
         { h: 122, label: "Oct 12" },
-        { h: 134, label: "12:00" },
         { h: 146, label: "Oct 13" },
+        { h: 170, label: "Oct 14" },
+        { h: 194, label: "Oct 15" },
+        { h: 218, label: "Oct 16" },
+        { h: 242, label: "Oct 17" },
       ]
     : [
         { h: 2, label: "Oct 7" },
-        { h: 26, label: "Oct 8" },
         { h: 50, label: "Oct 9" },
-        { h: 74, label: "Oct 10" },
         { h: 98, label: "Oct 11" },
-        { h: 122, label: "Oct 12" },
         { h: 146, label: "Oct 13" },
+        { h: 194, label: "Oct 15" },
+        { h: 242, label: "Oct 17" },
       ]
 
   const chart = (g: Geo) => {
@@ -907,7 +1138,7 @@ export function KappaRace() {
         viewBox={`0 0 ${W} ${H}`}
         className={g.narrow ? "mx-auto block w-full max-w-md sm:hidden" : "hidden w-full sm:block"}
         role="img"
-        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, to 2 to the minus 10.51 by 18:38, to 2 to the minus 10.47 at 22:06 with the first five-stage claim, to 2 to the minus 10.40 by 07:10 UTC on October 10, to 2 to the minus 10.38 by 11:31, to 2 to the minus 10.30 by midnight and, with the E8 units, to 2 to the minus 10.16 at 05:05 UTC on October 11. A dotted line marks kappa equals 10 to the minus 3; the first pull request opened above it is number 390 at 07:09 UTC. The best claims reach 2 to the minus 9.60 at 17:17 with pull request 467 and 2 to the minus 9.59 by 19:33; hollow circles up to 2 to the minus 9.51 rest on a contested residual split. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, pull request 186 at 12:57 UTC at 2 to the minus 10.56, and pull request 279 at 14:08 UTC on October 10 at 2 to the minus 10.43, where it still stood at 19:40 UTC on October 11. Then main moves eight times in under thirty-one hours: pull request 531 at 01:56 UTC on October 12 at 2 to the minus 9.36, pull request 535 at 13:11, pull request 588 at 15:46, pull request 596 at 17:01 at 2 to the minus 9.28, pull request 617 at 21:02, pull request 626 at 22:37, pull request 741 at 06:11 UTC on October 13 and pull request 799 at 06:44 at 2 to the minus 9.23. The open claims meanwhile run from 2 to the minus 9.59 through 2 to the minus 9.36 at 01:25 UTC on October 12 and reach 2 to the minus 9.23 with pull request 799, which main took fifty-five minutes after it opened, so at 07:20 UTC on October 13 the red and green lines end at the same point. Two more hollow circles, near 2 to the minus 9.44, rest on the same contested split. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
+        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, to 2 to the minus 10.51 by 18:38, to 2 to the minus 10.47 at 22:06 with the first five-stage claim, to 2 to the minus 10.40 by 07:10 UTC on October 10, to 2 to the minus 10.38 by 11:31, to 2 to the minus 10.30 by midnight and, with the E8 units, to 2 to the minus 10.16 at 05:05 UTC on October 11. A dotted line marks kappa equals 10 to the minus 3; the first pull request opened above it is number 390 at 07:09 UTC. The best claims reach 2 to the minus 9.60 at 17:17 with pull request 467 and 2 to the minus 9.59 by 19:33; hollow circles up to 2 to the minus 9.51 rest on a contested residual split. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, pull request 186 at 12:57 UTC at 2 to the minus 10.56, and pull request 279 at 14:08 UTC on October 10 at 2 to the minus 10.43, where it still stood at 19:40 UTC on October 11. Then main moves eight times in under thirty-one hours: pull request 531 at 01:56 UTC on October 12 at 2 to the minus 9.36, pull request 535 at 13:11, pull request 588 at 15:46, pull request 596 at 17:01 at 2 to the minus 9.28, pull request 617 at 21:02, pull request 626 at 22:37, pull request 741 at 06:11 UTC on October 13 and pull request 799 at 06:44 at 2 to the minus 9.23. The open claims meanwhile run from 2 to the minus 9.59 through 2 to the minus 9.36 at 01:25 UTC on October 12 and reach 2 to the minus 9.23 with pull request 799, which main took fifty-five minutes after it opened, so at 07:20 UTC on October 13 the red and green lines meet. Main moves four more times that day, to 2 to the minus 9.224 with pull request 1094 at 18:45 UTC, and then stays there to 17:35 UTC on October 17. The open claims stall near 2 to the minus 9.218 from 10:16 UTC on October 14, jump at 02:54 UTC on October 15 after anticipatory dirty borrowing to 2 to the minus 9.203, jump again at 10:12 with source-partner lifetimes to 2 to the minus 9.189, and creep to 2 to the minus 9.183 by 04:45 UTC on October 16, to 2 to the minus 9.180 by 15:00, jump with joint rank-seven end frames to 2 to the minus 9.176 at 15:59 and reach 2 to the minus 9.175 with pull request 3148 at 09:29 UTC on October 17. Four hollow circles from 15:22 UTC on October 17, up to 2 to the minus 9.171, rest on pull request 3184's idle-star move, which pull request 3187 refutes. Two more hollow circles, near 2 to the minus 9.44, rest on the same contested split. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
       >
         {ticksY.map((t) => (
           <g key={t}>
@@ -1086,7 +1317,7 @@ export function KappaRace() {
   return (
     <figure className="not-prose my-8 rounded-xl border border-border bg-card p-3 sm:p-4">
       <figcaption className="mb-2 font-mono text-xs text-muted-foreground">
-        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s eleven rounds, Oct 6 to 07:20 UTC on Oct 13
+        log₂ κ against time · every checkpoint and PR, each move of main, and Jain&apos;s eleven rounds, Oct 6 to 17:35 UTC on Oct 17
         {zoom ? " · zoomed to 10:00 UTC on Oct 8 onward" : ""}
       </figcaption>
       {chart(WIDE)}
@@ -1189,7 +1420,7 @@ export function KappaRace() {
           <span style={{ color: PALETTE.Colkitt }}>■</span> main moves, each after the maintainer&apos;s review (dashed from the PR&apos;s opening)
         </span>
         <span>
-          <span style={{ color: OTHER }}>○</span> rests on #448&apos;s cross-copy split, which #451 challenges (left out of the green best-claim line)
+          <span style={{ color: OTHER }}>○</span> rests on #448&apos;s cross-copy split, which #451 challenges, or on #3184&apos;s idle-star move, which #3187 refutes (left out of the green best-claim line)
         </span>
         <span>
           <span style={{ color: JAIN_COLOUR }}>◆</span> Jain (own repo)
