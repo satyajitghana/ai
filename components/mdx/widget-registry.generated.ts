@@ -486,6 +486,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "laguna/automixer": () => import("@/components/articles/laguna/automixer"),
   "laguna/model-factory": () => import("@/components/articles/laguna/model-factory"),
   "laguna/two-models": () => import("@/components/articles/laguna/two-models"),
+  "langevin-flow-maps/double-well": () => import("@/components/articles/langevin-flow-maps/double-well"),
   "lanyon-neurosymbolic/neurosymbolic-loop": () => import("@/components/articles/lanyon-neurosymbolic/neurosymbolic-loop"),
   "lattice-deduction-transformers/lattice-solver": () => import("@/components/articles/lattice-deduction-transformers/lattice-solver"),
   "layerrope/gain-rotor": () => import("@/components/articles/layerrope/gain-rotor"),
