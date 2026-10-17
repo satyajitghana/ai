@@ -1,0 +1,227 @@
+---
+title: "Zephon in TorchTitan: the same global batch on 8, 16 or 64 GPUs"
+description: "Zephon is a data loader that tokenizes, packs, shuffles and mixes inside the training job and still hands the model the same global batch when a run resumes on a different number of GPUs. The trick is lanes: a fixed number of logical streams, each with its own packing and shuffle state, that ranks own in blocks. I read the loader and its TorchTitan adapter, ran its elastic tests and a toy resume on CPU, and worked out which GPU counts a lane count allows."
+date: 2026-10-17
+tags:
+  - pretraining
+  - reproducibility
+  - distributed-training
+  - training
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Reads Zephon's lane code, runs its elastic tests and a CPU resume across 1-8 replicas, and derives which GPU counts each lane count allows."
+topic: tools-infra
+kind: tool
+level: practitioner
+runsOn: cpu
+licence: Apache-2.0
+---
+
+import { LaneMap } from "@/components/articles/zephon-torchtitan/lane-map"
+
+PyTorch's post on 16 October makes a narrow, testable claim. A 1B-parameter model trains in TorchTitan on 16 GPUs, checkpoints at step 150, and resumes on 8, 32 and 64 GPUs. With Zephon as the data loader, "the SHA-256 hash of every global batch matched the original run" (reported). With a standard loader, every GPU count gets its own loss curve.
+
+That is the property Mosaic Streaming named *elastic determinism*: the sequence of global batches is a function of the data recipe and the step, not of how many GPUs happen to be free. Zephon's contribution is getting it while doing the data prep online, inside the training job: tokenize, pack, shuffle and mix, with no preprocessed copy of the corpus on disk.
+
+I read the [blog post](https://pytorch.org/blog/bringing-elastically-deterministic-data-loading-to-torchtitan-with-zephon/), the [paper](https://arxiv.org/abs/2610.03087), Zephon at commit `0f9230b` and the TorchTitan adapter at `cdaaa5a`. Then I ran Zephon's elastic tests and a toy resume of my own on a shared 4-core cloud VM, CPU only. The mechanism is sound and the toy reproduces it exactly. Two details in the announcement are looser than the code.
+
+<Figure
+  src="/articles/zephon-torchtitan/fig1.png"
+  alt="Two panels of training loss from step 120 to 180 with a dashed FAULT line at step 150. Left, standard data loader: after the fault the curves for different GPU counts split apart and the batch-hash barcode below turns red. Right, Zephon: one curve continues and the barcode stays blue."
+  caption="A 1B model trained on 16 GPUs, checkpointed at step 150 and resumed on 8, 32 and 64. Left: a standard loader; the barcode is the per-step batch SHA-256 of the 8-GPU continuation, red where it differs. Right: Zephon (paper, Figure 1)."
+/>
+
+<RepoCard repo="datologyai/zephon" />
+
+<RepoCard repo="datologyai/torchtitan-zephon" />
+
+## Why the GPU count changes your data
+
+Start with the loader most PyTorch training code has. A map-style dataset, a `DistributedSampler`, and a `DataLoader` per rank. The sampler shuffles the index list with the epoch seed and gives rank `r` of `G` the slice `indices[r::G]`. The global batch at step `t` is the union of what each rank pulls at that step.
+
+Change `G` and the slices change. Rank 0 of 16 sees documents 0, 16, 32 and so on; rank 0 of 8 sees 0, 8, 16. The union over ranks at step `t` is a different set of documents, because each rank walks its own slice at its own pace. That alone breaks the global batch.
+
+Online packing makes it worse. A packer concatenates documents into fixed-length rows (4,096 tokens in the paper's runs) and keeps partially filled bins between calls. Each rank runs its own packer over its own documents. So when `G` changes, it is not just *which rank* holds a row that changes. The rows themselves change: different documents end up glued together.
+
+Worker processes add a third coupling. A map-style `DataLoader` keeps batch order whatever `num_workers` is, but streaming and packing loaders are usually iterable datasets that shard by `get_worker_info()`, so the worker count decides which documents share a packer too. The blog notes that Megatron-Energon reproduces batches across GPU counts only "as long as the total number of data loader workers across all of the GPUs stays the same" (reported).
+
+The paper's name for the underlying problem is a stateful *n*-to-*m* pipeline. Tokenization with splitting is 1-to-*n*, packing is *n*-to-1, a shuffle buffer and a mixture counter carry history. Such a pipeline is not *indexable*: you cannot find the source records of step `t` without running everything before it. Mosaic Streaming and Grain get elastic determinism by computing the sample order ahead of time from an index, which is exactly what online packing rules out.
+
+I wrote a short emulation of the standard path to see it (my script, not Zephon's): shuffle 900 documents, shard by rank, pack each rank's stream into 32-token rows, take 16 rows per step. Comparing the *sorted multiset* of rows in each global batch against one GPU, 0 of 12 steps matched for 2, 4 and 8 ranks (measured). Not "a different order". Different rows.
+
+Does it matter downstream? The paper trains the same 1B model for 20B tokens on 8, 16, 32 and 64 GPUs with a standard loader and evaluates the four finals. The max-minus-min spread across GPU counts is 0.922 points on DCLM Core v1 and 0.555 on FineWeb, averaged over two seeds; with Zephon it is 0.061 and 0.007 (reported, paper). The reference levels it compares against are 0.2 and 0.15, so a two-mixture ablation run on two allocations can measure the allocation.
+
+<Figure
+  src="/articles/zephon-torchtitan/fig5.png"
+  alt="Two horizontal bar charts of score spread across GPU counts. Core v1: standard 0.922, Zephon 0.061, with a dashed reference line at 0.2. FineWeb: standard 0.555, Zephon 0.007, reference line at 0.15."
+  caption="Spread (max minus min) of final eval scores across 8, 16, 32 and 64 GPUs for 20B-token training. The dashed line is the level above which a difference counts as meaningful (paper, Figure 8)."
+/>
+
+The blog quotes different numbers for the same experiment: "up to 0.82 points" on Core v1 and 0.64 on FineWeb for the standard loader, 0.05 and 0.011 with Zephon (reported, blog). The paper's figure says it averages two seeds; the blog does not say what it reports. The conclusion survives either set, about four times the threshold, but they are not the same measurement, and I cannot tell from public material which runs produced the blog's.
+
+## Lanes instead of ranks
+
+Zephon's fix is to stop dividing the data by GPU. It divides it into `L` *lanes*, a number you pick up front, and treats the GPU count as a way of distributing lanes.
+
+A lane is a complete, independent copy of the pipeline's logic. It has its own stream of input chunks, its own packing bins, its own shuffle buffer, its own mixture counters. Nothing in a lane reads anything about ranks. So a lane's output is the same sequence of records whatever GPU it runs on, and a global batch made of a fixed slice of every lane is the same batch at any GPU count.
+
+<Figure
+  src="/articles/zephon-torchtitan/fig2.png"
+  alt="Zephon's architecture: data storage feeds a WorkSource that emits per-lane chunks of sample pointers, drawn as three coloured lines, into an operator graph of Fetch then Op1, Op2 and Op3 with cardinalities 1:1, 1:N and N:1, which feeds the training loop."
+  caption="The WorkSource plans the curriculum and emits chunks of sample pointers per lane (the coloured lines); Fetch turns pointers into records; each lane keeps its own operator state through the graph (paper, Figure 3)."
+/>
+
+Three pieces of code make that true.
+
+**Chunks go to lanes as a pure function of the seed.** The `WorkSource` emits fixed-size chunks of sample pointers, mixed across datasets by weighted round-robin. Each lane's copy of it enumerates the *global* chunk stream and keeps only its own chunks; the docstring calls it "compute-everywhere-then-discard". The default assignment is a seeded permutation per block of `L` chunks (`static_mixture.py`):
+
+```python
+# zephon/work/static_mixture.py, _lane_for_chunk (trimmed)
+block, slot = divmod(g, self._canon)          # g = global chunk index, canon = L
+if block != self._perm_block:
+    order = list(range(self._canon))
+    random.Random(self._seed + block * _GOLDEN_RATIO_64).shuffle(order)
+    self._perm_block, self._perm_order = block, order
+return self._perm_order[slot]
+```
+
+Every block of `L` chunks gives each lane exactly one, and the map depends on `(seed, g)` and nothing else. It replaced plain `g % L`, which could park a rare mixture component on a few lanes and starve the rest.
+
+**Ranks own blocks of lanes.** `engine.py` builds the mapping from the data-parallel degree. The default is contiguous: with 64 lanes on 16 replicas, replica 0 owns lanes 0-3, replica 1 owns 4-7, and so on. An `interleaved` strategy exists too; both give the same global batches.
+
+**A multiplexer restores lane order.** A rank's lanes share one pipeline, and lanes finish at different speeds. The lane mux buffers per lane and emits from owned lanes in strict round-robin, so each lane hands over the same records per step whichever rank it is on.
+
+Formally: with global batch `N` records, microbatch `m`, and `G` replicas doing $a = N/(Gm)$ accumulation steps, lane $\ell$ contributes the next $q = N/L$ records to every step, and
+
+$$B_t = \langle b_{0,t},\, b_{1,t},\, \ldots,\, b_{L-1,t} \rangle$$
+
+does not mention `G` anywhere. It needs two divisibility conditions, which are the constraints in PyTorch's post:
+
+- $G \mid L$: every replica owns the same number of lanes.
+- $L \mid N/m$: every lane hands over a whole number of microbatches each step.
+
+## Which GPU counts are legal
+
+The conditions compose into something easy to compute. For the paper's 1B run the setup is sequence length 4,096, local batch 7 and global batch 448 (reported). So $N/m = 448/7 = 64$ microbatches per step (reasoned).
+
+The second condition says `L` divides 64. The first, at 64 GPUs, says 64 divides `L`. If the microbatch stays at 7 on every topology, the only lane count that admits all four GPU counts in the experiment is $L = 64$ (reasoned). The paper does not state the lane count it used; this is the one the arithmetic leaves.
+
+With 64 lanes, the legal data-parallel sizes are the divisors of 64: 1, 2, 4, 8, 16, 32 and 64 (reasoned). Twelve, 24 and 48 are not, even though they are perfectly ordinary node counts. At 8 GPUs each replica owns 8 lanes and accumulates 8 microbatches per step; at 64, one lane and one microbatch (reasoned).
+
+The widget below is that arithmetic, drawn. Pick a lane count and a GPU count. The bar shows which lanes each rank owns. The grid is the step's 448 sequences, coloured by a toy hash of their content, with a stripe for the lane (or rank) that produced each one. The fingerprint is compared against the 16-GPU run.
+
+<LaneMap />
+
+In lanes mode the grid and fingerprint do not move as you change the GPU count, and illegal counts are refused with the reason. Switch to rank-sharded and every GPU count gets its own fingerprint, which is the left half of the paper's Figure 1. Set lanes to 128 and nothing is legal: 64 microbatches cannot cover 128 lanes. The colours are illustrative; the divisibility rules are the real ones from the paper's Section 5.4.
+
+The blog's rule of thumb follows from the first condition: "If you might run on 8, 16, or 32 GPUs, 32 lanes is a cap that covers all three" (reported).
+
+## Accumulators decide, workers work
+
+Lanes make the output independent of the GPU count. Something else has to make it independent of parallelism *inside* a rank, because Zephon runs tokenization, packing and shuffling on pools of worker processes or threads that finish in any order.
+
+<Figure
+  src="/articles/zephon-torchtitan/fig3.png"
+  alt="Zephon's runtime: an engine runs WorkSource, Stage 0 fetch and tokenize, a bounded queue, Stage 1 pack and mixture, another queue, Stage 2 batch, then a lane multiplexer into the training loop. A zoomed panel of Stage 0 shows each operator as a pump with a stateful accumulator and a reorder buffer keyed by sequence number, dispatching tasks to worker processes across an IPC boundary."
+  caption="Each operator's pump has one single-threaded, stateful accumulator that makes every ordering decision and stamps a sequence number; stateless workers run in parallel and a reorder buffer puts their results back in order (paper, Figure 4)."
+/>
+
+Every operator splits in two. A single-threaded *accumulator* sees each record in order and makes all the stateful decisions: which sequences share a bin, when a bin is full, what leaves the shuffle buffer. It stamps each outgoing microbatch with a sequence number and hands the expensive, stateless part to the workers. A reorder buffer releases results by sequence number. Doubling the tokenizer workers changes speed, not output. The accumulator is the only thing that orders anything.
+
+Randomness has the same discipline. The shuffle buffer's victim choice is "a pure function of seed, lane, cursor-derived salt, emit counter, and reservoir size" (`shuffle_buffer.py`), never a global RNG.
+
+## Checkpoints: flush and replay
+
+The hard part of resuming a stateful pipeline is the state. A packer mid-bin has half a sequence of tokens from documents that were read twenty minutes ago. Zephon does not save that. It saves where to replay from.
+
+Every record carries a cursor `(chunk, offset, lineage)`; lineage grows as a document is split. A checkpoint stores, per lane, the cursor of the last record delivered to training, plus the sample *pointers* of the chunks still in flight. On resume it re-runs those chunks, which rebuilds the bins exactly because the pipeline is deterministic, and a replay filter drops everything up to the saved cursor.
+
+That only works if replay starts from a known state, and packing has history. The paper's example: a packer with 2 bins of capacity 10 fed items of size 3, started from free space (10, 10) versus (10, 5), settles into the same cycle permanently out of phase (reported). Replay from empty would never converge to the original. So every `K` chunks per lane Zephon injects a *flush sentinel*. Each stateful operator emits what it holds and resets. A segment between two flushes depends on nothing before it, and a checkpoint only needs to replay from the last flush.
+
+The cost of this is bounded by backpressure, not by how far the run has got. On an 8-process VLM pipeline the paper measures checkpoints of 2.61, 2.92 and 2.97 MiB at steps 100, 1,000 and 10,000, and time-to-first-batch after a restore of 48.5 s against 44.8 s for a cold start (reported). Flushing every chunk costs under 0.37 points of token waste in the worst case they tried (reported).
+
+What does grow is lanes per rank. Going to 64 and 512 lanes on 8 ranks (8 and 64 lanes per rank) pushed checkpoints to 3.46 and 13.10 MiB and restore to 62.6 and 403 s (reported). The blog's warning not to pick "multiple thousands when your max is 16" is this number.
+
+A distributed checkpoint has to hold every lane, because after a resize a rank may own lanes it never had. Zephon aggregates per-rank state into one merged checkpoint through a shared directory. The TorchTitan adapter makes that mandatory: a run with more than one process and no `aggregate_dir` and `run_id` is refused. It then pickles the whole Zephon checkpoint into TorchTitan's distributed checkpoint as one opaque bytes value.
+
+## What I ran
+
+Zephon's core install has no PyTorch dependency, so it went into a Python 3.12 venv with no GPU stack. I ran five of its test files that cover elastic continuation, multi-lane flush sentinels, multi-lane shuffle and the mid-window warning:
+
+```bash
+python -m pytest --run-integration tests/integration/test_elastic_continuation.py \
+  tests/integration/test_multilane_flush_sentinel.py \
+  tests/integration/test_shuffle_multilane_determinism.py \
+  tests/integration/test_midwindow_checkpoint_warning.py tests/zephon/_internal/test_world.py
+```
+
+66 passed and 2 were skipped in 195.75 s (measured). Both skips import `torch.distributed`, which I did not install.
+
+Then a toy of my own against the public API. Two in-memory text datasets mixed 3:1, Zephon's dependency-free fallback tokenizer, `pack_flat` with wrap packing to 32 tokens, a 16-record shuffle buffer, microbatches of 2. Eight lanes and a global batch of 16 sequences, so each lane gives exactly one microbatch per step. Each emulated replica is its own `Pipeline` with `dp_degree=G` and `dp_group_id=r`, run on a thread. I hashed each step's lane contributions in lane order with SHA-256.
+
+| Run | Steps whose global batch hash matched 1 replica |
+|---|---|
+| 2 replicas | 12 of 12 |
+| 4 replicas | 12 of 12 |
+| 8 replicas | 12 of 12 |
+| 2 replicas, checkpoint at step 6, resume on 1 | 6 of 6 |
+| same checkpoint, resume on 4 | 6 of 6 |
+| same checkpoint, resume on 8 | 6 of 6 |
+| my rank-sharded baseline, 2, 4 or 8 ranks | 0 of 12 |
+
+All measured, in 8.8 s. The merged checkpoint serialised to 76,759 bytes of JSON (measured), for a toy with eight lanes.
+
+Then I broke the rules. With a global batch of 8 sequences, $N/m = 4$ and 8 lanes cannot each contribute every step. One replica's steps alternate between lanes 0-3 and 4-7; two replicas' steps take lanes 0, 1, 4 and 5, then 2, 3, 6 and 7. 0 of 6 steps matched (measured). Nothing is lost: over two steps the same lanes appear. But the step boundary moved, and a step is what the optimizer sees. With 3 replicas and 8 lanes, Zephon itself ran with a `RuntimeWarning` about uneven lane distribution (measured); the TorchTitan adapter raises instead.
+
+## Same batch, different loss
+
+One more number from the toy. I also hashed the microbatches in *arrival order*: accumulation step by step, rank by rank, the order a trainer would actually see them. That hash matched 1 replica on 0 of 12 steps with 2 and 4 replicas, and 12 of 12 with 8 (measured).
+
+That is the contract working as specified. With contiguous mapping and 2 replicas, accumulation step 0 pairs lane 0 with lane 4; with 1 replica it is lane 0 alone, then lane 1. The *batch* is the same set of lane contributions. The order in which the gradients of its microbatches are summed is not. The adapter's own demo says it compares batches "without regard to order inside each global step".
+
+Mathematically that makes no difference. Numerically it does, because floating-point addition is not associative. In fp32, `(1e8 + 1) - 1e8` is 0 and `1e8 + (1 - 1e8)` is 0 too, but `(1e8 - 1e8) + 1` is 1. Three sources of order change when `G` changes:
+
+1. **Accumulation order.** Which microbatches a rank sums locally, and in what order, as above.
+2. **The all-reduce.** Gradients are summed across `G` ranks by a ring or tree whose shape depends on `G`. Eight partial sums reduced in one shape and sixty-four in another round differently.
+3. **Kernels.** Some GPU kernels accumulate with atomics, whose order varies run to run even at fixed `G`, unless deterministic algorithms are switched on.
+
+So the post's last caveat is right and worth taking literally: "Zephon guarantees the data, not the arithmetic." For the VLM experiment the paper trains in fp32 with SDPA attention and every deterministic CUDA option, and reports the loss curves' mean absolute pairwise difference 5.84 times lower with Zephon than without (reported). Close, not identical.
+
+This is a different determinism from the one in [Jev is not deterministic, and option order is not noise](/articles/jev-is-not-deterministic), which is about the same prompt producing different tokens at inference time. Zephon fixes an input; it says nothing about the kernels. It is also weaker than what [Open-1B: what auditable training actually audits](/articles/open-1b-auditable-training) checks: a bit-exact hash chain over every step, which only holds when the topology and the arithmetic are pinned too.
+
+## Checking the claims
+
+| Claim (PyTorch's post) | What I found |
+|---|---|
+| Identical global batches on 8, 32, 64 GPUs from a 16-GPU checkpoint | The 1B run is reported, not re-run. The mechanism is in the code, and my toy reproduces it on 1-8 replicas (measured). "Identical" means the same lane contributions; the arrival order inside a step can differ. |
+| Tokenize, pack, shuffle and mix in the job, no preprocessed copy | Holds. The adapter builds `tokenize`, `pack_flat`, `shuffle` and `batch` operators on raw text. An optional on-disk shard cache holds source shards, not tokens. |
+| Data, tokenizer, seed, mixture, context length, global batch fixed | Holds, and the adapter's README adds three more: `canonical_replicas` (the lane count), `aggregate_dir` and `run_id`. |
+| Lane count must divide across DP replicas | Holds. The adapter raises `ValueError` at construction. Zephon on its own only warns (measured). |
+| Each step's batch must split evenly across lanes, checked at launch | Not what I found at `cdaaa5a`. The adapter checks only the first condition. A violation surfaces as a warning when a mid-window checkpoint is saved or resumed into a new topology, which says the rest of the window will be permuted with nothing lost or duplicated. |
+| Losses can still differ | Holds, for the reasons above. |
+
+The throughput story deserves one figure. On the paper's vision-language pipeline Zephon is slower than Grain at low parallelism and level with it at 32, and both clear the 16.9k tokens per second per GPU the authors need to avoid stalls (reported). The x-axis is loader parallelism, not GPU count.
+
+<Figure
+  src="/articles/zephon-torchtitan/fig4.png"
+  alt="Grouped bars of per-GPU usable tokens per second at 8, 16, 32 and 64 degrees of parallelism. Grain: 33.2k, 31.3k, 29.9k, 28.7k. InternalDs: 9.2k, 4.4k, 2.2k, 1.1k. Zephon: 22.4k, 28.3k, 29.8k, 26.6k. A dashed stall-free line at 16.9k."
+  caption="Usable (non-padding) tokens per second per GPU on a vision-language pipeline as loader parallelism grows, for Grain, an internal Streaming-based loader and Zephon; numbers are the authors' (PyTorch's post on X; same data as the paper, Figure 7)."
+/>
+
+## What it costs
+
+- **The lane count is fixed for the life of the run.** A checkpoint refuses a different `canonical_replicas` ("migration required"). Pick it before the first step, as a common multiple of every data-parallel size you might want, and no larger than your largest.
+- **It caps data parallelism.** With 64 lanes you cannot use 128 replicas, or 48.
+- **Every lane walks every chunk.** Each lane's `WorkSource` enumerates the whole global chunk stream and discards the rest. It only touches pointers, not payloads, so it is cheap, but it is `L` times the planning work.
+- **Restore time grows with lanes per rank**: 62.6 s at 8 per rank, 403 s at 64 (reported).
+- **The adapter is a starting point.** Its README says it "currently supports online raw text only".
+
+Like the stack in [Olmo-core 3](/articles/olmo-core-3), this is plumbing that decides whether an ablation measures the thing you changed. Ranks are where data is computed. Lanes are what the data *is*. Keep `L` fixed, keep `G` a divisor of it, and the batch at step `t` stops depending on the cluster.
