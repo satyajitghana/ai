@@ -4,6 +4,8 @@
 export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "3d-reconstruction-roundup-2/loop-closure-toy": () => import("@/components/articles/3d-reconstruction-roundup-2/loop-closure-toy"),
   "3d-reconstruction-roundup/floater-toy": () => import("@/components/articles/3d-reconstruction-roundup/floater-toy"),
+  "3dcodeverse/refine-loop": () => import("@/components/articles/3dcodeverse/refine-loop"),
+  "3dcodeverse/row-ledger": () => import("@/components/articles/3dcodeverse/row-ledger"),
   "3dgs-capture-pipelines/pipeline-stepper": () => import("@/components/articles/3dgs-capture-pipelines/pipeline-stepper"),
   "3dgs-capture-pipelines/splat-budget": () => import("@/components/articles/3dgs-capture-pipelines/splat-budget"),
   "a6b-k-expansion/esft-select": () => import("@/components/articles/a6b-k-expansion/esft-select"),
