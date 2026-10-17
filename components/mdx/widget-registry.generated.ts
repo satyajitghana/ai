@@ -825,6 +825,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "prime-inference/copy-count": () => import("@/components/articles/prime-inference/copy-count"),
   "prime-inference/kv-row-bytes": () => import("@/components/articles/prime-inference/kv-row-bytes"),
   "project-maya/tier-simulator": () => import("@/components/articles/project-maya/tier-simulator"),
+  "prompt-caching-harnesses/breakpoint-map": () => import("@/components/articles/prompt-caching-harnesses/breakpoint-map"),
+  "prompt-caching-harnesses/prompt-layout-sim": () => import("@/components/articles/prompt-caching-harnesses/prompt-layout-sim"),
   "pruna-superpoint/prune-stack": () => import("@/components/articles/pruna-superpoint/prune-stack"),
   "ps5lm/decode-ceiling": () => import("@/components/articles/ps5lm/decode-ceiling"),
   "ps5lm/pool-fit": () => import("@/components/articles/ps5lm/pool-fit"),
