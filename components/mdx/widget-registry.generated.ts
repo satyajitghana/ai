@@ -712,6 +712,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "nemotron-3-diarization/stream-budget": () => import("@/components/articles/nemotron-3-diarization/stream-budget"),
   "nemotron-audex/text-tax": () => import("@/components/articles/nemotron-audex/text-tax"),
   "nemotron-audex/unified-decoder": () => import("@/components/articles/nemotron-audex/unified-decoder"),
+  "nemotron-dory/loop-unroller": () => import("@/components/articles/nemotron-dory/loop-unroller"),
   "nemotron-nvfp4/bit-layout": () => import("@/components/articles/nemotron-nvfp4/bit-layout"),
   "nemotron-nvfp4/memory-calc": () => import("@/components/articles/nemotron-nvfp4/memory-calc"),
   "nemotron-nvfp4/precision-map": () => import("@/components/articles/nemotron-nvfp4/precision-map"),
