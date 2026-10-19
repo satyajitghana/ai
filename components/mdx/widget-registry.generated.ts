@@ -14,6 +14,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "aa-3d/vote-to-elo": () => import("@/components/articles/aa-3d/vote-to-elo"),
   "abot-world/systems-ablation": () => import("@/components/articles/abot-world/systems-ablation"),
   "abot-world/worldroam-explorer": () => import("@/components/articles/abot-world/worldroam-explorer"),
+  "activation-offload/offload-calculator": () => import("@/components/articles/activation-offload/offload-calculator"),
   "activation-probe-monitors/cascade-flow": () => import("@/components/articles/activation-probe-monitors/cascade-flow"),
   "activation-probe-monitors/threshold-cascade": () => import("@/components/articles/activation-probe-monitors/threshold-cascade"),
   "aes-circuits-lean/circuit-explorer": () => import("@/components/articles/aes-circuits-lean/circuit-explorer"),

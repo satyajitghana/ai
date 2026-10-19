@@ -1,0 +1,210 @@
+---
+title: "Activation checkpoint offload: moving the last per-layer tensor off the GPU"
+description: "Hugging Face Transformers 5.17 can hold gradient-checkpointing's saved layer inputs in pinned CPU memory instead of on the GPU. I read the Transformers code and Snowflake's Arctic Platform implementation, worked out the PCIe and NVLink-C2C arithmetic for when the copies are free and when they stall, and ran the hook path on a toy Qwen3 on CPU to count what it actually moves."
+date: 2026-10-19
+tags:
+  - training
+  - gpu
+  - long-context
+  - distributed-training
+  - huggingface
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Both implementations read side by side, copy-vs-compute arithmetic per host link, and a CPU run showing exactly which tensors the hook moves."
+topic: gpu-systems
+kind: tool
+level: practitioner
+runsOn: datacenter
+licence: Apache-2.0
+---
+
+import { OffloadCalculator } from "@/components/articles/activation-offload/offload-calculator"
+
+Stas Bekman posted on 16 October that "@huggingface Transformers now allows you to offload activation checkpoints to CPU", and that "it needs more TLC to be faster but it's already amazing". In the same post he pointed at the implementation in Snowflake's Arctic Platform as the "close to 0-overhead" one, because "it uses a separate CUDA stream w/ full overlap w/ compute and prefetch".
+
+I read the Transformers code, the Arctic Platform file, the chapter of Stas's [ml-engineering book](https://github.com/stas00/ml-engineering/tree/master/training/performance#offloading-the-activation-checkpoints-to-cpu-memory) the post links to, and the [Arctic Long Sequence Training paper](https://arxiv.org/abs/2506.13996) (ALST), where the feature started. Then I ran the Transformers hook path on a toy model on CPU. Every number below is labelled: **measured** (I ran it or read it from a file), **reported** (someone else's figure, not re-run), or **reasoned** (my arithmetic on the other two).
+
+## What checkpointing already saves
+
+In training, backward needs the tensors that forward computed. A transformer layer saves a lot of them: the inputs to every matmul, the norm statistics, the attention outputs, the MLP's intermediate activations. Korthikanti et al. put it at `sbh(34 + 5as/h)` bytes per layer for a GPT-style layer in 16-bit, where `s` is sequence length, `b` the micro-batch, `h` the hidden size and `a` the number of heads ([Reducing Activation Recomputation in Large Transformer Models](https://arxiv.org/abs/2205.05198), Equation 1; **reported**). With a fused attention kernel the `5as/h` term mostly goes away and 34 bytes per element is left.
+
+Gradient checkpointing throws that away. Each checkpointed layer keeps one tensor, its **input**, and backward reruns the layer's forward from it to get everything else back. That input is the residual stream, `batch x seq x hidden`. In bf16 it is 2 bytes per element, against 34 for the full set of activations: checkpointing cuts activation memory per layer about 17-fold (**reasoned**, 34 / 2). It costs one extra forward per layer.
+
+What is left still grows with depth and with sequence length:
+
+$$
+M_{\text{ckpt}} = L \cdot b \cdot s \cdot h \cdot 2 \text{ bytes}
+$$
+
+At short sequences this is small. At long ones it is the largest thing on the GPU. The book's own example is Qwen3-8B, 36 layers with hidden size 4096 (both **measured** from its `config.json`), at 128K tokens: `36 x 131072 x 4096 x 2` bytes = 36 GiB (**reported**, and the arithmetic comes out exactly; **reasoned**). That is 36 GiB on an 80 GB card spent purely on holding layer inputs until backward reaches them.
+
+## The idea: these tensors are idle
+
+A layer's checkpoint is written at the start of its forward and read once, at the start of its backward. For layer 1 it sits unread through the rest of forward and nearly all of backward.
+
+So move it. Copy each checkpoint to host memory once forward has used it, and copy it back just before backward needs it. Host RAM is the cheap tier: Stas notes in the replies that "a typical 2TB cpu ram is usually plenty" (**reported**). GPU memory now holds the checkpoint of only the layer it is working on, so peak memory no longer grows with depth.
+
+ALST shows what that looks like. Figure 7 profiles one forward-backward iteration of Llama-8B at a 32K sequence. On the left, memory climbs with each layer's forward and falls with each layer's backward: a hill. On the right, with offload, the hill is gone.
+
+<Figure src="/articles/activation-offload/fig1.png" alt="Two PyTorch memory-profiler plots on the same 0 to 18 GB axis. Left: without offload, allocated memory rises in a staircase from about 4 GB to a peak near 17 GB during forward and steps back down during backward, forming a triangular hill. Right: with activation checkpoint offload to CPU, the base stays flat near 4 GB through forward and backward, with spikes reaching about 11 GB during backward." caption="One forward-backward iteration of Llama-8B at 32K tokens. Left: normal. Right: activation checkpoint offload to CPU. The staircase of retained layer inputs is gone (Arctic Long Sequence Training paper, Figure 7)." />
+
+The catch is in the plot too: the spikes on the right, about 11 GB in backward, are a layer's recomputed activations and gradients, which offload does not touch. Offload lowers the **peak** only if the checkpoints are part of what is held at the peak. The book gives the case where they barely are: Qwen3-1.7B at 32K tokens frees 3.5 GiB after forward, yet its peak drops only from 11.13 GB to 10.16 GB (**reported**). The 3.5 GiB is `28 x 32768 x 2048 x 2` bytes (**reasoned**, with 28 layers and hidden 2048 **measured** from the model's config).
+
+## The Transformers implementation: one context manager
+
+The Transformers change is small. Searching the repository's pull requests finds [#48444](https://github.com/huggingface/transformers/pull/48444), "Add offload to gradient checkpointing", by Quentin Gallouédec, merged on 1 September (**reported**; I read the code, not the PR thread). I checked the release tags in a clone: `v5.16.0` (26 August) has no `save_on_cpu` in `modeling_utils.py`, and `v5.17.0` (9 September) does (**measured**). So the post's `transformers>=5.17` is right.
+
+Here is the whole mechanism, from `PreTrainedModel.gradient_checkpointing_enable` on `main`:
+
+```python
+# src/transformers/modeling_utils.py
+if offload:
+    device_type = (get_current_accelerator() or torch.device("cpu")).type
+
+    def checkpoint_func(function, *args, **kwargs):
+        with save_on_cpu(pin_memory=True, device_type=device_type):
+            return checkpoint(function, *args, **kwargs)
+else:
+    checkpoint_func = checkpoint
+```
+
+`torch.autograd.graph.save_on_cpu` is a pair of saved-tensor hooks. Whenever autograd saves a tensor for backward inside the context, the **pack** hook runs instead: it allocates a pinned host tensor of the same shape, copies into it with `non_blocking=True`, and returns that. When backward needs the tensor, the **unpack** hook runs `tensor.to(device, non_blocking=True)`.
+
+Why only the layer inputs? Non-reentrant `torch.utils.checkpoint` first saves the function's inputs with `_CheckpointFrame.save_inputs`, as ordinary saved tensors, so they pass through the active hook: `save_on_cpu`. Only then does it enter its own innermost hook, which swallows everything the layer saves internally and recomputes it later. Inputs go to the CPU; internals are never stored.
+
+You turn it on through the Trainer:
+
+```python
+args = TrainingArguments(
+    gradient_checkpointing=True,
+    gradient_checkpointing_kwargs={"offload": True},
+)
+```
+
+The Trainer pops `offload` (and `every_n_layers`) out of that dict and passes it to `gradient_checkpointing_enable(offload=...)`. Everything else goes to `torch.utils.checkpoint.checkpoint`. That has a consequence if you call the model method yourself, which I hit below.
+
+The docstring says plainly what it costs: "Both copies run on the compute stream, so the step gets slower." The pack copy is queued on the same CUDA stream as the layer's kernels, so the next layer's kernels wait behind it. The unpack copy is issued at the moment autograd asks for the tensor, with nothing queued ahead of it to hide behind, so backward waits for the whole host-to-device copy. Nothing is prefetched. Each pack also asks the caching host allocator for a fresh pinned buffer.
+
+## The Arctic implementation: side streams and prefetch
+
+[`activation_offload.py`](https://github.com/Snowflake-AI-Research/Arctic-Platform/blob/4f50c5bbea3f1ba102daba675bd480796c6dfea5/arctic_platform/model/implementations/gpu/activation_offload.py#L175) in Arctic Platform uses the same entry point, `torch.autograd.graph.saved_tensors_hooks(self.pack, self.unpack)`, wrapped around the whole model's forward. Its module docstring states the precondition: the model must use non-reentrant checkpointing. With reentrant checkpointing, it says, "the block outputs stay retained by the autograd graph, so offloading the inputs frees nothing (measured: identical peak)" (**reported**). I read the file at the commit the book links and on `main`; they are identical (**measured**).
+
+What it adds is scheduling. Read from the code (**measured**, with the defaults from `ActivationOffloadConfig`):
+
+- **Two side streams.** `_ensure_streams` creates an offload stream and a reload stream. Device-to-host copies run on the first and host-to-device on the second, each fenced with a CUDA event, so they run on the copy engines while the compute stream keeps going.
+- **Keep the newest one.** `keep_last_n` defaults to 1. When layer *n* packs its input, the input of layer *n-1* starts copying out. The most recent checkpoint stays on the GPU, because it is the first one backward needs.
+- **Prefetch in reverse.** Backward unpacks in reverse order. When layer *k*'s checkpoint is pulled, `_prefetch_prev` starts the reload of layer *k-1*'s, so it arrives while layer *k* recomputes and runs backward. The compute stream waits on the reload event only at the moment it needs the tensor.
+- **Forward never waits.** Nothing in forward makes the compute stream wait for the offload. `gpu.record_stream(offload_stream)` keeps the caching allocator from reusing the GPU buffer until the copy is done. If the link is slow, the cost shows up as memory, as several checkpoints in flight at once, not as time.
+- **Own pinned pool.** A `_PinnedStagingCache` hands out pinned buffers rounded up to 64 MiB buckets, so variable sequence lengths reuse the same allocations instead of pinning new memory each step. Tensors under 1 MiB, parameters and aliased views are left on the GPU.
+
+ALST describes the history: its first version "monkey patched `torch.utils.checkpoint.CheckpointFunction`" and was "not optimized for speed yet - it needs to be switched from direct copy to asynchronous CUDA streams" (**reported**). The Arctic Platform file is that switch. The Transformers version is closer to the first version: correct and synchronous.
+
+## When the copy is free: the bandwidth arithmetic
+
+How much slower is "slower"? Per layer, the checkpoint is `b·s·h·2` bytes, and it crosses the host link twice: out in forward, back in backward.
+
+The links, as the ml-engineering book lists them (all **reported**): PCIe 4 x16 is 31 GBps in one direction, PCIe 5 x16 is 63 GBps, and on an 8x H200 node Stas measured 55.43 GBps host-to-device and 55.06 GBps device-to-host with `nvbandwidth`. NVLink-C2C between a Grace CPU and its GPU is 450 GBps in one direction, a figure he notes has no official spec behind it.
+
+The compute it has to hide behind is one layer's forward. To first order that is `2 x tokens x (layer parameters)` for the matmuls plus `2 x b x s² x (attention width)` for causal attention. The sustained rate is whatever your training achieves; ALST's ablation reports 548.7 to 590.6 TFLOPS on H100s at its longest sequences, counted with the Megatron-LM FLOP estimate (**reported**), and I use 500 below. With checkpointing a step is about four forwards per layer: forward, recompute, and a backward that costs two.
+
+Qwen3-8B has 192,937,984 parameters per layer (**reasoned** from its config: q and o projections of 4096 x 4096, grouped k and v of 4096 x 1024, and a SwiGLU MLP of three 4096 x 12288 matrices). On PCIe 5 at 55.43 GBps (all **reasoned**):
+
+| Tokens | Checkpoint per layer | Copy | Forward per layer | Synchronous slowdown |
+|---|---|---|---|---|
+| 4K | 32 MiB | 0.61 ms | 3.44 ms | 8.8% |
+| 32K | 256 MiB | 4.84 ms | 42.88 ms | 5.6% |
+| 128K | 1 GiB | 19.37 ms | 382.63 ms | 2.5% |
+
+The synchronous slowdown is two copies per layer over four forwards per layer. Two things follow.
+
+**At long sequence the synchronous version is cheap.** Copy time grows linearly with sequence length, while attention compute grows with its square, so the ratio improves as the sequence grows. At 128K the copy is about 5% of a layer's forward. That is the regime the feature exists for.
+
+**At short sequence, with a small model or a slow link, it is not.** Per token, the copy costs `2h` bytes and the compute costs about `2 x (layer parameters)` FLOPs, and layer parameters grow as `h²`. So the copy-to-compute ratio goes as `1/h`: small models pay more. Qwen3-1.7B at 4K tokens is 15.7% slower on PCIe 5 and 28.1% on PCIe 4 (**reasoned**, same method). A mixture-of-experts layer is worse again, because its compute per token counts only the active experts, while the checkpoint is still the full hidden size.
+
+The overlapped schedule changes what counts. In backward the reload of layer *k-1* hides behind layer *k*'s recompute and backward, three forwards' worth of time, so it costs nothing until the copy is three times the forward. In every row of the table above, the overlapped slowdown is 0% (**reasoned**). That is the sense in which Arctic's version is "close to 0-overhead".
+
+The calculator below runs this model. Pick a model and a link, move the sequence length, and watch the two timelines. "GPUs sharing one link" covers nodes where several GPUs sit behind one PCIe switch or one host memory controller and split its bandwidth.
+
+<OffloadCalculator />
+
+The model is first order: copies at the full link rate, no HBM contention, no embedding or loss layers, no first-step pinning cost. Real hardware would differ there, and I have no GPU measurement. Stas's post doesn't give a number for the slowdown, and neither the book nor the Transformers docs do either. So "needs more TLC" stands as his judgement, and my table is the arithmetic of why it would be single digits at long sequence and double digits at short.
+
+## Pinned memory is not optional
+
+One reply to the post points out that "without page-locked memory those async copies fall back to blocking and the overlap is gone", and Stas confirms that "it's all implemented as pinned memory". Both implementations do it. The reason is how CUDA copies work. A copy engine reads host memory by DMA, which needs physical pages that cannot be paged out. From pageable memory the driver first copies into its own pinned staging buffer and then transfers from there. That makes the call synchronous with the host, and slower than a direct transfer. `save_on_cpu(pin_memory=True)` and Arctic's `torch.empty(..., pin_memory=True)` both allocate page-locked buffers directly.
+
+Pinned memory is a hard reservation of physical RAM, and allocating it is slow. Hence Arctic's pool of 64 MiB buckets with an "auto" cap sized from recent steps; Transformers relies on PyTorch's caching host allocator, which reuses freed pinned blocks sized per request.
+
+The host side also has to be big enough. ALST's example is Llama-70B (80 layers, hidden 8192) at a 3M-token sequence split over 32 GPUs with Ulysses sequence parallelism: 915 GiB of CPU memory per node for the offloaded checkpoints alone (**reported**). The arithmetic reproduces it: 93,750 tokens per GPU x 8192 x 2 bytes x 80 layers x 8 GPUs per node = 915.5 GiB (**reasoned**). At that scale CPU memory, not GPU memory, sets the limit.
+
+## What I ran
+
+The task allowed one exception to "read, don't run": install Transformers and CPU PyTorch in a scratch venv and run a tiny model through the offload path. On a CPU there is no device memory to free, so this is a demonstration of which tensors the hook moves, not of savings. Setup (**measured**): `torch 2.14.1+cpu`, `transformers 5.20.1`, Python 3.12, on a shared 4-core cloud VM, 2 threads, CPU only. The model is a randomly initialised `Qwen3ForCausalLM` with 8 layers, hidden 512, MLP 2048, 8 query and 4 KV heads, at batch 2 and sequence 2048 in fp32. I wrapped `save_on_cpu` in a subclass that counts every pack and unpack, and patched it into `transformers.modeling_utils`.
+
+```python
+class spy(save_on_cpu):
+    def __init__(self, pin_memory=False, device_type="cuda"):
+        super().__init__(pin_memory=pin_memory, device_type=device_type)
+        pack, unpack = self.pack_hook, self.unpack_hook
+        def counted_pack(t):
+            shapes[(tuple(t.shape), str(t.dtype))] += 1
+            return pack(t)
+        self.pack_hook = counted_pack
+        # unpack wrapped the same way
+transformers.modeling_utils.save_on_cpu = spy
+model.gradient_checkpointing_enable(offload=True)
+```
+
+What came out (all **measured**):
+
+- **Exactly the layer inputs.** One step packed 8 tensors, all of shape `(2, 2048, 512)` in fp32, 67,108,864 bytes in total. That is exactly `L x b x s x h x 4`. Backward unpacked 8. Nothing else went through the hook: the rotary `cos` and `sin` reach each layer as keyword arguments, which checkpoint does not save as tensors, and everything inside the layer went to checkpoint's own inner hook.
+- **Same gradients, bit for bit.** The loss was 7.029450416564941 in all three modes. The concatenated parameter gradients were bitwise equal between no checkpointing, checkpointing, and checkpointing with offload.
+- **Checkpointing saves memory; offload on a CPU does not.** Peak resident memory of the process was 3,165 MiB without checkpointing, 1,035 MiB with it, and 1,057 MiB with offload on top. On a CPU the "offload" is a host-to-host copy, so there is nothing to free.
+- **Reentrant mode routes the same tensors.** With `use_reentrant=True` and offload, the hook again packed the same 8 tensors. Whether that frees device memory, which Arctic's docstring says it does not, needs a GPU to check.
+- **Wall-clock time** was 22 to 55 seconds a step across modes, and noisy enough on a shared VM that I draw nothing from it.
+
+Two sharp edges turned up on the way.
+
+First, on a machine with no accelerator, `offload=True` raises `RuntimeError: pin_memory=True requires a CUDA or other accelerator backend`. Transformers passes `device_type="cpu"`, with a comment that then "there is nothing to copy off a device". But `save_on_cpu` in torch 2.14.1 decides whether to pin by calling `torch.cpu.is_available()`, which is true. It only matters for tests and toy runs. My spy passes `device_type="cuda"`, which skips pinning on a machine without CUDA; the hook path is otherwise the library's own.
+
+Second, `gradient_checkpointing_kwargs={"offload": True}` works only through the Trainer, which pops the key. Pass the same dict to `model.gradient_checkpointing_enable(...)` yourself and it is forwarded to `torch.utils.checkpoint`, which fails on the first forward with `ValueError: Unexpected keyword arguments: offload`. Outside the Trainer, use the keyword argument: `model.gradient_checkpointing_enable(offload=True)`.
+
+## Offload the checkpoint, not every activation
+
+One reply asks whether this is worth it "if transfer speed is faster than recomputing activations". Stas's answer is that this is "offload(activation_checkpoint) - not a substitute". The arithmetic says why. Offloading every activation instead of recomputing would move about 34 bytes per element instead of 2, roughly 17 times the traffic (**reasoned**). In the Qwen3-8B 4K row above, that turns a 0.61 ms copy into about 10 ms against a 3.44 ms forward, so no amount of overlap hides it. He suggests it could pay with selective activation checkpointing, which keeps only the tensors that are expensive to recompute, "but you'd need a lot more cpu memory for that".
+
+Where it sits among the other memory tools: ALST's ablation, run on one node of eight H100s with ZeRO-3, optimizer-state offload and checkpointing already on, measures how far each feature pushes the maximum sequence length (Table 1, **reported**):
+
+| Features enabled | Max sequence (bs=1) | Iteration time | TFLOPS |
+|---|---|---|---|
+| Baseline | 32K | 0:00:17 | 231.6 |
+| + tiled logits and loss | 160K | 0:02:03 | 514.4 |
+| + Ulysses SP for HF | 1.1M | 0:09:24 | 576.1 |
+| + tiled MLP (no offload) | 1.2M | 0:11:43 | 548.7 |
+| + checkpoint offload (no tiled MLP) | 2.4M | 0:43:30 | 585.8 |
+| + both | 3.7M | 1:47:35 | 590.6 |
+
+<Figure src="/articles/activation-offload/fig2.png" alt="Bar chart of maximum sequence length in millions: HF baseline 32K, plus tiled logits and loss 160K, plus Ulysses SP for HF 1.1M, plus activation-checkpoint CPU offload 2.4M, plus tiled MLP 3.7M." caption="Maximum sequence length as each feature is added. Checkpoint offload roughly doubles it, from 1.1M to 2.4M tokens (Arctic Long Sequence Training paper, Figure 11)." />
+
+Offload alone takes the Ulysses run from 1.1M to 2.4M tokens, about 2.2 times (**reasoned** from the table). Tiled MLP alone adds less than 10%, from 1.1M to 1.2M, and becomes useful only once offload has removed the checkpoints. Stas's ranking in the replies follows from this: if offload is close to free, "it's definitely the first thing to go to, before any other offloads or even sharding/tiling computations".
+
+[MegaTrain](/articles/megatrain-single-gpu-training) moves weights, gradients and optimizer state to the host and streams layers over three CUDA streams: the same overlap idea at a much larger scale. ZeRO-Offload moves the optimizer. Checkpoint offload moves only the residual stream between layers, so it combines with both. [OLMo-core 3](/articles/olmo-core-3) trains with selective activation checkpointing under FSDP, and [Zephon in TorchTitan](/articles/zephon-torchtitan) covers the data side of the same kind of TorchTitan run. [MAI-Base-2](/articles/mai-2) is a case where fixing memory fragmentation left more room for less recomputation. They are all the same budget, spent differently.
+
+## Checking the claims
+
+- **Offload in `transformers>=5.17`**: holds. The code is in `v5.17.0`, not in `v5.16.0`, and it ran on my toy model (**measured**).
+- **"It needs more TLC to be faster"**: holds as a description of the code: both copies on the compute stream, no prefetch. Nobody publishes how much slower. My estimate is 2.5% to 9% for Qwen3-8B on PCIe 5, more for small models on slow links (**reasoned**, not measured on a GPU).
+- **Arctic's "close to 0-overhead"**: the side streams, event fences and one-layer prefetch are in the code as described (**measured** by reading). Near-zero overhead follows whenever a reload takes less than three forwards of compute (**reasoned**). I found no published timing.
+- **"Any model that supports gradient checkpointing supports it"** (the book): holds for the Transformers path, except on a host with no accelerator (**measured**, torch 2.14.1).
+
+## What it costs
+
+Host RAM of `L x b x s x h x 2` bytes per GPU, times the GPUs in a node, all of it pinned. On the Transformers path, two full copies per layer per step: single digits at long sequence, double digits for small models at short sequence. On the Arctic path, close to nothing in the regimes above, for a few hundred lines of stream and buffer management. Neither moves a backward peak set by one layer's recomputed activations and gradients. If that is your peak, offload frees memory you were not short of.
