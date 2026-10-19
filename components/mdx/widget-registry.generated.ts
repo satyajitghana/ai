@@ -276,6 +276,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "fly-connectome-computing/dataset-scale": () => import("@/components/articles/fly-connectome-computing/dataset-scale"),
   "fly-connectome-computing/neuron-explorer": () => import("@/components/articles/fly-connectome-computing/neuron-explorer"),
   "fly-connectome-reservoir/reservoir-dynamics": () => import("@/components/articles/fly-connectome-reservoir/reservoir-dynamics"),
+  "forspecies20k/points-to-views": () => import("@/components/articles/forspecies20k/points-to-views"),
+  "forspecies20k/species-bars": () => import("@/components/articles/forspecies20k/species-bars"),
   "freetoken/expert-locality": () => import("@/components/articles/freetoken/expert-locality"),
   "freetoken/hardware-ladder": () => import("@/components/articles/freetoken/hardware-ladder"),
   "freetoken/hybrid-split": () => import("@/components/articles/freetoken/hybrid-split"),
