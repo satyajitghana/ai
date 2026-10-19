@@ -599,6 +599,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "matryoshka-lm-suites/junction": () => import("@/components/articles/matryoshka-lm-suites/junction"),
   "matryoshka-lm-suites/nested-stack": () => import("@/components/articles/matryoshka-lm-suites/nested-stack"),
   "matryoshka-lm-suites/suite-ledger": () => import("@/components/articles/matryoshka-lm-suites/suite-ledger"),
+  "megabake/launch-budget": () => import("@/components/articles/megabake/launch-budget"),
+  "megabake/layer-schedule": () => import("@/components/articles/megabake/layer-schedule"),
   "megatrain/memory-placement": () => import("@/components/articles/megatrain/memory-placement"),
   "megatrain/pipeline-streams": () => import("@/components/articles/megatrain/pipeline-streams"),
   "mellum2-1/frontier": () => import("@/components/articles/mellum2-1/frontier"),
