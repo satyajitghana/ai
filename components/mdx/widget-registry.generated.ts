@@ -1143,6 +1143,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "verifier-frontier/task-anatomy": () => import("@/components/articles/verifier-frontier/task-anatomy"),
   "videochat3/adaptive-resolution": () => import("@/components/articles/videochat3/adaptive-resolution"),
   "videochat3/i3d-vit": () => import("@/components/articles/videochat3/i3d-vit"),
+  "virtual-head-attention/fold-diagram": () => import("@/components/articles/virtual-head-attention/fold-diagram"),
+  "virtual-head-attention/kv-calculator": () => import("@/components/articles/virtual-head-attention/kv-calculator"),
   "virtual-logic-depth/compute-accounting": () => import("@/components/articles/virtual-logic-depth/compute-accounting"),
   "virtual-logic-depth/knowledge-reasoning-plane": () => import("@/components/articles/virtual-logic-depth/knowledge-reasoning-plane"),
   "vit-compression-plant-disease/accuracy-size-frontier": () => import("@/components/articles/vit-compression-plant-disease/accuracy-size-frontier"),
