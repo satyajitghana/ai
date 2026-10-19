@@ -457,6 +457,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "kat-coder-agentic-training/hindsight-critic": () => import("@/components/articles/kat-coder-agentic-training/hindsight-critic"),
   "kda-half-life/channel-spectrum": () => import("@/components/articles/kda-half-life/channel-spectrum"),
   "kda-half-life/decay-curve": () => import("@/components/articles/kda-half-life/decay-curve"),
+  "kimi-k3-gb300-megakernel/layer-trace": () => import("@/components/articles/kimi-k3-gb300-megakernel/layer-trace"),
+  "kimi-k3-gb300-megakernel/step-budget": () => import("@/components/articles/kimi-k3-gb300-megakernel/step-budget"),
   "kimi-k3-in-c/bytes-per-token": () => import("@/components/articles/kimi-k3-in-c/bytes-per-token"),
   "kimi-k3-in-c/memory-dial": () => import("@/components/articles/kimi-k3-in-c/memory-dial"),
   "kimi-k3-in-c/mxfp4-decode": () => import("@/components/articles/kimi-k3-in-c/mxfp4-decode"),
