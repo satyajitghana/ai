@@ -1,0 +1,186 @@
+---
+title: "NVX: Microsoft's micro-VM sandbox builds the machine up from nothing"
+description: "Microsoft Research and Azure Research open-sourced NVX (MIT), a micro-VM sandbox for untrusted agent workloads built on a fork of OpenVMM. Instead of trimming a PC, its machine profile constructs one: no firmware, no ACPI, no PCI, six fixed virtio-mmio slots, one hypervisor-independent clock contract across KVM, MSHV and Windows WHP, and a guest-initiated snapshot that every restore maps copy-on-write and reseeds with 64 fresh bytes of host entropy. I read the design docs, the Rust guest agents and the OpenVMM fork it pins, ran the nvx-rs test suite on CPU (959 unit tests pass), and pulled the project's own CI history across 288 commits: about 278 ms to a shell and 62 ms to restore on nested KVM. Also: why its virtio-net exposes exactly two feature bits, and the two network defaults to turn off before you hand it an agent."
+date: 2026-10-23
+tags:
+  - agents
+  - security
+  - infrastructure
+  - rust
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "NVX read from its design docs, Rust guest agents and the OpenVMM fork it pins, with its own 288-commit CI history and the nvx-rs tests run on CPU."
+topic: security
+kind: tool
+level: practitioner
+runsOn: cpu
+licence: MIT
+---
+
+import { LifecycleBench } from "@/components/articles/nvx/lifecycle-bench"
+import { FeatureMask } from "@/components/articles/nvx/feature-mask"
+
+On October 19, Liam Arzola posted that Microsoft Research's systems group and Azure Research had open-sourced **NVX**, "a sandbox built to support most agent workloads while stripping out all unnecessary components resulting in the lightest hardware isolated uVM I've seen". He was clear that he did not work on it; his internship mentors did. The replies asked the right questions: how cold boot compares to Firecracker, whether it has network policies, whether it runs only on Hyper-V, and one person argued that gVisor already does this without a hypervisor.
+
+I cloned the repository at `1f9e0c7` (October 22), read the design documents, the Rust guest agents and the OpenVMM fork it pins, ran its Rust test suite, and pulled its own benchmark history out of `data/`. I could not boot it: this machine has no `/dev/kvm`. So the latency numbers below are the project's, from its CI, and I say so each time.
+
+<RepoCard repo="microsoft/nvx" />
+
+## What it is
+
+NVX is a micro-VM sandbox: one small virtual machine, with its own Linux kernel, per untrusted workload. The virtual machine monitor is [OpenVMM](https://github.com/microsoft/openvmm), Microsoft's Rust VMM, run from a fork branch called `feature/microvm/dev`. The README credits the MSR Systems Research Group and Azure Research – Systems, "building on research results from the Nanvix system". The licence is MIT and the version file says `0.1.0`.
+
+The repository is the distribution, not the VMM: version pins, three kernel patches, a kernel config, guest images, a Python harness (`scripts/nvx.py`), a Rust crate (`nvx-rs`) with the host launcher and nine guest binaries, a Rust lifecycle API (`aci_edge_sandboxes`), 32 design documents and the CI performance history. It tracks 593 files (measured). The guest kernel is Linux 6.18.38; the userlands are Alpine 3.24.1, Ubuntu 26.04.1 and Azure Linux, all booted with the same NVX kernel.
+
+It runs on three hypervisor backends: KVM and MSHV on Linux, and the Windows Hypervisor Platform (WHP) on Windows. So yes, there is a KVM path; it is the default in the quick start.
+
+## Build the machine, don't trim it
+
+The single design decision everything else follows from is in section 2.1 of the design docs:
+
+> The machine profile constructs the required machine directly instead of creating a standard PC and removing unwanted devices.
+
+A general VMM emulates a PC and you switch parts off. NVX's profile is an allowlist. It rejects UEFI, PCAT and IGVM firmware, caller-supplied ACPI, SMBIOS and device trees, PCI and PCIe, vPCI, VMBus, ISA DMA, IDE, floppy, graphics and "every device outside the machine profile" (reported, design doc 2.1.1). What is left:
+
+- An x86-64 guest booted Linux-direct, with Intel MP 1.4 tables and no firmware.
+- One NUMA node, one socket, one core per vCPU, no SMT, xAPIC mode, and 1, 2, 4 or 8 vCPUs.
+- A fixed chipset: PIC, IOAPIC, PIT, RTC, plus a byte channel and shutdown and snapshot-request ports.
+- Six virtio-mmio slots at fixed addresses: network at `0xd0000000`, host filesystem at `0xd0001000`, boot console at `0xd0002000`, a read-only `distro` block at `0xd0003000`, a writable `scratch` block at `0xd0006000`, and a control console at `0xd0007000`.
+
+The slots are fixed rather than allocated in order, so an omitted device never moves another, and the guest finds them from kernel command-line tokens that only the machine profile may emit. A caller cannot inject a device declaration through the command line.
+
+The kernel config matches. `CONFIG_ACPI` and `CONFIG_PCI` are off, and so are `CONFIG_KVM_GUEST` and `CONFIG_HYPERV`: the guest gets no paravirtual interface from whichever hypervisor runs it. The config enables 945 options and builds no modules (both measured, from `kernel/config-microvm`).
+
+<Figure src="/articles/nvx/fig1.png" alt="Block diagram in three groups. OpenVMM contains command-line entry and management RPC, the machine profile, the VM worker, chipset and platform devices, virtio devices, the snapshot publisher and the hypervisor backends. The host group holds the NVX launcher, sandbox lifecycle API, host control library, snapshot storage and external attachments, linked to OpenVMM by control sessions. The guest group runs Linux kernel to guest agents to workload." caption="NVX's three layers: the host owns policy, OpenVMM owns the virtual platform, the guest agents own the workload. Rendered from the Mermaid source in the repository (NVX design docs, Figure 1.2)." />
+
+The split is policy against mechanism. The host decides identity, attachments and network policy. OpenVMM enforces the platform and validates every input twice, before it opens any host resource and again when the worker is built. The workload is the only tenant of its VM, so the VM boundary is also the boundary between workloads.
+
+## One clock, three hypervisors
+
+The part I did not expect is how much of the design is about time. A sandbox that snapshots and restores has to answer an awkward question: when a frozen machine wakes on another host, minutes later, what time is it, and how fast does its clock tick?
+
+NVX answers with what it calls the **time ABI**, and it is strict. There is no paravirtual clock: no `kvm-clock`, no Hyper-V enlightenments. The TSC-deadline timer is hidden on every backend, so every guest uses the one-shot counting local APIC timer. The guest kernel reads the TSC and APIC timer rates from the hypervisor identity's frequency registers and never calibrates them, and OpenVMM refuses a command line that tries to set them (`E_CMDLINE_CLOCK_TOKEN`). The only hypervisor interface the guest sees is a minimal identity that is the same on KVM, MSHV and WHP (reported, design docs 2.1 and 3.2).
+
+That uniformity is what lets one snapshot format work across three hypervisors. It does not let a snapshot move between them. Restore requires the same backend and a CPU profile of the same generation as the capture, and the non-goals list rules out cross-backend restore, live migration and capture-and-continue.
+
+## Snapshots: the guest pulls the trigger
+
+A snapshot in NVX is not a host-side memory dump. The guest requests it, and a successful capture **terminates the source VM**. The VMM quiesces the devices, writes guest memory, processor and device state into a new directory, and renames it into place. The restored copies are the only continuation. A restored VM can never be captured again.
+
+Snapshots come in three tiers (reported, design doc 5.4.4):
+
+| Tier | Restore | What it saves you | Who may share it |
+|---|---|---|---|
+| `platform` | clone | kernel and guest-agent start-up | a trusted platform build, fleet-wide |
+| `workload-start` | clone | also the runtime's own start-up | one tenant: it holds workload memory and often secrets |
+| `instance-checkpoint` | resume | a single live instance, claimed once | one instance |
+
+Restore is ten checks before any vCPU runs: read a bounded manifest, check the time contract and CPU profile, require the same backend, validate topology, devices, attachments, command line, memory and block geometry, and then **map the captured memory privately, copy-on-write**. Every VM restored from one snapshot shares the clean pages of one immutable memory file and gets private copies of the pages it writes. The design doc is careful about what that does not mean: copy-on-write "isolates writes, not physical pages", so clean pages stay shared through the host page cache, and it is not a tenant-isolation mechanism on its own (reported, design doc 1.4.4).
+
+Then the guest repairs itself before anything else runs. Clones of one snapshot would otherwise share the same random-number generator state and hand out the same keys. So before any processor runs, the VMM draws 64 bytes from the host's cryptographic generator. They reach the guest in a restore packet; the first 16 bytes become the VM's generation ID. A clone credits all 64 bytes to the kernel's entropy pool, forces a reseed, and derives a fresh machine ID from them. The guest also steps its wall clock by the measured offset and corrects its rate, clamped to ±500 ppm (reported, design doc 5.5).
+
+[Perplexity's SPACE](/articles/perplexity-space) forks the same way, from a file with private writes; NVX differs in writing entropy and clock repair into the restore protocol itself.
+
+## Inside the guest: nine binaries and a supervisor
+
+The guest side is nine static `x86_64-unknown-linux-musl` binaries from `nvx-rs`, installed at `/sbin/nvx-*` in all three images. The ones that do the work are `nvx-managed-agent`, which serves the host's control session and runs workloads one at a time; `nvx-time`, which enforces the time ABI and repairs the clock after a restore; `nvx-reseed`; `nvx-ingress`, which announces the guest's listening ports; and `nvx-exit`, which stops the VM with an exit code through I/O port `0x604`.
+
+The agent never becomes the workload. It stays the guest's init, runs each workload as its child, and reaps whatever it leaves. Before a workload starts, the agent sets a host-chosen non-root UID and GID, clears supplementary groups and every capability, and sets `no_new_privs`. With every capability gone the workload cannot do port I/O, so only the agent can request a snapshot. When a workload's first process exits, the agent kills everything left in its cgroup and reports the result only once the cgroup is empty.
+
+There are two roots, and they are not equal. The **layered root** stacks a read-only `distro` image under a private writable `scratch` disk with overlayfs, and gives the workload private mount, PID and UTS namespaces, a private `/proc`, a read-only `/sys` and a restricted `/dev`. The **blockless managed root**, which is the default backend of the Rust lifecycle API, runs each execution in the guest's own initramfs root with the agent's namespaces. The design doc says so plainly: it "has no such isolation"; credentials and a cgroup contain the workload, but it sees the guest's own `/proc`, `/sys` and `/dev` (reported, design doc 4.3.2). The VM boundary still holds either way. What you lose is isolation between the workload and the agent inside it.
+
+## The network path has no TAP device
+
+Networking is off unless you pass `--net`. When it is on, the NIC is a virtio-net device backed by an **in-process userspace network stack inside the VMM**. There is no TAP interface, bridge or host virtual switch, and the host needs no IP forwarding. A guest TCP connection ends in that stack; the VMM opens an ordinary host socket to the destination. It proxies sockets rather than rewriting packets, so a remote server sees the host.
+
+Egress is checked twice: once on the frame headers as the device reads the TX queue, and again on the endpoint's own copy of the complete frame. The second check exists because guest memory stays writable after the first, so a guest could change a frame between the check and the send. A policy has a default action and up to 256 allow rules and 256 deny rules over addresses, CIDRs, protocols and ports. A matching deny always wins, whatever the order (reported, design doc 3.5.3).
+
+Then I checked what the device tells the guest. OpenVMM's general virtio-net device, over this backend, offers checksum offload, TCP and UDP segmentation offload, packed rings and a dozen other features. The microVM profile masks all of that away:
+
+```rust
+// openvmm/openvmm_defs/src/microvm.rs, OpenVMM fork at 7ff31ed
+/// Exact microVM virtio-net feature mask: MAC and virtio version 1.
+pub const MICROVM_VIRTIO_NET_FEATURES: u64 = (1 << 5) | (1 << 32);
+```
+
+The worker passes `!MICROVM_VIRTIO_NET_FEATURES` as the disabled-feature set when it builds the transport, so of the 15 feature bits in the widget below the guest can negotiate two (measured, from source).
+
+<FeatureMask />
+
+This matters more than it looks. The guest-to-host escape I covered in the [SPACE article](/articles/perplexity-space), CVE-2026-99999, starts with exactly the metadata this mask removes: a guest offering a packet with a partial checksum and a note on where to finish it, delivered through a TAP device into the host kernel's IPv4 path. NVX's guest cannot negotiate `CSUM`, and its frames never reach a host TAP. My reading is that NVX is not on that bug's path (reasoned, from the mask and the design doc; I did not test it). The parsing has not disappeared, though. It moved into the VMM's userspace network stack, so that Rust code is now the code that reads hostile packets. A bug there compromises the VMM process, which runs as an ordinary host user, not the host kernel. That is a better place to have a bug, but it is not no bug.
+
+## The two defaults to change before you give it an agent
+
+Two of the network defaults are friendly to development and wrong for a hostile agent:
+
+- **Egress is allowed by default.** Turn it to `deny` and add allow rules for what the agent needs.
+- **The gateway maps to host loopback by default.** Unless you pass `--host-loopback deny`, a guest connection to its gateway address lands on the host's `127.0.0.1`, and "other host-local destinations, such as link-local addresses, also reach host sockets" (reported, design doc 3.5.4). On a cloud VM, that link-local range is where the instance metadata service lives, at `169.254.169.254`, subject to the egress policy (reasoned).
+
+Inbound access defaults to none, and the Rust API's quick start uses `NetworkPolicy::deny_all()`, the right example to copy. So yes, it has network policies; switch them on.
+
+## What the CI measures
+
+NVX keeps its performance history in the repository: one CSV per backend and vCPU count, where each row is the median (p50) of one CI run at one commit, and CI gates on regressions against it. There are 288 commits in each series (measured). Every runner is an Azure `Standard_D8s_v5` virtual machine with Intel Xeon CPUs, so **every number is nested virtualization**: a microVM inside a cloud VM. Bare-metal results, the docs say, are a separate history; none is committed.
+
+<LifecycleBench />
+
+At the latest commit, on one vCPU with a 128 MiB guest (all reported, from `data/*.csv`; the medians and ranges over 288 commits are my arithmetic):
+
+| | KVM | MSHV | WHP |
+|---|---:|---:|---:|
+| Cold start to shell | 278.0 ms | 225.3 ms | 536.4 ms |
+| Snapshot restore to shell | 61.5 ms | 33.0 ms | 154.7 ms |
+| Guest exit and teardown | 63.3 ms | 21.4 ms | 60.2 ms |
+| Snapshot generation | 1.2 ms | 4.6 ms | 1041.2 ms |
+| OpenVMM peak RSS, cold | 80.0 MiB | 81.1 MiB | 76.4 MiB |
+| OpenVMM peak RSS, restored | 35.5 MiB | 61.4 MiB | 18.7 MiB |
+
+A few things I would take from this.
+
+**Restore is the fast path.** On KVM restore takes about a quarter of a cold start: 61.5 ms against 278.0 ms, roughly 4.5× (reasoned). On MSHV the ratio is about 6.8× (reasoned). That is the reason the snapshot tiers exist: a fleet boots once into a `platform` snapshot and clones it.
+
+**The KVM restore history is bimodal.** Its median over 288 commits is 59.4 ms, but the fastest commit recorded 29.7 ms and the slowest 72.2 ms (reasoned, from the CSV). The 512 MiB shell restore shows the same spread, 27.5 to 75.5 ms. On a shared nested host I would not read a single commit's number as the product's.
+
+**Peak RSS on restore is not memory saved.** RSS counts guest pages actually touched in the private mapping, and the docs warn that Windows reports a cumulative working set instead. The 18.7 MiB on WHP says that little was faulted in by the readiness marker, not that a restored VM uses 18.7 MiB.
+
+**Kernel tuning barely moves cold start.** The cold-start suite adds one boot parameter at a time to a quiet baseline of 308.1 ms on KVM. Only `mitigations=off` moves it, to 280.1 ms (reported); the other seven land within 7 ms of it. So the fixed cost is not in kernel options a caller could tune.
+
+**More vCPUs cost some restore time.** The 512 MiB restore goes from 62.6 ms on one vCPU to 72.1 ms on eight on KVM, though two vCPUs recorded 52.2 ms at the same commit, and from 41.1 to 52.3 ms on MSHV (reported).
+
+What is not measured anywhere in the repository is a comparison with Firecracker, Cloud Hypervisor or gVisor. I searched the docs; the only mention of any of them says the Azure setup does not need Cloud Hypervisor or Kata. So the reply asking how cold boot compares with Firecracker has no answer from NVX, and the CI hosts are nested, which makes cross-project numbers from elsewhere a poor comparison anyway. "The lightest hardware isolated uVM I've seen" is an opinion; the repository does not make that claim.
+
+## What I ran
+
+The run exception here was the Rust crate. With Rust 1.95.0 (the repository's pinned toolchain), two build jobs on a shared 4-core cloud VM with no GPU and no `/dev/kvm`:
+
+```bash
+cd nvx-rs
+NVX_BUNDLE=skip cargo test --all-features -j2 -- --test-threads=2
+```
+
+It built in about a minute and the whole run took 95 s (measured). The library tests, which cover the guest agents, cgroup containment, the time and reseed code and the host supervisor against a fake OpenVMM, passed: **959 passed, 0 failed, 10 ignored** (measured). The CLI parity test, which replays recorded `nvx.py` scenarios against the Rust launcher, passed 26 of 27. The one failure was my environment: I ran as root, and the "caller-owned share" scenarios correctly refuse a shared directory owned by UID 0 with `--mount-owner caller squashes guest root to the owner of the shared directory, so … must not be owned by UID 0 or GID 0` (measured). That is the check doing its job.
+
+I did not boot a guest, run the benchmark suite, or test the egress policy. All three need a hypervisor.
+
+## Where it sits
+
+The site has covered three other answers to "where do you put an agent that runs code". [DeepSeek's DSec](/articles/dsec-agent-sandbox) is a production platform with four backends and a 50× CPU overcommit, described in a paper with no code. [SPACE](/articles/perplexity-space) gives each task a jailed Firecracker microVM and keeps credentials in a gateway outside it. [OpenShell](/articles/openshell) skips the hypervisor and puts the boundary in the kernel with Landlock and seccomp. That last one is the shape of the gVisor argument in the replies: a userspace kernel or kernel-level policy can contain a workload without a VM, at the cost of sharing one host kernel.
+
+NVX is the hypervisor answer, done narrowly. What is new is how much it refuses: firmware, PCI, paravirtual clocks, offloads, device enumeration, cross-backend restore. Each is attack surface or a source of nondeterminism across snapshot and restore.
+
+## Where it costs
+
+- **It is a fork.** NVX pins OpenVMM at `7ff31ed`, the head of `feature/microvm/dev`. Its upstream roadmap maps 158 fork commits to planned upstream PRs and lists 154 more not yet assigned; eight have landed upstream (reported). Until more land, you are running Microsoft's fork, not OpenVMM. The roadmap still names an older pinned revision than the submodule does (measured), which is the usual sign of a document moving slower than its branch.
+- **No credentials story.** SPACE's gateway attaches API keys the guest never holds. NVX's network layer filters by address and port, not by host name or content, and there is no credential injection.
+- **No cross-hypervisor or cross-generation restore**, by design. A snapshot fleet has to be homogeneous per backend and CPU generation.
+- **Snapshots hold secrets.** A `workload-start` snapshot contains workload memory, and the docs leave artifact access control to the deployment.
+- **Its own adversarial testing is not a result.** The repository ships a harness that lets GitHub Copilot pick catalogued guest-side probes while a credential-free executor and watchdog decide whether containment held. No escape-attempt counts are published.
+
+If I were putting agents in it, I would start from the Rust API's `deny_all()` example, add `--host-loopback deny`, use the layered root rather than the blockless one, clone from a `platform` snapshot, and keep `workload-start` snapshots per tenant. That gets most of what the design offers, and the design is careful.
