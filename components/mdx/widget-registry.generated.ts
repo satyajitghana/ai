@@ -563,6 +563,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "longlive-plug/once-for-all": () => import("@/components/articles/longlive-plug/once-for-all"),
   "longstraw-2m-rl/group-serialization": () => import("@/components/articles/longstraw-2m-rl/group-serialization"),
   "longstraw-2m-rl/prefix-reuse-drift": () => import("@/components/articles/longstraw-2m-rl/prefix-reuse-drift"),
+  "looking-ahead-video/chunk-pairs": () => import("@/components/articles/looking-ahead-video/chunk-pairs"),
+  "looking-ahead-video/iq-ledger": () => import("@/components/articles/looking-ahead-video/iq-ledger"),
   "loom-looped-moe/loop-ledger": () => import("@/components/articles/loom-looped-moe/loop-ledger"),
   "looped-contrastive-decoding/contrast-lab": () => import("@/components/articles/looped-contrastive-decoding/contrast-lab"),
   "looped-contrastive-decoding/reference-picker": () => import("@/components/articles/looped-contrastive-decoding/reference-picker"),
