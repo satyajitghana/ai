@@ -157,6 +157,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "csfm-flow-matching/source-flow": () => import("@/components/articles/csfm-flow-matching/source-flow"),
   "cuda-rust/aliasing-compare": () => import("@/components/articles/cuda-rust/aliasing-compare"),
   "cuda-rust/simt-vs-tile": () => import("@/components/articles/cuda-rust/simt-vs-tile"),
+  "d3-turbo/box-confidence": () => import("@/components/articles/d3-turbo/box-confidence"),
+  "d3-turbo/state-once-mask": () => import("@/components/articles/d3-turbo/state-once-mask"),
   "da3-streaming-reconstruction/memory-stream": () => import("@/components/articles/da3-streaming-reconstruction/memory-stream"),
   "dart-realtime-detection/class-count-collapse": () => import("@/components/articles/dart-realtime-detection/class-count-collapse"),
   "dart-realtime-detection/student-tradeoff": () => import("@/components/articles/dart-realtime-detection/student-tradeoff"),
