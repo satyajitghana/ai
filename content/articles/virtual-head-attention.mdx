@@ -1,0 +1,203 @@
+---
+title: "Virtual Head Attention: train with sixteen heads' worth of queries, serve plain GQA-2"
+description: "Baidu's VHA halves the physical query heads, drops to two K/V heads, and adds two linear maps: a per-group Premix that turns 8 query heads into 16 virtual ones, and a low-rank Postmix that mixes the head outputs. Because both are linear they fold into W_Q and W_O after training, so the served model is stock GQA with a 4x smaller cache than GQA-8. I re-derived the fold and ran it in numpy at the paper's 1.7B shape (max difference 5.5e-15 in float64), recomputed the KV bytes and FLOP deltas, and read the benchmarks row by row: the average beats GQA at every scale, but by 0.05 points at 8B-A1B, from one run per cell, and 13 of 32 individual benchmark cells go to GQA."
+date: 2026-10-19
+tags:
+  - attention
+  - kv-cache
+  - inference
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Runs the Premix/Postmix fold at the 1.7B shape, reproduces the FLOP deltas, finds where the fold breaks (gated attention) and where 'match or beat' is noise."
+topic: llm-architecture
+kind: paper
+level: research
+runsOn: datacenter
+licence: Apache-2.0
+---
+
+import { KvCalculator } from "@/components/articles/virtual-head-attention/kv-calculator"
+import { FoldDiagram } from "@/components/articles/virtual-head-attention/fold-diagram"
+
+Every decode step rereads the whole KV cache, so the cheapest attention layer is the one that keeps the fewest bytes per token. The industry answer has been [grouped-query attention](/architectures/attention-kv): share each key/value head across a group of query heads. Go far enough (two K/V heads for sixteen query heads) and quality drops. DeepSeek's multi-head latent attention (MLA) compresses harder but needs its own kernels.
+
+**Virtual Head Attention** (VHA), from Baidu and Peking University ([arXiv 2610.17959](https://arxiv.org/abs/2610.17959), code at [github.com/PaddlePaddle/VHA](https://github.com/PaddlePaddle/VHA)), takes a different route. Train a model that is *already* GQA-2, with half the usual query heads, and give it two extra linear maps that recover what the cut cost. After training, multiply those maps into the neighbouring weights. What you deploy is a standard GQA layer with two K/V heads. No new kernel, nothing in vLLM to change.
+
+The claim, from the abstract: VHA beats GQA at every one of four scales (0.6B to 8B-A1B) while caching 4x fewer bytes than GQA-8, uses 7.9% fewer training FLOPs at 1.7B, and beats both MLA and GQA-4 on a 30B-A3B MoE trained on 500B tokens. I worked through the algebra, ran the fold, and recounted the tables.
+
+<Figure
+  src="/articles/virtual-head-attention/fig1.png"
+  alt="Three panels. (a) The VHA layer: X feeds W_Q, W_K and W_V. W_Q's output of H_q-prime heads goes through an orange dashed Premix box W_g^premix to become H_q heads, then RoPE and attention. W_K and W_V produce H_kv heads. Attention's H_q-head output passes a purple dashed Postmix box, an identity path plus a low-rank A then B-transpose path, into W_O. Dashed arrows show Premix absorbed into W_Q and Postmix into W_O. (b) A triangle labelled Quality, FLOPs and KV Cache. (c) Two bubble charts at 1.7B and 4B of training FLOPs against KV cache in KB: VHA (red, 54.5 and 57.71) sits lowest-left; MFA at the top with 1 KB cache; GQA at 4 KB; MHA at 6 and 10 KB; MLA near 1 KB."
+  caption="The VHA layer and its fold (a), the trade-off it targets (b), and the paper's headline placement at 1.7B and 4B (c). The bubble labels are 8-task averages; the 4B MLA label reads 56.25 where Table 1's own row averages to 56.38 (paper, Figure 1)."
+/>
+
+## The bill, in bytes
+
+A decoder caches one key and one value per K/V head, per token, per layer. With $H_{kv}$ K/V heads of width $d$ in BF16:
+
+$$
+\text{bytes per token per layer} = 2 \cdot H_{kv} \cdot d \cdot 2
+$$
+
+The paper's 1.7B model (Qwen3 shape, 28 layers, hidden size 2048, $d = 128$) makes the variants concrete. These are my numbers from the formula and the paper's Table 12 shapes, and they match the paper's "Cache" column (**reasoned**):
+
+| layout | Q-K-V heads | bytes / token / layer | 128K-token sequence, 28 layers |
+|---|---|---|---|
+| MHA | 12-12-12 | 6,144 (6.00 KB) | 21.0 GiB |
+| GQA-8 | 16-8-8 | 4,096 (4.00 KB) | 14.0 GiB |
+| MLA | 12-12-12 | (512 + 64) x 2 = 1,152 (1.12 KB) | 3.94 GiB |
+| GQA-2, VHA | 16-2-2 / 8-2-2 | 1,024 (1.00 KB) | 3.5 GiB |
+
+**MQA and GQA** shrink the cache by sharing: $H_q$ query heads read $H_{kv}$ K/V heads, so the cache scales with $H_{kv}$ and the group size $G = H_q / H_{kv}$ says how many queries share one key. The attention FLOPs do not change: every query head still scores every cached token. Only the bytes per score fall.
+
+**MLA** caches one shared latent of width $c_{kv}$ (512 in every configuration here) plus a small decoupled RoPE key. The paper does not state the RoPE width; 64, DeepSeek-V2's value, reproduces its 1.12 KB exactly, so I assumed it. MLA's trick is the absorbed projection: the up-projection from latent to per-head key multiplies into the query side, so each query scores the latent directly. That works, but the query now lives in a 576-wide space and the decode kernel is MLA-specific. The [field guide to attention mechanisms](/articles/attention-mechanisms) places all of these on the same axis, and [Grouped Value Attention](/articles/grouped-value-attention) is a recent cousin that also hides a learned linear map inside the query.
+
+The obvious cheap move is GQA-2: keep 16 query heads, cut K/V heads from 8 to 2. The paper ran it. At 1.7B the 8-task average drops from 54.09 to 53.09, one full point (**reported**, Table 2). Halving the query heads as well (8-2-2) drops it to 52.38. VHA starts from that 8-2-2 shape and tries to buy the point back.
+
+## What a virtual head is
+
+VHA keeps $H_q' = H_q/2$ **physical** query heads (8 at 1.7B) and $H_{kv} = 2$ K/V heads. Two linear maps sit around the attention core.
+
+**Q Premix.** Each K/V group $g$ owns one $d \times d$ matrix $W_g^{\text{premix}}$. Every physical query head $Q_i$ is multiplied by each group's matrix, and the product is the query that group sees:
+
+$$
+\tilde Q_{i,g} = Q_i \, W_g^{\text{premix}}, \qquad W_g^{\text{premix}} = I + \alpha\,\epsilon \ \text{at init}
+$$
+
+Eight physical heads times two groups gives $H_v = 16$ **virtual** query heads, the same count GQA-8 had. Group 0's eight virtual heads attend over K/V head 0, group 1's over K/V head 1. Without Premix, both groups would see identical queries; with it, each group gets its own rotation of the same eight probes.
+
+**Linear Postmix.** The 16 head outputs $Y \in \mathbb{R}^{H_v \times d}$ (per token) are mixed along the head axis by an identity plus a low-rank term, before the usual output projection:
+
+$$
+Y' = (I + B A^{\top})\, Y, \qquad A, B \in \mathbb{R}^{H_v \times r}, \ r = H_q'/2
+$$
+
+$B$ starts at zero, so Postmix is the identity at step one. The rank is 4 at 1.7B, 8 at 4B and 12 at 30B-A3B. Its job, per the paper, is cross-group exchange: Premix only diversifies queries within a group, and Postmix lets a head that read K/V head 0 borrow from one that read K/V head 1.
+
+That is the whole method. Nothing is nonlinear, and that is the point.
+
+<FoldDiagram />
+
+## Why it folds
+
+The diagram above steps through it; here is the algebra.
+
+**Premix into $W_Q$.** A physical head is $Q_i = X W_Q^{(i)}$ with $W_Q^{(i)} \in \mathbb{R}^{h \times d}$. Matrix multiplication associates:
+
+$$
+\tilde Q_{i,g} = (X W_Q^{(i)})\, W_g^{\text{premix}} = X \,\big(W_Q^{(i)} W_g^{\text{premix}}\big) = X\, \widetilde W_Q^{(i,g)}
+$$
+
+Precompute $\widetilde W_Q^{(i,g)}$ for all 16 pairs, concatenate them, and you have an ordinary $h \times H_v d$ query projection. In the released code (`SelfAttentionVHA._get_qkv_vha`) the Qwen3 per-head RMSNorm and RoPE come *after* Premix, so they apply to $X\widetilde W_Q^{(i,g)}$ exactly as they would to any GQA query. The only bookkeeping is head order: the code's einsum emits group-major order (head $g \cdot 8 + i$), which is what a stock GQA kernel expects when head $j$ reads K/V head $\lfloor j/8 \rfloor$.
+
+**Postmix into $W_O$.** Flatten the head outputs row-major to a $1 \times H_v d$ vector and the output projection is $\text{vec}(Y')^{\top} W_O$. Mixing heads with $M = I + BA^{\top}$ before that is a block matrix acting on the flat vector:
+
+$$
+\text{vec}(MY)^{\top} = \text{vec}(Y)^{\top}\,(M^{\top} \otimes I_d) \quad\Rightarrow\quad W_O' = \big((I + AB^{\top}) \otimes I_d\big)\, W_O
+$$
+
+$W_O'$ has the same shape as $W_O$. Attention itself never sees Postmix.
+
+What does not fold: anything nonlinear between the maps and their neighbours. The paper tested SiLU in either module and lost 0.67 to 0.83 points at 1.7B (**reported**, Table 4), so the linear version is both better and foldable. A second case the paper does not discuss is in the code. When `gated_attention` is on, `Attention.forward` applies Postmix and *then* the elementwise sigmoid gate, then $W_O$. A per-channel gate between a head-mixing matrix and $W_O$ blocks the Postmix fold, because the mixing no longer sits next to a linear map. The paper does not say whether any of its runs used the gate; Qwen3-shape models do not have one.
+
+## I ran the fold
+
+The paper's code needs a CUDA 13 GPU and a nightly `paddlepaddle-gpu` build, so I did not run it. Instead I wrote a numpy version that mirrors its two einsums, at the paper's 1.7B shape ($h = 2048$, $d = 128$, $H_q' = 8$, $H_{kv} = 2$, $H_v = 16$, $r = 4$), with per-head q/k RMSNorm, RoPE, a causal mask, 256 tokens, and Premix matrices pushed to $\lVert W_g - I \rVert_F = 5.85$, the largest deviation the paper's Figure 2 reports for a trained model. I compared the VHA forward pass against the folded weights run through a plain GQA function that knows nothing about VHA (**measured**, shared 4-core cloud VM, CPU, numpy):
+
+| case | max abs difference | output scale |
+|---|---|---|
+| float64 | 5.5e-15 | 3.36 |
+| float32 | 1.3e-6 | 4.21 |
+| BF16 weights, fold in FP32, store folded in BF16 | 8.4e-3 | 4.52 |
+| same, for scale: just rounding the unfolded FP32 weights to BF16 | 1.2e-2 | 4.52 |
+| gated attention, gate after Postmix | 0.65 | 1.92 |
+| gated attention, Postmix off ($B = 0$) | 1.4e-15 | 1.92 |
+
+The fold is exact to floating-point round-off. Storing the folded weights in BF16 adds error of the same order as storing any BF16 checkpoint. With a gate, the folded model is a different function: a difference of 0.65 on outputs of size 1.9. The Premix fold survives the gate (last row), since the gate is after attention, far from $W_Q$.
+
+The repository has no fold or export script (I searched it for "absorb" and "fold"; the only hits are MLA code). The Algorithm 1 in the paper's appendix is the recipe; you write the ten lines yourself.
+
+## What it costs, and where the FLOPs go
+
+The fold has a price the abstract does not spell out. During training VHA's query projection is small: $H_q' h d + H_{kv} d^2$ = 2,129,920 weights per layer at 1.7B. After the fold it is $H_v h d$ = 4,194,304, the same as GQA-8's. The 50% query-parameter saving is a training-time saving. The served model is GQA with 16 query heads, and its query projection costs exactly what GQA-8's did.
+
+I re-derived the paper's Table 5 deltas from the shapes (**reasoned**, $S = 4096$, training = 3 x forward):
+
+- **MHA vs GQA at 1.7B** differ only in attention scores (12 vs 16 query heads, matched parameters): 3 x 28 x 4 x 4096 x 4 x 128 = 0.70 GFLOPs per token. The table says 10.61 − 9.91 = 0.70.
+- **VHA vs GQA-8 at 1.7B:** halving $W_Q$ saves 0.35 G, shrinking $W_K$ and $W_V$ from 8 heads to 2 saves 0.53 G, Premix and Postmix add back 0.047 G. Net 0.83 G, against the table's 10.61 − 9.78 = 0.83. At 4B the same count gives 1.85 G against the table's 1.86.
+
+Two things follow. First, at 1.7B about 60% of the gross saving is the K/V projection shrinking, which plain GQA-2 gets too; the paper calls the query halving "the primary source", which is true at 4B (57%) but not at 1.7B. Second, the "7.9% lower prefill FLOPs" holds only if you prefill with the *unfolded* graph. Run the folded GQA-2 that the paper recommends serving, and the forward-pass saving at 1.7B falls to the K/V share: 0.18 of 3.54 G, about 5.0% (**reasoned**). Keeping Premix unfolded for prefill is cheap (one $d \times d$ matmul per group), but then it is no longer the stock kernel path.
+
+Decode is where the cache matters. The paper claims a "2–4x theoretical speedup in memory-bound decoding". That applies to the bytes of KV read per step. A decode step also reads every weight once per batch, so the end-to-end gain is smaller and depends on batch size and context; the paper measures no decode latency, so neither can I.
+
+<KvCalculator />
+
+The calculator applies the formula above to the paper's three named shapes, or to your own. For VHA it shows both the training and the serving size of the query weights.
+
+The paper also argues that two K/V heads let "the group size in large models readily reach 64", which feeds Tensor Cores during decode. That is arithmetic about future models: the largest group in the paper is 24 (the 30B-A3B's 48 virtual heads over 2 K/V heads), and no kernel timing is reported.
+
+## Does "match or beat" hold, row by row?
+
+The main comparison is Qwen3-architecture models on 50B tokens of FineWeb-Edu at 4K context, zero-shot on eight multiple-choice tasks, **one training run per cell**. VHA minus each baseline on the 8-task average, in points (**reported**, Table 1; differences mine):
+
+| scale | VHA avg | − GQA | − MLA | − MFA | VHA cache vs GQA |
+|---|---|---|---|---|---|
+| 0.6B | 51.04 | +0.62 | +1.52 | +0.38 | 1.00 vs 4.00 KB |
+| 1.7B | 54.50 | +0.41 | +2.01 | +0.44 | 1.00 vs 4.00 KB |
+| 4B | 57.71 | +0.81 | +1.33 | +0.77 | 1.00 vs 4.00 KB |
+| 8B-A1B | 54.91 | +0.05 | +1.12 | +0.10 | 1.00 vs 2.00 KB |
+
+The averages hold as stated: highest at every scale, with a quarter to half of GQA's cache. Three caveats.
+
+**The margins are small against the noise.** The paper's only repeated runs (Appendix B, a different and faster training implementation) put GQA at 0.6B at 50.00 ± 0.34 over 3 runs and VHA at 50.40 ± 0.07 over 4 (**reported**). A 0.34 run-to-run spread is larger than the 8B-A1B gap (0.05) and comparable to the 1.7B one (0.41). The 8B-A1B result is a tie, not a win; the honest reading is "matches GQA at a quarter or half the cache", which is still a strong result.
+
+**Per benchmark, it is mixed.** Across the 32 cells (8 tasks x 4 scales), VHA beats GQA in 19 and loses 13; it beats MLA in 28 and MFA in 21 (**measured**, counted from Table 1). Single-task swings are large and run both ways: BoolQ is +3.18 at 0.6B and −1.47 at 1.7B, OpenBookQA +3.40 at 1.7B and −1.60 at 8B-A1B. Only Social IQA favours VHA at all four scales.
+
+**MLA loses everywhere at 50B tokens.** The paper says so itself: latent compression "is less effective than head-level virtualization at the 50B-token training budget used here." That qualifier matters, since DeepSeek trains MLA on trillions of tokens.
+
+At **30B-A3B** (one run each, 500B tokens, 8K context, FP8), the 12-benchmark macro-average is VHA 50.36, MLA 49.66, GQA-4 47.76 (**reported**, Table 3), and I reproduced those category averages from the per-benchmark Table 11 (**measured**). VHA wins 9 of 12 benchmarks against GQA and 10 of 12 against MLA. One benchmark carries much of the MLA margin: MATH, 48.84 vs 43.42, a gap that alone moves the Math & STEM category by 1.8 of its 2.91 points. VHA loses HumanEval+ to both (47.56 vs 50.00 and 52.44).
+
+The **long-context** result (a matched 10B-A1B hybrid with full and sliding-window layers at 1:3; only the full-attention layers differ, 2 vs 4 K/V heads) reports RULER 84.4 vs 73.0 averaged over 8K to 128K. I recomputed both from Table 6 (**measured**). Much of the gap is one of RULER's 13 tasks: Variable Tracking, where GQA collapses to 3.2, 4.2 and 3.0 at 32K, 64K and 128K while VHA stays at 92.6, 87.2 and 83.0. Remove that task and the length-averaged gap shrinks from 11.4 to 6.2 points (77.7 vs 83.9, **reasoned** from Table 6, since RULER Overall is the plain mean of 13 tasks). Still a clear win, but the headline number is roughly half one task. At the intermediate 32K checkpoint, GQA wins LongBench-v2 (28.0 vs 22.3), a point the abstract leaves out.
+
+## What the learned maps look like
+
+The paper checks that Premix and Postmix are not trivial after training.
+
+<Figure
+  src="/articles/virtual-head-attention/fig2.png"
+  alt="Two line charts over layer index 0 to 27 of a trained 1.7B VHA model. (a) Frobenius distance of each group's Premix matrix from identity, for group 0, group 1 and their mean, between about 3.2 and 6, peaking at 5.85 at layer 16. (b) Mean pairwise distance between the two groups' Premix matrices, between about 2.5 and 6, peaking at 6.13 at layer 19."
+  caption="Premix after training at 1.7B: both groups move well away from the identity (left) and away from each other (right), most in the middle and late layers (paper, Figure 2)."
+/>
+
+The released code initialises Premix as $I + 0.1/\sqrt{d}\cdot\mathcal{N}(0,1)$, a Frobenius distance of about 1.1 from identity. The paper's Table 12 lists $\alpha = 0.1, \sigma = 1$ without the $1/\sqrt{d}$, which would start at about 12.8, above anything in the chart. The code's version is the one consistent with the figure.
+
+<Figure
+  src="/articles/virtual-head-attention/fig3.png"
+  alt="Five Sankey diagrams for layers 3, 6, 17, 28 and 31 of a trained 4B VHA model, ribbons running from source heads on the left to output heads on the right. Red ribbons come from heads of K/V group 0, blue from group 1. Most ribbons stay within their colour band; in layers 28 and 31 a few blue ribbons cross into the red band."
+  caption="Postmix's learned low-rank term at 4B: mostly mixing within a K/V group, with a few cross-group bridges in late layers (paper, Figure 3)."
+/>
+
+One ablation deserves a footnote. The paper sweeps Postmix rank $r \in \{4, 32, 128\}$ at 1.7B and gets 54.50, 54.24 and 54.15, concluding that "the low-rank constraint provides useful implicit regularization". But at 1.7B there are only 16 virtual heads, so $BA^{\top}$ is a $16 \times 16$ matrix and any $r \ge 16$ is full rank. The sweep compares rank 4 against two over-parameterised full-rank mixers, not against intermediate ranks (**reasoned**). The component ablation is cleaner: Premix alone gives 53.31, Postmix alone 53.95, both 54.50 (**reported**, Table 4).
+
+How does a forward-redundant reparameterisation help at all? Same answer as [RepVGG](https://arxiv.org/abs/2101.03697) and [LoRA](https://arxiv.org/abs/2106.09685): the factorised parameters get coupled gradients, so SGD walks a different path to a function the folded layer could also represent. The paper's Appendix G writes the gradients out. It is an explanation, not a proof that the path is better; the evidence is the ablation table. The same idea of cheap linear head mixing shows up in [DCFormer](/articles/dcformer), which composes heads per token and therefore cannot fold.
+
+## What I could not check
+
+- **No checkpoints.** The paper's models are not released, so every quality number above is reported, and the fold check uses random weights at the right shapes rather than trained ones.
+- **The code is training-only.** It runs on a GPU with Paddle nightly and tensor-parallel degree 1. I read `SelfAttentionVHA` and its tests; I did not execute them.
+- **Decode speed.** Not measured by the paper or by me.
+- **Gated attention.** Whether any reported run enabled `gated_attention` (which would block the Postmix fold) is not stated.
+
+## The takeaway
+
+VHA is a training-time trick for GQA-2. Train with half the query projections plus two small linear maps, fold them in, and serve a model whose cache is 1 KB per token per layer instead of 4. The fold is exact; I confirmed it to 5.5e-15. The quality claim is "matches or beats GQA-8 on averages, at a quarter of the cache", from single runs with gaps between 0.05 and 0.81 points. The FLOP claim is a training-time number, and only part of it is VHA's own. If you already train GQA models in-house, this costs a few dozen lines and nothing at serving time, and it is worth a run of your own.
+
+For the cache arithmetic in general, start at [Attention and the KV cache](/architectures/attention-kv); for why decode is bound by those bytes, see [How LLM inference works](/articles/how-llm-inference-works).
