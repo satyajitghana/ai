@@ -14,10 +14,18 @@ import { cn } from "@/lib/utils"
 type Path = "source" | "decomp" | "emulate" | "rewrite"
 type Cell = "fits" | "strains" | "neutral"
 
-const PATHS: { k: Path; name: string; sub: string; example: string }[] = [
+// `placed` marks where a real site sits by measurement, not by inference:
+// web.nfsmwo.com publishes a launch config that runs speed.exe under Wine.
+const PATHS: { k: Path; name: string; sub: string; example: string; placed?: string }[] = [
   { k: "source", name: "Original source", sub: "recompile the studio's code", example: "GTA V on playgta5.com" },
   { k: "decomp", name: "Decompiled source", sub: "rebuild code from the binary", example: "reVC in the browser" },
-  { k: "emulate", name: "Shipped binary", sub: "run the .exe, translate x86 and D3D9", example: "Windows-in-wasm runners" },
+  {
+    k: "emulate",
+    name: "Shipped binary",
+    sub: "run the .exe, translate x86 and D3D9",
+    example: "Windows-in-wasm runners",
+    placed: "web.nfsmwo.com sits here (measured)",
+  },
   { k: "rewrite", name: "New engine", sub: "read the original data", example: "OpenMW for Morrowind" },
 ]
 
@@ -63,7 +71,7 @@ const EVIDENCE: Ev[] = [
     text: "An Android app, iPhone always in lite mode, about 200 MB trimmed from the phone build",
     label: "reported",
     cells: { source: "fits", decomp: "fits", emulate: "strains", rewrite: "fits" },
-    why: "Translating 32-bit x86 to wasm or ARM on the fly costs a large factor in speed and memory; a phone browser has neither to spare. A build compiled for the target, from any kind of source, starts from native speed.",
+    why: "Translating 32-bit x86 to wasm or ARM on the fly costs a large factor in speed and memory; a phone browser has neither to spare. A build compiled for the target, from any kind of source, starts from native speed. web.nfsmwo.com, which does run the binary, claims phones anyway and ships 3,028 pre-built code shards to pay less of that cost, so read this cell as a cost, not a wall.",
   },
   {
     id: "public",
@@ -111,6 +119,11 @@ export function PortingPaths() {
                   <div className="text-sm font-semibold">{p.name}</div>
                   <div className="text-muted-foreground">{p.sub}</div>
                   <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">e.g. {p.example}</div>
+                  {p.placed ? (
+                    <div className="mt-1 inline-block rounded bg-[oklch(0.65_0.13_250/0.2)] px-1.5 py-0.5 font-mono text-[10px]">
+                      {p.placed}
+                    </div>
+                  ) : null}
                 </th>
               ))}
             </tr>
