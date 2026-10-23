@@ -752,6 +752,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "nvidia-rubin/bottleneck-map": () => import("@/components/articles/nvidia-rubin/bottleneck-map"),
   "nvidia-rubin/gen-specs": () => import("@/components/articles/nvidia-rubin/gen-specs"),
   "nvidia-rubin/power-factory": () => import("@/components/articles/nvidia-rubin/power-factory"),
+  "nvx/feature-mask": () => import("@/components/articles/nvx/feature-mask"),
+  "nvx/lifecycle-bench": () => import("@/components/articles/nvx/lifecycle-bench"),
   "octop/isolation-map": () => import("@/components/articles/octop/isolation-map"),
   "olmo-core-3/expert-dispatch": () => import("@/components/articles/olmo-core-3/expert-dispatch"),
   "olmo-core-3/parallelism-planner": () => import("@/components/articles/olmo-core-3/parallelism-planner"),
