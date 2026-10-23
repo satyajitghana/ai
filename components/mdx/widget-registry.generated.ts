@@ -1014,6 +1014,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "skill2env/reward-tension": () => import("@/components/articles/skill2env/reward-tension"),
   "skill2env/skill-compiler": () => import("@/components/articles/skill2env/skill-compiler"),
   "skill2env/skill-fidelity": () => import("@/components/articles/skill2env/skill-fidelity"),
+  "sky-001/bench-explorer": () => import("@/components/articles/sky-001/bench-explorer"),
+  "sky-001/critical-path": () => import("@/components/articles/sky-001/critical-path"),
   "softmax-bottleneck/bottleneck-today": () => import("@/components/articles/softmax-bottleneck/bottleneck-today"),
   "softmax-bottleneck/mixture-ladder": () => import("@/components/articles/softmax-bottleneck/mixture-ladder"),
   "softmax-bottleneck/rank-wall": () => import("@/components/articles/softmax-bottleneck/rank-wall"),
