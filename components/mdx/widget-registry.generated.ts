@@ -1073,6 +1073,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "spark-x2-5-4b/vetting-checklist": () => import("@/components/articles/spark-x2-5-4b/vetting-checklist"),
   "spatiallm/scene-script-viewer": () => import("@/components/articles/spatiallm/scene-script-viewer"),
   "spatiallm/token-budget": () => import("@/components/articles/spatiallm/token-budget"),
+  "spatialscout/overlap-lab": () => import("@/components/articles/spatialscout/overlap-lab"),
+  "spatialscout/score-ruler": () => import("@/components/articles/spatialscout/score-ruler"),
   "spec-ptc/shadow-repl": () => import("@/components/articles/spec-ptc/shadow-repl"),
   "spec-ptc/spec-timeline": () => import("@/components/articles/spec-ptc/spec-timeline"),
   "spec-ptc/variance-trap": () => import("@/components/articles/spec-ptc/variance-trap"),
