@@ -1085,6 +1085,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "ssftalk/geomean-lab": () => import("@/components/articles/ssftalk/geomean-lab"),
   "ssftalk/prune-drift": () => import("@/components/articles/ssftalk/prune-drift"),
   "stable-diffusion-cpp/memory-planner": () => import("@/components/articles/stable-diffusion-cpp/memory-planner"),
+  "stable-reinforce/coefficient-dial": () => import("@/components/articles/stable-reinforce/coefficient-dial"),
+  "stable-reinforce/drift-lab": () => import("@/components/articles/stable-reinforce/drift-lab"),
   "steadysplats/variance-ray": () => import("@/components/articles/steadysplats/variance-ray"),
   "step-5-preview/sparse-gqa-explorer": () => import("@/components/articles/step-5-preview/sparse-gqa-explorer"),
   "strands-agents-and-box/agent-loop-stepper": () => import("@/components/articles/strands-agents-and-box/agent-loop-stepper"),
