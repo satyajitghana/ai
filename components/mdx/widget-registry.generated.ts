@@ -641,6 +641,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "mimo-v2-6/ultraspeed-ceiling": () => import("@/components/articles/mimo-v2-6/ultraspeed-ceiling"),
   "mimo-v2-flash/hybrid-attention": () => import("@/components/articles/mimo-v2-flash/hybrid-attention"),
   "mimo-v2-flash/swa-kvcache": () => import("@/components/articles/mimo-v2-flash/swa-kvcache"),
+  "ming-3/param-ledger": () => import("@/components/articles/ming-3/param-ledger"),
+  "ming-3/sample-player": () => import("@/components/articles/ming-3/sample-player"),
   "minicpm-v-4-7/bench-delta": () => import("@/components/articles/minicpm-v-4-7/bench-delta"),
   "minicpm-v-4-7/expert-stall": () => import("@/components/articles/minicpm-v-4-7/expert-stall"),
   "minicpm-v-4-7/visual-tokens": () => import("@/components/articles/minicpm-v-4-7/visual-tokens"),
