@@ -115,6 +115,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "btl-interference-search/frontier-explorer": () => import("@/components/articles/btl-interference-search/frontier-explorer"),
   "budgetpix/quadtree-dial": () => import("@/components/articles/budgetpix/quadtree-dial"),
   "budgetpix/warmup-ledger": () => import("@/components/articles/budgetpix/warmup-ledger"),
+  "carbon-x/bench-board": () => import("@/components/articles/carbon-x/bench-board"),
+  "carbon-x/kmer-frame": () => import("@/components/articles/carbon-x/kmer-frame"),
   "chicken-reasoning-cues/cue-switchboard": () => import("@/components/articles/chicken-reasoning-cues/cue-switchboard"),
   "chicken-reasoning-cues/opening-mixture": () => import("@/components/articles/chicken-reasoning-cues/opening-mixture"),
   "chimera-diffusion/hetero-p-drift": () => import("@/components/articles/chimera-diffusion/hetero-p-drift"),
