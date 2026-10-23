@@ -215,6 +215,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "dust-zeroth-order/noise-board": () => import("@/components/articles/dust-zeroth-order/noise-board"),
   "dust-zeroth-order/perturbation-race": () => import("@/components/articles/dust-zeroth-order/perturbation-race"),
   "eagle-3-speculative-decoding/draft-verify": () => import("@/components/articles/eagle-3-speculative-decoding/draft-verify"),
+  "eagle-4/harness-tree": () => import("@/components/articles/eagle-4/harness-tree"),
+  "eagle-4/speculation-calculator": () => import("@/components/articles/eagle-4/speculation-calculator"),
   "earshot/fit-candidates": () => import("@/components/articles/earshot/fit-candidates"),
   "earshot/sample-pairs": () => import("@/components/articles/earshot/sample-pairs"),
   "edge0-streaming-moe/critical-path": () => import("@/components/articles/edge0-streaming-moe/critical-path"),
