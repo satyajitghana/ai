@@ -90,6 +90,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "blender-5-3-gaussian-splats/dof-toy": () => import("@/components/articles/blender-5-3-gaussian-splats/dof-toy"),
   "blender-5-3-gaussian-splats/splat-inspector": () => import("@/components/articles/blender-5-3-gaussian-splats/splat-inspector"),
   "blender-5-3-gaussian-splats/stochastic-ray": () => import("@/components/articles/blender-5-3-gaussian-splats/stochastic-ray"),
+  "blenderworld/lambda-board": () => import("@/components/articles/blenderworld/lambda-board"),
+  "blenderworld/rubric-scorer": () => import("@/components/articles/blenderworld/rubric-scorer"),
   "bm25/bm25-scorer": () => import("@/components/articles/bm25/bm25-scorer"),
   "bm25/idf-rarity": () => import("@/components/articles/bm25/idf-rarity"),
   "bm25/inverted-index": () => import("@/components/articles/bm25/inverted-index"),
