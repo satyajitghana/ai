@@ -1,0 +1,214 @@
+---
+title: "d3-turbo: the state stops looking at the question, so a photo is read once for 255 questions"
+description: "vLLM Semantic Router's d3-turbo is d3, the 27B Qwen3.8 decision model, trained further with one change to its attention: in the 16 full-attention layers the state block no longer reads the question. That makes the state's hidden states identical for every question, so the runtime computes them once and runs each question on top, which is where the 15.5x over d3-flash at 255 questions about one photo comes from. I read the shipped runtime, the configs, the weights by HTTP range request and the Decision Index's own data files. The mechanism is exactly as described, and the latency table fits about 129 ms per question for d3-flash against a fixed 0.33 s plus about 7 ms per question for d3-turbo. Box answers are four 128-bin edge distributions whose confidence is the share of 512 sampled boxes that overlap the answer at IoU 0.5, passed through a calibration table; I ran that decoder. The '#1 on both boards' was the team's own estimate against a 16 October snapshot. On the official boards since, d3-turbo is tenth on text, level with d3 inside the tie band, and second on vision, where it was first for about 29 hours. Almost all of its gain over d3 is on the public benchmarks."
+date: 2026-10-23
+tags:
+  - calibration
+  - benchmarks
+  - multimodal
+  - qwen
+  - linear-attention
+  - inference
+draft: false
+rating:
+  novelty: 1
+  verification: 3
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Reads the state-once mask and the Box decoder from d3-turbo's own runtime, and replays the Decision Index history behind '#1 on both boards'."
+topic: llm-architecture
+kind: model
+level: practitioner
+runsOn: workstation
+licence: Apache-2.0
+---
+
+import { StateOnceMask } from "@/components/articles/d3-turbo/state-once-mask"
+import { BoxConfidence } from "@/components/articles/d3-turbo/box-confidence"
+
+[Xunzhuo Liu's launch post](https://x.com/XunzhuoLiu/status/2112343603209261092) for d3-turbo makes three kinds of claim. It is "#1 on both Jev Decision Index boards". It "points(box), follows and sees images in your questions". And "StateOnce brings 15x faster than d3 flash". The thread adds the numbers: 255 questions about one photo in 2.12 s against 32.94 s, a Box accuracy of 0.90, a track presence F1 of 0.97, +6.2 over d3 on the public suite, Apache-2.0 weights.
+
+The speed claim is the interesting one, because it is an architecture claim. A decision model reads a piece of state, an email or a photo, and answers typed questions about it with a probability per option, without generating text. If it answers 255 questions, the cheap way is to read the state once and hang every question off it. Whether a model is allowed to do that is decided by its attention mask, and the last two releases in this family went in opposite directions on it.
+
+So I went to the files: the [model repository](https://huggingface.co/vllm-sr/d3-turbo) at commit `a0f3e9e` (its runtime, configs and card), the weights of d3-turbo, d3 and Qwen3.8-27B read by HTTP range request, and the Decision Index Space's own data files at seven commits. There is no paper. The model card is the only write-up, so every architecture statement below comes from code.
+
+The short answer: the mechanism is real and small. One mask changed, and the speed follows from it exactly. The leaderboard claim was an estimate, and the official boards disagree with it on text.
+
+<ModelCard repo="vllm-sr/d3-turbo" note="Qwen3.5-architecture 27B checkpoint (64 layers, 48 Gated DeltaNet and 16 full attention, 27-block vision tower) plus a 255 x 5,120 FP32 readout: 25,624,600,064 text, 460,730,096 vision and 1,305,600 readout parameters per MODEL_MANIFEST.json. attention_mode prefix_bidir, validated_length 32,768. Apache-2.0." />
+
+## What a decision model computes
+
+Every model in this wave shares one output contract, the `/v1/systemone` shape that [Jev](/articles/where-to-use-jev) made common. The prompt (`d3_format.py`) is a system turn, then `State:` and the state, then `Question:`, the instructions, and the options listed under one-token codes: `A`, `B`, …, `Z`, `AA`, … up to 255 of them. The model does not decode. It takes the final hidden state at the last prompt position, $h \in \mathbb{R}^{5120}$, and multiplies it by a 255-row readout $W$:
+
+$$
+p = \operatorname{softmax}\!\left(\frac{W_{1:m}\, h}{T}\right), \qquad W \in \mathbb{R}^{255 \times 5120},\; T = 1
+$$
+
+where $m$ is the number of options and the codes past $m$ are masked to $-\infty$. That readout is 1,305,600 parameters (measured: $255 \times 5{,}120$, and the manifest says the same). A yes/no question is a two-option choice. A score is a choice over levels. None of that changed from d3. What changed is how $h$ is computed when there are many questions.
+
+The backbone is the Qwen3.5 hybrid that [Qwen3.8-27B](/articles/qwen3-8-open-weights) uses: 64 layers, every fourth a full softmax-attention layer and the other 48 [Gated DeltaNet](/articles/linear-attention-state-roundup) layers, a linear recurrence whose memory is a fixed-size matrix per head (measured from `config.json`'s `layer_types`). That split matters, because the two kinds of layer can be made to share work in different ways.
+
+## The one change: `prefix_bidir`
+
+d3's `decision_config.json` sets `attention_mode` to `noncausal_full_attention` (measured). In the 16 full-attention layers every token sees every other token, before and after it. That is what [pplx-decider v1.1](/articles/pplx-decider-v1-1) introduced, and for the same reason: a classifier wants the state read with the question in view. The cost is that the state's hidden states now depend on the question. Change the question and the state's representation changes too. Nothing can be cached, so every question is a full pass over the state. d3-flash, the 9B sibling, uses the same mode (measured).
+
+d3-turbo's config says `prefix_bidir` (measured). The runtime's docstring describes it, and `StateBlocks` and `block_attention` in `d3_runtime.py` implement it. Split each prompt at the end of the state text into a state block $\mathcal{S}$ (system turn, images, videos, `State:` and the state) and a question block $\mathcal{Q}$. In a full-attention layer, query $i$ may read key $j$ when
+
+$$
+M_{ij} = \begin{cases} 1 & i \in \mathcal{S},\; j \in \mathcal{S} \\ 1 & i \in \mathcal{Q},\; j \in \mathcal{S} \cup \mathcal{Q} \\ 0 & i \in \mathcal{S},\; j \in \mathcal{Q} \end{cases}
+$$
+
+The state is bidirectional within itself, the question is bidirectional within itself and reads the whole state, and the state never reads the question. The implementation does not even build the mask. It makes two unmasked SDPA calls per row, one with the state's queries against the state's keys and one with the question's queries against all keys, which together equal the dense masked attention.
+
+The Gated DeltaNet layers stay causal over the whole prompt, as they are in d3 (measured). A causal scan is already shareable: its recurrent state after the last state token is the same whatever follows.
+
+Put those together and the state's hidden states, in every layer, are a function of the state alone. That is the whole trick, and `StateOnce` is the code that cashes it in. A state pass runs the state block once as one row and keeps, per layer, either the full-attention keys and values (RoPE applied) or the Gated DeltaNet's final recurrent state plus the last three inputs of its width-4 short convolution. A question pass then runs the question blocks in batches of up to 64 rows, right padded. Each full-attention query reads the cached state keys and values plus its own block. Each DeltaNet layer continues its scan from the cached state. `usage.input_tokens` counts the state once plus each question block. With `D3_STATE_ONCE=0` the runtime falls back to one full row per question, the reference path the cached one is meant to equal.
+
+Toggle the two modes and the two kinds of layer below. The counter is the number of token positions pushed through the trunk for $k$ questions: $k(s + q)$ when every question re-reads a state of $s$ tokens, $s + kq$ when the state is read once.
+
+<StateOnceMask />
+
+Some numbers make the gap concrete. An image is resized to at most 1,638,400 pixels and each 32 x 32 patch becomes one token (measured from the runtime docstring), so a large photo is up to 1,600 tokens of state. Questions are tens of tokens. With a 1,600-token state, 40-token questions and 64 of them, re-reading costs 104,960 positions and state-once 4,160, 25 times fewer (reasoned).
+
+This is the same idea as the tree that [Agr](/articles/agr-decision-model) and [Liquid's d1-3B](/articles/liquid-open-d1) use to read the state once. The difference is that d3-turbo keeps the bidirectional view inside each block, where the earlier tree designs are causal. Perplexity's v1.2 reached a related layout from the other direction, putting every question in one sequence.
+
+### Is it a new model or a new mask?
+
+The checkpoint is the same shape as d3, down to the tensor names: 1,183 tensors in both indexes, 26,085,330,160 backbone parameters (measured from the safetensors index and the Hub's count). I read slices of the same tensors from d3-turbo, d3 and Qwen3.8-27B by HTTP range request (the first 8 MB of each tensor) and compared them:
+
+| Tensor (slice) | Qwen → d3 | Qwen → d3-turbo | d3 → d3-turbo |
+| --- | ---: | ---: | ---: |
+| layer 0 `mlp.up_proj` | 0.687% | 0.944% | 0.617% |
+| layer 3 `self_attn.q_proj` | 0.457% | 0.564% | 0.314% |
+| layer 31 `self_attn.q_proj` | 0.526% | 0.701% | 0.434% |
+| layer 31 `mlp.down_proj` | 0.606% | 0.861% | 0.565% |
+| layer 63 `self_attn.k_proj` | 0.674% | 0.952% | 0.709% |
+| layer 0 `linear_attn.in_proj_qkv` | 0.465% | 0.612% | 0.383% |
+| vision block 0 `attn.qkv` | 0 | 0 | 0 |
+
+Relative Frobenius distance, measured. The readout moved 1.22% from d3's (measured). The vision tower blocks I sampled are bit-identical to Qwen's in all three.
+
+The pattern fits d3-turbo being d3 trained further. The distance from Qwen to d3-turbo is close to what you get by adding the other two as independent steps: for layer 0's `up_proj`, $\sqrt{0.687^2 + 0.617^2} = 0.923$ against a measured 0.944 (reasoned). Two independent fine-tunes of Qwen would sit about equally far from it, and further from each other. The card does not describe training, so this is inference from weights, not a documented recipe. Training under the new mask is necessary, though: a model trained to read the question from inside the state cannot be switched to a mask that hides it without relearning.
+
+## The speed claim, against its own table
+
+The card times one request at a time on one AMD Instinct MI325X through `AutoModel`, 1 to 255 yes/no and choice questions about one 1,280 x 1,600 JPEG, median of 15 timed requests after 3 warm-ups (reported). On ROCm `gfx942` the state-once path runs through fused kernels in `d3_fast.py` (measured from the code path, not run).
+
+<Figure
+  src="/articles/d3-turbo/fig1.png"
+  alt="Log-scale line chart of median time per request against questions in the request, from 1 to 255, for one photo on one AMD Instinct MI325X. d3-flash rises from 154 ms at 1 question to 541 ms, 2.07 s, 8.26 s, 16.50 s and 32.94 s at 255. d3-turbo goes from 302 ms to 328 ms, 426 ms, 867 ms, 1.29 s and 2.12 s. A label reads 15.5x faster at 255 questions."
+  caption="Median time to answer n questions about one photo, d3-turbo against d3-flash, AutoModel on one MI325X. The vendor's measurement, not re-run here (d3-turbo model card)."
+/>
+
+| Questions | d3-turbo p50 | d3-flash p50 | flash ÷ turbo |
+| ---: | ---: | ---: | ---: |
+| 1 | 302 ms | 154 ms | 0.5× |
+| 4 | 328 ms | 541 ms | 1.6× |
+| 16 | 426 ms | 2.07 s | 4.9× |
+| 64 | 867 ms | 8.26 s | 9.5× |
+| 128 | 1.29 s | 16.50 s | 12.8× |
+| 255 | 2.12 s | 32.94 s | 15.5× |
+
+The rows are reported; the ratios recompute (reasoned). A least-squares line through each column says what the two designs cost (reasoned). d3-flash is close to a constant 129 ms per question, from 135 ms at 4 to 129 ms at 255, which is what reading the photo once per question looks like. d3-turbo is a fixed 0.33 s plus about 7.2 ms per added question. The fixed part is the state pass: the vision tower plus 64 layers over about 1,600 image tokens. The marginal part is a question block on a cached state.
+
+So the ratio is not a constant property of the model. It grows with the question count toward roughly $129 / 7.2 \approx 18$ and is below 1 for a single question, where the 9B model is twice as fast as the 27B one (reasoned). The card says both of those things plainly. Two things the headline leaves out: the comparison is against d3-flash, a third of d3-turbo's size, not against d3 at the same size, which the card does not time; and the free API takes 64 questions per request, so 9.5× is the most an API user can see (reported limits, reasoned ratio).
+
+One more thing the code shows. Box, track and image-in-question requests do not take the cached path in the shipped `AutoModel` runtime. `_system_one_composed` runs "every question as a row of its own under the block mask", so each Box question recomputes the state block, image included (measured from `d3_runtime.py`). Its `usage` still counts the state once. The card says the vllm-sr Engine "answers Box and track questions too" from one read and that 64 questions about one photo take 0.50 s there. I did not read or run the Engine, so that part is unverified.
+
+## Box, track and images in questions
+
+These are the new question types, and they reuse the same readout rather than adding a detection head. A Box question's prompt ends with four lines, `top:`, `bottom:`, `left:`, `right:`, and the instruction to give each edge "as a code on a 128-step scale" (`d3_compose.py`). The runtime reads the readout at each colon. Each edge becomes a distribution over the first 128 codes, and the edge is its expectation:
+
+$$
+\hat e = \sum_{k=0}^{127} p_k \,\frac{k + 0.5}{128}
+$$
+
+If the expected top lands below the expected bottom, `order_edges` collapses the pair to a one-bin sliver around their midpoint. There is always exactly one box, even when the object is absent, which is why the card says to pair a Box question with a yes/no one.
+
+The confidence is not a probability the model outputs. It is computed from the four distributions. The runtime draws 512 boxes, one per point of a quasi-random R4 sequence, by inverting each edge's cumulative distribution. It counts the share $c$ whose IoU with the reported box is at least 0.5, and maps $c$ through a 38-point piecewise-linear table in `decision_config.json`:
+
+$$
+\text{confidence} = g\!\left(\frac{1}{512}\sum_{i=1}^{512} \mathbf{1}\!\left[\operatorname{IoU}(b_i, \hat b) \ge 0.5\right]\right)
+$$
+
+The table lifts the middle of the range: a raw 0.53 becomes 0.67 and 0.35 becomes 0.50 (measured from the table). Where the calibration data came from is not published.
+
+This is the one piece of the release I could run on a CPU without the weights, so I did, under the run exception for this piece. I loaded the repository's `d3_compose.py` (numpy 2.5.3, on a shared 4-core cloud VM) and fed it synthetic Gaussian edge distributions (measured):
+
+| Synthetic case | Raw share | Calibrated |
+| --- | ---: | ---: |
+| 40% box, edge spread 0.4% of the image | 1.0000 | 1.0000 |
+| 40% box, spread 5% | 0.9551 | 0.9898 |
+| 40% box, spread 10% | 0.4453 | 0.6341 |
+| 10% box, spread 2% | 0.6699 | 0.8245 |
+| top and bottom crossed | 0.0000 | 0.0000 |
+
+The fourth row is the one to remember. The same 2% edge uncertainty that gives a 40% box a confidence of 1.00 gives a 10% box 0.82, because IoU punishes a fixed error more on a small box. Confidence here is "how likely is this box to overlap the truth at IoU 0.5", which is the right question for a detector, and it means small objects read as less certain for the same localisation error. The widget below is a TypeScript port of the same functions; it matches the Python to four decimals on all five cases (measured).
+
+<BoxConfidence />
+
+A track is the same machinery over time. The clip is read in windows of up to 32 frames at twice the requested rate, so 16-second windows at 1 update per second and 8-second windows at 2 (measured from `d3_compose.py`). Each window is a state of its own, and each moment is a Box question with an extra `visible:` line read over two codes.
+
+Images inside questions and options work because the composed path places an image's tokens in that question's block. Only that question sees it, and under `prefix_bidir` the state never does.
+
+<Figure
+  src="/articles/d3-turbo/fig3.jpg"
+  alt="A photo of an Australian Shepherd leaping for a frisbee in front of a seated crowd, with four boxes drawn on it: the frisbee 0.99, the dog's tail 0.98, the orange cone 1.00, and the camera on the tripod 0.27, where the box covers a camera held by a photographer."
+  caption="Four Box questions about one photo in one request, drawn as returned. The camera box at 0.27 is the confidence doing its job. Photo by Sally Wehner, CC BY 2.0 (d3-turbo model card)."
+/>
+
+The Box and tracking scores (0.90 accuracy at IoU 0.5, confidence AUROC 0.96, success AUC 0.79 and 0.80, presence F1 0.97, and 0.96 accuracy for images in options) are on "our Box test set" and "our tracking test clips" (reported). Neither set is published, so I cannot check them or say how hard they are.
+
+## "#1 on both boards"
+
+The tweet does not say "estimate". The card does: "70.2 on the Jev Decision Index, +4.0 over d3 (66.3). Our estimate, not an official board result", and its rank figure is labelled a 0.3.2 snapshot of 16 October.
+
+<Figure
+  src="/articles/d3-turbo/fig2.png"
+  alt="Two panels. Text board: d3 at number 2 with 66.3 official, an arrow to d3-turbo at number 1 with 70.2 marked our estimate, +4.0 points. Vision board: d3 at number 4 with 71.3 official, an arrow to d3-turbo at number 1 with 72.9 marked our estimate, +1.7 points."
+  caption="The launch's rank claim: d3's official ranks on the 0.3.2 boards and d3-turbo's self-estimated ones. The vendor's estimate, not a board result (d3-turbo model card)."
+/>
+
+The estimate itself holds up against the snapshot it names. On the Space's `data/v03.json` at the 16 October commit, the text board is led by StartLux-Decision v1.1 at 69.12 with d3 second at 66.26, and the vision board by Amos 1 Large at 72.4 (measured). 70.2 and 72.9 would have been first on both.
+
+But the board did not stay on 0.3.2. The post went out at 00:42 UTC on 20 October (from the post id). At 13:53 UTC the same day the Space published Decision Index 0.4, which scores the full index from the private parts only, 60% same skills and 40% new domains, with a 0.9-point tie band (measured from `formula` in the data file). d3-turbo was scored officially from then on (measured, `data/v03.json` and `data/vision.json` at each commit):
+
+| Board snapshot | Text: d3-turbo | Text: d3 | Vision: d3-turbo | Vision: d3 |
+| --- | ---: | ---: | ---: | ---: |
+| 0.4, 20 Oct | 69.04, 6th | 69.06, 4th | 72.35, 2nd | 71.26, 5th |
+| 0.4.1, 21 Oct | 67.31, 9th | 67.15, 10th | 72.46, **1st** | 71.26, 7th |
+| 0.4.1, 22 Oct (current) | 67.31, 10th of 229 | 67.15, 11th | 72.46, 2nd of 55 | 71.26, 9th |
+
+On the current text board, d3-turbo is 10th of 229 by score, tied with d3. Ranks are by score; v1.0 was scored on 20 October and v1.1, the weights released before the post, from 21 October. On text, d3-turbo and d3 have shared a tie group in every snapshot, 0.02 and 0.16 points apart against a 0.9 band. It was never first. On vision it was first from 21 October 15:13 UTC until RBDash-Decision v0.2 joined at 73.3 on 22 October 20:12 UTC, about 29 hours (measured from the commit times).
+
+The components say where the gain is (measured, current snapshot):
+
+| Part | d3-turbo v1.1 | d3 | Difference |
+| --- | ---: | ---: | ---: |
+| Text, public benchmarks | 71.62 | 65.45 | +6.17 |
+| Text, private same skills | 64.29 | 62.83 | +1.46 |
+| Text, private new domains | 56.41 | 57.86 | −1.45 |
+| Vision, public | 76.84 | 74.08 | +2.76 |
+| Vision, private | 68.08 | 68.45 | −0.37 |
+
+The thread's "+6.2 on the public suite" is real: the board's own public score agrees to 0.03 (reasoned from the two). That gain is mostly on the public benchmarks, the part of the index a team can measure for itself and that 0.4 stopped counting. On the private tests nobody can train on, d3-turbo is a wash against d3 on text and a third of a point behind on vision.
+
+A third-party run says the same. SaylorTwift's [Typed Decisions](https://huggingface.co/datasets/LocalLLaMA/typed-decisions) evaluation, linked from the card's own eval results, puts d3-turbo at 0.736 accuracy and ECE 0.069 over 400 cases and 2,000 decisions, behind d3 at 0.749 and 0.049 and d3-mini at 0.743 (reported, from the bucket's `leaderboard.md`). d3-turbo ran through `transformers` and the others through vLLM, which "does not yet support" the new attention mode, so the serving paths differ. The 0.013 accuracy gap is about 26 decisions, a little over one standard error at that sample size (reasoned). It does not show d3-turbo worse. It does show it is not better.
+
+## Smaller things I found
+
+- **The long-context number.** The card says `long_context=True` allows 131,072 tokens per question. The shipped runtime's `question_cap` returns `LONG_CONTEXT_TOKENS = 262_144` when the package declares no `max_length`, and d3-turbo's declares none (measured from `d3_runtime.py` and `decision_config.json`). Its docstring calls that mode "slower and less accurate, as the model card says"; the card says neither. The default cap is the `validated_length` of 32,768 tokens, and a question over a cap is refused, never truncated (measured).
+- **Size.** 26.09B parameters is 52.17 GB of BF16 shards (measured from the Hub listing). It needs one large accelerator, not a laptop, which is why I ran only the decoder.
+- **Licence.** Apache-2.0 for the weights, readout and runtime, per `MODEL_MANIFEST.json`, with a one-line NOTICE (measured). The example media keep their own CC licences.
+
+## What to take from it
+
+Encoders and decoders have long been one mask apart. Decision models have now been through three masks in a month. Causal reads the state once but sees the question only at the end. Fully noncausal sees everything and pays for the state on every question. `prefix_bidir` gives the state a bidirectional view of itself, gives the question a bidirectional view of itself and the state, and keeps the one property that makes caching legal: the state never looks forward at the question.
+
+That is a good design for exactly the workload these models are sold for, many cheap questions about one expensive input. The 15.5× is real for that workload, and smaller everywhere else. The accuracy claim is weaker than the post makes it: d3-turbo is d3's accuracy on held-out tests, with d3's latency problem fixed.
+
+*Sources, read on 2026-10-23: the [launch post](https://x.com/XunzhuoLiu/status/2112343603209261092) and its thread; [vllm-sr/d3-turbo](https://huggingface.co/vllm-sr/d3-turbo) at `a0f3e9e` (`README.md`, `config.json`, `decision_config.json`, `MODEL_MANIFEST.json`, `d3_runtime.py`, `d3_compose.py`, `d3_format.py`, `.eval_results/`); [vllm-sr/d3](https://huggingface.co/vllm-sr/d3) and [vllm-sr/d3-flash](https://huggingface.co/vllm-sr/d3-flash) configs; [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) weights by range request; the [Decision Index Space](https://huggingface.co/spaces/multimodalart/jev-decision-index) data files at commits `0ddf6758`, `de1f4ea8`, `16f312e2`, `76fbe376` and `0b5ecaf2`; and the [Typed Decisions eval bucket](https://huggingface.co/buckets/SaylorTwift/typed-decisions-evals). I ran only the repository's Box decoder, on synthetic inputs; no weights were loaded. Figures are reproduced for commentary from the Apache-2.0 model card; the two interactives are original.*
