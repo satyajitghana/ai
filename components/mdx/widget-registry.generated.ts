@@ -1167,6 +1167,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "toks-tokenizer/speed-cells": () => import("@/components/articles/toks-tokenizer/speed-cells"),
   "torch-profiler/schedule-strip": () => import("@/components/articles/torch-profiler/schedule-strip"),
   "torch-profiler/trace-lanes": () => import("@/components/articles/torch-profiler/trace-lanes"),
+  "torchtpu/dispatch-modes": () => import("@/components/articles/torchtpu/dispatch-modes"),
+  "torchtpu/mfu-check": () => import("@/components/articles/torchtpu/mfu-check"),
   "trackeverything/dedup-timeline": () => import("@/components/articles/trackeverything/dedup-timeline"),
   "treg/bench-decompose": () => import("@/components/articles/treg/bench-decompose"),
   "treg/route-waterfall": () => import("@/components/articles/treg/route-waterfall"),
