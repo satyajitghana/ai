@@ -1,0 +1,207 @@
+---
+title: "MiniMax M3.1 Flash: M3's shape, all-sparse attention, four-bit experts, and Space Bunny unmasked"
+description: "MiniMax released M3.1 Flash's weights on 23 October, four days after revealing that the anonymous 'Space Bunny' was an earlier version of it. I read all 48 safetensors headers by range request: 427.05B parameters, 23.52B per text token, the same 60-layer, 128-expert backbone as M3, so 'Flash' is not a smaller model. Three things changed. M3's three full-attention layers became MiniMax Sparse Attention, so every layer now reads a fixed 2,048 tokens per group plus an index scan; the routed experts ship in NVFP4, which takes the checkpoint from M3's 869 GB to 250 GB; and a 1.96B-parameter DSpark draft head replaces the MTP scheme M3 never published. I worked out what the sparse layers save at 128K and 1M (reads, not storage), checked the card's 15 benchmark rows against the posts and against DeepSeek's card for the same rivals, and went back to the integer-multiplication PRs that credited 'OpenCode (Space bunny free)' to say what the reveal does and does not change."
+date: 2026-10-23
+tags:
+  - mixture-of-experts
+  - sparse-attention
+  - speculative-decoding
+  - benchmarks
+  - agentic-coding
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 2
+  unique: 2
+  why: "Headers show Flash is M3's backbone re-encoded; KV arithmetic of going all-sparse; the card checked row by row against the posts and DeepSeek's card."
+topic: llm-architecture
+kind: model
+level: practitioner
+runsOn: datacenter
+licence: custom
+---
+
+import { Budget } from "@/components/articles/minimax-m3-1-flash/budget"
+import { CardTable } from "@/components/articles/minimax-m3-1-flash/card-table"
+
+On 19 October MiniMax posted "Space Performance + Bunny Speed" and settled a small mystery: "Space Bunny - which has topped global leaderboards with 200T+ tokens - was an earlier version of M3.1 Flash." The same post priced the API at \$0.15 per million input tokens and \$0.60 per million output, claimed "1/3 the cost of M3 and 3x the speed", and promised weights on 23 October. They arrived on time. The release post gives "428B parameters total, 23B activated per token" and five headline numbers: 76.2 on BankerToolBench, 73.7% on DeepSWE v1.1, 61.7 on OSWorld V2, 29.6 on Agents' Last Exam and 82.2 on CyberGym, with "MiniMax Sparse Attention and DSpark speculative decoding" for efficiency.
+
+The name suggests a smaller sibling of M3. The files say otherwise, and that is the interesting part. Labels below: **measured** means I computed it from a file in the repo, **reported** means MiniMax's (or someone else's) number that I did not re-run, and **reasoned** means my arithmetic on the other two.
+
+<ModelCard repo="MiniMaxAI/MiniMax-M3.1-Flash" />
+
+## Flash is M3's backbone, in files
+
+I fetched `config.json` from both `MiniMaxAI/MiniMax-M3` and `MiniMaxAI/MiniMax-M3.1-Flash` and compared the text model's fields (measured). They agree on everything that sets the model's size: 60 layers, hidden size 6,144, 64 query heads and 4 KV heads of 128 dimensions, 128 routed experts with 4 picked per token, one shared expert, a dense FFN in the first three layers and MoE in the other 57, a 200,064-token vocabulary and a 1,048,576-position context. M3's card says "~428B parameters and ~23B activated parameters". M3.1 Flash's card says "Approximately 428B total; 23B activated per token". Same numbers, because it is the same shape.
+
+To check the totals rather than trust them, I read the JSON header of every one of the 48 weight shards with two HTTP range requests each, about 13 MB in all, and summed the tensor shapes (measured). Packed NVFP4 weights hold two values per byte, so they count double; scale tensors are not parameters.
+
+| Part | Parameters | Stored as |
+|---|---|---|
+| Routed experts, 57 layers x 128 | 413.12B | NVFP4, 206.6 GB |
+| Attention projections | 6.42B | FP8 (E4M3) |
+| Shared experts | 3.23B | FP8 |
+| Embedding table | 1.23B | BF16 |
+| LM head | 1.23B | BF16 |
+| Vision tower and projectors | 0.87B | BF16 |
+| Dense FFN, layers 0-2 | 0.68B | FP8 |
+| MSA index projections | 0.24B | FP8 |
+| Router gates | 0.05B | FP32 |
+| **Total** | **427.05B** | **250.1 GB** with 26.2 GB of scales |
+
+427.05B rounds to the card's "approximately 428B" well enough. The per-token count depends on what you include. Four of 128 routed experts is 12.91B; add attention, the shared expert, the dense layers and the index branch and the text path is 23.52B, or 24.75B if the LM head counts (measured). The card's 23B is the first convention.
+
+So where did "Flash" come from? Not from the parameter count. The card is explicit: "M3.1-Flash retains M3's core mixture-of-experts architecture, with three main changes": sparse attention throughout, quantization-aware training, and DSpark. Each is visible in the files.
+
+## Change one: the last three full-attention layers go sparse
+
+[MiniMax Sparse Attention](/articles/minimax-sparse-attention) (MSA) keeps attention exact but makes each query read only part of the context. A small index branch, one 128-dimension index query per GQA group and one shared 128-dimension index key, scores every past block of 128 tokens. Each group keeps its top 16 blocks, plus the block it sits in, and the main branch runs ordinary attention over those 2,048 tokens and nothing else.
+
+<Figure
+  src="/articles/minimax-m3-1-flash/fig1.png"
+  alt="MSA architecture diagram. Left, an Index Branch takes hidden states through linear projection, norm and RoPE to index query and key heads, computes a score matrix, applies block max pooling, and emits a Top-K block index. Right, a Main Branch selects those Top-K KV blocks and runs exact sparse attention over Q, K, V. Far right, two attention-mask grids for Query Group 1 and Query Group 2 show different selected key blocks per group."
+  caption="MSA: the index branch scores KV blocks and keeps the top k; the main branch attends exactly over those blocks, chosen separately for each GQA group. M3.1 Flash's config sets block size 128 and k = 16 (MiniMax Sparse Attention paper, Figure 1)."
+/>
+
+M3 shipped MSA in 57 of 60 layers. Its `sparse_attention_freq` is `[0, 0, 0, 1, 1, …]`, and its weight index has no `index_q_proj` or `index_k_proj` tensors in layers 0 to 2 (measured). M3.1 Flash sets all 60 entries to 1, and the headers show index projections in layers 0, 1 and 2 (measured). Block size, top-k, index dimension and the number of index heads are unchanged.
+
+Three layers out of sixty sounds small. It isn't, at long context, because a full-attention layer's cost grows with the context and a sparse layer's mostly doesn't. Count the values one decoded token has to read from the KV cache in one layer, with $N$ tokens of context:
+
+$$
+\text{full: } 4 \times 2 \times 128 \times N = 1024\,N \qquad \text{MSA: } 1024 \times \min(N, 2048) + 128\,N
+$$
+
+Four groups times keys and values times 128 dimensions is 1,024 values per past token. MSA reads that for at most 2,048 tokens, but its index branch still has to score every block, so it scans one 128-dimension index key per past token. That scan is the floor. As $N$ grows the MSA reads approach $128N$, one eighth of full attention, never less (reasoned).
+
+Put the 60 layers together at 1M tokens of context, with the cache in BF16 (reasoned):
+
+- **Plain GQA, 60 full layers:** 128.8 GB of KV read per decoded token.
+- **M3's layout, 3 full and 57 sparse:** 22.0 GB, of which the three full layers are 6.4 GB.
+- **M3.1 Flash, 60 sparse:** 16.4 GB, 7.88 times less than plain GQA and 1.34 times less than M3.
+
+At 128K the same sums give 2.96 GB for M3 and 2.26 GB for M3.1 Flash, a ratio of 1.31 (reasoned). The MSA paper's own measurement at 1M is a 7.6x decode speedup over GQA on H800 (reported), close to the 7.88 these read counts allow, which is what you'd expect of a step bound by memory reads.
+
+What MSA does not do is shrink the cache. Every key and value is kept, because any block may be picked by a later query, and each layer adds an index key per token. That is 138,240 bytes per token in BF16, 135 KiB: 18.1 GB for a 128K sequence and 145 GB for a 1M one (reasoned; the card doesn't say what precision servers keep the cache in, and FP8 halves all of these). For scale, DeepSeek reports 890 bytes of global KV per token for V4.1 Flash, the peer I covered in [DeepSeek-V4.1-Flash-1017](/articles/deepseek-v4-1-flash-1017). MiniMax's design saves reads, not storage.
+
+<Budget />
+
+The widget runs these sums from 4K to 1M in either cache precision. At batch 1 the weights cost a fixed 20.8 GB per step (next section), and at 1M the attention reads are 16.4 GB on top. The weights are shared by every sequence in a batch; the attention reads are not. Converting the last three layers is a change aimed at long-context serving with many concurrent sessions, which is what an agent platform runs.
+
+## Change two: four-bit experts, trained for it
+
+`config.json` carries a `quantization_config` with two formats (measured). Routed experts are `NVFP4`: each weight is a 4-bit float, with an FP8 scale for every 16 weights and an FP32 global scale per tensor. In the header that shows up as a `weight_packed` tensor of bytes holding two values each, beside a `weight_scale` of shape `[rows, cols / 16]`. Attention, shared experts and the dense layers are MXFP8, FP8 with a scale per block of 32. Embeddings, the LM head, the router gates and the vision tower stay at full precision.
+
+The card calls it "quantization-aware training": "the routed MoE experts and the attention paths are quantized during training". I can't check that from weights, only that they ship in these formats. (For how NVFP4 scales work, see [Nemotron in NVFP4](/articles/nemotron-nvfp4).)
+
+The byte effect is checkable (measured, from header offsets):
+
+- The checkpoint is **250.1 GB** of weights, against **869.2 GB** in M3's `model.safetensors.index.json`, which is BF16 throughout. That is 3.48 times smaller.
+- One expert in one layer is 31.9 MB with its scales. Four of them in each of 57 layers is 7.26 GB per decoded token, and everything else on the text path, LM head included, is 13.53 GB. So a batch-1 decode step streams **20.8 GB** of weights. The same 24.75B parameters in BF16 would be about 49.5 GB, 2.4 times more (reasoned).
+
+A decode step at small batch is bound by memory bandwidth, so 2.4 times fewer weight bytes per token is the largest single lever behind "3x the speed" I can find in the files. It is also why the checkpoint fits in the memory of four 80 GB GPUs with about 70 GB left over, where M3 in BF16 needs a multi-node setup or its own quantization (reasoned). It is still not a laptop model, whatever 23B active suggests: every expert has to be resident somewhere.
+
+## Change three: DSpark replaces MTP
+
+The card: "DSpark replaces the earlier EAGLE-like MTP approach. The release includes the draft head." M3's config declares `num_mtp_modules: 7`, but its public index contains no MTP tensors (measured), so M3's draft modules were never published. M3.1 Flash ships `dspark/model-dspark-00001.safetensors`, 2.3 GB.
+
+[DSpark](/articles/deepseek-dspark) is DeepSeek's speculative-decoding head: a parallel drafter in the style of DFlash proposes a block of tokens in one pass, a small Markov head adds first-order dependencies between neighbouring draft tokens, and a confidence head lets the server verify only the prefix it trusts. Verification is by the full model, so output is unchanged. MiniMax's version, from `dspark/config.json` and its header (measured):
+
+- **5 draft layers**, dense, with an FFN of 12,288 and sliding-window attention over 4,096 tokens. DeepSeek's released drafter had three MoE layers and a window of 128.
+- **Block size 7**, against DeepSeek's 5.
+- **Inputs from target layers 3, 17, 31, 45 and 59**: the `fc` projection is 6,144 x 30,720, which is those five hidden states concatenated.
+- **A Markov head of rank 256** (two 200,064 x 256 tables) and a confidence head on 6,400 inputs, the 6,144 hidden plus the 256 Markov features.
+- **1.96B parameters** in all.
+
+MiniMax publishes no accepted length or speedup for it. The speed claim in the 19 October post is for the whole model, so the drafter's share of it is unknown.
+
+## "1/3 the cost of M3 and 3x the speed"
+
+Neither half has a number I can check. The posts don't say what M3 costs, which workload the 3x is measured on, or on which hardware, and I found no M3 price in the sources I read. The parts I can check point the same way: the weights move 2.4 times fewer bytes per token than M3 in BF16, the attention reads fall 1.3 times at 128K, and a draft head now exists. That makes the claim plausible, not shown.
+
+The prices that are stated: \$0.15 in, \$0.60 out and \$0.015 for cached input, flat. DeepSeek-V4.1-Flash-1017's peak rates are \$0.30 and \$1.20 (reported), twice as much.
+
+## The table, checked three ways
+
+The card compares M3.1 Flash against six models on 15 benchmarks. I transcribed it and checked it against the 19 October post, the table image attached to that post, and DeepSeek's own card for the comparators the two share.
+
+<Figure
+  src="/articles/minimax-m3-1-flash/fig2.jpg"
+  alt="Benchmark table grouped into CoWork, Coding, Cyber and General Capabilities, comparing MiniMax M3.1 Flash with DeepSeek-V4.1-Flash-1017, DeepSeek-V4.1-Flash, Kimi-K3, GLM-5.3, GPT-5.6 Sol and Opus 5. M3.1 Flash's column is highlighted: Automation-Bench v1.0.6 62.2, OSWorldV2 61.7, Agents' Last Exam 29.6, BankerToolBench 76.2, GDP.pdf AA 20.8, Terminal Bench 4.0 38.1, LOCA-Bench 256K 60.3, PostTrain Bench-v1.1 39.3, DeepSWE v1.1 73.7, NL2Repo-Bench 61.2, SWE Refactor Bench 23.0, CyberGym 82.2, BabyVision with tools 91.0, HLE without tools 43.4, CharXiv RQ 82.5."
+  caption="The table image attached to the 19 October announcement. Its Automation-Bench cell reads 62.2; the model card and MiniMax's own cost chart both say 62.8 (MiniMax on X, 19 October, image 1)."
+/>
+
+What I found (measured, by comparing the documents):
+
+- **The headline numbers match the card**, to the post's rounding: DeepSWE 73.7 is "74%", Agents' Last Exam 29.6 is "30%", BabyVision 91.0 is "91%". Automation-Bench is the exception. The card and the cost chart say 62.8, the table image says 62.2 and the text says "62%". 62.2 rounds to that; 62.8 doesn't. One of the two is a typo, and I can't tell which from outside.
+- **M3.1 Flash is best in its row on 3 of 15**: Automation-Bench, LOCA-Bench 256K and BankerToolBench, the last tied with Opus 5 at 76.2. On CyberGym, one of the five numbers in the release post, it is third of the four models with a score, behind GLM-5.3 at 84.5 and GPT-5.6 Sol at 83.6.
+- **Against DeepSeek V4.1 Flash-1017 it is behind on 4 of 6** shared rows: Terminal Bench (38.1 vs 42.3), DeepSWE (73.7 vs 77.0), NL2Repo (61.2 vs 68.2) and BabyVision (91.0 vs 92.5). It leads on Automation-Bench and HLE. A reply under the post made the same count, and it holds.
+- **The HLE lead is not like for like.** The card's note says its HLE row is the "Text-only subset (2,158 questions)". DeepSeek's card gives 1017 42.6 on the full set and 44.0 on the text-only subset. The card puts 42.6 next to M3.1 Flash's 43.4; the matching number is 44.0, and on it 1017 leads.
+- **Comparators' numbers differ between vendors.** For Agents' Last Exam, MiniMax's card has Opus 5 at 32.2 and GPT-5.6 Sol at 30.6; DeepSeek's card has 28.6 and 26.7. MiniMax leaves 1017 blank under a rule it states, "full-set results from the official ALE leaderboard only"; DeepSeek's card gives 1017 35.4. On HLE, GPT-5.6 Sol is 49.5 here and 44.5 there. Either could be right; both can't be the same measurement.
+- **The comparison columns are a generation back.** The table uses Opus 5 and GPT-5.6 Sol. MiniMax's own cost charts, posted in the same thread, plot Opus 5.5, GPT-6 Sol and GPT-6 Astra, and on Agents' Last Exam all three sit above M3.1 Flash's 29.6.
+
+<CardTable />
+
+Pick a rival in the widget to see the deltas row by row. By my count from the card: M3.1 Flash leads DeepSeek V4.1 Flash on 10 of 12 shared rows, Kimi K3 on 12 of 15, GLM-5.3 on 10 of 11, GPT-5.6 Sol on 7 of 15, and Opus 5 on 2 of 14 with one tie (measured).
+
+The cost charts in the thread carry the stronger argument, and the card doesn't include them.
+
+<Figure
+  src="/articles/minimax-m3-1-flash/fig3.jpg"
+  alt="Scatter plot, DeepSWE v1.1 score against average cost per task in USD on a log scale. MiniMax-M3.1-Flash runs from high 68.1% to xhigh 72.1% to max 73.7% at roughly 25 to 28 cents. DeepSeek V4.1 Flash-1017 sits higher and further left, low about 72.6% to max 77.0% near 20 cents. Claude Opus 5, Claude Fable 5, GPT-6 Astra, GPT-6.1 Sol and Gemini 3.8 Flash curves sit further right at higher cost."
+  caption="DeepSWE v1.1 score against cost per task. Its footer says the leaderboard data is as of 2026-09-22, yet it plots 1017, which shipped on 17 October (MiniMax on X, 19 October, image 3)."
+/>
+
+On DeepSWE, MiniMax's own chart puts DeepSeek V4.1 Flash-1017 above and to the left of M3.1 Flash: 77.0 at max effort for about \$0.19 a task, against 73.7 for about \$0.27 (read by eye off a log axis, so approximate). On Automation-Bench the order flips: M3.1 Flash at max effort, 62.8, costs about \$0.045 a task, and 1017's max, 60.5, about \$0.09 (approximate, same method). The Agents' Last Exam chart puts M3.1 Flash at \$111 for the whole run at 29.6, the cheapest point on the plot, with Opus 5.5 at about 38% for over ten times the cost.
+
+<Figure
+  src="/articles/minimax-m3-1-flash/fig4.jpg"
+  alt="Scatter plot, Agents' Last Exam pass rate against estimated total cost in USD on a log scale. MiniMax-M3.1-Flash is at the far left, 29.6% for 111 dollars. A dotted cost-performance frontier runs from it through GPT-5.6 Luna, GPT-6 Sol and GPT-6 Astra to Claude Opus 5.5 near 38%. Kimi K3, GPT-5.6 Sol, Claude Opus 5 and others sit between."
+  caption="Agents' Last Exam pass rate against total cost, ALE-V1 Overall, 152 tasks, best harness and effort per model (MiniMax on X, 19 October, image 2)."
+/>
+
+On quality M3.1 Flash is level with the open models of its size and behind the closed frontier; on cost per task it is at or near the cheap end of every chart MiniMax drew. All of these are MiniMax's runs, with harnesses named per row in the card's notes (Claude Code on five rows, Codex on Terminal Bench, mini-SWE-agent on DeepSWE, OpenCode on BankerToolBench), and none of them are mine.
+
+## Space Bunny
+
+"Space Bunny" was a codename for a model nobody had claimed; the posts that used it called it free. MiniMax's 19 October post says it "topped global leaderboards with 200T+ tokens". The post names no leaderboard and no time window, so I can't check the 200 trillion (reported).
+
+This site has met it before. In [the integer-multiplication exponent race](/articles/integer-mult-exponent-race#is-a-free-model-checkable), Rohan Arun's posts on 17 October credited "a free model, @opencode Space Bunny Max" with a new best bound, and then with four records in a row. The PRs said less. Every commit carried the text "Done with help from OpenCode (Space bunny free)" and a "Co-Authored-By: Claude Opus 5.5" trailer, and the first of them, #3184, was refuted by an exact counterexample 25 minutes after it was committed. The free model's contribution was proposing to port a known move, with a gain estimate about 31 times too high; Claude found the data, built the package and measured it.
+
+What the reveal changes:
+
+- **Provable now:** MiniMax says Space Bunny was an earlier M3.1 Flash. If the name in those commits refers to the same codename, the "free model" in the integer-multiplication PRs was a pre-release MiniMax model, not an unknown one.
+- **Not provable:** that it was that model. The commits record free text, not an OpenCode session or a model ID. Rohan's posts say "Space Bunny Max", a name MiniMax's post doesn't use, and nothing says whether "Max" was a separate variant or an effort setting.
+- **Unchanged:** the mathematics. #3184's move changes what the program computes, and the four records built on it fall with it, whoever proposed it.
+
+## Licence
+
+The weights carry the **MiniMax Community License**, not Apache or MIT. The grant is for "non-commercial purposes". Commercial use needs a "Built with MiniMax M3.1-Flash" credit; above \$20 million a year in revenue it needs "prior written authorization", and below that "a one-time notice" by email. Fine-tuned derivatives used commercially count as commercial use. The appendix bars military use, among others. Unlike [MiniMax H3's licence](/articles/minimax-h3), this one names no excluded countries.
+
+## What holds
+
+- **428B / 23B: holds** (measured, 427.05B and 23.52B). It is M3's size because it is M3's shape.
+- **"Sparse attention throughout": holds.** All 60 layers carry the MSA index branch; M3 had 57. The gain is in KV reads at long context, about 1.3x over M3 at 128K and 7.9x over plain GQA at 1M; storage stays at about 135 KiB per token in BF16 (reasoned).
+- **Quantization: holds in format** (NVFP4 experts, MXFP8 elsewhere, 250.1 GB). Whether it was trained in, as the card says, I can't check.
+- **DSpark: present**, 1.96B parameters, 5 layers, block size 7. No speedup published.
+- **Headline benchmarks: match the card**, except Automation-Bench, where the table image says 62.2 and the card 62.8. The comparators are a generation old, the HLE comparison with 1017 is not like for like, and 1017 leads on 4 of the 6 rows they share.
+- **"1/3 the cost, 3x the speed": unverified.** The file-level changes point that way.
+- **Space Bunny was M3.1 Flash: reported**, and it plausibly identifies the "free model" in the integer-multiplication PRs. It changes nothing about those PRs being wrong.
+
+SGLang and vLLM had day-0 support; Inferact says it has served M3.1 Flash in production since launch (reported).
+
+## Related
+
+- [MiniMax Sparse Attention](/articles/minimax-sparse-attention): the index branch and the 2,048-token budget.
+- [DeepSeek DSpark](/articles/deepseek-dspark): the drafter design MiniMax adopted.
+- [DeepSeek-V4.1-Flash-1017](/articles/deepseek-v4-1-flash-1017): the open peer, 763B total.
+- [The integer-multiplication exponent race](/articles/integer-mult-exponent-race): where "Space bunny free" turned up.
+- [Mixture of experts](/architectures/mixture-of-experts) and [attention and the KV cache](/architectures/attention-kv), the architecture pages.
+
+## How I checked
+
+On 23 October I read MiniMax's posts of 19 and 23 October, their threads and their first page of replies, and Inferact's post and announcement, through the fxtwitter mirror and Inferact's site. From Hugging Face I fetched the file listing, `README.md`, `config.json`, `LICENSE`, `generation_config.json`, `dspark/config.json` and both weight indexes of `MiniMaxAI/MiniMax-M3.1-Flash` at commit `54e4e69`, and `config.json`, `README.md`, the eval-results files and `model.safetensors.index.json` of `MiniMaxAI/MiniMax-M3`. I read the JSON header of all 48 weight shards and the DSpark shard by HTTP range request, about 13 MB in total, and downloaded no weights. Parameter counts, byte counts and tensor layouts come from those headers. The KV sums are my arithmetic on the config, assuming keys, values and index keys cached at one precision. I didn't run the model: 250 GB doesn't fit on the shared 4-core, GPU-less VM I work on. Benchmarks are MiniMax's, costs are read by eye off its charts, and DeepSeek's card numbers are from my article on 1017.
