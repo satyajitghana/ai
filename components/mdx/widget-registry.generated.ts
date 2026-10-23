@@ -636,6 +636,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "minimal-ml-engineering-agent/harness-ladder": () => import("@/components/articles/minimal-ml-engineering-agent/harness-ladder"),
   "minimal-ml-engineering-agent/interval-explorer": () => import("@/components/articles/minimal-ml-engineering-agent/interval-explorer"),
   "minimax-h3/territory-checker": () => import("@/components/articles/minimax-h3/territory-checker"),
+  "minimax-m3-1-flash/budget": () => import("@/components/articles/minimax-m3-1-flash/budget"),
+  "minimax-m3-1-flash/card-table": () => import("@/components/articles/minimax-m3-1-flash/card-table"),
   "minimax-music3/frame-budget": () => import("@/components/articles/minimax-music3/frame-budget"),
   "minimax-music3/param-ledger": () => import("@/components/articles/minimax-music3/param-ledger"),
   "minimax-music3/two-layouts": () => import("@/components/articles/minimax-music3/two-layouts"),
