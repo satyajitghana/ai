@@ -354,6 +354,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "glm-built-its-own-inference-infra/throughput-timeline": () => import("@/components/articles/glm-built-its-own-inference-infra/throughput-timeline"),
   "goat-optimal-transport-attention/sink-vs-transport": () => import("@/components/articles/goat-optimal-transport-attention/sink-vs-transport"),
   "goat-optimal-transport-attention/sinkhorn-stepper": () => import("@/components/articles/goat-optimal-transport-attention/sinkhorn-stepper"),
+  "gpu-lexer/affine-block-scan": () => import("@/components/articles/gpu-lexer/affine-block-scan"),
+  "gpu-lexer/parallel-lex-scan": () => import("@/components/articles/gpu-lexer/parallel-lex-scan"),
   "grape-position-encoding/additive-bias": () => import("@/components/articles/grape-position-encoding/additive-bias"),
   "grape-position-encoding/family-map": () => import("@/components/articles/grape-position-encoding/family-map"),
   "grape-position-encoding/generator-action": () => import("@/components/articles/grape-position-encoding/generator-action"),
