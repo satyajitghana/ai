@@ -616,6 +616,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "memharness/ablation-explorer": () => import("@/components/articles/memharness/ablation-explorer"),
   "memharness/mechanism-probe": () => import("@/components/articles/memharness/mechanism-probe"),
   "memharness/replay-vs-reconstruct": () => import("@/components/articles/memharness/replay-vs-reconstruct"),
+  "mercury-3/denoise-race": () => import("@/components/articles/mercury-3/denoise-race"),
+  "mercury-3/speed-gap": () => import("@/components/articles/mercury-3/speed-gap"),
   "meta-rebalancer/local-search-lab": () => import("@/components/articles/meta-rebalancer/local-search-lab"),
   "meta-rebalancer/model-size": () => import("@/components/articles/meta-rebalancer/model-size"),
   "mimimodel/ablation-ladder": () => import("@/components/articles/mimimodel/ablation-ladder"),
