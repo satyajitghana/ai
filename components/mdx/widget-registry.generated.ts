@@ -949,6 +949,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "rea-reverse-engineer-anything/function-layers": () => import("@/components/articles/rea-reverse-engineer-anything/function-layers"),
   "rea-reverse-engineer-anything/minify-probe": () => import("@/components/articles/rea-reverse-engineer-anything/minify-probe"),
   "rea-reverse-engineer-anything/tool-catalog": () => import("@/components/articles/rea-reverse-engineer-anything/tool-catalog"),
+  "reactive-optimizers/decision-planner": () => import("@/components/articles/reactive-optimizers/decision-planner"),
+  "reactive-optimizers/recipe-margins": () => import("@/components/articles/reactive-optimizers/recipe-margins"),
   "recursive-harness-self-improvement/component-drift": () => import("@/components/articles/recursive-harness-self-improvement/component-drift"),
   "recursive-harness-self-improvement/search-cost": () => import("@/components/articles/recursive-harness-self-improvement/search-cost"),
   "recursive-language-models/context-in-window-vs-variable": () => import("@/components/articles/recursive-language-models/context-in-window-vs-variable"),
