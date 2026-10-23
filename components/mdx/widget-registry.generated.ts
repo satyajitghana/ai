@@ -744,6 +744,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "next-latent-world-models/objective-bottleneck": () => import("@/components/articles/next-latent-world-models/objective-bottleneck"),
   "nfsmw-online/login-wall": () => import("@/components/articles/nfsmw-online/login-wall"),
   "nfsmw-online/porting-paths": () => import("@/components/articles/nfsmw-online/porting-paths"),
+  "nfsmw-online/two-revivals": () => import("@/components/articles/nfsmw-online/two-revivals"),
   "nous-hermes-moa/moa-cost": () => import("@/components/articles/nous-hermes-moa/moa-cost"),
   "nous-hermes-moa/moa-network": () => import("@/components/articles/nous-hermes-moa/moa-network"),
   "nous-hermes-moa/moa-roundtable": () => import("@/components/articles/nous-hermes-moa/moa-roundtable"),
