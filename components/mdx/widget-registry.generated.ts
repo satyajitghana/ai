@@ -1021,6 +1021,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "sentry-agent-recovery/trajectory-stepper": () => import("@/components/articles/sentry-agent-recovery/trajectory-stepper"),
   "set-diffusion/spectrum": () => import("@/components/articles/set-diffusion/spectrum"),
   "set-diffusion/window-knob": () => import("@/components/articles/set-diffusion/window-knob"),
+  "sglang-hicache/prefetch-policy": () => import("@/components/articles/sglang-hicache/prefetch-policy"),
+  "sglang-hicache/tier-sim": () => import("@/components/articles/sglang-hicache/tier-sim"),
   "sglang/draft-tree": () => import("@/components/articles/sglang/draft-tree"),
   "sglang/frontend-ir": () => import("@/components/articles/sglang/frontend-ir"),
   "sglang/jump-forward": () => import("@/components/articles/sglang/jump-forward"),
