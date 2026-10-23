@@ -1,0 +1,204 @@
+---
+title: "StableReinforce: what Tinker's new off-policy loss publishes, and what it keeps"
+description: "Thinking Machines shipped StableReinforce, an alpha RL loss on Tinker meant to keep runs stable when the sampler drifts from the learner through async staleness or low-precision numerics. The docs publish half of it: a sampler-to-learner KL term and a server-side record of every sample. I derive the off-policy problem from REINFORCE through PPO, GRPO, CISPO, GSPO, TIS and MIS, show which coefficient blows up and why, and run eight losses in a small CPU simulation with injected staleness and sampler mismatch to see which ones collapse."
+date: 2026-10-23
+tags:
+  - reinforcement-learning
+  - grpo
+  - post-training
+  - training
+draft: false
+featured: false
+rating:
+  novelty: 2
+  verification: 1
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Separates what StableReinforce's docs actually publish from the claim, and measures eight off-policy losses under injected lag and mismatch in a CPU toy."
+topic: training-rl
+kind: tool
+level: research
+runsOn: api
+licence: proprietary
+---
+
+import { CoefficientDial } from "@/components/articles/stable-reinforce/coefficient-dial"
+import { DriftLab } from "@/components/articles/stable-reinforce/drift-lab"
+
+On 21 October Tinker's account posted that "Off-policy RL is difficult; runs can suddenly collapse because of async RL staleness or numerical mismatch," and that StableReinforce "keeps your RL runs stable, even when learning drifts from sampling." The link goes to one docs page, [StableReinforce (alpha)](https://tinker-docs.thinkingmachines.ai/tinker/losses/stable-reinforce/). There is no paper, no blog post and no curve.
+
+I read that page, the rest of Tinker's loss docs, the [tinker SDK](https://github.com/thinking-machines-lab/tinker) at commit `d4c66fe` and the [tinker-cookbook](https://github.com/thinking-machines-lab/tinker-cookbook) at `54b3cb2`. The short version: the docs publish one of StableReinforce's terms and the plumbing it needs. They don't publish the term that does the stabilising. So this piece does three things. It derives the off-policy problem from first principles. It writes down exactly what StableReinforce discloses. Then it runs the published losses in a small CPU simulation with the two failure modes injected, so you can see which ones collapse and why.
+
+Labels: **measured** means I computed it, **reported** means the publisher's number, **reasoned** means my arithmetic or inference on the other two.
+
+## Why "off-policy" happens to on-policy RL
+
+The objective is the expected reward of the policy you're training, $p_\theta$:
+
+$$
+J(\theta) = \mathbb{E}_{x \sim p_\theta}\big[R(x)\big], \qquad \nabla_\theta J = \mathbb{E}_{x \sim p_\theta}\big[A(x)\, \nabla_\theta \log p_\theta(x)\big]
+$$
+
+That's REINFORCE. $x$ is a sampled completion, $A(x)$ is its advantage, and for a sequence $\log p_\theta(x) = \sum_t \log p_\theta(x_t \mid x_{<t})$. The expectation is under $p_\theta$, so the samples must come from the same weights you differentiate.
+
+In a real post-training stack they don't, for two reasons.
+
+**Staleness.** Sampling is the expensive half, so it runs asynchronously. The learner takes optimizer steps while the sampler is still generating with weights from $k$ steps ago. Every token in the batch was drawn from $q = p_{\theta - k}$, not $p_\theta$.
+
+**Numerics.** Even with $k = 0$, the sampler is a different program. It's an inference engine with its own kernels, batch shapes, reduction orders and often lower precision. Tinker's importance-sampling page points at Thinking Machines' own [non-determinism post](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/) as the cause. Same weights, different probabilities.
+
+How big is the second gap? Qi et al., [Defeating the Training-Inference Mismatch via FP16](https://arxiv.org/abs/2510.26788), sampled DeepSeek-R1-Distill-Qwen-1.5B on AMC and AIME with a 32K budget and compared the two engines' probabilities token by token.
+
+<Figure
+  src="/articles/stable-reinforce/fig2.png"
+  alt="Four panels. Left two: scatter of training-engine token probability against inference-engine token probability, in BF16 (visible spread off the diagonal) and FP16 (tight on the diagonal). Right two: sequence log-ratio of training to inference policy against sequence length; in BF16 it falls with slope -1.01 and KL 7.64, in FP16 slope -0.07 and KL 0.32."
+  caption="Same weights, two engines. In BF16 the sequence log-ratio drifts roughly one nat per thousand tokens and reaches -20 to -50 on long answers; in FP16 it stays near zero (Qi et al. 2025, arXiv:2510.26788, Figure 2)."
+/>
+
+The right-hand panels are the problem in one picture. The per-token disagreement looks harmless on the scatter plot. Summed over 10,000 to 25,000 tokens it is a sequence log-ratio of $-10$ to $-50$ in BF16, with a fitted slope of $-1.01$ per thousand tokens (reported). A sequence-level importance weight of $e^{-20}$ is not a correction. It's a zero.
+
+## The fix everyone reaches for: a ratio
+
+If samples come from $q$, rewrite the expectation:
+
+$$
+\nabla_\theta J = \mathbb{E}_{x \sim q}\Big[\tfrac{p_\theta(x)}{q(x)}\, A(x)\, \nabla_\theta \log p_\theta(x)\Big]
+$$
+
+That's unbiased and it is Tinker's `importance_sampling` loss: `loss = -(exp(target_logprobs - sampling_logprobs) * advantages).sum()`. Tinker applies it per token. Define the token ratio $r_t = p_\theta(x_t)/q(x_t)$.
+
+Every loss on Tinker's list, and every one in the papers below, has the same gradient shape. It differs in one coefficient:
+
+$$
+\nabla_\theta \mathcal{L} = -\sum_t c_t \, A_t \, \nabla_\theta \log p_\theta(x_t)
+$$
+
+| loss | coefficient $c_t$ | source |
+|---|---|---|
+| REINFORCE | $1$ | ignores $q$ |
+| IS | $r_t$ | Tinker `importance_sampling` |
+| PPO | $r_t$ if inside the trust region for the sign of $A_t$, else $0$ | [Schulman et al.](https://arxiv.org/abs/1707.06347); Tinker `ppo`, $\epsilon = 0.2$ |
+| CISPO | $\mathrm{sg}\big(\mathrm{clip}(r_t, 0, 4)\big)$ | [MiniMax-M1](https://arxiv.org/abs/2506.13585); Tinker defaults |
+| token TIS | $\min(r_t, C)$ | IMPALA lineage; Yao et al. |
+| sequence MIS | $\rho \cdot \mathbb{1}\{\rho \le C\}$, $\rho = \prod_t r_t$ | Liu and Li |
+| GSPO | the sequence's geometric-mean ratio, clipped to $[1 - 3\times 10^{-4},\ 1 + 4\times 10^{-4}]$ | [Zheng et al.](https://arxiv.org/abs/2507.18071) |
+
+GRPO ([DeepSeekMath](https://arxiv.org/abs/2402.03300)) is PPO's coefficient with a group-relative advantage: sample $G$ completions per prompt and set $A_i = R_i - \bar R$. The cookbook's RL scripts do this centering. DRO, also on Tinker, is a different shape: a REINFORCE term plus $-\tfrac{\beta}{2}(\log p_\theta - \log q)^2$.
+
+PPO deserves a closer look, because its clip has a hole. The objective is $\min(r_t A_t,\ \mathrm{clip}(r_t, 1-\epsilon, 1+\epsilon) A_t)$. For $A_t > 0$ the min clips large $r_t$. For $A_t < 0$ the product $r_t A_t$ is the more negative term whenever $r_t > 1 + \epsilon$, so the min picks the **unclipped** term and the coefficient is the raw ratio (reasoned). PPO was designed for small, deliberate policy updates. Under drift the dangerous tokens are exactly the ones the learner likes far more than the sampler did. That's $r_t \gg 1$, and if the completion was bad, it is unbounded.
+
+<CoefficientDial />
+
+The dial shows one token. With $\log r = 4$, $r \approx 55$, and with $A = -1$ both IS and PPO assign that one token a step about 55 times its advantage (reasoned, $e^4$). CISPO caps it at 4. TIS caps it at 2. MIS drops it. REINFORCE gives it 1. REINFORCE never looks at the ratio, so it can't blow up, and it can't correct for drift either.
+
+That is the whole design space in one line. A coefficient that tracks $r$ corrects the bias and inherits the variance. A bounded coefficient trades bias for stability. Tinker's own CISPO page makes the same argument about the *lower* bound: a floor such as $0.8$ "removes the attenuation importance sampling provides for stale tokens" and can set up "a positive feedback loop" off-policy. It recommends `clip_low_threshold=0.0`, `clip_high_threshold=4.0` (reported).
+
+## Evidence the failure is real
+
+Qi et al. ran these corrections on the same 1.5B model and a 1,460-question MATH subset filtered so that every question is solvable, which makes it a sanity test: a sound algorithm should approach 100% training accuracy. Eight A100 80G GPUs, 64 questions with 8 rollouts each, 4 gradient steps per iteration, BF16 sampling against the trainer.
+
+<Figure
+  src="/articles/stable-reinforce/fig1.png"
+  alt="Two rows (VeRL and Oat frameworks) of four panels: training reward, AIME 2024 score, sampler-trainer mismatch, and max and min of the probability gap. BF16 GRPO collapses first, BF16 GRPO with token TIS and BF16 GSPO collapse later as their mismatch grows, BF16 GRPO with sequence MIS stays stable but learns slowly, and FP16 plain policy gradient with sequence IS climbs highest with near-zero mismatch."
+  caption="Corrections under BF16 sampler-trainer mismatch on two frameworks. The runs that collapse show their mismatch growing first; FP16 removes most of the mismatch instead of correcting it (Qi et al. 2025, arXiv:2510.26788, Figure 3)."
+/>
+
+Their numbers (reported): vanilla GRPO peaks at 73% training accuracy in VeRL and 84% in Oat, then collapses. Token TIS lasts longer and collapses after 82% and 88%. Sequence MIS is the only BF16 correction that doesn't collapse, but it tops out at 95% training accuracy and 34% on AIME 2024, against 99% and 39% for plain sequence-level IS in FP16. They also note that every collapsing run shows the mismatch climbing *before* it collapses. That gives you a warning signal, and it means drift and instability feed each other.
+
+Two lessons carry over to StableReinforce. Bounding the coefficient helps, but each bound costs something. And mismatch is not a fixed nuisance; it grows as the policy sharpens.
+
+## What StableReinforce publishes
+
+From the docs page and the SDK, everything that is public:
+
+<RepoCard repo="thinking-machines-lab/tinker" />
+
+1. **It is "a REINFORCE variant"**, selected with `loss_fn="stable_reinforce"`. It takes the same tensors as the other RL losses: `target_tokens`, sampler `logprobs`, `advantages`. It returns the learner's `logprobs` and a `loss:sum` diagnostic. In the SDK the loss is one more string in `LossFnType`, next to `ppo`, `cispo`, `dro` and `gspo`. The loss itself runs on Tinker's servers.
+2. **It needs data recorded at sampling time.** You must create the sampler with `record_stability_info=True`. Each returned sequence then carries a `sequence_id`. The SDK docstring says only that "the server records stability information for each sampled sequence." The record belongs to the session, expires one day after the last training request that uses it, and can only be trained on in the same session.
+3. **Every datum needs provenance.** Each training datum must carry `SampledProvenanceSpan`s that cover whole sampled sequences, and every token with a nonzero advantage must sit under a span whose sequence was recorded. The server checks that the tokens match what was sampled.
+4. **It includes a sampler-to-learner KL**, not a reference-model KL. The docs say: "the loss uses no reference policy." Per sampled token, with the k1 estimator:
+
+$$
+\mathcal{L}_{\text{KL}}(\theta) = \beta \sum_t \big(\log q(x_t) - \log p_\theta(x_t)\big), \qquad \beta = \texttt{kl\_coeff},\ \text{default } 0.01
+$$
+
+What is **not** public is the main term: how StableReinforce weights $A_t \nabla \log p_\theta(x_t)$, and what the "stability information" is. The docs claim that "this loss function has led to extremely stable training, even under highly off-policy async RL and low precision numerics" in Thinking Machines' internal post-training. That is reported, and I can't check it: no curve, model, step count or baseline is given.
+
+### Reading the KL term
+
+The gradient of $\mathcal{L}_{\text{KL}}$ is $-\beta \sum_t \nabla_\theta \log p_\theta(x_t)$, as the docs say. In the coefficient table it adds $+\beta$ to every sampled token, independent of the advantage. That is supervised fine-tuning on the sampler's own outputs at weight 0.01.
+
+In expectation over $x \sim q$ that gradient equals $\nabla_\theta \mathrm{KL}(q \,\|\, p_\theta)$, because $q$ does not depend on $\theta$. That's the forward, mass-covering KL (reasoned). It punishes the learner for putting near-zero probability on tokens the sampler actually emits, the $p \ll q$ tail. Note what it does *not* cover. The tokens that blow up IS and PPO are the other tail, $p \gg q$. A pull toward the sampler shrinks drift over time, but on its own it does nothing for a single token with $r = 55$. If StableReinforce survives that token, the main term is doing it.
+
+Compare GRPO's original KL, which pulls toward a frozen reference model. Tinker's loss docs note, citing [Zhang et al.](https://arxiv.org/abs/2505.17508) and [Tang et al.](https://arxiv.org/abs/2506.09477), that putting that term in the loss is mathematically inconsistent. StableReinforce's KL has a moving target, the sampler, which is never more than the async lag behind.
+
+### What the stability info could be
+
+This part is reasoned, and I'm labelling it as speculation. The client already sends the sampler's per-token `logprobs`, so the recorded data must be something the client cannot provide. Either it can't see it, or Tinker won't trust it to. Candidates consistent with the API are: the sampler's distribution beyond the chosen token (Tinker already exposes `topk_sample_logprobs`), the exact sampler weights version (which pins the staleness $k$), or a server-trusted copy of the logprobs, which the whole-sequence and token-match checks would protect. The provenance rules have a practical consequence that is not speculation: StableReinforce works only on sequences Tinker itself sampled in the same session. You can't feed it rollouts from your own vLLM.
+
+## A toy that injects both failure modes
+
+Thinking Machines published no curves, so I built the smallest setup that has both drifts and ran the losses I can write down. This is the run exception for this piece: my own code, CPU only, `nice -n 19`, single-threaded, on a shared 4-core cloud VM. Two processes took about eight and a half minutes each (measured).
+
+**Setup.** 32 prompts, 12 positions each, 8 tokens. The policy is shared: logits are a 24-dimensional feature vector per position times one weight matrix, so a huge update on one token moves every prompt. Each prompt has a target token per position, reward is the fraction correct, $G = 8$ samples per prompt with a group-mean baseline, one SGD step per batch at learning rate 2.0, 600 steps, 3 seeds.
+
+**Staleness.** The sampler uses the weights from `lag` steps ago, 0, 2, 8 or 32.
+
+**Numerics.** On each sampler build, add Gaussian noise $\sigma$ to the sampler's logits, and in a random fraction of entries subtract 6. That creates the $p \gg q$ tail on purpose. **Mild** is $\sigma = 0.1$ with 0.5% spiked entries, **severe** is $\sigma = 0.2$ with 2%.
+
+The core of it, from `sim.py`:
+
+```python
+def coef(loss, A, r, logr_seq, beta):      # per-token c_t on grad log p(x_t)
+    if loss == "reinforce":    return np.broadcast_to(A, r.shape).copy()
+    if loss == "stable_proxy": return np.broadcast_to(A, r.shape) + beta   # + k1 KL
+    if loss == "is":           return r * A
+    if loss == "ppo":
+        active = ((A > 0) & (r < 1.2)) | ((A < 0) & (r > 0.8))
+        return np.where(active, r * A, 0.0)
+    if loss == "cispo":        return np.clip(r, 0.0, 4.0) * A
+    if loss == "cispo_lo":     return np.clip(r, 0.8, 4.0) * A
+    if loss == "tis":          return np.minimum(r, 2.0) * A
+    if loss == "mis":
+        rho = np.exp(np.clip(logr_seq, -50, 50))[:, None]
+        return np.where(rho <= 2.0, rho, 0.0) * np.broadcast_to(A, r.shape)
+```
+
+`stable_proxy` is **not StableReinforce**. It is plain REINFORCE plus the one term the docs publish, the k1 sampler KL at $\beta = 0.01$. It tests that term alone.
+
+<DriftLab />
+
+Final reward, the mean of the last 50 steps, averaged over the three mismatch levels and three seeds (9 runs per cell, measured):
+
+| loss | lag 0 | lag 8 | lag 32 | runs ending below 0.9 | max gradient norm |
+|---|---|---|---|---|---|
+| REINFORCE | 0.984 | 0.978 | 0.938 | 0 of 36 | 3.1 |
+| REINFORCE + sampler KL | 0.983 | 0.980 | 0.965 | 0 of 36 | 2.9 |
+| IS | 0.970 | 0.623 | 0.552 | 18 of 36 | 1754.8 |
+| PPO, ε 0.2 | 0.955 | 0.779 | 0.489 | 17 of 36 | 100.0 |
+| CISPO [0, 4] | 0.982 | 0.981 | 0.979 | 0 of 36 | 3.0 |
+| CISPO [0.8, 4] | 0.984 | 0.981 | 0.946 | 0 of 36 | 3.3 |
+| token TIS, C 2 | 0.983 | 0.981 | 0.979 | 0 of 36 | 2.8 |
+| sequence MIS, C 2 | 0.981 | 0.974 | 0.962 | 0 of 36 | 2.7 |
+
+What it shows (measured, on this toy only):
+
+- **The unbounded coefficients are the ones that collapse.** IS and PPO account for all 35 runs that ended below 0.9. Their largest gradient norms were 1754.8 and 100.0; no bounded loss went above 3.3. The collapses are the shape in Qi et al.'s figure: reward climbs, then a few huge steps knock a shared weight matrix somewhere it doesn't recover from.
+- **PPO fails even with no lag.** One severe-mismatch seed at lag 0 ended at 0.761. That's the negative-advantage hole, triggered by numerics alone.
+- **Bounding costs a little under heavy lag.** Plain REINFORCE loses about 0.05 between lag 0 and lag 32, which is the bias of ignoring the ratio. CISPO and TIS lose almost nothing.
+- **The sampler KL helped against staleness.** At lag 32, REINFORCE plus the k1 term finished at 0.965 against 0.938 without it. The term is cheap and in this toy it pays for itself. It is still not what keeps IS-style losses alive, since it never sees a ratio.
+- **Tinker's CISPO advice holds up, weakly.** Raising the floor to 0.8 costs 0.033 at lag 32 (0.946 against 0.979) and nothing at small lag. That's directional support for their warning. My toy shows no positive feedback loop and no collapse.
+
+What it does **not** show: anything about StableReinforce's main term, which isn't public. It also doesn't show transformer-scale behaviour. The real mismatch grows as the policy sharpens and lives in 10,000-token sequences, and neither is in a 12-position toy. Take the ranking as an illustration of the mechanism, not a benchmark.
+
+## Where this leaves you
+
+If you train on Tinker and your async runs collapse, the published options already cover most of the fix. Use CISPO with the default one-sided clip, or token TIS if you write a custom loss, and log the sampler-learner KL. Qi et al. found that number rises before a collapse. StableReinforce is the vendor's bet that it can do better. It's worth an A/B run against CISPO on your own task, because the vendor offers nothing else to judge it by.
+
+The costs are concrete. It's alpha, and the API "may change." It requires sampling through Tinker with `record_stability_info=True` in the same session, with whole-sequence provenance on every datum, and records expire a day after their last use. One reply to the launch post asked for exactly the experiment I ran on a toy: vary policy lag and numerical mismatch independently and show how much sample efficiency stability costs. Until Thinking Machines publishes that, "extremely stable" is a claim, not a result.
+
+For the theory of why token-level corrections work at all, see [Qwen's first-order formulation of RL with LLMs](/articles/first-order-rl). For the MoE version of the same mismatch, where the router picks different experts at sampling and training time, see [Rollout Routing Replay](/articles/rollout-routing-replay). For why labs accept staleness in the first place, see [Fireworks' distributed RL](/articles/frontier-rl-cheaper). For a pipeline that records exactly what the sampler emitted so the learner can compute an honest ratio, see the [multi-harness RL capture proxy](/articles/multi-harness-rl).
