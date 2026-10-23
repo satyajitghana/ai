@@ -171,6 +171,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "deepgemm/accum-promote": () => import("@/components/articles/deepgemm/accum-promote"),
   "deepgemm/pipeline-machine": () => import("@/components/articles/deepgemm/pipeline-machine"),
   "deepgemm/scale-granularity": () => import("@/components/articles/deepgemm/scale-granularity"),
+  "deepinfer/request-lifecycle": () => import("@/components/articles/deepinfer/request-lifecycle"),
+  "deepinfer/verify-budget": () => import("@/components/articles/deepinfer/verify-budget"),
   "deepseek-dspark/confidence-scheduler": () => import("@/components/articles/deepseek-dspark/confidence-scheduler"),
   "deepseek-dspark/decode-stream": () => import("@/components/articles/deepseek-dspark/decode-stream"),
   "deepseek-dspark/draft-verify": () => import("@/components/articles/deepseek-dspark/draft-verify"),
