@@ -31,6 +31,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "agents-a1/three-stage": () => import("@/components/articles/agents-a1/three-stage"),
   "agr-decision-model/branch-mask": () => import("@/components/articles/agr-decision-model/branch-mask"),
   "agr-decision-model/temperature-curve": () => import("@/components/articles/agr-decision-model/temperature-curve"),
+  "ai-playground-home-agent/message-path": () => import("@/components/articles/ai-playground-home-agent/message-path"),
+  "ai-playground-home-agent/reach-board": () => import("@/components/articles/ai-playground-home-agent/reach-board"),
   "ai-short-drama-pipelines/cost-per-minute": () => import("@/components/articles/ai-short-drama-pipelines/cost-per-minute"),
   "ai-short-drama-pipelines/pipeline-comparator": () => import("@/components/articles/ai-short-drama-pipelines/pipeline-comparator"),
   "aira-research-agents/bottleneck-ledger": () => import("@/components/articles/aira-research-agents/bottleneck-ledger"),
