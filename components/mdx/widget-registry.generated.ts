@@ -767,6 +767,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "olmo-core-3/parallelism-planner": () => import("@/components/articles/olmo-core-3/parallelism-planner"),
   "one-shot-launch-videos/song-timeline": () => import("@/components/articles/one-shot-launch-videos/song-timeline"),
   "open-1b-auditable-training/trust-chain": () => import("@/components/articles/open-1b-auditable-training/trust-chain"),
+  "open-math-harness/tree-scorer": () => import("@/components/articles/open-math-harness/tree-scorer"),
+  "open-math-harness/verify-gauntlet": () => import("@/components/articles/open-math-harness/verify-gauntlet"),
   "open-seo/mention-matcher": () => import("@/components/articles/open-seo/mention-matcher"),
   "open-seo/noise-budget": () => import("@/components/articles/open-seo/noise-budget"),
   "openai-math/abhyankar-sathaye-critical-point": () => import("@/components/articles/openai-math/abhyankar-sathaye-critical-point"),
