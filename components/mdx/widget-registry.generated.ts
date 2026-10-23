@@ -977,6 +977,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "ring-zero-trillion-scale-rl/ratio-correction": () => import("@/components/articles/ring-zero-trillion-scale-rl/ratio-correction"),
   "rlcd-calibrated-decisions/reliability-lab": () => import("@/components/articles/rlcd-calibrated-decisions/reliability-lab"),
   "rlcd-calibrated-decisions/scoring-rules": () => import("@/components/articles/rlcd-calibrated-decisions/scoring-rules"),
+  "rlcr-avalon/collective-advantage": () => import("@/components/articles/rlcr-avalon/collective-advantage"),
+  "rlcr-avalon/derived-latency": () => import("@/components/articles/rlcr-avalon/derived-latency"),
   "rollout-routing-replay/discrepancy-scatter": () => import("@/components/articles/rollout-routing-replay/discrepancy-scatter"),
   "rollout-routing-replay/router-replay": () => import("@/components/articles/rollout-routing-replay/router-replay"),
   "roomtsc/hopfield-budget": () => import("@/components/articles/roomtsc/hopfield-budget"),
