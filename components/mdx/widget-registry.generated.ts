@@ -1017,6 +1017,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "scaling-laws-2026/loss-surface": () => import("@/components/articles/scaling-laws-2026/loss-surface"),
   "scaling-laws-2026/scaling-line": () => import("@/components/articles/scaling-laws-2026/scaling-line"),
   "scaling-laws-2026/third-axis": () => import("@/components/articles/scaling-laws-2026/third-axis"),
+  "security-week-oct-2026/day-cves": () => import("@/components/articles/security-week-oct-2026/day-cves"),
   "security-week-oct-2026/version-check": () => import("@/components/articles/security-week-oct-2026/version-check"),
   "security-week-oct-2026/week-board": () => import("@/components/articles/security-week-oct-2026/week-board"),
   "sensenova-u15/no-encoder": () => import("@/components/articles/sensenova-u15/no-encoder"),
