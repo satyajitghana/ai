@@ -1173,6 +1173,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "turboquant/rotation": () => import("@/components/articles/turboquant/rotation"),
   "turbovec/config-explorer": () => import("@/components/articles/turbovec/config-explorer"),
   "turbovec/memory-fit": () => import("@/components/articles/turbovec/memory-fit"),
+  "tv-launcher-rebuilds/debloat-planner": () => import("@/components/articles/tv-launcher-rebuilds/debloat-planner"),
+  "tv-launcher-rebuilds/invasiveness-ladder": () => import("@/components/articles/tv-launcher-rebuilds/invasiveness-ladder"),
   "twotower/block-diffusion": () => import("@/components/articles/twotower/block-diffusion"),
   "twotower/decouple": () => import("@/components/articles/twotower/decouple"),
   "twotower/two-tower": () => import("@/components/articles/twotower/two-tower"),
