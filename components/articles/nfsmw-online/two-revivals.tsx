@@ -6,9 +6,9 @@ import { cn } from "@/lib/utils"
 
 // Two sites that put NFS Most Wanted (2005) in a browser in the same fortnight
 // of October 2026, compared layer by layer from public material only, on
-// 23 Oct 2026. nfsmwonline.com is read from outside its log-in wall;
-// web.nfsmwo.com publishes its launch config, build manifest and file listings
-// to any visitor. Every cell carries its own label; `why` says where it came
+// 23 Oct 2026. nfsmwonline.com was first read from outside its log-in wall,
+// then from one account made for the purpose; web.nfsmwo.com publishes its
+// launch config, build manifest and file listings to any visitor. Every cell carries its own label; `why` says where it came
 // from.
 
 type Label = "measured" | "reported" | "reasoned"
@@ -26,9 +26,9 @@ const LAYERS: Layer[] = [
   {
     id: "runs",
     name: "What runs",
-    online: { text: "unknown; changelog reads like editable code", label: "reasoned" },
+    online: { text: "a new engine in Rust, reading converted data", label: "measured" },
     mwo: { text: "the shipped speed.exe, under Wine", label: "measured" },
-    why: "web.nfsmwo.com's launch config passes D:\\speed.exe as the program and sets WINESYSTEMROOT and WINEDLLOVERRIDES; mw_web.js imports Wine's __wine_unix_call tables; the wine listing names 48 DLLs from Wine's i386-windows folder, its 32-bit x86 builds. NFSMW Online's engine is behind its login, and its notes keep restoring 'like the original game' behaviour, which running the binary would not need.",
+    why: "web.nfsmwo.com's launch config passes D:\\speed.exe as the program and sets WINESYSTEMROOT and WINEDLLOVERRIDES; mw_web.js imports Wine's __wine_unix_call tables; the wine listing names 48 DLLs from Wine's i386-windows folder, its 32-bit x86 builds. NFSMW Online's module, read after logging in, is Rust compiled with wasm-bindgen, its own crate named nfs, with no x86 code or address in it.",
   },
   {
     id: "gpu",
@@ -40,16 +40,16 @@ const LAYERS: Layer[] = [
   {
     id: "code",
     name: "Engine code",
-    online: { text: "not visible", label: "measured" },
+    online: { text: "13,687,532-byte wasm, names kept, not encrypted", label: "measured" },
     mwo: { text: "95,956,980-byte wasm, shipped encrypted", label: "measured" },
-    why: "The build manifest names mw_web.wasm at 95,956,980 bytes, split into 23 parts (10,617,881 bytes on the wire) under a partCipher of pms-part-1, plus 3,028 pre-built code shards. Part one has no wasm header. I did not decrypt anything.",
+    why: "The build manifest names mw_web.wasm at 95,956,980 bytes, split into 23 parts (10,617,881 bytes on the wire) under a partCipher of pms-part-1, plus 3,028 pre-built code shards. Part one has no wasm header. I did not decrypt anything. NFSMW Online's module arrives as plain wasm (4,584,640 bytes gzipped) with a name section; the server refuses a direct request for it outside the page, and its game files are scrambled.",
   },
   {
     id: "files",
     name: "Game files",
-    online: { text: "an R2 bucket, behind the login", label: "measured" },
+    online: { text: "4,008 files, 5,237,314,648 bytes, listed to accounts", label: "measured" },
     mwo: { text: "1,783 files, 4,476,030,245 bytes, listed publicly", label: "measured" },
-    why: "NFSMW Online's file host answers with a Cloudflare R2 404 for unknown paths; I did not guess names. web.nfsmwo.com fetches a listing of the game folder that names every file, its size and a content-addressed URL on pmscdn.playnfs.com.",
+    why: "NFSMW Online's manifest, fetched only by a logged-in page, lists every file with a content hash that is its path on the R2 host; most are its own converted formats, the audio and movies are EA's, and speed.exe is not among them. web.nfsmwo.com fetches a listing of the game folder that names every file, its size and a content-addressed URL on pmscdn.playnfs.com.",
   },
   {
     id: "account",
