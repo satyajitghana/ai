@@ -1,0 +1,215 @@
+---
+title: "Nemotron-Labs Dory1.0-4B: one 20-layer block, run up to four times"
+description: "NVIDIA's Dory1.0-4B is a looped language model: 8 input layers, a 20-layer block that runs a fixed number of times per token, and 8 output layers, on a normalized-GPT backbone. I read the loop out of the vLLM pull request that serves it, counted 3,975,229,440 parameters in the safetensors header, worked out what each extra pass costs in FLOPs and KV cache, and ran the weights on a CPU at 1 to 4 loops. The loop count is one config integer, fixed for every token and chosen at load time. The second pass buys most of the reported gain, and knowledge does not move at all."
+date: 2026-10-19
+tags:
+  - looped-transformers
+  - small-models
+  - nvidia
+  - kv-cache
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Reads Dory's loop and KV modes out of the serving code, recounts its 3.98B parameters, prices each pass, and runs it on CPU at 1 to 4 loops."
+topic: llm-architecture
+kind: model
+level: practitioner
+runsOn: consumer-gpu
+licence: OpenMDW-1.1
+---
+
+import { LoopUnroller } from "@/components/articles/nemotron-dory/loop-unroller"
+
+Oleksii Kuchaiev at NVIDIA posted the release with one line of framing: "Nemotron-Labs models give us a glimpse of what the future might be. And it may be looped!" The model is [NVIDIA-Nemotron-Labs-Dory1.0-4B](https://huggingface.co/nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16), released on October 16, 2026, in four formats (BF16, MXFP8, NVFP4 and a Q5_K_M GGUF). There is no paper. The card is the documentation, and the only executable description of the architecture is the vLLM pull request that serves it, [vllm-project/vllm#60149](https://github.com/vllm-project/vllm/pull/60149). The Hugging Face repo ships no modelling code and `transformers` 5.20.1 has no `dory` model type, so `AutoModelForCausalLM` cannot open it today.
+
+So I read the vLLM code, read the safetensors header, and wrote a 260-line PyTorch forward pass from the reference to run it on a CPU. This piece is what "looped" means in that code, what it costs, and which of the card's claims hold.
+
+<ModelCard repo="nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16" claimed="4B" note="Looped normalized GPT: 8 input, 20 recurrent and 8 output attention+MLP pairs, recurrent block run 2 times by default. 3,975,229,440 BF16 parameters (measured from the header). No modelling code in the repo; served by vLLM PR #60149. OpenMDW-1.1." />
+
+## What "looped" means in Dory
+
+A standard transformer is a list of distinct blocks, each applied once. A looped (or recurrent-depth) transformer stores fewer blocks and applies some of them more than once. The site's [looped transformer explainer](/architectures/looped-transformer) covers the family. Dory is the prelude, core and coda variant:
+
+- an **input block** $\mathcal{I}$ that runs once,
+- a **recurrent block** $\mathcal{R}$ that runs $k$ times with the same weights,
+- an **output block** $\mathcal{O}$ that runs once and feeds the LM head.
+
+<Figure
+  src="/articles/nemotron-dory/fig1.png"
+  alt="Diagram: Emb feeds an orange input block I, whose output h-in becomes the initial state s0. Three dashed loop boxes, Loop 1, Loop 2 and Loop k, each contain a plus node that adds h-in to the previous state and a blue recurrent block R. The final state sk goes to a red output block O and then the head H."
+  caption="Dory's layer stack: input block, a shared recurrent block applied k times with the input re-injected before each loop, then the output block (Dory1.0-4B model card, architecture figure)."
+/>
+
+The card's caption says "the Input and Output blocks have 8 layers each, while the Recurrent block has 20 layers." The config says something that looks different: `num_hidden_layers: 72`, `n_input_layers: 16`, `n_recurrent_layers: 40`, `n_output_layers: 16`. Both are right. In Dory's code a "layer" is one sublayer, either attention or an MLP, never both. The `layer_types` list in `config.json` alternates them: 36 attention entries and 36 `mlp` entries (measured). The card counts attention+MLP pairs. So the stack is 8 + 20 + 8 = 36 pairs, and with $k$ loops the token passes through $16 + 20k$ pairs: 36 at one loop, 56 at the default two, 96 at four (reasoned).
+
+The loop itself is a dozen lines of `DoryBackbone.forward` in the PR:
+
+```python
+# vllm/model_executor/models/dory.py (PR #60149), condensed
+for layer in self.layers[:n_in]:
+    h = layer(positions, h)
+input_h = h
+state = input_h
+for i in range(self.num_loops):
+    h = justnorm(state + input_h)          # re-inject the input block's output
+    for layer in self.layers[n_in : n_in + n_rec]:
+        h = layer(positions, h, loop_idx=i)
+    state = justnorm(h)
+h = state
+for layer in self.layers[n_in + n_rec :]:
+    h = layer(positions, h)
+```
+
+Three things follow from it.
+
+**The input is re-injected before every pass.** Each loop starts from $\tilde s_k = \operatorname{norm}(s_{k-1} + h^{\text{in}})$, with $s_0 = h^{\text{in}}$. This is the "input injection" that keeps a recurrence anchored to the token it is processing. [IFM's ablations](/articles/looped-models-done-right) found it one of the axes that matters; Dory uses the simple additive form and starts the state from the input rather than from noise.
+
+**The loop count is a constant.** `self.num_loops = config.n_recurrent_loops`, read once when the model is built. Every token, in prefill and decode, runs exactly that many passes. There is no halting head, no per-token exit and no router. You set it at load time: `--hf-overrides '{"n_recurrent_loops": 2}'` in vLLM, `--override-kv dory.num_loops=int:2` in llama.cpp, which the card says accepts 1, 2, 3 or 4. The checked-in `config.json` says 2, which is NVIDIA's recommended default. This is elastic in the deployment sense, one checkpoint for several budgets, not adaptive in the Universal-Transformer sense.
+
+**Everything lives on the unit sphere.** Dory is a normalized GPT ([nGPT, arXiv 2410.01131](https://arxiv.org/abs/2410.01131)). There is no LayerNorm or RMSNorm. `justnorm` divides by the L2 norm, and the residual update is not `h + f(h)`. It is `justnorm(a + α·(norm(b) − a))`: move a learned, per-dimension fraction α of the way from the current point toward the sublayer's output, then project back onto the sphere. Queries and keys are normalized after RoPE, the attention output goes through a sigmoid gate and is normalized again, and the logits are multiplied by a learned per-token `logit_scale`. For a looped model this matters more than usual. A hidden state whose norm cannot grow is one failure mode, variance blow-up across passes, that [LOOM](/articles/loom-looped-moe) had to engineer around and Dory gets by construction. I have no ablation showing that is why NVIDIA chose nGPT; it is a reasonable reading, not a reported one.
+
+What the card does not say is how the model was trained with respect to loops: a fixed $k$ throughout, a random $k$ per step as in Huginn, or a schedule. It reports results at 1, 2 and 4 loops from one checkpoint, so whatever the recipe was, the weights tolerate all three. The training loop count is unverified.
+
+## Parameters stay fixed, compute does not
+
+The name says 4B. I summed every tensor in the BF16 safetensors header (an HTTP range request, no download): **3,975,229,440 parameters** across 507 tensors, all BF16 (measured). The name is honest. Split by role:
+
+| Group | Parameters | Share |
+|---|---:|---:|
+| Embeddings | 335,544,320 | 8.4% |
+| Input block (8 pairs) | 734,224,384 | 18.5% |
+| Recurrent block (20 pairs) | 1,835,560,960 | 46.2% |
+| Output block (8 pairs) | 734,224,384 | 18.5% |
+| LM head + `logit_scale` | 335,675,392 | 8.4% |
+
+All measured from the header. The embedding and LM head are untied (131,072 × 2,560 each), so 3.30B of the 3.98B are non-embedding.
+
+The recurrent block is 46.2% of the weights, so every extra pass re-runs almost half the model. Counting the weights each token multiplies against (everything but the embedding lookup):
+
+| Loops | Effective depth (pairs) | Matmul weights touched / token | FLOPs / token | vs 1 loop |
+|---:|---:|---:|---:|---:|
+| 1 | 36 | 3.64B | 7.28 GFLOP | 1.00x |
+| 2 | 56 | 5.48B | 10.95 GFLOP | 1.50x |
+| 3 | 76 | 7.31B | 14.62 GFLOP | 2.01x |
+| 4 | 96 | 9.15B | 18.29 GFLOP | 2.51x |
+
+All reasoned from the measured parameter groups, at 2 FLOPs per weight, ignoring attention scores (small at short context). At batch size one, decode is bound by memory bandwidth, and the number of bytes read per token scales the same way: 7.28 GB of BF16 weight reads per token at one loop and 18.29 GB at four, unless the 3.67 GB recurrent block fits in a cache, which on a GPU it does not. At the default of two loops, Dory does the per-token work of a 5.5B dense model while storing 3.98B.
+
+<LoopUnroller />
+
+## The KV cache: two modes, one approximation
+
+Every attention layer in the recurrent block sees a different hidden state on each pass, so in principle each pass has its own keys and values. The PR makes that the default, `recurrent_kv_cache_mode: "per_loop"`: for a recurrent attention layer it builds one `Attention` module per loop, each with its own cache, registered under a virtual layer index `loop_idx * num_hidden_layers + layer_idx` so the projections stay shared while the caches do not.
+
+The arithmetic from the config (reasoned): each attention layer stores 2 (K and V) × 4 KV heads × 256 dims × 2 bytes = 4,096 bytes per token. Of the 36 attention layers, 9 are full attention (2 input, 5 recurrent, 2 output) and 27 use a 1,024-token sliding window, so at long context only the full layers grow. Per token of context that is 36 KiB at one loop, 56 KiB at two and 96 KiB at four. At the advertised 256K context, one sequence's cache is 9.1 GiB at one loop, 14.2 GiB at two and 24.3 GiB at four.
+
+`"last_loop"` is the card's answer: one cache per recurrent attention layer, which every loop overwrites. The cache is then the one-loop size for any $k$: 9.1 GiB at 256K whether you loop once or four times. The code comment says exactly what this costs:
+
+> In last-loop mode every loop writes this step's KV to the same cache, overwriting the previous loop's. Loop i thus attends to loop-i KV for this step's tokens and last-loop KV for earlier tokens.
+
+In other words, on pass 1 of a new token, the earlier tokens are seen as they looked after their *final* pass, not their first. That is not the computation the model does in per-loop mode, and so it is not exact. It is an approximation, and the card's evidence for it is one sentence: "the accuracy with last-loop caching stays close to the per-loop mode with nearly unchanged output lengths." No table. My implementation has both modes, but the machine ran out of memory and time before I reached the last-loop runs, so I have no number of my own here either.
+
+## Running it on a CPU
+
+Satyajit asked me to run what I could. With no `transformers` implementation, I wrote my own forward pass in plain PyTorch from the vLLM reference: nGPT `justnorm`, the slerp-style residual, RoPE with $\theta = 10^4$ on sliding layers and $10^7$ on full ones, q/k normalization after RoPE, the sigmoid output gate, `logit_scale`, the loop, and both KV modes. The prompt is rendered with the repo's own `chat_template.jinja` with thinking off (`<think></think>`), decoding is greedy, and the loop count and cache mode are runtime arguments. The hardware is a shared 4-core cloud VM with no GPU, two threads, `nice -n 19`, with five other jobs on the machine. Speeds below are lower bounds.
+
+**First attempt, BF16 in RAM.** I streamed the BF16 file straight into memory (7.71 GB resident after loading, 7.96 GB after fusing the q/k/v/gate and gate/up projections, measured). It ran: at one loop it answered "391" to "What is 17 * 23?" with log-probability −0.0041 on the right answer, at 0.79 tokens/s. Four prompts in, the container's memory cgroup killed it. A 4B model in BF16 needs about 8 GB, and a shared box with a hard memory limit does not have 8 GB to spare.
+
+**Second attempt, int8 weight-only.** I quantized each 2-D weight to int8 with one scale per output row as it streamed in, kept norms and scales in BF16, and used PyTorch's `_weight_int8pack_mm` kernel. That is W8A16, the same precision class as NVIDIA's own MXFP8 export, at half the memory: 4.90 GB peak resident (measured). On a test matrix the int8 matmul differs from BF16 by 0.87% relative error, and on the four prompts the BF16 run finished, the int8 model's log-probabilities on the reference answers land within 0.13 of BF16's (−0.0032 vs −0.0041, −5.36 vs −5.47, −2.24 vs −2.37, −11.80 vs −11.74; measured). The quantization is not what moves the numbers below.
+
+Five prompts, each ending "Reply with only the number.", thinking off, greedy:
+
+| Prompt | Reference | 1 loop: answer (log p) | 2 loops: answer (log p) | 3 loops: answer (log p) |
+|---|---:|---:|---:|---:|
+| What is 17 * 23? | 391 | 391 (−0.003) | 391 (−0.31) | 391 (−0.015) |
+| 120 km in 1.5 hours, average km/h? | 80 | 120 (−5.36) | 120 (−6.31) | 120 (−5.91) |
+| If 3x + 7 = 31, what is x? | 8 | 2 (−2.24) | 24 (−2.78) | not run |
+| Primes between 10 and 30? | 6 | 11 (−11.80) | 11 (−11.12) | not run |
+| Sally's 3 brothers each have 2 sisters | 1 | 2 (−1.38) | 2 (−1.40) | not run |
+
+All measured, int8, per-loop cache. "log p" is the log-probability the model puts on the reference answer when forced through it; 0 means certain. The model gets 1 of 5 at one loop and 1 of 5 at two. The second loop changes one wrong answer into a different wrong answer: on the algebra prompt it answers 24, which is $31 - 7$, one step further along than 2. That is the whole quality signal I could get, and I would not read much into it. Dory is a reasoning model whose card results are all with reasoning on; asking it for a bare number with `<think></think>` already closed is the regime where an extra pass has the least room to help. Its card numbers come from long reasoning traces, and I could not generate those on this machine.
+
+The same memory limit ended this run too: the cgroup killed it at 4.90 GB, two prompts into three loops, while other jobs on the box spiked. **Third attempt:** I wrote the int8 weights to a 3.98 GB file and memory-mapped it, so the kernel could evict pages instead of killing the process, and ran a round-robin speed test (64-token prompt, 8 decode steps, each loop count in turn so contention hits all of them alike). The process survived. The numbers did not. With a load average of 10 to 15 on 4 cores and the weight pages being evicted between steps, two rounds gave:
+
+| Loops | Decode tok/s, round 1 | Decode tok/s, round 2 | Fastest single-prompt decode in any run |
+|---:|---:|---:|---:|
+| 1 | 0.52 | 0.21 | 2.70 |
+| 2 | 0.16 | 0.21 | 1.43 |
+| 3 | 0.08 | 0.13 | 0.17 |
+| 4 | 0.06 | 0.10 | 0.10 (bench only) |
+
+All measured, CPU only, two threads. Round 2 has one loop and two loops at the same speed, which no model does; that is the machine, not Dory. The defensible readings are the ones that do not depend on wall-clock time. The cache my implementation builds is exactly what the per-loop arithmetic says: 5,160,960 bytes for 35 tokens at one loop, 8,028,160 at two and 10,895,360 at three, which is 35 tokens × 36, 56 and 76 attention layers × 4,096 bytes (measured). And the cost of a pass is the FLOP table above: 1.50x, 2.01x and 2.51x the one-loop work. On an idle machine I would expect decode speed to fall roughly in that proportion, since decode is reading weights; I did not get an idle machine to show it. I stopped there and deleted the weights.
+
+## The card's numbers
+
+All of the following are NVIDIA's, run under NVIDIA's own harness (NeMo Gym / NeMo Evaluator SDK), for every model in the table (reported). Only Qwen3.6-35B-A3B's SWE-bench Verified score is a quoted third-party number.
+
+| Benchmark | Dory 1 loop | Dory 2 loops | Dory 4 loops | Qwen3.5-4B | Qwen3.5-9B |
+|---|---:|---:|---:|---:|---:|
+| SciCode | 27.3 | 34.94 | 35.11 | 25.82 | 28.21 |
+| SWE-bench Verified | 50.3 | 59.5 | 61.8 | 54.7 | 61 |
+| Terminal-Bench 2.1 | 12.5 | 18.1 | 22.2 | 15 | 24 |
+| τ³-bench (Banking) | 11.6 | 12.89 | 14.69 | 5.03 | 7.22 |
+| GDPval-AA-V2 (Elo) | 815 | 946 | 967 | 424 | 546 |
+| GPQA Diamond | 69.19 | 72.41 | 72.16 | 77.71 | 80.93 |
+| HLE (text, no tools) | 8.25 | 10.89 | 10.43 | 11.31 | 15.43 |
+| IFBench | 74.29 | 77.94 | 79 | 53.83 | 59 |
+| AA-LCR | 63 | 71 | 73 | 64.7 | 68.4 |
+| AA-Omniscience | 10.03 | 10.08 | 10.03 | 15.02 | 18.05 |
+
+Four readings.
+
+**The second loop is most of the gain.** From one to two loops, SWE-bench Verified goes 50.3 → 59.5 (+9.2) and SciCode 27.3 → 34.94; from two to four it goes 59.5 → 61.8 (+2.3) and 34.94 → 35.11 (reasoned from the reported rows). On GPQA Diamond and HLE, four loops is slightly *worse* than two (72.16 vs 72.41, 10.43 vs 10.89). Only the agentic rows, Terminal-Bench (18.1 → 22.2) and τ³ (12.89 → 14.69), keep climbing. That matches the card's own advice: two loops by default, four for agentic work.
+
+**Knowledge does not loop.** AA-Omniscience, a recall test, reads 10.03, 10.08 and 10.03 at one, two and four loops. Flat to the second decimal. More passes over the same weights do not add facts that are not in the weights. This is the result that [virtual logic depth](/articles/virtual-logic-depth) argued from small GPT-2s, "looping buys reasoning, not knowledge", here at 4B in a shipped model's own table. It is also where Dory loses: 10.08 against Qwen3.5-4B's 15.02, and below it on GPQA Diamond (72.41 vs 77.71) and HLE (10.89 vs 11.31), all knowledge-heavy.
+
+**Against Qwen3.5-4B at two loops**, Dory wins 7 of 10 rows, including SWE-bench Verified (59.5 vs 54.7), IFBench (77.94 vs 53.83) and GDPval (946 vs 424). The fair framing is that Qwen3.5-4B does 4B parameters of work per token and Dory at two loops does about 5.5B (reasoned, above). Against Qwen3.5-9B, which does more work still, Dory at two loops is close on SWE-bench (59.5 vs 61) and behind on GPQA and HLE. These are comparisons of stored size, not of compute, which is the confound [SMELT](/articles/looped-transformers-matched-compute) set out to remove.
+
+**The aggregate chart** puts Dory's internal Artificial Analysis v4.3.2 estimate at 13.8, 17.7 and 18.4 for one, two and four loops, against Qwen3.5-4B at 11.0 and Qwen3.5-9B at 12.53. The card's footnote is explicit that these are "internal estimates" that "may deviate from official Artificial Analysis (AA) scores."
+
+<Figure
+  src="/articles/nemotron-dory/fig2.png"
+  alt="Line chart of AA v4.3.2 estimate against loop count k. Dory1-4B rises from 13.8 at k=1 to 17.7 at k=2 and 18.4 at k=4. Dashed reference lines: Qwen3.6-35B-A3B 20.15, Muse-Glimmer-30B 19.94, Gemma4-26B-A4B 16.35, Qwen3.5-9B 12.53, Qwen3.5-4B 11.0."
+  caption="NVIDIA's internal AA v4.3.2 estimate for Dory at 1, 2 and 4 loops against reference models; the card notes these may deviate from official AA scores (Dory1.0-4B model card, benchmark figure)."
+/>
+
+## Do the extra passes pay for themselves?
+
+A loop makes every token more expensive. The card's counter-claim is that it makes answers shorter: "With looping, the model needs fewer generated tokens to solve a task."
+
+<Figure
+  src="/articles/nemotron-dory/fig3.png"
+  alt="Grouped bar chart of output tokens per attempt relative to k=1 on four benchmarks. Terminal-Bench 2.1: 1.00x, 0.72x, 0.50x. GDPval-AA-V2: 1.00x, 0.66x, 0.40x. SWE-bench Verified: 1.00x, 0.79x, 0.74x. tau-cubed Banking: 1.00x, 0.80x, 0.77x, for k=1, 2 and 4."
+  caption="Output tokens per attempt at 2 and 4 loops relative to 1 loop, on four agentic benchmarks (Dory1.0-4B model card, token-efficiency figure)."
+/>
+
+Multiply the per-token cost by those factors and you get compute per task relative to one loop (reasoned, assuming cost is linear in generated tokens and ignoring the prompt, which in agentic tasks is not small):
+
+| | Terminal-Bench | GDPval | SWE-bench Verified | τ³ Banking |
+|---|---:|---:|---:|---:|
+| 2 loops (1.50x per token) | 1.08x | 0.99x | 1.19x | 1.20x |
+| 4 loops (2.51x per token) | 1.26x | 1.01x | 1.86x | 1.94x |
+
+At two loops the total compute for a task is roughly flat, between 0.99x and 1.20x, while SWE-bench Verified gains 9.2 points. That is the honest version of "elastic inference compute": the second pass is close to free *per task* on these benchmarks, because the model talks less. Four loops is not free: on SWE-bench and τ³ it nearly doubles compute per task for 2.3 and 1.8 more points. Latency follows the same arithmetic only when decode is the bottleneck; prefill has no shorter answer to offset the extra passes, so long prompts pay the full 1.50x or 2.51x.
+
+## Where it breaks, and what is unverified
+
+- **No paper, no training details on the loop.** How many loops the model saw in pre-training, RL and SFT is not stated. The card does say pre-training used NVFP4 for the first ~4.5T of 6T tokens, the recipe the site covered in [Nemotron in NVFP4](/articles/nemotron-nvfp4).
+- **Serving is pre-release.** vLLM support is an open PR and llama.cpp support is a fork pinned to one commit. `transformers` has no implementation. The KV cache modes exist only in those two code paths.
+- **Last-loop caching is an approximation** whose accuracy cost the card summarizes in a sentence, without numbers. I did not get to test it.
+- **All comparison numbers are NVIDIA's own runs.** Consistent harness is better than mixed sources, but none of it is third-party.
+- **My runs are CPU runs on a contended VM**, with my own forward pass and int8 weights, thinking off. The cache sizes are exact; the speeds are too noisy to show a scaling curve, and five bare-number prompts say nothing about the reasoning-on gains the card reports.
+
+## Licence
+
+OpenMDW-1.1 (reported from the card; I read the [licence text](https://openmdw.ai/license/1-1/)). It grants permission "to deal in the Model Materials without restriction", including under patent and trade-secret rights, asks you to keep the licence and notices when you redistribute, and terminates for anyone who sues claiming the materials infringe. It places no restriction on outputs. That is about as permissive as model licences get, close to MIT in spirit, and it is the same licence the site found on [Nemotron 3.5 Super VL](/articles/nemotron-3-5-super-vl).
+
+## Where this sits
+
+Dory is the second looped small model to ship with real weights in a few months, after [Nanbeige4.2-3B](/articles/nanbeige-4-2-3b), which also loops twice. What Dory adds is the elastic part: one checkpoint with published scores at 1, 2 and 4 loops, and a cache mode that decouples memory from loop count. What it does not add is a way for the model to decide its own depth per token. Every token pays for the same number of passes, the hard ones and the trivial ones. The site's other Nemotron-Labs release, [TwoTower](/articles/nemotron-twotower), made a different structural bet on the same theme, spending a fixed set of weights more than once.

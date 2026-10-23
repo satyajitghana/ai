@@ -1,0 +1,361 @@
+---
+title: "SANA-WM: a minute of camera-controlled world, and where its memory actually lives"
+description: "NVIDIA's SANA-WM turns one image, a prompt and a 6-DoF camera path into a 60-second 720p video, with a 2.6B diffusion transformer that keeps 15 of its 20 blocks as frame-wise Gated DeltaNet and 5 as softmax. I read the paper, the code at commit 0354b3d and the safetensors headers of the released weights. The 2.6B is real (2,663,575,828 parameters, 19% of them camera branch), and the camera conditioning is a sensible two-rate design: one pose per latent frame inside attention, plus all eight raw-frame Plücker raymaps (48 channels) added after it. The cost story needs two corrections. The five softmax layers are still quadratic and, by my arithmetic, account for nearly half of each 60-second forward pass; constant memory only arrives in the streaming release, whose softmax layers see the first chunk and the previous one and nothing in between. And the single-GPU claims come in layers: stage 1 on one H100, stage 1 plus a 19B refiner in 74.7 GB, and the RTX 5090's 34 seconds for the denoising of a distilled, NVFP4, stage-1-only model."
+date: 2026-10-15
+tags:
+  - world-models
+  - video-generation
+  - linear-attention
+  - diffusion
+  - nvidia
+cover: /articles/sana-wm/fig1.jpg
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Counts SANA-WM's 2.6B from the weights, shows the 5 softmax layers still dominate cost at 60 s, and pins down what each single-GPU claim includes."
+topic: generative-media
+kind: model
+level: practitioner
+runsOn: workstation
+licence: mixed
+---
+
+import { ContextCost } from "@/components/articles/sana-wm/context-cost"
+import { CameraRays } from "@/components/articles/sana-wm/camera-rays"
+
+A reshare doing the rounds puts it simply: NVIDIA has a 2.6B open-source world model that takes an
+image, a text prompt and a camera trajectory and turns them into a controllable world, "all on a single
+GPU", RTX 5090 or H100. That is a fair summary of the abstract of
+[SANA-WM](https://arxiv.org/abs/2605.15178) (Zhu, Liu, Zhao et al., NVIDIA, May 2026), which promises
+720p, one-minute videos with 6-DoF camera control, trained in 15 days on 64 H100s.
+
+I have written about this family twice. [Sana](/articles/sana) is the image model, where I rebuilt the
+FLOP table from the configs and found the deep-compression autoencoder doing more of the work than the
+linear attention. [SANA-Video 2.0](/articles/sana-video2) is the video model that gave up on pure linear
+attention for a 3:1 linear-to-softmax hybrid. SANA-WM is the third step: the same 3:1 shape, but the
+linear layers are now a gated delta rule that runs one *frame* at a time, and the model has to follow a
+camera for a full minute instead of filling five seconds.
+
+I cloned [NVlabs/Sana](https://github.com/NVlabs/Sana) at commit `0354b3d` (2026-10-11), read the
+SANA-WM model, camera and streaming code, read the paper (arXiv v1), and range-read the safetensors
+headers of the three released Hugging Face repos without downloading any weights. Every number below is
+labelled: **measured** (I computed it from a file), **reported** (the authors' figure, not re-run) or
+**reasoned** (my arithmetic on the other two). I did not run the model; the full bidirectional release is
+102.5 GB of files at its current revision (measured, from the Hub listing; the card below shows the
+repo's 145.79 GB of storage, which probably also counts superseded files such as the single 41 GB
+`refiner.safetensors` the model card's own table still names).
+
+<Figure
+  src="/articles/sana-wm/fig1.jpg"
+  alt="SANA-WM teaser. Two rows of four frames each from minute-long generated videos: a character walking a mountain path among autumn trees, and a silver sports car driving down a sunlit street lined with low buildings. Each frame has a small WASD overlay. Between the rows, the SANA-WM logo with the slogan 'One image. Infinite worlds.' and four badges: minute-scale long horizon, precise action control, 64 GPUs efficient training, 1 H100 GPU 1-min video gen. A timeline along the bottom runs from 0s to 60s."
+  caption="The pitch: one first frame, a held key or a camera path, and a minute of 720p video. Frames are the authors' selection. (SANA-WM paper, Figure 1.)"
+/>
+
+## What it is, in one table
+
+| | |
+|---|---|
+| Task | first frame + text + 6-DoF camera path → 60 s of 720p video (961 frames at 16 fps) |
+| Stage 1 | Sana DiT, 20 blocks × 2240 wide, 20 heads of 112, patch 1 · **2,663,575,828 parameters** (measured) |
+| Attention | blocks 3, 7, 11, 15 and 19 softmax; the other 15 frame-wise Gated DeltaNet (`softmax_every_n: 4`, measured) |
+| Camera | coarse: UCPE pose transform in every block's attention · fine: 48-channel raw-frame Plücker map added after attention, 20 of 20 blocks (measured) |
+| Tokenizer | LTX-2 VAE, stride 8 × 32 × 32, 128 channels → 22 × 40 = 880 tokens per latent frame at 704 × 1280 (measured from config) |
+| Stage 2 | an LTX-2 refiner with LoRA, three Euler steps: **18,876,174,592 parameters** in the released transformer, 5.7B of them in tensors named `audio` (measured) |
+| Releases | `SANA-WM_bidirectional` (stage 1 + refiner), `SANA-WM_streaming` (distilled 4-step chunk-causal), `SANA-WM_chunk_causal` (stage-1 teacher) |
+| Training | ~213K clips with metric camera poses; 64 H100s for ~15 days (reported) |
+
+<ModelCard repo="Efficient-Large-Model/SANA-WM_bidirectional" />
+
+## Why a minute is hard: count the tokens
+
+Start where the cost starts. The LTX-2 VAE squeezes 8 raw frames into one latent frame in time and 32
+pixels into one cell in each spatial direction; the DiT patch size is 1 (the `x_embedder` weight is
+`[2240, 128, 1, 1, 1]`, measured). At the fixed 704 × 1280 output, one latent frame is 22 × 40 = 880
+tokens. A 60-second clip is 961 raw frames: the first latent frame holds frame 0 on its own, and each of
+the next 120 holds eight. So the transformer sees **121 × 880 = 106,480 tokens** at once (reasoned, from
+the config).
+
+Full softmax attention over that is the familiar quadratic. Per layer, forming $QK^\top$ and multiplying
+by $V$ costs about $4N^2d$ floating-point operations, with $N$ the token count and $d = 2240$. At
+$N = 106{,}480$ that is $1.0 \times 10^{14}$ per layer per forward pass (reasoned). The weight matrices,
+by contrast, cost $2PN$ for $P$ parameters: $5.7 \times 10^{14}$ for the whole 2.66B network (reasoned).
+Twenty softmax layers would spend about 3.6 times the rest of the network on attention alone.
+
+Memory is the sharper edge for a model that rolls out autoregressively. A softmax layer that wants to
+recall the whole past has to keep its keys and values: $2Nd$ numbers, 0.95 GB per layer in bf16 at 60
+seconds (reasoned). The paper's own scaling plot shows an all-softmax variant running out of an 80 GB
+H100 at 40 seconds (reported, Figure 7b).
+
+## The linear part: a gated delta rule, one frame per step
+
+SANA-Video's linear attention keeps a running sum of key-value outer products, a $D \times D$ matrix per
+head, and reads it with the current queries. Its weakness at a minute is that nothing ever leaves:
+"stale features accumulate with the same effective weight as more recent ones", and the paper reports
+drift and unstable training as the state grows. The [delta-rule family](/articles/ltc-gated-delta) is the
+standard fix, and [the state-size question](/articles/linear-attention-state-roundup) is the standard
+worry about it.
+
+Gated DeltaNet decays the state and writes only what it failed to predict:
+
+$$
+S_i = \gamma_i S_{i-1} + \big(v_i - \gamma_i S_{i-1} \hat k_i\big)\,\beta_i \hat k_i^\top, \qquad o_i = S_i \hat q_i
+$$
+
+Here $S_i$ is the state, $\gamma_i \in (0,1]$ a forget gate and $\beta_i \in [0,1]$ a write strength.
+The bracket is the error between the value the state should return for this key and the value it does.
+
+SANA-WM's change is the step size. A language model scans one token per step; SANA-WM scans one latent
+frame per step, all 880 tokens at once:
+
+$$
+S_t = S_{t-1} M_t + U_t, \quad M_t = \gamma_t\big(I - \hat K_t \beta_t \hat K_t^\top\big), \quad U_t = V_t \beta_t \hat K_t^\top
+$$
+
+That makes a minute 121 recurrent steps, not 106,480, and the state stays $112 \times 112$ per head: 20
+heads × 12,544 numbers, about 1 MB per layer in fp32 (reasoned). It also creates a numerical problem the
+paper handles neatly. $M_t$ is applied 121 times, so it must not expand anything, and the subtracted term
+now sums 880 keys instead of one. With the keys RMS-normalised and scaled by $1/\sqrt{D \cdot S}$ (with
+$S = 880$ tokens), its trace is at most 1 and $\lVert M_t \rVert \le \gamma_t$. The paper's ablation
+shows why it matters: the usual $1/\sqrt{D}$ scaling hit NaNs at step 16, no scaling at step 1, and
+only the extra $1/\sqrt{S}$ trained (reported, Figure 6).
+
+The bidirectional model runs this scan forwards and backwards and sums the two; the chunk-causal one
+keeps the forward scan global and resets the backward one at each chunk boundary. The parameter count of
+a GDN block and a softmax block is the same to within 0.1M (130.8M against 130.7M, measured): the softmax
+blocks keep the same QKV and output projections and simply skip the recurrence and the key convolution.
+The decay and write-gate tensors are still in the softmax blocks' checkpoint, unused.
+
+<Figure
+  src="/articles/sana-wm/fig2.jpg"
+  alt="SANA-WM architecture. Left: a stack labelled SANA-WM times L, three GDN blocks then a softmax block, fed by camera pose, text tokens, reference-image tokens and latent tokens. Middle top: inside a GDN or softmax block, the GDN or softmax attention and a UCPE attention branch are summed, then Plücker mixing (fed by the camera pose), cross-attention with text tokens and a Mix-FFN. Middle bottom: GDN attention, with Q passing norm and ReLU, K passing conv, norm, ReLU and scale, V, gamma and beta feeding a gated delta rule, multiplied by a SiLU-gated linear branch. Right: a control pad, a joystick and a prompt about a silver sports car feed Stage 1, SANA-WM, whose frames pass to Stage 2, the refiner, with a zoomed crop showing a sharper car body after refinement."
+  caption="The whole machine: GDN blocks with a softmax block every fourth, a UCPE camera branch beside the main attention, Plücker mixing after it, and a separate refiner as stage 2. (SANA-WM paper, Figure 2.)"
+/>
+
+## Where the softmax anchors sit, and what they still cost
+
+Linear state cannot do exact recall. A $112 \times 112$ matrix is a lossy summary, so SANA-WM keeps
+exact attention in every fourth block, at indices 3, 7, 11, 15 and 19 (measured, `softmax_every_n: 4`
+in `_build_camctrl_cls_list`). In the bidirectional model those five layers attend over all 106,480
+tokens with no mask (measured: `_forward_softmax_attn` with `frame_causal=False`). The paper calls them
+the layers that "anchor long-term spatial consistency".
+
+That is the design, and it is the right shape. What it is not is linear. Five quadratic layers are a
+quarter of twenty quadratic layers, and the quadratic term still grows. The widget runs the arithmetic on
+the released shapes:
+
+<ContextCost />
+
+The numbers it prints, all reasoned from the shapes above:
+
+| clip | tokens | all softmax | hybrid (5 + 15) | all GDN | share of hybrid spent in softmax |
+|---|---|---|---|---|---|
+| 5 s | 9,680 | 68 TFLOP | 56 TFLOP | 52 TFLOP | 8% |
+| 30 s | 53,680 | 802 TFLOP | 416 TFLOP | 287 TFLOP | 31% |
+| 60 s | 106,480 | 2.60 PFLOP | 1.08 PFLOP | 0.57 PFLOP | 47% |
+
+Per forward pass at a minute, the hybrid is about 2.4 times cheaper than all-softmax and about 1.9
+times dearer than all-GDN. Nearly half its compute is in the five softmax layers. The point where those
+five layers cost as much as every weight in the network is about 119,000 tokens, roughly 67 seconds of
+video (reasoned). That is a model sized, deliberately or not, to stop at about a minute. These are FLOP
+counts, not timings: FlashAttention and the fused Triton GDN kernels run at different efficiencies, and
+the paper measures rather than models. Its Figure 7b puts the hybrid's single-step latency on an H100
+between the cumulative-linear and all-softmax curves at every length, with all-softmax going out of
+memory at 40 seconds (reported).
+
+The memory story is where the release splits in two. In the chunk-causal rollout, a softmax layer that
+keeps the whole past holds about 0.95 GB of keys and values per layer at 60 seconds (reasoned), which is
+why five of them fit and twenty did not. The streaming release goes further. Its stage-1 softmax layers
+keep the first chunk as an attention sink and a sliding window of past chunks, default
+`--num_cached_blocks 2` with the sink token on (measured, `inference_sana_wm_streaming.py` and
+`sana_streaming_cache.py`). Reading the window logic, a chunk sees chunk 0, the chunk before it and
+itself: 4 + 3 + 3 latent frames, under 80 MB per softmax layer, flat in length (reasoned).
+
+Here is what that means. In the deployed streaming model, exact attention reaches the opening frames and
+the last three seconds or so of video. Everything in between survives only as the GDN state. That is a
+legitimate trade, and the paper says so in its own words: the sink and window keep "softmax memory and
+per-chunk latency constant with respect to rollout length". But it is the opposite of the headline
+picture of softmax anchors holding the whole minute together. In the version that runs in real time,
+they do not.
+
+<Figure
+  src="/articles/sana-wm/fig7.png"
+  alt="Two panels. Left, a 60-second efficiency ablation as horizontal bars: SANA-WM on an H100 at 60 steps, VAE 4.4 s plus DiT 21.7 minutes; with 4-step distillation on an H100, 48 s; with sink, 34 s; on an RTX 5090 without sink, out of memory; with sink, 48 s; with NVFP4, 42 s, of which DiT 34 s; arrows mark 27x, 1.4x, 1.1x and 38x overall. Right, two line plots against video duration from 5 to 60 seconds on an H100: DiT latency and peak memory for hybrid GDN-softmax, cumulative linear and softmax only. Softmax only climbs steeply and is marked OOM at 40 s; hybrid rises gently to about 0.6 s and 28 GB at 60 s; cumulative linear is flat."
+  caption="Left: the path from 21.7 minutes of DiT time on an H100 to 34 seconds on an RTX 5090; the 5090 bars are a distilled, sink-windowed, NVFP4 stage 1 with no refiner. Right: per-step latency and memory against clip length. Measured by the authors. (SANA-WM paper, Figure 7.)"
+/>
+
+## Camera control at two rates
+
+A world model is only a world model if it goes where you point it. SANA-WM takes a camera-to-world
+matrix per raw frame (an `(F, 4, 4)` array) or a keyboard string such as `w-100,dw-60` that the script
+integrates into one. The difficulty is the same VAE that made the minute affordable: one latent token
+summarises eight raw frames, and over eight frames the camera can turn several degrees.
+
+So the camera enters twice.
+
+- **Coarse, at the latent rate: UCPE.** For each token, the pose of its latent frame and the
+  intrinsics give a world-space ray. The model builds a small coordinate frame around that ray and
+  applies it, as a 4 × 4 transform, to a group of channels in the camera branch's queries, keys and
+  values; the remaining channels get ordinary rotary embedding. Attention then compares tokens in each
+  other's ray frames. The camera branch has its own Q, K, V and output projections in every block
+  (four 2240 × 2240 matrices, measured), shares the main branch's GDN gates, and is zero-initialised.
+- **Fine, at the raw rate: Plücker mixing.** For each of the eight raw frames inside a latent frame,
+  every cell gets its Plücker ray: the direction $d$ and the moment $o \times d$, six numbers. Eight
+  frames × 6 = 48 channels, passed through a zero-initialised patch embedder
+  (`plucker_embedder.proj.weight [2240, 48, 1, 1, 1]`, measured) and added after every block's attention
+  through a per-block zero-initialised projection. The raymap is computed at the latent resolution, 22
+  × 40, not at pixel resolution (measured, `_build_chunk_plucker`).
+
+The two halves of a Plücker ray separate the two kinds of motion. A pure rotation repaints the
+directions across the whole grid and leaves the moments alone if the camera sits at the origin; a pure
+translation leaves every direction unchanged and moves only the moments. Pick a path and scrub through
+the minute:
+
+<CameraRays />
+
+Everything the camera needs costs 502M parameters: the four camera projections and the Plücker
+projection in each of 20 blocks, plus the embedders (measured). That is 19% of the 2.66B, and the reason
+the checkpoint is named `sana_wm_1600m_720p` while holding 2.66B parameters: the backbone is the
+1600M-class Sana configuration, 20 blocks at width 2240, and the camera branch, the output gates and
+the temporal convolutions in the feed-forward layers sit on top (reasoned from the tensor names).
+
+The paper's ablation, on its held-out OmniWorld split with 5-second clips (reported, Table 4):
+
+| camera encoding | FVD ↓ | rotation error ↓ | translation error ↓ | CamMC ↓ |
+|---|---|---|---|---|
+| none | 348.93 | 16.93 | 0.2347 | 0.4937 |
+| Plücker only | 339.45 | 16.02 | 0.2340 | 0.4742 |
+| PRoPE | 326.70 | 6.29 | 0.1857 | 0.2629 |
+| UCPE only | 314.88 | 7.73 | 0.1350 | 0.2453 |
+| UCPE + Plücker | 320.80 | 6.21 | 0.1162 | 0.2047 |
+
+Input-level Plücker on its own barely moves rotation error. The work is done inside attention, and the
+raw-rate Plücker branch adds the last 14% of translation accuracy. [Astronex-World](/articles/astronex-world)
+uses PRoPE; on this one table, UCPE plus Plücker beats it on every camera metric and loses no FVD.
+
+## What keeps a minute consistent
+
+There is no memory module. SANA-WM has no point cloud, no retrieved frames, no 3D state; the paper's
+own limitations section says it "lacks explicit 3D scene memory". Consistency comes from three things:
+the GDN state, the softmax layers (globally in the bidirectional model, windowed in streaming), and the
+camera conditioning, which tells every token where in the world it is looking. A second stage then
+cleans up.
+
+The second stage is not small. It is an LTX-2 video model with a LoRA, trained to map a noised stage-1
+latent to a high-fidelity one in three Euler steps, with a clean reference slice of the first frame
+prepended as fixed keys and values. The paper calls it 17B; the transformer in the release has
+18,876,174,592 parameters, of which 5,714,096,256 sit in tensors with `audio` in their names (measured).
+LTX-2 is an audio-video model; SANA-WM uses the video half.
+
+On the authors' own 60-second benchmark (80 scenes, simple and hard revisit trajectories), the refiner
+earns its keep (reported, Tables 2 and 8):
+
+| | rotation error (simple / hard) | VBench overall | revisit PSNR | ΔIQ (first − last 10 s) |
+|---|---|---|---|---|
+| SANA-WM stage 1, autoregressive | 7.59° / 10.02° | 79.29 / 79.60 | 14.16 / 14.10 dB | 3.79 / 3.09 |
+| + refiner | 4.50° / 8.34° | 80.62 / 81.89 | 14.46 / 14.80 dB | 1.17 / 0.31 |
+| LingBot-World (14B+14B, 480p, 8 GPUs) | 10.47° / 18.99° | 81.82 / 81.89 | 14.59 / 14.08 dB | 0.04 / 0.58 |
+| Matrix-Game 3.0 (5B, 720p, 8 GPUs) | 12.96° / 18.79° | 78.53 / 78.79 | 12.29 / 12.17 dB | 2.41 / 0.32 |
+
+Camera following is the clear win: the lowest rotation error in the table on both splits. Visual quality
+with the refiner matches LingBot-World, which runs at 480p on eight GPUs. Revisit memory, the test of
+whether a place looks the same when you come back to it, is middling for everyone: 12 to 15 dB.
+[WorldCrafter](/articles/worldcrafter), which adds an explicit learned memory, scores 18.016 dB on its
+own benchmark and includes SANA-WM among its baselines. The benchmarks differ, so that is a
+direction, not a ranking.
+
+<Figure
+  src="/articles/sana-wm/fig5.jpg"
+  alt="A grid comparing four hard-trajectory 60-second videos across methods. Each row is one scene, a street, a forest, a room and a plaza, shown at several times; SANA-WM's frames carry green borders and a small action overlay in the corner. Baseline frames in the same rows are blurrier, change layout, or drift to a different place."
+  caption="Four hard trajectories, a minute each. Scenes selected by the authors; the tables above are the averages. (SANA-WM paper, Figure 5.)"
+/>
+
+## The 2.6B and the single GPU, claim by claim
+
+The parameter count holds. The stage-1 checkpoint is 872 tensors and 2,663,575,828 parameters, stored
+in fp32 except the 691,200-number caption-padding embedding in bf16, which is why the file is 10.65 GB
+(measured). "2.6B" describes stage 1. The rows of the main table that match LingBot-World on quality are
+labelled "2.6B+17B".
+
+The single-GPU claims come in four layers, and each is true of something different:
+
+1. **Stage 1 on one H100 (reported).** Bidirectional stage 1 peaks at 49.2 GB and the autoregressive
+   one at 51.1 GB (Tables 2 and 9). Both fit an 80 GB card with room to spare.
+2. **Stage 1 plus refiner on one H100 (reported).** 74.7 GB peak, 22.0 videos an hour on eight H100s,
+   one clip per GPU. The release's files add up to 102.5 GB, including 48.8 GB of text encoder for the
+   refiner (measured), so the pipeline necessarily loads in stages; the docs offer `--offload_vae` and
+   `--offload_refiner` for tighter cards.
+3. **"60 s of 720p in 34 s" on an RTX 5090 (reported).** Figure 7a is explicit about what this is: a
+   4-step distilled, chunk-causal stage 1 with the attention sink and local window, quantised to NVFP4,
+   and 34 s of DiT time. With the VAE it is 42 s. There is no refiner in that path. The same figure shows
+   the distilled model without the sink running out of memory on the 5090.
+4. **Real-time streaming with the refiner (reported, partly).** The streaming docs give 47.3 GB peak in
+   bf16 and 29.4 GB with both stages in NVFP4, "Runs on a 32 GB RTX 5090". But the real-time
+   multiples in that table are measured on GB200 and B200; there is no 5090 throughput figure. The H100
+   bf16 row says 1.09× real time, while the paragraph above it says "~0.93× realtime on a single
+   H100". One of the two is stale.
+
+So the reshare's "single GPU, RTX 5090 or H100" is true, and the two GPUs run different products. The
+H100 runs the model in the paper's tables. The 5090 runs a distilled, windowed, 4-bit stage 1, whose
+softmax layers see the start and the last few seconds, and whose quality the paper does not put in a
+table.
+
+## Against the other world models on this site
+
+| | SANA-WM | [ABot-World-0](/articles/abot-world) | [Astronex-World 1.0](/articles/astronex-world) | [WorldCrafter](/articles/worldcrafter) |
+|---|---|---|---|---|
+| Size | 2.66B (+18.9B refiner) | 5B | 5B | base model + 1.14B memory encoder |
+| Long context | GDN state + 5 softmax layers | streaming distillation | 20-frame KV cache | 9 memory frames picked by coverage |
+| Camera | UCPE + raw-frame Plücker | actions | PRoPE | camera-posed memory read-out |
+| Explicit memory | none | none | none | learned, view-synthesis lineage |
+| Licence | Apache-2.0 DiT; LTX-2 terms for refiner | Apache-2.0 | Apache-2.0 | academic only |
+
+A different design shipped the same week: [Matrix-Game 4.0](/articles/matrix-game-4) gives the world's rules to a game engine and asks a 5B video model only to repaint a low-poly frame, which is how it reaches 60 fps on one card. SANA-WM keeps the whole world inside the model, so it can go anywhere a camera can, and has to remember it.
+
+SANA-WM's distinctive bet is architectural rather than about memory: make the backbone cheap enough to
+train natively on minute-long clips, rather than distilling a long model out of a short teacher. The
+paper's argument for doing it that way is that "short-horizon teachers provide limited supervision for
+minute-scale scene persistence". Its revisit numbers say native training alone does not buy persistence;
+WorldCrafter's say a memory might. For a cheaper way to stretch an existing model, NVIDIA's own
+[LongLive-Plug](/articles/longlive-plug) distils long-context behaviour as a LoRA instead.
+
+## Licence: three sets of terms
+
+- **Code** in `NVlabs/Sana` is Apache-2.0 (measured, `LICENSE`).
+- **Stage-1 weights**: all three Hugging Face repos are tagged `apache-2.0` (measured). The model card
+  adds that "the bundled LTX-2 refiner and VAE inherit the LTX-2 upstream license".
+- **LTX-2's licence** is the LTX-2 Community License Agreement, under which entities with annual revenue
+  of at least \$10,000,000 "are required to obtain a paid commercial" licence (measured, Lightricks'
+  `LICENSE`). The refiner and both VAEs come under it, and the VAE is on every output path.
+- The refiner's **text encoder** is a Gemma 3 12B, under Google's Gemma terms; the stage-1 text encoder is
+  Gemma-2-2B.
+- The **example training dataset** derived from Sekai "is redistributed for non-commercial research use
+  only" (measured, docs). The paper itself is CC BY-NC-SA 4.0.
+
+The frontmatter says `mixed` because it is. A research group can use all of it. A company above the
+revenue line cannot route around the LTX-2 terms by skipping the refiner: `--no_refiner` (which the
+docs call "lower-quality debugging") still decodes through the LTX-2 VAE that stage 1 was adapted to.
+The Apache-2.0 part it can use freely is the DiT, which produces latents nobody can look at without
+that decoder.
+
+## What I would check with a GPU
+
+- Run the streaming model on a 5090 and time it. The only 5090 number in the release is the DiT time of
+  a model that is not the one the docs say fits.
+- Compare streaming against bidirectional on the revisit metric. If my reading of the window is right,
+  a loop that returns after twenty seconds has to be recalled through a $112 \times 112$ state, and
+  revisit PSNR should drop in streaming. The paper reports stage 1 autoregressive and bidirectional
+  (Table 9) but not the distilled streaming model.
+- Time a bidirectional forward at 30 and 60 seconds. My FLOP model says the five softmax layers go from
+  31% to 47% of the work; a profile would say whether the kernels agree.
+
+The take: SANA-WM is a well-built efficient world model whose most interesting idea is unglamorous. A
+gated delta rule that steps one frame at a time, with a key scale chosen so a minute of steps cannot
+blow up, is what lets a 2.6B model train on minute-long clips at all. Treat the softmax anchors as
+expensive, and in the streaming release as short-sighted. Read "one GPU" as one of four different
+configurations.

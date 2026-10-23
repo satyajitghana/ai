@@ -143,6 +143,10 @@ function detectLicense(raw: string): string {
 
   // Before the open licences: a BUSL file names its future "Change License"
   // (often Apache 2.0) in its own text, and must not be read as that licence.
+  // A licence that says it is not open source is custom, whatever open licences
+  // it later names for designated files (eagle-hq/EAGLE-4 mentions Apache-2.0).
+  if (/source-available license|not an osi-approved/.test(t.slice(0, 400)))
+    return "custom"
   if (/business source license,? 1\.1/.test(t)) return "BUSL-1.1"
   if (/gnu affero general public license,? version 3/.test(t)) return "AGPL-3.0"
   if (/gnu lesser general public license,? version 3/.test(t)) return "LGPL-3.0"
@@ -152,6 +156,9 @@ function detectLicense(raw: string): string {
   if (/gnu general public license,? version 2/.test(t)) return "GPL-2.0"
   if (/apache license,? version 2\.0/.test(t)) return "Apache-2.0"
   if (/mozilla public license,? version 2\.0/.test(t)) return "MPL-2.0"
+  // A file that opens by naming itself MIT is MIT, even when it then appends a
+  // bundled dependency's ISC notice (obsidianmd/pele carries Lucide's).
+  if (/^mit license/.test(t)) return "MIT"
   if (
     /permission to use, copy, modify, and\/or distribute this software for any purpose/.test(
       t
