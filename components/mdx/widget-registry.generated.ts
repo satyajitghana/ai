@@ -516,6 +516,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "leanstral/agent-loop": () => import("@/components/articles/leanstral/agent-loop"),
   "leanstral/safe-verify": () => import("@/components/articles/leanstral/safe-verify"),
   "leanstral/test-time-scaling": () => import("@/components/articles/leanstral/test-time-scaling"),
+  "learnable-spectral-activations/fit-curves": () => import("@/components/articles/learnable-spectral-activations/fit-curves"),
+  "learnable-spectral-activations/harmonic-composer": () => import("@/components/articles/learnable-spectral-activations/harmonic-composer"),
   "lensvlm-9b/compression-frontier": () => import("@/components/articles/lensvlm-9b/compression-frontier"),
   "lensvlm-9b/page-budget": () => import("@/components/articles/lensvlm-9b/page-budget"),
   "leviathan-agent-index/card-builder": () => import("@/components/articles/leviathan-agent-index/card-builder"),
