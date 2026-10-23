@@ -302,6 +302,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "full-bandwidth-transformer/bandwidth-gap": () => import("@/components/articles/full-bandwidth-transformer/bandwidth-gap"),
   "full-bandwidth-transformer/result-ledger": () => import("@/components/articles/full-bandwidth-transformer/result-ledger"),
   "functional-gradient-descent/adaptive-fit": () => import("@/components/articles/functional-gradient-descent/adaptive-fit"),
+  "fx0/crash-replay": () => import("@/components/articles/fx0/crash-replay"),
+  "fx0/recovery-clock": () => import("@/components/articles/fx0/recovery-clock"),
   "gdp-ts/will-it-typecheck": () => import("@/components/articles/gdp-ts/will-it-typecheck"),
   "gemma-4/attn-strip": () => import("@/components/articles/gemma-4/attn-strip"),
   "gemma-4/kv-budget": () => import("@/components/articles/gemma-4/kv-budget"),
