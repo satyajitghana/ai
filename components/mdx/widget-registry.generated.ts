@@ -1112,6 +1112,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "streamrender-h3/booth": () => import("@/components/articles/streamrender-h3/booth"),
   "streamrender-h3/chunk-clock": () => import("@/components/articles/streamrender-h3/chunk-clock"),
   "streamrender-h3/guidance-fit": () => import("@/components/articles/streamrender-h3/guidance-fit"),
+  "strong-stochastic-flow-maps/wong-zakai": () => import("@/components/articles/strong-stochastic-flow-maps/wong-zakai"),
   "structuregs-slam/structure-closure": () => import("@/components/articles/structuregs-slam/structure-closure"),
   "subq-snap/budget-ledger": () => import("@/components/articles/subq-snap/budget-ledger"),
   "subq-snap/latency-bound": () => import("@/components/articles/subq-snap/latency-bound"),
