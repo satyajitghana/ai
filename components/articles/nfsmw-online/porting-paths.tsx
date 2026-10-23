@@ -8,14 +8,17 @@ import { cn } from "@/lib/utils"
 // public evidence about NFSMW Online sits with each one. "fits" means the
 // evidence is what that path would produce; "strains" means the path would have
 // to be stretched to explain it; "neutral" means it does not tell the paths
-// apart. Every cell is the article's reasoning, written out in `why`; nothing
-// here is a measurement of the game's code, which is behind the login.
+// apart. Every cell is the article's reasoning, written out in `why`. The first
+// rows were all that could be seen from outside the login; the rows marked
+// `inside` come from the logged-in load later on 23 Oct, which read the engine
+// module itself. Untick them to see where the outside reading stopped.
 
 type Path = "source" | "decomp" | "emulate" | "rewrite"
 type Cell = "fits" | "strains" | "neutral"
 
 // `placed` marks where a real site sits by measurement, not by inference:
-// web.nfsmwo.com publishes a launch config that runs speed.exe under Wine.
+// web.nfsmwo.com publishes a launch config that runs speed.exe under Wine, and
+// nfsmwonline.com's module is a Rust engine of its own.
 const PATHS: { k: Path; name: string; sub: string; example: string; placed?: string }[] = [
   { k: "source", name: "Original source", sub: "recompile the studio's code", example: "GTA V on playgta5.com" },
   { k: "decomp", name: "Decompiled source", sub: "rebuild code from the binary", example: "reVC in the browser" },
@@ -26,7 +29,13 @@ const PATHS: { k: Path; name: string; sub: string; example: string; placed?: str
     example: "Windows-in-wasm runners",
     placed: "web.nfsmwo.com sits here (measured)",
   },
-  { k: "rewrite", name: "New engine", sub: "read the original data", example: "OpenMW for Morrowind" },
+  {
+    k: "rewrite",
+    name: "New engine",
+    sub: "read the original data",
+    example: "OpenMW for Morrowind",
+    placed: "nfsmwonline.com sits here (measured)",
+  },
 ]
 
 type Ev = {
@@ -35,6 +44,7 @@ type Ev = {
   label: "measured" | "reported" | "reasoned"
   cells: Record<Path, Cell>
   why: string
+  inside?: boolean
 }
 
 const EVIDENCE: Ev[] = [
@@ -87,6 +97,22 @@ const EVIDENCE: Ev[] = [
     cells: { source: "strains", decomp: "neutral", emulate: "neutral", rewrite: "neutral" },
     why: "The GTA V port was possible because RAGE's source leaked. I found no report of Most Wanted's source getting out. Absence of a report is weak evidence, so this cell strains rather than rules out.",
   },
+  {
+    id: "rust",
+    text: "The module is Rust with its names kept: 2,718 functions in its own crate, nfs (police, mwai, career, traffic), on wgpu and winit; no x86 address, nothing of speed.exe",
+    label: "measured",
+    inside: true,
+    cells: { source: "strains", decomp: "strains", emulate: "strains", rewrite: "fits" },
+    why: "EA's game is C++. A port of its source or of a decompilation would carry C++ names or the executable's addresses, as the itch.io recompilation carries 42,545 of them; a translator would carry speed.exe's code. This module carries Rust's standard library, Rust crates, and 87 source files of its own under nfs-gpu, named in its panic messages. The 2005 game's logic is not in it; a rewrite of it is.",
+  },
+  {
+    id: "data",
+    text: "Game data converted offline by its own nfs-tools into its own formats (NGW1, NGC1 and others); shaders hand-written in WGSL and fitted to screenshots of the original",
+    label: "measured",
+    inside: true,
+    cells: { source: "strains", decomp: "strains", emulate: "strains", rewrite: "fits" },
+    why: "Strings name the converter and what it reads, 'nfs-tools career <attributes.bin> <gameplay.bin>' and the front end's PLATFORMCRIB.BIN, and the engine refuses a file without its own magic. One shader comment says its colour filter was 'fitted to the PC original's own Visual Treatment Low/High screenshots'. Any of the other three paths would read the original files and run the original shaders.",
+  },
 ]
 
 const CELL_STYLE: Record<Cell, string> = {
@@ -105,7 +131,7 @@ export function PortingPaths() {
   return (
     <figure className="@container my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
-        <span>four ways into a browser tab · public evidence only</span>
+        <span>four ways into a browser tab · outside the login, then inside</span>
         <span className="hidden @min-[560px]:inline">tick evidence off to see what it carries</span>
       </div>
 
@@ -142,7 +168,10 @@ export function PortingPaths() {
                     />
                     <button type="button" onClick={() => setSel(e.id)} className="cursor-pointer text-left leading-snug">
                       {e.text}{" "}
-                      <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">{e.label}</span>
+                      <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                        {e.label}
+                        {e.inside ? " · inside" : ""}
+                      </span>
                     </button>
                   </label>
                 </td>
