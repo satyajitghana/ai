@@ -400,6 +400,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "hydrahead/complexity": () => import("@/components/articles/hydrahead/complexity"),
   "hydrahead/head-vs-layer": () => import("@/components/articles/hydrahead/head-vs-layer"),
   "hydrahead/retrieval-heads": () => import("@/components/articles/hydrahead/retrieval-heads"),
+  "ideogram-vector/svg-anatomy": () => import("@/components/articles/ideogram-vector/svg-anatomy"),
+  "ideogram-vector/trace-compare": () => import("@/components/articles/ideogram-vector/trace-compare"),
   "illada/attention-modes": () => import("@/components/articles/illada/attention-modes"),
   "illada/masking-process": () => import("@/components/articles/illada/masking-process"),
   "illada/unmasking": () => import("@/components/articles/illada/unmasking"),
