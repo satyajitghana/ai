@@ -36,7 +36,7 @@ type Mode = "gpu" | "cpu"
 
 const MODE_TEXT: Record<Mode, string> = {
   gpu: "llama.cpp with every layer on the GPU (-ngl 999). llama.cpp tags per_layer_token_embd as an input tensor (a row lookup) and keeps input tensors on the CPU, so the 3 GB table never enters VRAM.",
-  cpu: "CPU only, weights memory-mapped (llama.cpp's default). Every block weight is read for every token, so it all becomes resident. The per-layer table is only looked up: a page is read when a token's row is needed, so at most one 11.4 KB row per distinct token in the context becomes resident.",
+  cpu: "CPU only, weights memory-mapped (llama.cpp's default). This is the working set: every block weight is read for every token, while the per-layer table is only looked up, one 11.4 KB row per distinct token at most. Measured on Unsloth's file, the working set matched this, but llama.cpp's loader still pre-reads the whole file, so RSS counts all of it, and default repacking adds a second copy of the block weights.",
 }
 
 function kvBytes(ctx: number, shared: boolean) {
@@ -127,7 +127,7 @@ export function MemoryLedger() {
 
         <div>
           <div className="mb-1 flex justify-between font-mono text-xs">
-            <span>{mode === "gpu" ? "VRAM" : "resident RAM"}: weights and cache</span>
+            <span>{mode === "gpu" ? "VRAM" : "working set in RAM"}: weights and cache</span>
             <span className="font-semibold">{fmt(hotTotal)} GB</span>
           </div>
           <div className="relative h-9 w-full overflow-hidden rounded-md border bg-muted/30">
@@ -161,7 +161,7 @@ export function MemoryLedger() {
         <div>
           <div className="mb-1 flex justify-between font-mono text-xs">
             <span>
-              {mode === "gpu" ? "system RAM (mapped, read by row)" : "on disk, mapped but never read"}: per-layer table
+              {mode === "gpu" ? "system RAM (mapped, read by row)" : "mapped, pre-read at load, then rarely touched"}: per-layer table
             </span>
             <span className="font-semibold">{fmt(coldGb)} GB</span>
           </div>
