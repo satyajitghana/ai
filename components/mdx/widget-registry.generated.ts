@@ -1013,6 +1013,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "sakana-fugu/fugu-pool": () => import("@/components/articles/sakana-fugu/fugu-pool"),
   "sakana-fugu/trinity-loop": () => import("@/components/articles/sakana-fugu/trinity-loop"),
   "sam-3-1-object-multiplex/memory-scaling": () => import("@/components/articles/sam-3-1-object-multiplex/memory-scaling"),
+  "sam3-segmentation-skill/crop-planner": () => import("@/components/articles/sam3-segmentation-skill/crop-planner"),
   "sana-video2/attention-scaling": () => import("@/components/articles/sana-video2/attention-scaling"),
   "sana-video2/hybrid-stack": () => import("@/components/articles/sana-video2/hybrid-stack"),
   "sana-wm/camera-rays": () => import("@/components/articles/sana-wm/camera-rays"),
