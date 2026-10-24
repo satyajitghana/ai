@@ -1,0 +1,246 @@
+---
+title: "A fix for softmax and cross-entropy: the target gradient that rounds to zero"
+description: "Jon Barron, Dan Gnanapragasam and Michael Tschannen show that every standard softmax cross-entropy adds a tiny number to 1.0 and loses it: past a logit margin of about 16.6 in fp32 the target gradient is exactly zero while the others are not, and Adam turns that into the grokking 'slingshot'. A second bug leaves a gradient when a student equals its teacher. I reproduced both in PyTorch on a CPU, ported the fix, and ran the grokking experiment: the fix removed every slingshot, and in my runs it did not speed grokking up."
+date: 2026-10-24
+tags:
+  - training
+  - theory
+  - optimization
+  - distillation
+rating:
+  novelty: 2
+  verification: 3
+  runnable: 3
+  explains: 3
+  takeaway: 2
+  durability: 3
+  reach: 2
+  unique: 2
+  why: "Both bugs reproduced in PyTorch with printed values, the fix ported and checked, and a CPU grokking run: slingshots gone, but no speed-up here."
+topic: training-rl
+kind: paper
+level: practitioner
+runsOn: cpu
+---
+
+import { CliffProbe } from "@/components/articles/softmax-fix/cliff-probe"
+import { SlingshotRuns } from "@/components/articles/softmax-fix/slingshot-runs"
+
+[A Fix for Softmax and Cross-Entropy](https://arxiv.org/abs/2610.31642) (Jonathan T. Barron, Dan Gnanapragasam, Michael Tschannen, Google DeepMind, arXiv 22 October 2026) makes a claim that sounds like it cannot be true: the softmax and cross-entropy in JAX, PyTorch and the textbooks are wrong in two places. Not unstable in some exotic regime. Wrong, in the sense that they return a different gradient from the one the formula defines, in a regime that ordinary training reaches.
+
+Barron announced it on X on 23 October: "all existing implementations of softmax and cross-entropy (that's JAX, PyTorch, textbooks, etc) have a subtle bug --- two bugs, actually. A simple rewrite fixes both, and eliminates 'slingshots' when grokking." The [HTML version of the paper](https://jonbarron.info/softmaxfix/) carries the code, and there is an [interactive demo](https://jonbarron.info/softmaxfix/demo.html).
+
+I wanted to see the numbers myself, so this page has three kinds of evidence, each labelled. **Measured**: I ran it, in PyTorch 2.14.1 (CPU build) and NumPy 2.5.4 on a shared 4-core cloud VM, with no GPU. **Reported**: the paper's figure, not re-run. **Reasoned**: my arithmetic on the other two.
+
+## Softmax as everyone writes it
+
+Take logits $\mathbf{z} \in \mathbb{R}^K$. Computing $e^{z_k} / \sum_j e^{z_j}$ directly overflows once a logit passes about 88 in fp32, so every framework first subtracts the largest logit:
+
+$$
+\tilde z_k = z_k - z_{\max}, \qquad
+\log\operatorname{softmax}(\mathbf{z})_k = \tilde z_k - \log \sum_j e^{\tilde z_j}, \qquad
+q_k = \frac{e^{\tilde z_k}}{\sum_j e^{\tilde z_j}}.
+$$
+
+Cross-entropy against a target distribution $\mathbf{p}$ is $\mathcal{L} = -\sum_k p_k \log\operatorname{softmax}(\mathbf{z})_k$, and its gradient is the cleanest result in deep learning: $\mathbf{g} = \mathbf{q} - \mathbf{p}$. $\mathbf{q}$ and $\mathbf{p}$ each sum to one, so the gradient sums to zero. Raising one logit has to lower the others. Keep that invariant in mind; both bugs break it.
+
+## Bug one: Softmax Collapse
+
+Call the target class $t$ and suppose the model is right and confident, so $z_t = z_{\max}$. The paper measures confidence with the **logit margin**, how far the target logit sits above the log-sum-exp of all the others:
+
+$$
+m = z_t - \log \sum_{j \neq t} e^{z_j}.
+$$
+
+After the max shift, the target's own term in the denominator is $e^0 = 1$ and the other $K-1$ terms add up to exactly $e^{-m}$. So the denominator is $1 + e^{-m}$, and the hard-target loss and gradient are
+
+$$
+\mathcal{L} = \log(1 + e^{-m}), \qquad
+g_t = \underbrace{\frac{1}{1 + e^{-m}} - 1}_{\text{standard}} = \underbrace{-\frac{e^{-m}}{1 + e^{-m}}}_{\text{fixed}}, \qquad
+g_j = \frac{e^{z_j - z_t}}{1 + e^{-m}} \;\; (j \neq t).
+$$
+
+The two forms of $g_t$ are equal on paper. In floating point they are not. Floats are dense near zero and sparse near one: fp32 can hold numbers as small as about $10^{-38}$, but the gap between 1.0 and the next float is $2^{-23}$. Add anything at or below $2^{-24}$ to 1.0 and the sum rounds back to exactly 1.0. That happens once $e^{-m} \le 2^{-24}$, which is $m \ge 24 \ln 2 = 16.64$ (reasoned). The paper calls this the **precision cliff** $c_d$ and gives $c_{16} \approx 5.5$ for bf16, $c_{32} \approx 16.6$ for fp32 and $c_{64} \approx 36.7$ for fp64 (reported; $8 \ln 2 = 5.55$ and $53 \ln 2 = 36.74$ match, reasoned).
+
+Past the cliff the standard path computes $q_t = 1/1.0 = 1.0$, subtracts 1, and gets a target gradient of exactly 0.0. The loss is $\log(1.0) = 0$ as well. But the non-target gradients are each $e^{z_j - z_t}$ divided by 1.0. That numerator was never added to 1, so it stays a perfectly good small positive number all the way down to exponent underflow near $m \approx 88$. The row of gradients now sums to $e^{-m}/(1 + e^{-m}) > 0$. The invariant is gone.
+
+### What PyTorch prints
+
+Here is the paper's own example, $\mathbf{z} = [9, -9, -9]$ with target 0, so $m = 18 - \ln 2 = 17.31$, run through `torch.nn.functional.cross_entropy` and through my PyTorch port of the fix (measured):
+
+```text
+-- torch.float32
+torch.log_softmax(z)             [ 0.0000e+00, -1.8000e+01, -1.8000e+01]
+log_softmax_fixed(z)             [-3.0460e-08, -1.8000e+01, -1.8000e+01]
+F.cross_entropy     loss=0.0000e+00 grad=[ 0.0000e+00, 1.5230e-08, 1.5230e-08] sum=3.0460e-08
+cross_entropy_fixed loss=3.0460e-08 grad=[-3.0460e-08, 1.5230e-08, 1.5230e-08] sum=0.0000e+00
+-- torch.float64
+F.cross_entropy     loss=3.0460e-08 grad=[-3.0460e-08, 1.5230e-08, 1.5230e-08]
+```
+
+The fp32 standard gradient is the correct gradient with its first entry deleted. In fp64 the same call is right, because 17.31 is below fp64's cliff. The paper reports the identical numbers from `jax.nn` and `optax` (reported), and a NumPy textbook version, `q = e / e.sum(); g = q; g[t] -= 1`, prints the same `[0.000e+00 1.523e-08 1.523e-08]` (measured).
+
+bf16 hits it at a margin anyone reaches in minutes. With $\mathbf{z} = [3.5, -3.5, -3.5]$, $m = 6.31$ (measured):
+
+```text
+F.cross_entropy bf16   loss=0.0000e+00 grad=[ 0.0000e+00, 9.1171e-04, 9.1171e-04]
+fixed bf16             loss=1.8082e-03 grad=[-1.8234e-03, 9.1171e-04, 9.1171e-04]
+exact fp64 grad                         [-1.8204e-03, 9.1022e-04, 9.1022e-04]
+```
+
+The widget below does the same arithmetic in your browser, one rounding at a time, for three classes. Drag the margin across the cliff and watch the standard target gradient fall off a wall while the fixed one keeps decaying as $e^{-m}$.
+
+<CliffProbe />
+
+### The cliff is a little earlier than 16.6
+
+One thing the paper's single number hides (measured). I swept $m$ in steps of 0.05 with one target logit and $K-1$ equal others, and recorded where `F.cross_entropy`'s target gradient first became exactly zero:
+
+| classes $K$ | fp32 | bf16 | fp64 |
+|---|---|---|---|
+| 2 | 16.65 | 5.55 | 36.75 |
+| 3 | 15.95 | 5.55 | 36.05 |
+| 10 | 14.45 | 5.55 | 35.25 |
+| 100 | 16.0 | 5.6 | 34.75 |
+| 1000 | 15.95 | 5.6 | 34.7 |
+| 32000 | 15.95 | 5.55 | 34.7 |
+
+With two classes it is the textbook $24 \ln 2$. With more, the $K-1$ small terms are not summed before they meet the 1.0; each one is added to a running total near 1.0 and rounded on its own, so each is lost once it alone falls below half a step. With $K = 3$ each term is $e^{-m}/2$, and the cliff moves to $16.64 - \ln 2 = 15.95$, exactly what PyTorch shows (reasoned from measured). Where it lands for larger $K$ depends on how the kernel vectorises the sum. bf16 does not move, because PyTorch's CPU kernel accumulates in fp32 and the cliff comes from rounding $q_t$ to bf16 afterwards. The paper's claim is unaffected; the cliff is, if anything, closer than it says.
+
+### The fix
+
+Never add $e^{-m}$ to 1. Take the max logit out of the sum entirely, compute the margin from the others with a log-sum-exp, and let a numerically stable softplus, $\operatorname{softplus}(x) = \log(1 + e^{x})$, do the rest:
+
+$$
+m = -\operatorname*{LSE}_{j \neq t}\,(z_j - z_t), \qquad \mathcal{L} = \operatorname{softplus}(-m).
+$$
+
+Because the target slot is the constant 0 rather than $z_t - z_t$, $z_t$ reaches the loss only through the $K-1$ differences, so autodiff gives each non-target $g_j = e^{z_j - z_t - \mathcal{L}}$ and the target exactly minus their sum. The paper ships it as nine lines of JAX. My PyTorch port of the hard-target version:
+
+```python
+import torch, torch.nn.functional as F
+
+def cross_entropy_fixed(z, t):
+    z_t = z.gather(-1, t[..., None])                      # target logit
+    is_t = F.one_hot(t, z.shape[-1]).bool()               # target mask
+    others = (z - z_t).masked_fill(is_t, float("-inf"))   # exclude target from the sum
+    m = -torch.logsumexp(others, -1)                      # logit margin
+    return F.softplus(-m).mean()                          # = -log_softmax(z)_t
+```
+
+`log_softmax` gets the same treatment with the argmax standing in for $t$. Across the whole sweep above, the port's gradient row summed to zero to within one rounding step in every format, and its target entry matched fp64 (measured).
+
+## Why a missing $10^{-8}$ matters: Adam
+
+A gradient of $3 \times 10^{-8}$ that should have been there is not obviously a problem. It becomes one because Adam does not care how big a gradient is. It divides the running mean of each parameter's gradient by the square root of the running mean of its square:
+
+$$
+\Delta\theta_i = -\eta\left(\frac{\hat m_i}{\sqrt{\hat v_i} + \epsilon} + \lambda\theta_i\right).
+$$
+
+While $|g| \gg \epsilon$, that normalised step is about 1 whatever the size of $g$. So the paper's account of the **slingshot** (Thilak et al., 2022), the recurring loss spikes after a grokking network memorises its training set, runs like this (reported):
+
+1. After memorisation the margins grow, because the loss keeps pushing $q_t$ toward 1.
+2. Once a batch sits past the cliff, the target gradients are zero and what is left is the small, lopsided push from the non-targets. The gradient almost vanishes, and $\hat v_i$ decays toward zero with it.
+3. Weight decay and that residual push drag a few examples back below the cliff. Their target gradients switch back on at about $e^{-m}$.
+4. Adam divides those restored gradients by a $\sqrt{\hat v_i}$ that has just decayed. The step is enormous, the loss spikes, $\hat v_i$ resets, and the cycle starts again.
+
+With the fixed loss, $g_t$ fades smoothly through the cliff, $\hat m_i$ and $\sqrt{\hat v_i}$ decay together, and there is nothing to snap back.
+
+The paper adds a second result that I find the more useful one. At a stationary point the update is zero, so $g_i / (|g_i| + \epsilon) = -\lambda\theta_i$. Once $|g_i|$ drops below $\epsilon$ the normalised step shrinks like $g_i / \epsilon$, and since $|g_i| \propto e^{-m}$, weight decay stops the margin near
+
+$$
+m^\star(\epsilon) \approx \log(1/\epsilon).
+$$
+
+For PyTorch's default $\epsilon = 10^{-8}$ that is 18.42, just past fp32's 16.64 (reasoned). That is the whole reason the default triggers slingshots: training wants to settle at a margin the standard loss cannot represent. At $\epsilon = 10^{-7}$ the equilibrium is 16.12, below the cliff, and the paper notes standard cross-entropy then settles without spiking (reported). Barron's thread puts it as "the default `eps=1e-8` happens to be juuust past where this bug kicks in for fp32 (this may be why some think a small eps is dangerous)."
+
+<Figure src="/articles/softmax-fix/fig2.png" alt="Six panels in two rows. Top row, a+b mod 31 with weight decay 1: the fixed cross-entropy margin rises to just above the fp32 cliff and stays flat, while standard cross-entropy repeatedly climbs to the cliff and drops back to about 8 in a sawtooth; the training loss of standard cross-entropy spikes in the same rhythm; test accuracy of fixed cross-entropy reaches 100% sooner than most standard runs. Bottom row, a squared plus b squared mod 97 without weight decay: one spike near step 1,250 sends standard cross-entropy test accuracy from about 60% to about 23%, while fixed cross-entropy keeps climbing to about 85%." caption="The paper's slingshot experiment, 5 seeds in fp32. Top: standard cross-entropy saws between the cliff and a margin near 8; the fixed loss crosses smoothly and saturates near log(1/ε). Bottom: without weight decay a single spike at the cliff drops test accuracy from 61% to 23% (Barron, Gnanapragasam and Tschannen, Figure 2)." />
+
+The paper's Table 1 puts numbers on the top row: on $a + b \bmod 31$ at $\epsilon = 10^{-8}$, fp32 fixed cross-entropy reaches 100.0 ± 0.0% test accuracy against 94.3 ± 5.4% for standard (reported). The bottom row is the dramatic one: with no weight decay and $\epsilon = 10^{-16}$, one spike at around step 1,250 drops standard cross-entropy from 61% to 23%, while the fixed loss continues to 85% (reported).
+
+## I ran the grokking experiment
+
+The paper's Section 6 setup is a 1-layer, width-64 ReLU Transformer on $a + b \bmod 31$ with a 50% training split, full-batch AdamW at learning rate $10^{-3}$, betas 0.9 and 0.98, weight decay 1, $\epsilon = 10^{-8}$, 10,000 epochs. The paper does not give head count, MLP width, initialisation or normalisation, so I chose: 4 heads, an MLP of width 256, PyTorch default initialisation, no LayerNorm, inputs `a b =`, read out at the last position. That leaves 480 training pairs and 481 held out. Each run is one process, one thread, `nice -n 19`, and took 2.5 to 11 minutes on the shared CPU, depending on load (measured). The only difference between a standard and a fixed run is the loss function: same seed, same split, same initialisation.
+
+<SlingshotRuns />
+
+What I saw (measured, three seeds at learning rate $10^{-3}$):
+
+- **The slingshots are real and the fix removes them.** Standard cross-entropy produced 6, 6 and 6 slingshots in 10,000 epochs (a mean-margin drop of more than 3 within 100 epochs); the fixed loss produced 0, 0 and 0. The standard runs climb to a mean margin of 16.05 to 16.24, the moment a quarter to a third of training pairs are past the 16.64 cliff, and fall back to between 4.75 and 8.14.
+- **The fixed margin settles below the predicted equilibrium.** It flattens at 16.51 to 16.83 by epoch 10,000, not at the 18.42 that $\log(1/\epsilon)$ predicts or the 17.9 the paper's Table 1 reports for fp32. My guess is that the approximation drops constants, such as the weight norm, that differ in my model (reasoned).
+- **Neither loss grokked in 10,000 epochs.** Final test accuracy was 46.2, 47.6 and 50.7% for standard against 43.7, 46.2 and 48.6% for fixed. My model groks slower than the paper's, so 10,000 epochs is not enough to test the speed claim.
+
+So I ran the same seeds at a learning rate of $3 \times 10^{-3}$, which makes weight decay act three times faster per epoch (switch to it in the widget).
+
+The result was the opposite of the paper's (measured, three seeds):
+
+| learning rate $3 \times 10^{-3}$ | seed 0 | seed 1 | seed 2 |
+|---|---|---|---|
+| standard: slingshots | 7 | 7 | 7 |
+| fixed: slingshots | 0 | 0 | 0 |
+| standard: first epoch at 90% test | 5,890 | 5,470 | 4,090 |
+| fixed: first epoch at 90% test | not reached | not reached | 4,680 |
+| standard: test accuracy at 10,000 | 97.9% | 100.0% | 100.0% |
+| fixed: test accuracy at 10,000 | 60.1% | 47.2% | 100.0% |
+
+Standard cross-entropy grokked on all three seeds; the fixed loss grokked on one, later than standard did on the same seed, and on seed 0 it was just starting to climb when the run ended. In the standard runs, test accuracy climbs between slingshots: on seed 0 it goes from 50.5% at epoch 4,800, just after one, to 90.9% at epoch 6,000, just after the next. The fixed margins sat at 16.60 to 17.17 at the end, again under 18.42.
+
+That is not what the paper reports, and I do not think it refutes it: three seeds of one architecture I had to partly guess, against five seeds and four benchmarks. The paper itself says that whether spikes help or hurt depends on how the weight norm is controlled, and that with LayerNorm and no weight decay each spike "acts as an accidental learning-rate decay" (reported). My model has weight decay and no LayerNorm, the case where the paper says spikes only hurt. What my runs do support without reservation is the mechanism: every sawtooth tops out just as a quarter or more of the training pairs cross the cliff, and the fixed loss has no sawtooth at all.
+
+<Figure src="/articles/softmax-fix/fig5.png" alt="Six panels for a+b mod 31 with weight decay 1. Top row at epsilon 1e-8, bottom row at epsilon 1e-16. Columns are mean margin, training loss and test accuracy over 10,000 epochs. Standard cross-entropy stalls at the bf16 cliff in bf16 and saws at the fp32 cliff in fp32; at epsilon 1e-16 even fp64 standard cross-entropy breaks when it reaches the fp64 cliff. Fixed cross-entropy rises smoothly to log(1/epsilon) in every precision." caption="Every format has its cliff. At ε = 1e-16 the equilibrium log(1/ε) ≈ 36.8 sits past fp64's cliff at 36.7, and even fp64 standard cross-entropy fails (Barron, Gnanapragasam and Tschannen, Figure 5)." />
+
+## Bug two: Softmax Cancellation
+
+The second bug lives in distillation, where the target is itself a softmax, $\mathbf{p} = \operatorname{softmax}(\mathbf{z}_T)$ of teacher logits. The standard code computes $\mathbf{q}$ and $\mathbf{p}$ separately, rounds both to probabilities, and subtracts. When the student is close to the teacher, that is the subtraction of two nearly equal numbers, and the small logit gap $\boldsymbol{\delta} = \mathbf{z}_S - \mathbf{z}_T$ is gone before the subtraction happens. Worse, $\mathbf{p}$ comes from `softmax` in the forward pass while $\mathbf{q}$ comes from `exp(log_softmax)` in the backward pass, two different sequences of roundings, so even at $\mathbf{z}_S = \mathbf{z}_T$, where the true gradient is zero, they do not cancel (reported).
+
+The fix computes $\mathbf{q} - \mathbf{p}$ from $\boldsymbol{\delta}$ directly, in log space, with `expm1` and `log1p` so nothing is ever added to or subtracted from 1:
+
+$$
+d_k = \delta_k - \sum_i p_i \delta_i, \qquad
+s_k = d_k - \operatorname{log1p}\!\Big(\sum_i p_i \operatorname{expm1}(d_i)\Big), \qquad
+u_k = p_k \operatorname{expm1}(s_k),
+$$
+
+with $s_k = \log(q_k / p_k)$ and $u_k = q_k - p_k$, a fallback to $q_k - p_k$ when $|s_k| \ge 1$, and a final projection $g_k = u_k - q_k \sum_i u_i$ so the row sums to zero.
+
+My PyTorch reproduction of the paper's example, $\mathbf{z}_T = [2, 1, 0]$ and $\mathbf{z}_S = \mathbf{z}_T + [-10^{-7}, 10^{-7}, 0]$ in fp32 (measured). In fp32 that perturbation rounds to $\pm 1.19 \times 10^{-7}$, so the exact gradient is of those rounded inputs:
+
+```text
+exact (fp64 of the rounded inputs)  [-4.5955e-08,  4.1442e-08,  4.5131e-09]
+fp32 standard (PyTorch)             [-5.9605e-08,  4.4703e-08,  7.4506e-09]  sum=-7.451e-09
+fp32 fixed                          [-4.5955e-08,  4.1442e-08,  4.5131e-09]  sum= 1.776e-15
+```
+
+PyTorch's standard gradient is wrong by 30% in the first entry and 65% in the third. The paper's JAX run of the same thing is wrong differently, `[-5.960e-8, 1.452e-8, -1.123e-9]`, with the third sign flipped (reported). Different frameworks, different rounding sequences, different wrong answers, which is the point.
+
+Then the clean test, suggested by more than one reply to Barron's thread: set the student equal to the teacher, where the gradient must be zero. 64 rows of 1,000 random logits each (measured):
+
+| format | standard: max abs gradient | standard: entries non-zero | fixed: max abs gradient |
+|---|---|---|---|
+| fp64 | 6.985e-16 | 95.4% | 0 |
+| fp32 | 2.778e-07 | 96.3% | 0 |
+| bf16 | 2.747e-03 | 100.0% | 0 |
+
+That residual is harmless in plain SGD. Under Adam it is not, for the same reason as before: any gradient larger than $\epsilon$ becomes a full-sized step. The paper initialises a student with its teacher's weights on $a + b \bmod 53$ and runs 2,000 Adam steps: the fp64 residual of about $10^{-17}$ sits below $\epsilon = 10^{-8}$ and nothing moves, fp32's $10^{-8}$ residual causes an initial KL spike and a floor near $10^{-6}$, and bf16's $10^{-3}$ drives the student away from the teacher and costs test accuracy, while the fixed loss stays at KL 0 and 100% in every format (reported, Section 7). I did not re-run that experiment.
+
+<Figure src="/articles/softmax-fix/fig1.png" alt="Two log-log style plots. Left: target-logit gradient magnitude against logit margin; all curves fall as e to the minus m, but standard cross-entropy drops vertically to zero at the bf16, fp32 and fp64 cliffs while fixed cross-entropy continues. Right: gradient norm against the student-teacher logit gap; the true gradient falls linearly toward zero, but standard cross-entropy flattens into a floor near 1e-3 in bf16, 1e-8 in fp32 and 1e-17 in fp64, while fixed cross-entropy follows the true line down." caption="Both bugs on one page. Left, Softmax Collapse: the standard target gradient drops to zero at each format's cliff. Right, Softmax Cancellation: the standard gradient stops shrinking at a precision floor as the student approaches the teacher (Barron, Gnanapragasam and Tschannen, Figure 1)." />
+
+## Who should care
+
+The paper is candid that "the extreme margins and near-zero student–teacher gaps probed by our experiments are uncommon in standard large-scale training" (reported). I would not expect language-model pretraining over a 100,000-token vocabulary to sit at a margin of 16 on most tokens (reasoned). But four places do reach it.
+
+- **bf16 losses.** The bf16 cliff is a margin of 5.55, a probability of about 0.996 on the right answer (reasoned). Most training code upcasts logits to fp32 before the loss for this reason among others; code that does not is collapsing on every easy token.
+- **Small-output problems trained long.** Grokking, classifiers with a few classes, anything past memorisation with weight decay and default $\epsilon$.
+- **Distillation from a close teacher**, and KL penalties that start the policy as a copy of the reference, which is how most RL fine-tuning begins. One reply points at continual-learning penalties that start the new model as an exact copy of the old one.
+- **Attention.** Attention is a softmax too. A reply to the thread from the authors of [Broken Symmetry in BF16 Attention](https://arxiv.org/abs/2609.34272) argues the same broken zero-sum shows up in FlashAttention's bf16 backward. That is their claim; I have not checked it.
+
+Prior fixes treated symptoms: [Liu et al.](https://arxiv.org/abs/2605.06152) project the gradient to zero sum, StableMax (Prieto et al., 2025) replaces the exponential, and others cast to fp64. The paper's Table 1 finds zero-sum projection stalls the margin near 18 and drops test accuracy below 50% at $\epsilon \le 10^{-12}$, and StableMax lets margins run to about $10^4$ (reported). Liu replied that their main contribution is the mechanism, "Numerical Feature Inflation", and that the projection was a causal test.
+
+What the fix costs: an argmax, a masked log-sum-exp and a softplus instead of one fused kernel. The paper says it runs "without meaningful slowdown" (reported). I did not benchmark it, and a reply asking about fused vocabulary-scale kernels has no public answer yet. My unfused port allocates a few extra $B \times K$ temporaries, which at a large vocabulary is the memory a fused cross-entropy exists to avoid.
+
+Two notes on provenance. Barron writes that the bug was "first found and fixed by Gemini Flash 3.7", that most experiments were run by Flash 3.8 and the first draft written by a Gemini model before he rewrote it (reported, from his thread); a reply points out the paper itself does not say so. And no code repository is published: the code is the listings on the project page, which is what I ported.
+
+## The takeaway
+
+The bug is one addition: $1 + e^{-m}$. Everything else follows from where floats are dense and where they are sparse. If a quantity you care about is tiny, compute it directly; never compute it as the difference between 1 and something close to 1. The same lesson is why `log1p` and `expm1` exist, and it is the whole of both fixes. For a different, older problem with the same output layer, see [the softmax bottleneck](/articles/softmax-bottleneck); for softmax inside attention, [the attention explainer](/architectures/attention-kv); for training natively in low precision, [A.X-K2](/articles/ax-k2); for loss spikes caught by an optimizer that watches itself, [reactive optimizers](/articles/reactive-optimizers); and for distillation measured on a reasoning model, [Inkling-Small](/articles/inkling-small).
