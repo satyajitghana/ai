@@ -317,6 +317,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "gemma-4/kv-budget": () => import("@/components/articles/gemma-4/kv-budget"),
   "generated-web-at-2000-tokens-per-second/cost-per-page": () => import("@/components/articles/generated-web-at-2000-tokens-per-second/cost-per-page"),
   "generated-web-at-2000-tokens-per-second/latency-threshold": () => import("@/components/articles/generated-web-at-2000-tokens-per-second/latency-threshold"),
+  "generative-trajectory-planning/prior-sharpening": () => import("@/components/articles/generative-trajectory-planning/prior-sharpening"),
   "generative-ui-by-decision/call-budget": () => import("@/components/articles/generative-ui-by-decision/call-budget"),
   "generative-ui-by-decision/catalogue-ceiling": () => import("@/components/articles/generative-ui-by-decision/catalogue-ceiling"),
   "geoguessr-rl-environment/advantage-amplification": () => import("@/components/articles/geoguessr-rl-environment/advantage-amplification"),
