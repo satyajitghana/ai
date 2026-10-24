@@ -1021,6 +1021,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "sana/linear-tradeoff": () => import("@/components/articles/sana/linear-tradeoff"),
   "sana/sprint-schedule": () => import("@/components/articles/sana/sprint-schedule"),
   "sana/token-budget": () => import("@/components/articles/sana/token-budget"),
+  "sandbox-runtime/policy-lab": () => import("@/components/articles/sandbox-runtime/policy-lab"),
   "scaling-agentic-rl/reward-spectrum": () => import("@/components/articles/scaling-agentic-rl/reward-spectrum"),
   "scaling-agentic-rl/rollout-pipeline": () => import("@/components/articles/scaling-agentic-rl/rollout-pipeline"),
   "scaling-agentic-rl/taskset-map": () => import("@/components/articles/scaling-agentic-rl/taskset-map"),
