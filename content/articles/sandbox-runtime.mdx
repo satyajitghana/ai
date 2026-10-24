@@ -1,0 +1,252 @@
+---
+title: "sandbox-runtime: Claude Code's sandbox is a mount table, a missing network and a proxy"
+description: "Anthropic's open-source sandbox-runtime (srt, Apache-2.0) is the sandbox behind Claude Code's Bash tool: Seatbelt profiles on macOS, bubblewrap on Linux, and a host-side HTTP and SOCKS proxy that holds the domain allowlist. I read the code at commit c66fb77 (v0.0.81) and ran it on a Linux VM: a denied directory becomes an empty tmpfs, a write outside the project gets EROFS, a non-allowlisted host gets a 403 from the proxy, a direct dial finds no network at all, and every command pays about 80-110 ms when the proxy is already up, or about 735 ms through the CLI."
+date: 2026-10-24
+tags:
+  - agents
+  - security
+  - agentic-coding
+  - developer-tools
+  - mcp
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "srt run for real on Linux: the bwrap argv it builds, each denial's exact error, the violation block, and per-command overhead, against the code."
+topic: security
+kind: tool
+level: practitioner
+runsOn: cpu
+licence: Apache-2.0
+---
+
+import { PolicyLab } from "@/components/articles/sandbox-runtime/policy-lab"
+
+An agent that writes code needs a shell. A shell can read `~/.ssh`, append to `.bashrc` and POST either to anywhere. Claude Code's old answer was to ask before almost every command, and Anthropic's engineering post on sandboxing is candid about where that leads: "approval fatigue", where people stop reading what they approve. Its answer is a boundary drawn once, inside which commands run without prompts. The post reports that in internal use sandboxing "safely reduces permission prompts by 84%" (reported; I have no way to check it).
+
+That boundary is a separate package, `@anthropic-ai/sandbox-runtime`, with a CLI called `srt`. It wraps any command (an agent, a local MCP server, `npm install`) in filesystem and network restrictions without starting a container. The X post that pointed me at it put the real problem well: an allowlist tight enough to be safe stops the agent installing dependencies, and one loose enough to be useful weakens the sandbox. I wanted to see exactly where the line sits, so I read the source and ran it.
+
+<RepoCard repo="anthropics/sandbox-runtime" />
+
+The clone is commit `c66fb77` (2026-10-23), package version 0.0.81, Apache-2.0. It is not small. `src/` holds 31,376 lines of TypeScript, and `test/` holds 131 `*.test.ts` files with 76,703 lines (measured with `wc -l`). The Linux backend alone, `linux-sandbox-utils.ts`, is 3,937 lines; macOS is 1,725; the alpha Windows backend is 4,606. Most of that bulk is edge cases: symlinks, globs, and paths that do not exist yet.
+
+## Two boundaries, one config
+
+The design premise, stated in both the README and the blog post, is that filesystem and network isolation only work together. Without the network fence, a process that can read your SSH key can send it out. Without the filesystem fence, a process can rewrite the tools that run outside the sandbox and get the network that way.
+
+The policy is a JSON file (`~/.srt-settings.json` by default, or `--settings`). This is the one I ran:
+
+```json
+{
+  "network": { "allowedDomains": ["example.com"], "deniedDomains": [] },
+  "filesystem": {
+    "denyRead": ["$S/run/secret"],
+    "allowWrite": ["$S/run/project"],
+    "denyWrite": []
+  },
+  "bwrapPath": "$S/bin/bwrap",
+  "socatPath": "$S/bin/socat"
+}
+```
+
+`$S` is my scratch directory; I shorten it everywhere below. The rules have deliberately asymmetric defaults:
+
+- **Reads are open by default.** `denyRead` carves regions out, and `allowRead` re-opens paths inside them. Here `allowRead` wins over `denyRead`, unless the deny is more specific than the allow it sits under.
+- **Writes are closed by default.** `allowWrite` opens paths, and `denyWrite` closes paths inside them. Here the deny wins. An empty `allowWrite` means no writes at all, apart from a few defaults (`/tmp/claude`, `~/.npm/_logs`, `~/.claude/debug`, the child's stdio).
+- **The network is closed by default.** An empty `allowedDomains` means no network. Entries are exact hosts or `*.domain` wildcards, with an optional `:port`.
+- **Some writes are always denied.** Shell rc files (`.bashrc`, `.zshrc`, `.profile` and friends), `.gitconfig`, `.gitmodules`, `.ripgreprc`, `.mcp.json`, `.vscode/`, `.idea/`, `.claude/commands/`, `.claude/agents/`, `.git/hooks/` and `.git/config` are write-denied even inside an allowed directory. These are the files that run code later, outside the sandbox.
+
+The open-read default is worth saying twice. Claude Code's own docs list the default read scope as "Most of the machine, including credential files such as `~/.ssh` and `~/.aws/credentials`" (reported). The network fence is what makes that tolerable. If you widen the network, you should narrow the reads.
+
+## The network decision
+
+Every outbound connection is decided by one function in `sandbox-manager.ts`. It first rejects hosts with control characters and canonicalises IP shorthand, so `2852039166` cannot slip past a deny entry for `169.254.169.254`. Then it runs five checks in order:
+
+1. a `deniedDomains` match denies;
+2. an `allowedDomains` match allows;
+3. `strictAllowlist` denies whatever is left;
+4. a per-command allow list, keyed by an id the client presents in the proxy username, allows;
+5. an embedder's ask callback decides, and with no callback the answer is no.
+
+Claude Code is an embedder with a callback. That is how "this command wants `registry.npmjs.org`, allow it?" reaches you. The bare `srt` CLI has no callback, so anything off the list is simply denied. One detail of the matcher is easy to trip on: `*.example.com` matches `api.example.com` but not `example.com`, so a recipe needs both.
+
+After an allow, a second check runs before the proxy dials. The proxy resolves the name once, drops any address that is loopback, link-local, a cloud metadata endpoint, one of this host's own interfaces or anything in `deniedResolvedAddresses`, and connects to an address that survived. Without that, anyone who controls the DNS of an allowed name could point it at `127.0.0.1`. Private ranges such as `10.0.0.0/8` are not denied by default; you list them yourself.
+
+## Linux: bubblewrap builds the box
+
+On Linux, `srt` turns the policy into a single `bwrap` command line. I had it print the wrapped string through the library's `wrapWithSandbox`. Trimmed, with the environment flags and proxy credentials removed, it reads:
+
+```text
+bwrap --new-session --die-with-parent --unshare-net
+  --bind /tmp/claude-http-<id>.sock /tmp/claude-http-<id>.sock
+  --ro-bind / /
+  --ro-bind $S/run/project/.git $S/run/project/.git
+  --bind /root/.npm/_logs /root/.npm/_logs
+  --bind $S/run/project $S/run/project
+  --tmpfs $S/run/secret
+  --ro-bind /dev/null $S/run/project/.bashrc        (and 10 more like it)
+  --ro-bind /tmp/claude-empty-<id> $S/run/project/.claude
+  --ro-bind $S/run/project/.git/hooks $S/run/project/.git/hooks
+  --ro-bind $S/run/project/.git/config $S/run/project/.git/config
+  --dev /dev --unshare-pid --unshare-user --cap-drop ALL --cap-add CAP_SETFCAP
+  --proc /proc -- /usr/bin/bash -c '<socat listeners; wait loop; apply-seccomp bash -c CMD>'
+```
+
+Read it top to bottom and the whole Linux design is there.
+
+**The filesystem is a mount table.** `--ro-bind / /` makes the entire host tree visible and read-only. `--bind` re-mounts each `allowWrite` path read-write on top. Each `denyWrite` path and each mandatory deny is then re-bound read-only over that. A `denyRead` directory gets `--tmpfs`, an empty directory mounted over it. Mandatory-deny files that do not exist yet get a read-only `/dev/null` mounted at their name, so they cannot be created either. A `ripgrep` scan finds the dangerous files in subdirectories, three levels deep by default. My project held one git repository and got 12 of these placeholder mounts (measured from the debug log). There are no path checks in user space at all; the kernel's mount table is the policy.
+
+**The network is absent.** `--unshare-net` gives the command a network namespace with nothing in it but `lo`. Inside the sandbox `/proc/net/dev` listed one interface, `lo`, with zero bytes received (measured). The only way out is a filesystem object: the host-side proxy listens on a Unix socket (`/tmp/claude-http-<id>.sock`), and that socket is bind-mounted into the sandbox. Inside, two `socat` processes listen on `localhost:3128` (HTTP) and `localhost:1080` (SOCKS) and forward to it. `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and friends point there, `GIT_SSH_COMMAND` tunnels ssh through it, and a small Java agent in `JAVA_TOOL_OPTIONS` does the same for JVMs. In this version one socket serves both protocols: a multiplexer peeks at the first byte and sends `0x04`/`0x05` to SOCKS and everything else to HTTP.
+
+**The command runs one level deeper.** The wrapper starts both `socat` listeners, polls `/proc/net/sockstat` until two TCP sockets are listening (for up to 30 s), then hands off to `apply-seccomp`. That static binary, shipped prebuilt for x64 and arm64, creates a nested user, PID and mount namespace, installs seccomp filters and runs the command. One filter returns `EPERM` for `socket(AF_UNIX, …)` and `AF_VSOCK`, and blocks `io_uring_setup`, `io_uring_enter` and `io_uring_register`, because an io_uring socket opcode would sidestep the `socket()` rule. A second filter refuses `unshare` and `clone` with the user- or mount-namespace flags, `setns`, `mount`, `umount2` and `pivot_root`. That second filter matters more than it looks. Every write deny on Linux is a bind mount, and a process that can make a fresh user namespace gets a private copy of the mount tree it can rearrange. So the command is kept in the namespaces built for it.
+
+## What I ran, and what it said
+
+The task allowed one exception to my usual "read, don't run" rule, and this is it. bubblewrap is not installed on this machine, so I downloaded the Ubuntu 24.04 `.deb` packages for `bubblewrap` (0.9.0) and `socat` (1.8.0, plus its `libwrap0` dependency), extracted the binaries into scratch, and installed `@anthropic-ai/sandbox-runtime@0.0.81` from npm with `--ignore-scripts`. The machine is a shared 4-core cloud VM running Ubuntu 24.04 on kernel 6.18, as root, with `CAP_SETFCAP` in the bounding set. Unprivileged user namespaces were available: `unshare -U -r true` succeeded on the host. Every result below is measured.
+
+**Reads.** One allowed, one under `denyRead`:
+
+```text
+$ srt --settings $S/run/srt-settings.json -c "cat notes.txt; echo exit=\$?; cat $S/run/secret/key.txt; echo exit=\$?; ls -la $S/run/secret"
+public notes
+exit=0
+cat: $S/run/secret/key.txt: No such file or directory
+exit=1
+total 4
+drwxr-xr-x 2 root root   40 Oct 24 03:29 .
+drwxr-xr-x 5 root root 4096 Oct 24 03:29 ..
+```
+
+The denied file is not "permission denied". It is gone. The directory is a fresh tmpfs: 40 bytes, empty. The README says this is intended, and it has a consequence I confirmed: the tmpfs is writable. `echo h > $S/run/secret/new.txt` exited 0 inside the sandbox, and afterwards the host directory still held only `key.txt`. The write went into the tmpfs and vanished with it.
+
+**Writes.** Outside the project, into the home directory, into the mandatory denies, and into `/tmp`:
+
+```text
+$ srt --settings $S/run/srt-settings.json -c 'echo a > ok.txt; echo b > $S/run/outside/x.txt; echo c > $HOME/srt-probe.txt; echo d >> .bashrc; echo e > .git/hooks/pre-commit; echo g > /tmp/t.txt'
+ok-exit=0
+/usr/bin/bash: line 1: $S/run/outside/x.txt: Read-only file system
+/usr/bin/bash: line 1: /root/srt-probe.txt: Read-only file system
+/usr/bin/bash: line 1: .bashrc: Permission denied
+/usr/bin/bash: line 1: .git/hooks/pre-commit: Read-only file system
+/usr/bin/bash: line 1: /tmp/t.txt: Read-only file system
+```
+
+(I trimmed the `echo …-exit=$?` markers; each refused write exited 1.) Most failures are `EROFS`, because the path is under the read-only `--ro-bind / /`. The `.bashrc` refusal is `EACCES`, because it hit the read-only `/dev/null` placeholder. After the run, `ok.txt` existed in the project, and none of the other files existed on the host. The placeholders were cleaned up too: no `.bashrc` was left behind in the project.
+
+**Network.** One allowlisted host, one that is not, and a direct dial:
+
+```text
+$ srt --settings $S/run/srt-settings.json -c 'curl -sS -o /dev/null -w "example.com https %{http_code}\n" https://example.com; curl -sS -o /dev/null -w "example.org https %{http_code}\n" https://example.org; curl -sS --noproxy "*" -o /dev/null https://example.com'
+example.com https 200
+curl: (56) CONNECT tunnel failed, response 403
+example.org https 000
+curl: (6) Could not resolve host: example.com
+```
+
+Over plain HTTP the proxy can say more, because it sees the request:
+
+```text
+$ srt ... -c 'curl -sS -i http://example.org'
+HTTP/1.1 403 Forbidden
+Content-Type: text/plain
+X-Proxy-Error: blocked-by-allowlist
+...
+Connection blocked by network allowlist
+```
+
+The last line of the first block is the important one. With the proxy variables ignored, even the *allowed* host is unreachable. There is no resolver and no route in the namespace. A program that does not honour `HTTP_PROXY` does not get around the fence; it just fails. The README's "Linux proxy bypass" limitation is about exactly this: such programs cannot connect, not that they escape.
+
+**Sockets and namespaces.** Inside the sandbox, `python3 -c "import socket; socket.socket(socket.AF_UNIX)"` died with `PermissionError: [Errno 1] Operation not permitted`, and `unshare -U true` printed `unshare: unshare failed: Operation not permitted`. Both are the `apply-seccomp` filters.
+
+The widget below replays each of these and, beside it, what the macOS profile does according to the source. Its second half is a port of the five-step network decision; type a host and watch which rule decides.
+
+<PolicyLab />
+
+## How violations are reported
+
+A block is only half the job; the agent needs to know what was blocked, or it will just try another way.
+
+**On macOS** the kernel does the reporting. The generated profile opens with `(deny default (with message "<tag>"))`, where the tag is `CMD64_<base64 of the command>_END_` plus a random per-session suffix. `srt` runs `log stream` filtered on that suffix, decodes the command from each `Sandbox: … deny …` line, drops known noise (`mDNSResponder`, `diagnosticd`, `analyticsd`), and files the rest under the command. I could not run this; it is read from `macos-sandbox-utils.ts`.
+
+**On Linux** bubblewrap reports nothing, and the README still tells you to use `strace`. The code has moved on. `apply-seccomp` can install a seccomp `USER_NOTIF` filter on write-intent syscalls (28 of them on x86-64, from `openat`, `unlinkat` and `renameat2` to the legacy `creat` and `chmod`) and stream each one, with its path, to a Unix socket the library bind-mounts in. The kernel reports *attempts*, not denials, so the monitor intersects each path with the allow and deny lists. The source comment is blunt about the trust level: the path is read from the sandboxed process's memory, so it is "ATTACKER-CONTROLLED and racy", and the events "must never gate a policy decision". They are hints for the user; the mount table stays the boundary.
+
+The network side is simpler, because the proxy itself decides. Each connection carries an attribution key (by default the base64 of the command) in the proxy username, so a deny is filed under the command that made it.
+
+The CLI prints none of this. The library does. With the monitor on (the third argument of `SandboxManager.initialize`), I wrapped one command that writes outside the project and calls a non-allowlisted host, then called `annotateStderrWithSandboxFailures` on its stderr:
+
+```text
+exit 56
+/usr/bin/bash: line 1: $S/run/outside/x.txt: Read-only file system
+curl: (56) CONNECT tunnel failed, response 403
+
+<sandbox_violations>
+deny openat $S/run/outside/x.txt
+deny network-outbound example.org:443 (host is not on the allow list)
+</sandbox_violations>
+```
+
+That block is what a model reads. It names the syscall or the host, and for network denials a reason. `deniedDomainReasons` lets you write that reason yourself, such as "SSH pushes to GitHub are blocked; use an https:// remote", so the model learns the sanctioned alternative, not just the refusal.
+
+## macOS: a Seatbelt profile per command
+
+On macOS there is no namespace to build. `srt` writes a Seatbelt profile and runs `env … /usr/bin/sandbox-exec -p <profile> <shell> -c <command>`. The profile starts from `(deny default)` and adds what a shell needs: exec and fork, signals only within the same sandbox, and a named list of Mach services with no wildcard. Reads are `(allow file-read*)` followed by the `denyRead` rules and the `allowRead` re-allows. Writes allow the `allowWrite` roots, deny the mandatory denies as globs, and block renames that would move a protected path aside.
+
+The network section is the macOS equivalent of the missing namespace. With restrictions on, it allows `network-outbound` only to `localhost:<httpProxyPort>` and `localhost:<socksProxyPort>`, the two ports the host proxies listen on. Unix sockets need an explicit `allowUnixSockets` path.
+
+Two options open real holes, and the README says so plainly. `enableWeakerNetworkIsolation` re-allows `com.apple.trustd.agent` for Go TLS verification, "a potential data exfiltration vector". `allowAppleEvents` lets a command run `open` and `osascript`, and since launched apps run outside the sandbox, it "removes code-execution isolation, not just weakens it".
+
+## How Claude Code wires it in
+
+All of the following comes from the Claude Code docs (reported), not from Claude Code's source, which I did not read. The docs state that "Claude Code builds the sandbox on the open source `@anthropic-ai/sandbox-runtime` package". Some replies under the X post claim the shipped sandbox differs from the open-source one. I cannot check that from the outside.
+
+<Figure src="/articles/sandbox-runtime/fig1.png" alt="Diagram in three columns: the user, Claude Code and the sandbox. A bash command runs inside the sandbox; a write to ~/.bad_file and HTTPS to a denied host are denied, a write to ./README.md is allowed. Network calls leave the sandbox through socat to a domain socket and on to the SOCKS proxy (for UDP, SSH and other traffic) or the HTTP proxy (for HTTP and HTTPS) inside Claude Code. Allowed hosts pass, denied hosts are refused, and unknown hosts on port 80 or 443 trigger 'Ask user for permission'. Errors stream from the sandbox to a log listener, and failures are shown to the user." caption="Claude Code's sandbox: socat and a domain socket are the only way out, the proxies decide per host, and unknown hosts become a permission prompt. (Anthropic engineering blog, 'Beyond permission prompts', also in the sandbox-runtime README.)" />
+
+The sandbox wraps the Bash tool and nothing else. Claude Code's own Read, Edit, Write and WebFetch tools follow permission rules instead. Hooks, local MCP servers, LSP servers and the status line command run "with your full access". The sandbox is off by default; `/sandbox` or `sandbox.enabled: true` turns it on. With `autoAllowBashIfSandboxed` (default true), a command that runs sandboxed is approved without a prompt. That is the 84% claim in mechanical form.
+
+Then there is the escape hatch. When a command fails in the sandbox, Claude can retry it with `dangerouslyDisableSandbox`, which runs it unsandboxed. Your permission mode decides who approves that: a prompt in manual mode, no prompt in `bypassPermissions`. `allowUnsandboxedCommands: false` turns the hatch off, and `failIfUnavailable: true` stops Claude Code from quietly running unsandboxed when bubblewrap is missing. That last default matters on Linux. Without bubblewrap installed, the docs say Claude Code "runs commands without sandboxing".
+
+Claude Code on the web takes the other route. The whole session runs in a gVisor sandbox with no git credentials inside, and a git proxy holds the token:
+
+<Figure src="/articles/sandbox-runtime/fig2.png" alt="Three panels: a gVisor sandbox containing Claude Code, where git add is auto-allowed and git commit and git push send requests carrying a JWT; a git proxy that validates the JWT, the pushed branch name and the pushed repo destination; and github.com, which receives the push only after those checks." caption="Claude Code on the web keeps credentials out of the sandbox entirely: the in-sandbox git client holds a scoped JWT, and the proxy checks branch and destination before attaching the real token. (Anthropic engineering blog, 'Beyond permission prompts'.)" />
+
+srt has a local version of the idea: `credentials` entries can withhold a secret or swap in a sentinel that the proxy replaces on the way out. It needs the experimental `network.tlsTerminate`, and I did not test it.
+
+## What it costs per command
+
+The runs below come from the shared VM described above. The 1-minute load average was about 10 on 4 cores while they ran, so treat these as upper bounds. Every figure is a median of 20 runs (measured).
+
+| What | Median |
+|---|---|
+| `bash -c true`, unsandboxed, from a shell loop | 6 ms |
+| `srt -c true`, the whole CLI: Node start, proxy start, wrap, run | 734.5 ms |
+| `SandboxManager.initialize` (proxies, bridge), once per session | 123.9-238.5 ms |
+| `wrapWithSandbox("true")`: build the argv, ripgrep scan | 33.1-47.2 ms |
+| run the wrapped `true`, proxies already up | 80.9-108.1 ms |
+| run `bash -c true` unwrapped, same harness | 4.3-9.7 ms |
+
+The ranges are three separate runs of the library harness. For an embedder like Claude Code, which initialises once, the per-command price is the wrap plus the wrapped run: roughly 115-155 ms against under 10 ms bare (reasoned, from the rows above). Part of it is fixed by design. The wrapper waits until both `socat` listeners are up before it starts your command, so a command never races its own network bridge. For commands that take seconds, that is noise; for a loop of a thousand `grep`s, batch them.
+
+## Where the boundary is thin
+
+The README and the Claude Code docs list the limits themselves, and they are the right ones to know before relying on this.
+
+- **An allowed domain is a whole domain.** The proxy decides from the hostname, the CONNECT target or the SOCKS name, and by default never looks inside TLS. Allowing `github.com` allows pushing to any repository. Both documents warn that domain fronting "may" bypass the filter, for the same reason. The fix they suggest is a custom or TLS-terminating proxy that inspects requests (`network.filterRequest`, `mitmProxy`), at the cost of a CA certificate inside the sandbox.
+- **DNS happens on the host.** Inside the Linux sandbox there is no resolver; names go to the proxy (`socks5h://`, CONNECT). That stops DNS tunnelling from the sandbox, but it means the host's resolver decides what an allowed name points at. The resolved-address check covers loopback, link-local, metadata and the host's own interfaces; your LAN is covered only if you list it.
+- **Unix sockets are a side door you open yourself.** `allowUnixSockets: ["/var/run/docker.sock"]` is, in the README's words, effectively access to the host. On Linux the seccomp filter cannot match by path, so it is all or nothing (`allowAllUnixSockets`), and it does not touch sockets inherited or passed in with `SCM_RIGHTS`.
+- **Linux globs are narrower than they look.** `allowWrite` and `denyWrite` take literal paths. A `denyRead` glob is expanded once, when the command is wrapped, so a file created later is not covered. A pattern with a wildcard in its first component is skipped, and "a skipped pattern hides nothing".
+- **Three switches turn the walls down.** `enableWeakerNestedSandbox` (for Docker without privileged namespaces) "considerably weakens security". `allowNestedUserNamespaces` lets a command undo its own write denies. And `allowAllUnixSockets` together with `enableWeakerNestedSandbox` leaves user namespaces unlimited, because bubblewrap's own `--disable-userns` cannot be used there.
+- **The sandbox can rewrite its own runtime.** If `srt` is installed in `<project>/node_modules` and the project is writable, a sandboxed command can modify it, and the next `srt` runs the result unsandboxed. Install it globally.
+- **Not everything is wrapped.** In Claude Code, hooks, MCP servers and built-in tools run outside it. For a boundary around all of that, the docs suggest running Claude Code itself under `srt` or in a container.
+
+These are the honest edges of a design that chose OS primitives over a VM. Compare [NVX](/articles/nvx), which builds a micro-VM up from nothing, and [OpenShell](/articles/openshell), which puts Landlock and a seccomp supervisor between the agent and every connection. [Strands Box](/articles/strands-agents-and-box) uses the same macOS Seatbelt primitive with a policy language on top. [Octop](/articles/octop)'s optional bubblewrap backend is a mount-namespace jail with no network fence. srt is the lightest of these. Nothing is started, the command still runs on your kernel, and you pay a small cost per command.
+
+## What I would check before trusting it
+
+I ran the Linux path end to end. I only read the macOS profile, the TLS-terminating proxy, credential masking, Windows and Claude Code's wiring.
+
+The question the X post asked, how tight to make the allowlist, has no universal answer. srt gives you the tools to make it a conscious one. Start from the deny-everything default. Turn on `strictAllowlist` if you do not want an ask callback widening the list. Add `denyRead` for `~/.ssh` and `~/.aws` before adding any domain. Add `deniedResolvedAddresses` for your private ranges. And treat every domain you allow as a place your files can go.
