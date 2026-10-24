@@ -19,6 +19,9 @@
 // installed it already ran the attacker's code. Ties break on how direct
 // the exploitation evidence is (malicious, KEV, attempts, breach, keys,
 // none), then on CVSS. CVSS is shown, never summed in. The prose explains why.
+// The HTTP2Shell row was added on 24 October (KEV catalog 2026.10.23, CVE record
+// SSVC Exploitation: none); the PoC flag is null because the only public PoC is
+// Imperva's, against Node, which is the row above.
 
 import { useMemo, useState } from "react"
 
@@ -58,6 +61,7 @@ const ITEMS: Item[] = [
   { name: "Windows Shell", ids: "CVE-2026-96951", kind: "desktop", cls: "Command injection, security feature bypass", cvss: "8.8 (v3.1)", kev: "2026-10-13", exploited: "kev", access: "user", reach: "conditional", poc: null, fix: "October 2026 cumulative update" },
   { name: "Palo Alto PAN-OS", ids: "CVE-2026-0322", kind: "appliance", cls: "Code injection in management interface", cvss: "8.6 (v4.0)", kev: "2026-10-14", exploited: "kev", access: "admin", reach: "conditional", poc: null, fix: "e.g. 12.2.4, 11.2.16; restrict the management interface" },
   { name: "Node.js (Node2Shell + 9 more)", ids: "CVE-2026-111497; TLS: CVE-2026-105483, CVE-2026-106069; 7 others", kind: "runtime", cls: "Brotli decoder out-of-bounds write; TLS hostname-check bypasses; 10 CVEs in all", cvss: "9.2 (v4.0, CNA); High (Node.js)", kev: null, exploited: "none", access: "none", reach: "conditional", poc: true, fix: "22.23.4 · 24.22.1 · 26.12.1" },
+  { name: "Brotli beyond Node (HTTP2Shell)", ids: "CVE-2026-111497; GHSA-9v8h-qqgm-4m35 (PyPI); Envoy GHSA-3wvj-j6qm-62mr", kind: "runtime", cls: "Same Brotli decoder out-of-bounds write in libbrotli, Python Brotli/brotlicffi, Envoy, Istio, Bun", cvss: "9.2 (v4.0, CNA)", kev: null, exploited: "none", access: "none", reach: "conditional", poc: null, fix: "libbrotli 1.0.10 · 1.1.1 · 1.2.1; Brotli 1.2.1; brotlicffi 1.2.1.0; Envoy 1.37.8+; Istio 1.29.9 · 1.30.6 · 1.31.2; Bun 1.4.4" },
   { name: "NGINX Open Source and Plus", ids: "CVE-2026-15176, -93479, -97205, -97629, -95101", kind: "runtime", cls: "Worker heap overflows and use-after-free in specific configurations; TLS session forgery; HTTP/3 body injection", cvss: "9.2 (v4.0, F5) ×3; nginx.org: medium", kev: null, exploited: "none", access: "none", reach: "conditional", poc: null, fix: "1.31.7 · 1.30.6 (14 Oct); Plus 37.0.5.1 · 37.1.0.1" },
   { name: "Go standard library", ids: "CVE-2026-111943", kind: "pki", cls: "crypto/x509 denylist for the compromised eMudhra intermediates", cvss: "n/a", kev: null, exploited: "none", access: "none", reach: "conditional", poc: null, fix: "1.26.10 · 1.27.3, then rebuild every binary" },
   { name: "Fortinet FortiOS and others", ids: "CVE-2025-61624", kind: "appliance", cls: "Path traversal via admin CLI", cvss: "5.4 (v3.1)", kev: "2026-10-16", exploited: "kev", access: "admin", reach: "conditional", poc: null, fix: "Per FG-IR-26-122" },
