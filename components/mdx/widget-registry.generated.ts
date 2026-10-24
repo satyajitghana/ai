@@ -197,6 +197,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "depth-anything-3-ros2/scale-seam": () => import("@/components/articles/depth-anything-3-ros2/scale-seam"),
   "depthbench/depth-explorer": () => import("@/components/articles/depthbench/depth-explorer"),
   "desert-ant-labs/energy-ledger": () => import("@/components/articles/desert-ant-labs/energy-ledger"),
+  "dessa/offset-histogram": () => import("@/components/articles/dessa/offset-histogram"),
+  "dessa/turn-tape": () => import("@/components/articles/dessa/turn-tape"),
   "dflash2/concurrency-cliff": () => import("@/components/articles/dflash2/concurrency-cliff"),
   "dflash2/path-selector": () => import("@/components/articles/dflash2/path-selector"),
   "dflash2/selection-headroom": () => import("@/components/articles/dflash2/selection-headroom"),
