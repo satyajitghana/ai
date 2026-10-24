@@ -1077,6 +1077,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "softmax-bottleneck/bottleneck-today": () => import("@/components/articles/softmax-bottleneck/bottleneck-today"),
   "softmax-bottleneck/mixture-ladder": () => import("@/components/articles/softmax-bottleneck/mixture-ladder"),
   "softmax-bottleneck/rank-wall": () => import("@/components/articles/softmax-bottleneck/rank-wall"),
+  "softmax-fix/cliff-probe": () => import("@/components/articles/softmax-fix/cliff-probe"),
+  "softmax-fix/slingshot-runs": () => import("@/components/articles/softmax-fix/slingshot-runs"),
   "sog-splat-format/morton-win": () => import("@/components/articles/sog-splat-format/morton-win"),
   "sog-splat-format/splat-anatomy": () => import("@/components/articles/sog-splat-format/splat-anatomy"),
   "sol-attn/engine-stack": () => import("@/components/articles/sol-attn/engine-stack"),
