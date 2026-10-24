@@ -194,6 +194,39 @@ function checkLitellm(raw: string): Verdict | null {
   return { tone: "warn", text: "Newer than 1.107.0. Confirm against the maintainers' incident page that this release was published after the clean-up." }
 }
 
+// CVE-2026-111497 outside Node ("HTTP2Shell"). The CVE record (Google as CNA)
+// names Brotli 1.0.3 through 1.2.0, fixed in 1.0.10, 1.1.1 and 1.2.1.
+// GHSA-9v8h-qqgm-4m35 gives the PyPI fixes: Brotli 1.2.1 (PyPI never got a
+// 1.0.10 or 1.1.1) and brotlicffi 1.2.1.0, whose four-part versions track the
+// bundled C library. A distro package keeps the old number when it backports.
+function checkBrotliPy(raw: string): Verdict | null {
+  const four = raw.trim().match(/^v?(\d+)\.(\d+)\.(\d+)\.(\d+)/)
+  if (four) {
+    const v = four.slice(1).map(Number)
+    const ok = v[0] > 1 || (v[0] === 1 && (v[1] > 2 || (v[1] === 2 && v[2] >= 1)))
+    return ok
+      ? { tone: "ok", text: "brotlicffi at or past 1.2.1.0, the fixed release. Rebuild images that pinned an older wheel." }
+      : { tone: "bad", text: "brotlicffi below 1.2.1.0: it bundles an affected Brotli decoder. urllib3, httpx and aiohttp use it whenever it is installed. Upgrade to 1.2.1.0." }
+  }
+  const v = parse(raw)
+  if (!v) return null
+  if (cmp(v, [1, 2, 1]) >= 0) return { tone: "ok", text: "Brotli at or past 1.2.1, the fixed PyPI release." }
+  if (cmp(v, [1, 0, 3]) < 0) return { tone: "warn", text: "Older than the CVE's stated range (1.0.3 to 1.2.0), and years out of support. Move to 1.2.1 anyway." }
+  return { tone: "bad", text: "Brotli 1.0.3 to 1.2.0 on PyPI is affected, and PyPI's only fix is 1.2.1. urllib3 (so requests), httpx and aiohttp use it whenever it is installed. Upgrade." }
+}
+
+function checkLibbrotli(raw: string): Verdict | null {
+  const found = raw.match(/(\d+\.\d+\.\d+)/)
+  const v = found ? parse(found[1]) : null
+  if (!v) return null
+  if (v[0] !== 1) return { tone: "warn", text: "Not a Brotli 1.x version. Check what reported it." }
+  if (cmp(v, [1, 0, 3]) < 0) return { tone: "warn", text: "Older than the CVE's stated range (1.0.3 to 1.2.0). Check your vendor's advisory." }
+  const fixed = v[1] === 0 ? [1, 0, 10] : v[1] === 1 ? [1, 1, 1] : v[1] === 2 ? [1, 2, 1] : null
+  if (!fixed) return { tone: "warn", text: "Newer than the lines in the CVE record. Check the Brotli release notes." }
+  if (cmp(v, fixed) >= 0) return { tone: "ok", text: `At or past ${fixed.join(".")}, the upstream fix for the ${v[0]}.${v[1]} line.` }
+  return { tone: "warn", text: `Upstream ${v.join(".")} is affected (fixed in ${fixed.join(".")}). A distro package keeps the old number when it backports: Debian's fixes are 1.0.9-2+deb12u1 and 1.1.0-2+deb13u1. Check the package release, not only this number.` }
+}
+
 const TONE: Record<Verdict["tone"], string> = {
   ok: "oklch(0.58 0.14 155)",
   bad: "oklch(0.60 0.18 28)",
@@ -231,9 +264,11 @@ export function VersionCheck() {
       <Field label="LiteLLM version (pip show litellm)" placeholder="1.106.2" check={checkLitellm} />
       <Field label="NGINX version (nginx -v), or Plus 37.x.y.z / R36" placeholder="1.30.5" check={checkNginx} />
       <Field label="Go toolchain that built the binary (go version -m)" placeholder="go1.26.9" check={checkGo} />
+      <Field label="Python Brotli or brotlicffi (pip show brotli brotlicffi)" placeholder="1.2.0" check={checkBrotliPy} />
+      <Field label="libbrotli, the C library (dpkg -l, rpm -q, or curl -V)" placeholder="1.1.0" check={checkLibbrotli} />
       <p className="text-xs text-muted-foreground sm:col-span-2">
         Version ranges from the PHP advisories GHSA-w8hw-w9fx-j79w and GHSA-6wmf-4rv5-p3rp, the Node.js October 2026 security
-        release, the GitLab 19.5.1 patch release, nginx.org&apos;s advisories and F5&apos;s CVE records, Go&apos;s GO-2026-6809 and the LiteLLM 21 October incident report. Nothing leaves your browser. A version string is not the whole answer: a distro backport can fix an older number,
+        release, the GitLab 19.5.1 patch release, nginx.org&apos;s advisories and F5&apos;s CVE records, Go&apos;s GO-2026-6809, the LiteLLM 21 October incident report, and for Brotli the CVE-2026-111497 record and GHSA-9v8h-qqgm-4m35. Nothing leaves your browser. A version string is not the whole answer: a distro backport can fix an older number,
         and an unrestarted worker can still run the old code.
       </p>
     </div>
