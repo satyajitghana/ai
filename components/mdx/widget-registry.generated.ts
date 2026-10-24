@@ -2,6 +2,8 @@
 // One import() per article widget so each is its own chunk (components/mdx/lazy-widget.tsx).
 
 export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
+  "3d-model-anything/photo-score": () => import("@/components/articles/3d-model-anything/photo-score"),
+  "3d-model-anything/who-decides": () => import("@/components/articles/3d-model-anything/who-decides"),
   "3d-reconstruction-roundup-2/loop-closure-toy": () => import("@/components/articles/3d-reconstruction-roundup-2/loop-closure-toy"),
   "3d-reconstruction-roundup/floater-toy": () => import("@/components/articles/3d-reconstruction-roundup/floater-toy"),
   "3dcodeverse/refine-loop": () => import("@/components/articles/3dcodeverse/refine-loop"),
