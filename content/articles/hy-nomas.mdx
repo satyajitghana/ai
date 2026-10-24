@@ -1,0 +1,181 @@
+---
+title: "Hy-Nomas: an 8.6B world model whose memory is a KV cache, and what it takes to fit a 4090"
+description: "Tencent Hunyuan's Hy-Nomas generates a world five seconds at a time from text and camera paths. I read the code at commit 01b7dba, every safetensors header by range request, the configs, the benchmark card and two of the project's own demo clips, and ran the history-selection code on CPU. The DiT is 8,553,434,592 parameters; its 'world memory' is the attention keys and values of every past segment, not frames and not 3D. The RTX 4090 preset keeps 18 power-spaced latent frames of that cache on the GPU and the rest in system RAM, which grows by about 1.2 GB per second of video. The 'lightweight' robotics LoRA is 3.06B parameters, 36% of the DiT. Published results are pairwise human preferences; the benchmark ships prompts and trajectories but no scores, and the technical report is not out."
+date: 2026-10-24
+tags:
+  - world-models
+  - video-generation
+  - kv-cache
+  - distillation
+  - lora
+  - quantization
+  - diffusion-transformers
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Shows from code and headers what Hy-Nomas's world memory stores, which 18 frames the 4090 preset keeps, and what the CPU archive costs per second."
+topic: generative-media
+kind: model
+level: practitioner
+runsOn: consumer-gpu
+licence: Apache-2.0
+---
+
+import { HistoryPicker } from "@/components/articles/hy-nomas/history-picker"
+
+Tencent Hunyuan [announced Hy-Nomas](https://x.com/TencentHunyuan/status/2113676827114053892) with four bullet points: free-form interaction with text prompts and camera trajectories, "long-horizon generation with world memory", "lightweight LoRA adaptation for specialized domains such as robotics", and "optimized for inference on consumer GPUs". The replies split three ways. One person said 24 GB of VRAM is still too much. Another said they had it running in ComfyUI on 12 GB. A third asked the right question: when the camera leaves a place and comes back, does the scene stay, or quietly regenerate?
+
+That question is about what "world memory" means, so that is where I spent most of the time. I cloned [the repository](https://github.com/Tencent-Hunyuan/Hy-Nomas) at commit `01b7dba` (23 October), read the configs and the pipeline, read every safetensors header in [the weights repo](https://huggingface.co/tencent/Hy-Nomas) by HTTP range request, read the [Hy-Nomas-Bench card](https://huggingface.co/datasets/tencent/Hy-Nomas-Bench) and the [project site](https://hy-nomas.hy.tencent.com/), and pulled two of the site's own demo clips. I did not run the model; there is no GPU here. I did run one piece of its code on CPU, the function that decides which past frames the 4090 preset keeps on the GPU.
+
+The short version: the memory is a KV cache. It is a good, honest design, and the consumer-GPU path is real, but it moves the problem from VRAM to system RAM. The technical report is "coming soon", so every quality number below is the publisher's.
+
+<ModelCard repo="tencent/Hy-Nomas" />
+
+<RepoCard repo="Tencent-Hunyuan/Hy-Nomas" />
+
+## What is in the box
+
+Four models ship together. I counted parameters from the headers (measured):
+
+| Asset | Parameters | On disk | What it does |
+|---|---|---|---|
+| DiT, `base_ar` / `distilled` | 8,553,434,592 | 34.2 GB each, FP32 | the world model; the base is for LoRA training, the distilled one for 4/6/8-step inference |
+| DiT, `distilled_int8` | same weights, INT8 in groups of 128 | 9.06 GB | the single-GPU checkpoint |
+| PixelUMM decoder (`PixelUMM_FT`) | 7.89B (6.97B decoder, 0.92B encoder) | 31.6 GB FP32, 9.14 GB FP8 | latents to pixels |
+| DCAE-V `f32t4c32` | not a safetensors file | 4.28 GB | the video autoencoder, used for training data |
+| Nomas-PE | about 27.8B | 55.6 GB BF16 | the demo's prompt rewriter |
+
+Inside the DiT, 8.157B parameters sit in 54 dual-stream blocks and 0.242B in the camera modules, 2.8% of the total (measured). The site calls it "an 8B video world model", which is fair.
+
+Two things in that table matter later. The decoder is almost as large as the generator. And Nomas-PE is a separate 27.8B model (its config is the Qwen3.5 hybrid layout, 48 linear-attention layers and 16 full-attention ones) that the interactive demo requires and that the deployment guide launches on eight GPUs by default (reported). Offline inference reads a prepared prompt file and does not need it.
+
+## How one segment is made
+
+Hy-Nomas does not generate a minute in one pass. It generates a segment, usually five seconds, writes that segment into its cache, and generates the next one conditioned on everything cached so far. The model card's architecture figure shows one step of that loop:
+
+<Figure
+  src="/articles/hy-nomas/fig1.png"
+  alt="Hy-Nomas framework diagram. On the left, three inputs: a structured prompt (style, subject, segment text, action) goes through an MLLM and a token refiner; a video clip goes through a 3D VAE encoder, has noise added, and goes through patch embed; a camera trajectory goes through a pose encoder and a camera projection. Text and video tokens enter a dual-stream MMDiT block repeated N times, containing segment-wise causal attention with 3D RoPE, which reads history from a KV cache above it, then separate MLPs for text and video, with timestep modulation. The camera tokens enter a camera cross-attention after the video MLP. The video stream goes to a 3D VAE decoder producing generated segment k, and a dashed line feeds the segment's output back into the KV cache."
+  caption="One segment: text, video latents and camera poses enter 54 dual-stream blocks; attention is causal across segments and reads earlier segments from the KV cache; the finished segment is written back to it. Purple is text, blue video, green camera (Hy-Nomas model card, framework figure)."
+/>
+
+Walking the figure with the config open (`configs/experiment/inference.yaml`; measured unless marked):
+
+- **Text.** The language half of Qwen2.5-VL-7B-Instruct encodes a structured JSON prompt: a style, a subject list, then per segment a description and timed actions. Its 3,584-wide hidden states go through a two-layer token refiner into the DiT's 2,048 width.
+- **Video tokens.** DCAE-V compresses 32 times in each spatial direction and 4 times in time, into 32 channels, and the DiT's patch size is 1×1×1. At 720×1280 that is a 22 × 40 grid, so **880 tokens per latent frame**, and at 24 fps, six latent frames per second (reasoned). A five-second segment is 30 latent frames, or 26,400 tokens.
+- **The blocks.** 54 double-stream blocks, hidden size 2,048, 16 heads of 128, MLP width 8,192, 3D RoPE split `[16, 56, 56]` with theta 256. No single-stream blocks. Text and video keep separate weights and meet in joint attention, the MMDiT layout from [the Diffusion Transformer page](/architectures/diffusion-transformer).
+- **Two masks.** Attention is segment-wise causal: a token sees its own segment and earlier ones, never later ones. And a timed action ("draws sword") is visible only to the video frames inside its window, so the model does not act it out early.
+- **Sampling.** Flow velocity, Euler, 8 steps with shift 5, guidance 1.0. Guidance was distilled in, so each step is one forward pass, not two.
+
+One small discrepancy: the code computes the latent height as 720 ÷ 32 rounded down, which is 22, and 22 × 32 is 704. Both demo clips I downloaded are 1280×704 at 24 fps (measured with `ffprobe`). The card's "720 × 1280" is the requested size; the frames are 16 rows shorter.
+
+### Writing the segment into memory
+
+After the eighth step, the pipeline does something the figure only hints at with its dashed arrow. It takes the clean latent of the finished segment, mixes it back with noise at sigma 0.206897, and runs the DiT over it once more with `update_cache=True`. That ninth pass is the one whose keys and values get stored.
+
+Why re-noise a clean result? Because that is what the model saw in training. The fine-tuning transport (`segment_self_forcing_transport.py`) rolls the model out segment by segment, writes each generated segment into the cache with gradients cut, and draws the cache's noise level between 0.1 and 0.3 (`context_low_t_min`, `context_low_t_max` in `sft.yaml`). Inference writes at 0.207, inside that band. A model trained on its own slightly noisy history learns not to trust its past pixel-for-pixel, which is how self-forcing fights drift. So a segment costs nine DiT passes, not eight (reasoned from the loop).
+
+### The camera
+
+The camera enters through a small cross-attention module after each of the 54 blocks (`extrinsics_attn`). Each video frame has a normalized 4×4 camera-to-world matrix; four consecutive ones are flattened into a 64-wide vector, one per latent frame, matching the VAE's 4× time compression. With `camera_chunk_size: 1`, the mask is block-diagonal: latent frame *t* attends only to its own camera token. The demo turns W, A, S, D and the arrow keys into those matrices (`keyboard_mouse_to_extrinsics.py`). Training drops the camera on half of the segments (`per_segment_camera_dropout_p: 0.5`), so one clip can switch between text control and camera control, which is the "interleaved" mode on the site.
+
+## What "world memory" stores
+
+Not frames. Not a point cloud or a map. The memory is, for every one of the 54 layers, the attention keys and values of every past segment's video tokens and text tokens. When segment *k* is denoised, its queries attend over that cache. Nothing in the repository reconstructs geometry; if a waterfall comes back where you left it, that is because the keys for the frames that showed it are still being attended to.
+
+The standard preset keeps all of it (`max_cache_segments: null`, no window), and the arithmetic is steep. Keys and values are 2,048 wide each, so in BF16 one token costs 8,192 bytes per layer and 442,368 bytes across 54 layers. One latent frame of 880 tokens is 389 MB. A second of video is 2.34 GB, and a minute is about 140 GB (all reasoned from the shapes). That is why the standard preset runs sequence-parallel across eight GPUs (`sp_size: 8`), about 17.5 GB of cache each for a full minute.
+
+### The 4090 preset
+
+`single_gpu_low_mem_inference.yaml` changes four things: INT8 DiT weights, INT8 KV cache, an FP8 decoder through CUTLASS, and CPU offload of every model between its stages. And it turns on `sliding_window` with `past_frames: 18` and `sampling: temporal_context`.
+
+The README calls this a sliding window. It is not one, in the usual sense. The cache is quantized once per segment (one byte per value plus an FP32 scale per token and head, 4,224 bytes per token per layer) and **every segment's INT8 keys and values are archived in CPU memory**. Before each new segment, `temporal_context_frame_indices` picks 18 past latent frames out of the whole archive and restores only those to the GPU. The pick is power-spaced back from the newest frame:
+
+$$
+d_i = i + \operatorname{rint}\!\big((T-N)\,u_i^{\gamma}\big), \qquad u_i = \tfrac{i}{N-1},\quad N = \min(18, T),\quad \gamma = 2
+$$
+
+where $T$ is the number of past latent frames and the selected frames are $T-1-d_i$. With $\gamma = 2$ the distances grow slowly at first and fast later, so the picks crowd toward the present, and $d$ always ends at $T-1$, so frame zero, the opening shot, is always kept.
+
+I ran the upstream function on CPU with a stub for its profiling import (measured, shared 4-core VM). A minute in, with 360 past latent frames, it keeps frames 0, 40, 78, 113, 146, 177, 205, 231, 254, 275, 294, 310, 324, 336, 345, 352, 357 and 359. Five of the 18 come from the last five seconds. The widest gap is 40 latent frames, about 6.7 seconds. A true sliding window of 18 would have covered only the last three seconds. The widget below is a port of the same function; I checked it against the Python output for 7,200 combinations of history length, budget and policy, and it matches all of them.
+
+<HistoryPicker />
+
+So the 4090's GPU holds about 3.6 GB of history (18 × 880 tokens × 54 layers × 4,224 bytes, reasoned), however long the world gets. The archive in system RAM is what grows: about 200 MB per latent frame, 1.2 GB per second of video, 72 GB for the 60-second worlds the site advertises. It is never trimmed, because the next selection may want any frame back, and because the demo's undo ("Draft it. Review it. Redo it.") rebuilds the history from it. The README's warning that "CPU offload requires enough system RAM" is doing a lot of work. A consumer GPU with 32 GB of system RAM will run out of host memory well before a minute, on my arithmetic; I could not test it.
+
+Does the memory work? The site shows three revisit clips and says plainly that "spatial memory remains weaker than Genie 3 on revisiting trajectories". Here is one of its examples, two frames I pulled from it:
+
+<Figure
+  src="/articles/hy-nomas/fig2.jpg"
+  alt="Two frames from a Hy-Nomas demo video in an ice cavern. Left, at 8 seconds: a figure in a red hooded parka in the foreground, a frozen waterfall falling down a blue honeycomb ice wall behind, with a text caption about sunlight refracting through the ceiling. Right, at 19 seconds, after the camera has turned away and back: the waterfall is again in view in a similar place on the wall, but the ceiling above it now shows an orange rock band that was not there before, and the parka figure is out of frame. Keyboard overlays show W and D pressed and the right arrow."
+  caption="A revisit, frames at 8 s and 19 s of the site's 'Rediscover the waterfall' clip: the waterfall is back roughly where it was; the ceiling around it is not the same. The project's own selected example (Hy-Nomas project site, world-memory demo)."
+/>
+
+That is about what a KV cache with no geometry should give: the landmark, the layout and the palette survive; the details are regenerated. It is the same trade [WorldCrafter](/articles/worldcrafter) attacks from the other side, choosing its eight past frames by how much of the upcoming views they cover rather than by time alone.
+
+## Few steps, and where they come from
+
+The distilled checkpoint runs 4, 6 or 8 steps. The site describes two distillation stages, a causal PCM initialisation and then "DDMD + adversarial refinement" with a frozen teacher, a fake-score model and a discriminator (reported). The repository has the pieces (`dmd.py`, adapted from Self-Forcing-Plus, and a discriminator head), but no distillation config. What it ships end to end is the segment self-forcing fine-tune and inference. If you want to reproduce the 8-step model you will have to wait for the report.
+
+The decoder is also distilled: the fine-tuned PixelUMM decoder runs one step over windows of 10 latent frames overlapping by 5 (reported on the card, and set in the config). PixelUMM is NVIDIA's pixel-space model that I covered in [PixelUMM and PixelDense](/articles/pixelumm-pixeldense); here a 7.89B copy of it is repurposed as the decoder for DCAE-V latents, which is why decoding needs its own 9.14 GB of FP8 weights.
+
+## What runs on one consumer GPU
+
+The README's claim is narrow and, as far as I can check from files, true: offline inference on a single RTX 4090 with the INT8 DiT and FP8 decoder. One reply summarized it as INT8 DiT and cache, FP8 decoder, 18 past frames on the GPU, the rest on CPU, the same 8 steps and "720x1280 at 24 FPS"; every part of that matches the config except the 720, which is 704. Since each model is moved to the GPU only for its stage, peak VRAM is the largest stage, not the sum (reasoned from file sizes; activations are extra and I could not measure them):
+
+| Stage | Weights on GPU | Plus |
+|---|---|---|
+| Text encoding | Qwen2.5-VL-7B in BF16, roughly 15 GB | prompt activations |
+| Denoising and cache write | 9.06 GB INT8 DiT | 3.6 GB INT8 history, 26,400 query tokens per five-second segment |
+| Decoding | 9.14 GB FP8 decoder | a 10-latent-frame window |
+
+That fits 24 GB on paper. The 12 GB ComfyUI report is a third party's and I could not verify it. What the repository does not publish is a speed. There is no seconds-per-segment figure for the 4090 preset, and none for the eight-GPU demo; the site says "4-step fast, 8-step quality" and stops there. Each five-second segment costs nine DiT passes over 26,400 tokens attending to the history, plus a decoder pass, plus host-to-device copies of three models. I would not expect real time from that on one card, and nobody claims it.
+
+The interactive demo is another matter: it needs Nomas-PE, the 27.8B rewriter, as a separate service. "Runs on a 4090" means the video model, offline, from a prompt file.
+
+## How lightweight is the LoRA?
+
+The training recipe: start from the non-distilled `base_ar` checkpoint, train LoRA adapters with segment self-forcing (Muon, learning rate 1e-4, 2,000 steps), then merge them into the distilled checkpoint. The example launch is 128 GPUs, sequence-parallel 8 by data-parallel 16. The README says `sft.yaml` uses rank and alpha 256. The released adapters differ (measured from their configs and headers):
+
+| Adapter | Rank / alpha | Parameters | Share of the DiT |
+|---|---|---|---|
+| Cinematic | 256 / 512 | 1.53B | 18% |
+| Dual-arm robotics | 512 / 512 | 3.06B | 36% |
+
+For scale, the whole DiT is 8.6B. Both adapters target every attention, MLP and modulation projection in all 54 blocks, both streams, plus three projections in each camera module. At rank 512 that is a third of the blocks' own weights. One target is smaller than its adapter: the camera key/value projection is 2,048 × 128, about 262K weights, and its rank-512 adapter is 1.11M (reasoned from the shapes). The robotics adapter is trained on the [RealSource-World](https://huggingface.co/datasets/RealmanRobot/RealSource-World) robot-arm dataset (reported).
+
+So "lightweight" is true in one sense that matters: after merging, inference costs exactly what the base model costs. It is not small to train, store or download, and these adapters are closer to a partial fine-tune than to the few-megabyte LoRAs the word usually suggests. [LongLive-Plug](/articles/longlive-plug) is the other end of that spectrum, distilling capabilities into adapters meant to be stacked onto other models.
+
+## The numbers, and what is behind them
+
+Hy-Nomas-Bench has 280 cases in four sets: 60 multi-turn text, 100 camera navigation, 60 interleaved, and 60 spatial-memory revisits of 18 seconds each, with 220 reference trajectories (reported on the dataset card). It ships prompts and trajectories. It does not ship videos, reference frames or scores, so nobody can recompute a number from it yet.
+
+The site reports three pairwise human evaluations (reported, not re-run):
+
+- 75–80% prompt-following wins against HappyOyster and LingBot-World v2, over 60 cases.
+- A camera-control net win of +18.2 to 27.3 percentage points against three unnamed baselines, over 99 trajectories.
+- 74.6% wins on interleaved prompts against an adapted LingBot-World v2, over 59 cases.
+
+The camera and interleaved counts are one short of the released sets, 99 of 100 and 59 of 60; the site does not say why. There is no automated metric anywhere, no memory score, and the one comparison on memory is the admission that Genie 3 is better.
+
+A reply asked about [Orbia](https://orbia-bench.github.io/), a third-party 3D-consistency benchmark with 27 models on its leaderboard. Hy-Nomas is not on it. Every Orbia case starts from an input image and returns to that image's pose; Hy-Nomas, as released, starts from text, with no image conditioning in the inference path. It would need an adapter before it could run that protocol, so the absence is not evidence either way.
+
+## Related work on this site
+
+- [Hy Memory](/articles/hy-memory) is from the same publisher and also sells "memory", but it is a different thing: a 3B-active language model trained to write text memories for agents. Hy-Nomas's memory is attention state inside a video model. Nothing is shared between them but the word.
+- [SANA-WM](/articles/sana-wm) solves the same long-history cost with architecture: linear-attention layers carry a fixed-size state, and the few softmax layers keep the first chunk and the latest one. Hy-Nomas keeps every layer softmax and solves it with sampling and host memory instead.
+- [Matrix-Game 4.0](/articles/matrix-game-4) gives the world to a game engine and uses the video model only to repaint frames; Hy-Nomas keeps the world entirely in the model's cache.
+- [Looking Ahead](/articles/looking-ahead-video) changes the training objective of a chunk-by-chunk video model; Hy-Nomas's chunking is coarser, five-second segments, and its training is self-forcing.
+- For the background, see [Attention and the KV cache](/architectures/attention-kv) and [RoPE](/architectures/rope).
+
+## What I take from it
+
+Hy-Nomas is a clean, well-documented release: Apache-2.0 code, weights, a single-GPU preset, a LoRA recipe and a benchmark. The mechanism is easy to state once the code is open. A segment-causal MMDiT generates five seconds at a time, writes each segment's keys and values into a cache from a slightly re-noised copy, and on one GPU keeps 18 power-spaced frames of that cache resident while the full history waits in RAM.
+
+That last part is what I would tell someone with a 4090. The VRAM fits. The host memory grows by about 1.2 GB per second of world, and nothing in the release says how long a segment takes. The robotics LoRA is a third of the model. And until the technical report arrives, how good the memory is rests on the publisher's own clips and the publisher's own word that Genie 3 is better at it.
