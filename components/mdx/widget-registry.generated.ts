@@ -742,6 +742,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "needle-finetune/benchmark-matrix": () => import("@/components/articles/needle-finetune/benchmark-matrix"),
   "needle-finetune/energy-budget": () => import("@/components/articles/needle-finetune/energy-budget"),
   "needle-finetune/scope-argument": () => import("@/components/articles/needle-finetune/scope-argument"),
+  "nemotron-3-5-bolt/memory-ledger": () => import("@/components/articles/nemotron-3-5-bolt/memory-ledger"),
   "nemotron-3-5-super-vl/hybrid-budget": () => import("@/components/articles/nemotron-3-5-super-vl/hybrid-budget"),
   "nemotron-3-5-super-vl/latent-moe": () => import("@/components/articles/nemotron-3-5-super-vl/latent-moe"),
   "nemotron-3-diarization/der-ledger": () => import("@/components/articles/nemotron-3-diarization/der-ledger"),
