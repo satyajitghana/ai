@@ -397,6 +397,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "hunyuan-hy3/hy3-quant": () => import("@/components/articles/hunyuan-hy3/hy3-quant"),
   "hy-memory/metric-toggle": () => import("@/components/articles/hy-memory/metric-toggle"),
   "hy-memory/turn-stepper": () => import("@/components/articles/hy-memory/turn-stepper"),
+  "hy-nomas/history-picker": () => import("@/components/articles/hy-nomas/history-picker"),
   "hy4-preview/benchmark-delta-explorer": () => import("@/components/articles/hy4-preview/benchmark-delta-explorer"),
   "hy4-preview/bit-allocation-map": () => import("@/components/articles/hy4-preview/bit-allocation-map"),
   "hy4-preview/blind-eval-scorecard": () => import("@/components/articles/hy4-preview/blind-eval-scorecard"),
