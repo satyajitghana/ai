@@ -1177,6 +1177,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "torchtpu/dispatch-modes": () => import("@/components/articles/torchtpu/dispatch-modes"),
   "torchtpu/mfu-check": () => import("@/components/articles/torchtpu/mfu-check"),
   "trackeverything/dedup-timeline": () => import("@/components/articles/trackeverything/dedup-timeline"),
+  "transitions-dev/dot-budget": () => import("@/components/articles/transitions-dev/dot-budget"),
+  "transitions-dev/generation-scrubber": () => import("@/components/articles/transitions-dev/generation-scrubber"),
   "treg/bench-decompose": () => import("@/components/articles/treg/bench-decompose"),
   "treg/route-waterfall": () => import("@/components/articles/treg/route-waterfall"),
   "turboquant/kv-memory": () => import("@/components/articles/turboquant/kv-memory"),
