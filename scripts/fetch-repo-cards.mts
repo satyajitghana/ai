@@ -143,6 +143,14 @@ function detectLicense(raw: string): string {
 
   // Before the open licences: a BUSL file names its future "Change License"
   // (often Apache 2.0) in its own text, and must not be read as that licence.
+  // A licence titled after the project ("Transitions.dev License") is the
+  // project's own, even when it names MIT for some of the files it covers.
+  const title = raw.trimStart().split("\n", 1)[0].trim().toLowerCase()
+  if (
+    /^[\w.\- ]{1,60} licen[cs]e$/.test(title) &&
+    !/^(mit|apache|bsd|isc|mozilla|gnu|the unlicense|unlicense|zlib|boost|creative commons|eclipse|business source)\b/.test(title)
+  )
+    return "custom"
   // A licence that says it is not open source is custom, whatever open licences
   // it later names for designated files (eagle-hq/EAGLE-4 mentions Apache-2.0).
   if (/source-available license|not an osi-approved/.test(t.slice(0, 400)))

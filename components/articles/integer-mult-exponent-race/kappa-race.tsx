@@ -82,6 +82,14 @@ import { cn } from "@/lib/utils"
 //     model), as are BIT-only savings (#4760, #4814) and "not frontier" or "no new kappa" titles.
 //     main moved twice: #4359 at ae87507 (19:10:46 UTC on Oct 21) and #4470 at 4f19ced
 //     (12:16:48 UTC on Oct 22), kappa from certificates/selected-result.json at each.
+//   #4596, #4633 and #5377 to #5413 were added at 04:00 UTC on Oct 24 from pr-ledger.json on main
+//     at 1a3ced6 (to #5416) and PR-head commit metadata fetched with git (no blobs). #4596 and
+//     #4633 are DaysSky's ambient quotients (commit authors; not in the ledger), at the commit
+//     whose subject states an outer kappa (0.0034, 0.012401); #4604, #4636, #4652 and #4655 show
+//     the quotient words change every main output chart and meet 0 of the priced port contracts,
+//     so both are drawn hollow. #5377 onward are owned helper relations and the coupled provider.
+//     main moved twice more: #4610 at 1ec1119 (20:19:22 UTC on Oct 23, admitted through #5241) and
+//     #5413 at 1a3ced6 (03:30:46 UTC on Oct 24), kappa from certificates/selected-result.json.
 //   Four more moves of main on Oct 13, at the committer times of the selection commits (no
 //     merged_at without the API): #890 3b83e4f 13:30:30, #942 3825dc0 15:06:01, #1042 87db776
 //     18:05:11, #1094 0a31ad8 18:45:23; kappa from certificates/selected-result.json at each.
@@ -862,6 +870,14 @@ const PRS: Pt[] = [
   { pr: 4568, who: "hexapode", h: 369.168, l2: -8.371, k: "3.0202e-3" },
   { pr: 4610, who: "intqwq", h: 371.888, l2: -8.37, k: "3.0218e-3", note: "joint helper interfaces and Lean compiler bounds; the best open claim at 04:00 UTC on Oct 23" },
   { pr: 4626, who: "hexapode", h: 373.603, l2: -8.37, k: "3.0216e-3", note: "helper621 and a funded compiler gap" },
+  { pr: 4596, who: "DaysSky", h: 371.276, l2: -8.201, k: "3.4000e-3", contested: true, note: "complex ambient quotient by span{511}, outer capped at the BIT side's 0.0034; #4604: every main output chart collapses into one" },
+  { pr: 4633, who: "DaysSky", h: 374.767, l2: -6.333, k: "1.2401e-2", contested: true, note: "BIT ambient quotient, 'outer kappa 0.012401'; #4652: 0 of 111 ports meet the priced contract" },
+  { pr: 5377, who: "aliromman", h: 406.387, l2: -8.37, k: "3.0224e-3", note: "one owned helper relation; past #4658's 0.003022 ceiling by leaving its family" },
+  { pr: 5383, who: "aliromman", h: 406.818, l2: -8.368, k: "3.0267e-3", note: "eight joint helper relations" },
+  { pr: 5387, who: "Dugongue", h: 407.023, l2: -8.368, k: "3.0267e-3", note: "smaller completion reserve" },
+  { pr: 5392, who: "aliromman", h: 407.243, l2: -8.368, k: "3.0273e-3", note: "owned circuit transposition" },
+  { pr: 5398, who: "aliromman", h: 407.805, l2: -8.368, k: "3.0273e-3", note: "direct backward caller (0.00302728823)" },
+  { pr: 5413, who: "Clear1nsight", h: 411.914, l2: -8.368, k: "3.0273e-3", note: "coupled-output caller on #5402's provider, +5e-12 over #5398; selected by main at 03:30 UTC on Oct 24" },
 ]
 
 // Each move of main: the PR that supplied the witness, when it was opened, and when GitHub
@@ -1063,10 +1079,30 @@ const MAIN: MainMove[] = [
     h: 374.28,
     l2: -8.371,
     k: "0.00302015",
-    note: "PR #4470 (Cinna Davis) · 4f19ced · joint helper boundaries; still the selected record at 04:02 UTC on Oct 23",
+    note: "PR #4470 (Cinna Davis) · 4f19ced · joint helper boundaries; the selected record until 20:19 UTC on Oct 23",
     merged: true,
     url: "https://github.com/CrocSwap/integer-mult-bounds/pull/4470",
     from: { h: 361.101, l2: -8.371 },
+  },
+  {
+    who: "Colkitt",
+    h: 406.323,
+    l2: -8.37,
+    k: "0.0030217758",
+    note: "PR #4610 (Cao Yifan) · 1ec1119 · joint helper interfaces, admitted through Chris R's independent #5241 audit",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/4610",
+    from: { h: 371.888, l2: -8.37 },
+  },
+  {
+    who: "Colkitt",
+    h: 413.513,
+    l2: -8.368,
+    k: "0.003027288235",
+    note: "PR #5413 (Chris R) · 1a3ced6 · coupled-output caller; the selected record at 04:00 UTC on Oct 24",
+    merged: true,
+    url: "https://github.com/CrocSwap/integer-mult-bounds/pull/5413",
+    from: { h: 411.914, l2: -8.368 },
   },
 ]
 
@@ -1107,8 +1143,8 @@ const WIDE: Geo = { W: 680, H: 340, L: 48, R: 14, T: 14, B: 34, fs: 10, narrow: 
 const NARROW: Geo = { W: 340, H: 300, L: 46, R: 8, T: 14, B: 30, fs: 10.5, narrow: true, clip: "kappa-race-plot-narrow" }
 // Two views: the whole race, and everything from 10:00 UTC on Oct 8, where everything after 2^-17 lives.
 type View = { h0: number; h1: number; y0: number; y1: number }
-const FULL: View = { h0: -0.5, h1: 390, y0: -190, y1: 0 }
-const ZOOM: View = { h0: 36, h1: 390, y0: -17.5, y1: -8 }
+const FULL: View = { h0: -0.5, h1: 416, y0: -190, y1: 0 }
+const ZOOM: View = { h0: 36, h1: 416, y0: -17.5, y1: -6 }
 
 // kappa = 10^-3, and the first PR opened above it: Dugongue's #390 at 07:09:46 UTC on Oct 11.
 const MILLI = -9.965784284662087 // log2(10^-3), precomputed
@@ -1162,7 +1198,7 @@ export function KappaRace() {
       : sel.who === "Jain"
         ? "Swapnil Jain (own repo)"
         : sel.who
-  const ticksY = zoom ? [-17, -16, -15, -14, -13, -12, -11, -10, -9, -8] : [-180, -150, -120, -90, -60, -30, 0]
+  const ticksY = zoom ? [-17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -7, -6] : [-180, -150, -120, -90, -60, -30, 0]
   const ticksX = zoom
     ? [
         { h: 50, label: "Oct 9" },
@@ -1179,6 +1215,8 @@ export function KappaRace() {
         { h: 314, label: "Oct 20" },
         { h: 338, label: "Oct 21" },
         { h: 362, label: "Oct 22" },
+        { h: 386, label: "Oct 23" },
+        { h: 410, label: "Oct 24" },
       ]
     : [
         { h: 2, label: "Oct 7" },
@@ -1189,6 +1227,7 @@ export function KappaRace() {
         { h: 242, label: "Oct 17" },
         { h: 290, label: "Oct 19" },
         { h: 338, label: "Oct 21" },
+        { h: 386, label: "Oct 23" },
       ]
 
   const chart = (g: Geo) => {
@@ -1202,7 +1241,7 @@ export function KappaRace() {
         viewBox={`0 0 ${W} ${H}`}
         className={g.narrow ? "mx-auto block w-full max-w-md sm:hidden" : "hidden w-full sm:block"}
         role="img"
-        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, to 2 to the minus 10.51 by 18:38, to 2 to the minus 10.47 at 22:06 with the first five-stage claim, to 2 to the minus 10.40 by 07:10 UTC on October 10, to 2 to the minus 10.38 by 11:31, to 2 to the minus 10.30 by midnight and, with the E8 units, to 2 to the minus 10.16 at 05:05 UTC on October 11. A dotted line marks kappa equals 10 to the minus 3; the first pull request opened above it is number 390 at 07:09 UTC. The best claims reach 2 to the minus 9.60 at 17:17 with pull request 467 and 2 to the minus 9.59 by 19:33; hollow circles up to 2 to the minus 9.51 rest on a contested residual split. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, pull request 186 at 12:57 UTC at 2 to the minus 10.56, and pull request 279 at 14:08 UTC on October 10 at 2 to the minus 10.43, where it still stood at 19:40 UTC on October 11. Then main moves eight times in under thirty-one hours: pull request 531 at 01:56 UTC on October 12 at 2 to the minus 9.36, pull request 535 at 13:11, pull request 588 at 15:46, pull request 596 at 17:01 at 2 to the minus 9.28, pull request 617 at 21:02, pull request 626 at 22:37, pull request 741 at 06:11 UTC on October 13 and pull request 799 at 06:44 at 2 to the minus 9.23. The open claims meanwhile run from 2 to the minus 9.59 through 2 to the minus 9.36 at 01:25 UTC on October 12 and reach 2 to the minus 9.23 with pull request 799, which main took fifty-five minutes after it opened, so at 07:20 UTC on October 13 the red and green lines meet. Main moves four more times that day, to 2 to the minus 9.224 with pull request 1094 at 18:45 UTC, stays there until 19:10 UTC on October 21, then jumps to 2 to the minus 8.764 with pull request 4359 and to 2 to the minus 8.371 with pull request 4470 at 12:16 UTC on October 22. The open claims stall near 2 to the minus 9.218 from 10:16 UTC on October 14, jump at 02:54 UTC on October 15 after anticipatory dirty borrowing to 2 to the minus 9.203, jump again at 10:12 with source-partner lifetimes to 2 to the minus 9.189, and creep to 2 to the minus 9.183 by 04:45 UTC on October 16, to 2 to the minus 9.180 by 15:00, jump with joint rank-seven end frames to 2 to the minus 9.176 at 15:59 and reach 2 to the minus 9.175 with pull request 3148 at 09:29 UTC on October 17. Five hollow circles from 15:22 to 18:50 UTC on October 17, up to 2 to the minus 9.171, rest on pull request 3184's idle-star move, which pull request 3187 refutes; pull request 3263 also refutes the last of them, pull request 3251. A staged line had already passed pull request 3148 at 12:33 UTC on October 18 and creeps to 2 to the minus 9.174 by October 20, where a proved ceiling stops it. At 14:20 UTC on October 21 pull request 4359, which counts helpers' completed transforms as output, jumps to 2 to the minus 8.764, and within nine hours a run of pull requests by Cinna Davis reaches 2 to the minus 8.371; the best open claim is 2 to the minus 8.370 on October 22. Two more hollow circles, near 2 to the minus 9.44, rest on the same contested split. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
+        aria-label="Scatter of log base 2 of kappa against time. OpenAI's 2 to the minus 182 at the left, committed at 21:59 UTC on October 6; Colkitt's checkpoints climb to 2 to the minus 30 by 13:10 UTC on October 8; community pull requests climb from 2 to the minus 31 to about 2 to the minus 14.6 by 12:30 UTC, pause, climb to about 2 to the minus 14.2 by the evening and to 2 to the minus 13.9 by 22:40. After 23:00 a run of new constructions lifts them past 2 to the minus 13 at 00:24 UTC on October 9, to 2 to the minus 11.6 at 02:29 with the three-stage cover, to 2 to the minus 10.57 by 08:22, to 2 to the minus 10.51 by 18:38, to 2 to the minus 10.47 at 22:06 with the first five-stage claim, to 2 to the minus 10.40 by 07:10 UTC on October 10, to 2 to the minus 10.38 by 11:31, to 2 to the minus 10.30 by midnight and, with the E8 units, to 2 to the minus 10.16 at 05:05 UTC on October 11. A dotted line marks kappa equals 10 to the minus 3; the first pull request opened above it is number 390 at 07:09 UTC. The best claims reach 2 to the minus 9.60 at 17:17 with pull request 467 and 2 to the minus 9.59 by 19:33; hollow circles up to 2 to the minus 9.51 rest on a contested residual split. A red step line marks main: pull request 39 merged at 15:18 UTC at 2 to the minus 14.65, pull request 49 at 16:47, a reviewed batch at 18:36 at 2 to the minus 14.26, pull request 144 at 05:06 UTC on October 9 at 2 to the minus 11.08, pull request 186 at 12:57 UTC at 2 to the minus 10.56, and pull request 279 at 14:08 UTC on October 10 at 2 to the minus 10.43, where it still stood at 19:40 UTC on October 11. Then main moves eight times in under thirty-one hours: pull request 531 at 01:56 UTC on October 12 at 2 to the minus 9.36, pull request 535 at 13:11, pull request 588 at 15:46, pull request 596 at 17:01 at 2 to the minus 9.28, pull request 617 at 21:02, pull request 626 at 22:37, pull request 741 at 06:11 UTC on October 13 and pull request 799 at 06:44 at 2 to the minus 9.23. The open claims meanwhile run from 2 to the minus 9.59 through 2 to the minus 9.36 at 01:25 UTC on October 12 and reach 2 to the minus 9.23 with pull request 799, which main took fifty-five minutes after it opened, so at 07:20 UTC on October 13 the red and green lines meet. Main moves four more times that day, to 2 to the minus 9.224 with pull request 1094 at 18:45 UTC, stays there until 19:10 UTC on October 21, then jumps to 2 to the minus 8.764 with pull request 4359 and to 2 to the minus 8.371 with pull request 4470 at 12:16 UTC on October 22. The open claims stall near 2 to the minus 9.218 from 10:16 UTC on October 14, jump at 02:54 UTC on October 15 after anticipatory dirty borrowing to 2 to the minus 9.203, jump again at 10:12 with source-partner lifetimes to 2 to the minus 9.189, and creep to 2 to the minus 9.183 by 04:45 UTC on October 16, to 2 to the minus 9.180 by 15:00, jump with joint rank-seven end frames to 2 to the minus 9.176 at 15:59 and reach 2 to the minus 9.175 with pull request 3148 at 09:29 UTC on October 17. Five hollow circles from 15:22 to 18:50 UTC on October 17, up to 2 to the minus 9.171, rest on pull request 3184's idle-star move, which pull request 3187 refutes; pull request 3263 also refutes the last of them, pull request 3251. A staged line had already passed pull request 3148 at 12:33 UTC on October 18 and creeps to 2 to the minus 9.174 by October 20, where a proved ceiling stops it. At 14:20 UTC on October 21 pull request 4359, which counts helpers' completed transforms as output, jumps to 2 to the minus 8.764, and within nine hours a run of pull requests by Cinna Davis reaches 2 to the minus 8.371; the best open claim is 2 to the minus 8.370 on October 22. Main takes it, pull request 4610, at 20:19 UTC on October 23; owned helper relations then pass a certified ceiling for the old path family, and main moves to 2 to the minus 8.368 with pull request 5413 at 03:30 UTC on October 24. Two hollow circles on October 22, at 2 to the minus 8.20 and 2 to the minus 6.33, are ambient-quotient claims whose output charts audits show do not meet the priced contract. Two more hollow circles, near 2 to the minus 9.44, rest on the same contested split. Swapnil Jain's separate track, eleven diamonds joined by a line, runs from 2 to the minus 27.6 at 07:20 UTC on October 8 to 2 to the minus 10.67 at 09:50 UTC on October 9 and 2 to the minus 10.55 at 13:08; rounds five to eleven are ringed as Lean-kernel-checked arithmetic. A straight-line extrapolation through 2 to the minus 78 and 2 to the minus 59 reaches kappa equals one at about 13:08 UTC on October 8. A zoom button shows everything from 10:00 UTC on October 8."
       >
         {ticksY.map((t) => (
           <g key={t}>

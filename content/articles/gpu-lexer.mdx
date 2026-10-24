@@ -1,0 +1,215 @@
+---
+title: "gpu-lexer: how a 28 KB model lexes in parallel, and where the 3.8x came from"
+description: "Shu Ding's gpu-lexer labels every part of a source file at once on WebGPU, with no grammar and no language id, and he just announced it 3.8x faster (850 ms to 221 ms). I read the shader, the essay and both benchmark reports. The parallelism comes from an affine scan: a gated linear recurrence whose steps compose into maps of the same size, so 32-part blocks fold to two numbers per channel and a short scan stitches them. The 3.8x is real arithmetic on two different measurements: run the same way before and after, the code change is 290 ms to 212 ms, about 1.37x, and four of the five comparison libraries sped up 6-12x between those runs without changing a line. I also built a parallel-prefix DFA lexer on CPU, ran both gpu-lexer releases and Pierre's Highlights in headless Chromium on SwiftShader WebGPU, and compared the designs."
+date: 2026-10-23
+tags:
+  - webgpu
+  - small-models
+  - browser-ml
+  - performance
+  - benchmarks
+  - developer-tools
+rating:
+  novelty: 2
+  verification: 3
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Reads gpu-lexer's scan kernels, shows its 3.8x is 1.37x of code plus a re-measured baseline, and runs a parallel-prefix lexer against a sequential one."
+topic: gpu-systems
+kind: teardown
+level: practitioner
+runsOn: browser
+licence: MIT
+---
+
+import { ParallelLexScan } from "@/components/articles/gpu-lexer/parallel-lex-scan"
+import { AffineBlockScan } from "@/components/articles/gpu-lexer/affine-block-scan"
+
+On 22 October Shu Ding [posted](https://x.com/shuding/status/2113299853359149360) that he had made [gpu-lexer](https://gpu-lexer.vercel.app) "3.8x faster: 850ms → 221ms", added that it is "still far behind" Pierre's [Highlights](https://diffs.com/highlights), and linked an essay, [*Ideas Behind GPU Lexer*](https://shud.in/thoughts/ideas-behind-gpu-lexer). I covered gpu-lexer once already, as the seed of a cluster of [tiny browser models](/articles/tiny-browser-models). This piece is about the two things that article did not take apart: how a lexer runs in parallel at all, and what the 3.8x actually measures.
+
+Short version, each part labelled:
+
+- **The parallelism is an affine scan, not a state machine.** Each of 32 channels follows $h_t = a_t h_{t-1} + b_t$. Two such steps compose into one step of the same shape, so a block of any length folds into two numbers per channel and a scan stitches the blocks together. (Read from `tree-shader.js`; the closure argument is reasoned.)
+- **The 3.8x is two measurements, not one.** 850 ms is a single sample from 16 September; 220.5 ms is a median of three fresh workers from 22 October. Run the same way before and after, the code change is 290 ms to 212 ms, about **1.37x**. (Reported numbers, my division.)
+- **Highlights is a different design entirely**: one hand-written WebAssembly lexer per language, sequential, with SIMD scans for the boring stretches. On the same input it took 75.3 ms in gpu-lexer's own run, against gpu-lexer's 220.5 ms. (Reported.)
+- **A parallel-prefix lexer pays for its parallelism in work.** My 11-state DFA lexer on CPU did about 10.5x the sequential work in its parallel phase, and about 4.4x after merging start states that converge, because quote parity never forgets. (Measured.)
+
+## The workload: ten copies of three.min.js
+
+Every number in the post is the same stress test. The input is `three.min.js` from three.js r97, concatenated ten times: 555,650 characters a copy, **5,556,500** in total. I downloaded it from the URL in the benchmark report and its SHA-256 matches the report's `3ed7c931…` (measured). The time is one warmed `parse()` call in a dedicated worker, DOM rendering excluded, on an Apple M4 Pro with a 20-core GPU (reported, `packages/benchmark/reports/browser-performance-2026-10-22.json`).
+
+It is a large minified file: lots of independent work for one GPU dispatch. Asked on X why lexing takes 220 ms at all, Shu Ding [replied](https://x.com/shuding/status/2113551711453515821) that "Running just a RegExp on it would take 10ms" (reported).
+
+## How gpu-lexer works
+
+The essay frames the problem as image segmentation in one dimension. Split code into its smallest parts, treat each part as a pixel, and label every pixel. The [architecture doc](https://github.com/vercel-labs/gpu-lexer/blob/main/architecture.md) fills in the rest:
+
+1. **One CPU pass** splits the string into word runs, whitespace runs, newlines and single symbols, and packs each part's features into two `u32`s: kind, a log length bucket, first and last character, two word hashes, line-start and shape flags, and neighbouring-symbol hashes. No grammar, no regex table.
+2. **On the GPU**, sparse features are summed into a 32-channel vector per part, mixed with a five-part window and the nearest non-whitespace neighbours.
+3. **Learned affine state updates scan the sequence in both directions.**
+4. **A binary tree** merges 32-part blocks bottom-up into one whole-file summary, then pushes context back down.
+5. **A classifier** with 72 hidden units gives each part one of nine classes, and adjacent equal labels merge into spans.
+
+<RepoCard repo="vercel-labs/gpu-lexer" />
+
+The weights are 41,321 six-bit integers, and the whole package is about 28.6 KB with Brotli after this week's change: 28,580 bytes in the README, 28,599 in the size benchmark (reported).
+
+<Figure
+  src="/articles/gpu-lexer/fig1.jpg"
+  alt="Dark animation frame titled 'Scan context both directions'. A row of source parts (const, space, message, =, quote, hello, comma, world, and so on) sits under a column of 32 blue channel cells per part, with a highlighted window around five parts. Labels read '32 learned channels' and '5-part window + nearest non-space'."
+  caption="Each part becomes 32 learned channels; a five-part window and a bidirectional scan add ordered context (Shu Ding, gpu-lexer pipeline video, Ideas Behind GPU Lexer)."
+/>
+
+<Figure
+  src="/articles/gpu-lexer/fig2.jpg"
+  alt="Dark animation frame titled 'Pass 2: top-down'. A binary tree of blue channel blocks rises from the row of source parts to a single root, with the level counts 21, 11, 6, 3, 2, 1 in the corner."
+  caption="The tree pass: blocks merge up to one root for the whole file, then context flows back down to every part (Shu Ding, gpu-lexer pipeline video, Ideas Behind GPU Lexer)."
+/>
+
+Step 3 is the part that answers "how do you lex in parallel", so it gets its own section.
+
+## Why a lexer looks sequential
+
+A conventional lexer is a loop with a state variable: inside a string, inside a comment, in code. Whether the `*` at byte 4,000,000 is multiplication or the end of a comment depends on everything before it. Each state needs the previous one, which is a dependency chain the length of the file.
+
+The classical escape is to stop carrying a state and carry a *function* instead. For a DFA with states $Q$, each chunk of input defines a transition table $f: Q \to Q$, "if you enter in state $q$, you leave in state $f(q)$". Function composition is associative, so the state at every chunk boundary is a prefix scan over those tables, and a scan finishes in $O(\log n)$ parallel rounds ([Hillis and Steele, 1986](https://dl.acm.org/doi/10.1145/7902.7903)). Once each chunk knows its start state, every chunk re-lexes itself independently.
+
+<ParallelLexScan />
+
+The widget runs that algorithm exactly on a six-state toy grammar: code, a pending `/`, a block comment, a pending `*` inside it, and two kinds of string. Each chunk becomes a table of six arrows. The scan composes them in $\lceil \log_2 \text{chunks} \rceil$ rounds and reads off each chunk's real start state. Then every chunk re-lexes from that state. Press "skip the scan" and each chunk assumes it starts in code. That is what chunked lexing without a scan does, and a quote or a `/*` in an earlier chunk then colours later characters wrong.
+
+I wrote about the cost of doing this for real grammars in [Lexing on the GPU](/articles/lexing-on-the-gpu). Pareas, a GPU compiler, does exactly this, and its precomputed composition table grows from 7.4 MB to 126.5 MB when a single string rule is added (measured there). The trouble is that composed tables do not stay small. A string introduces a mode, compositions stop collapsing, and the number of distinct functions explodes.
+
+### What the DFA scan costs on CPU
+
+I ran the same algorithm on the benchmark input, in JavaScript on Node 22, single-threaded, on a shared 4-core cloud VM (`dfa-scan.mjs`, an 11-state DFA covering code, `//` and `/* */` comments, three quote styles and escapes; regex literals ignored, so it is a toy, not a JavaScript lexer). Medians of five runs, measured:
+
+| Phase, 5,556,500 characters | Time |
+|---|---|
+| Sequential walk, one state | 18.3 ms |
+| Phase 1: each of 4,096 chunks run from all 11 start states | 193 ms |
+| Phase 1, merging start states once they converge | 80.1 ms |
+| Phase 2: scan over 4,096 tables | 1.33 ms |
+| Phase 3: re-lex every chunk from its true start | 16.9 ms |
+
+The output matched the sequential walk on all 5,556,500 characters, and the converged tables matched the full ones exactly (measured, zero mismatches). The scan itself is nearly free. The cost is phase 1: running every start state costs about 10.5x the sequential work (reasoned, 193 / 18.3), or 4.4x with merging, and that is what a parallel machine has to amortize before it wins anything.
+
+Merging start states helps, but less than I expected. I sampled 2,000 random offsets and ran all 11 states forward. After 4,096 characters, an average of **3.05** distinct states were still alive (measured). Start states that differ only in whether you are inside a string never merge: every `"` swaps "in a string" and "in code", so a chunk cannot know which side of a quote it is on without its prefix. Quote parity is the part of lexing that refuses to be local.
+
+## gpu-lexer's scan: an affine map instead of a table
+
+gpu-lexer sidesteps the table problem by not scanning a DFA at all. Its state is 32 floating-point channels, and each part updates each channel with a gated linear step. From `affine_at` in `packages/core/src/tree-shader.js`:
+
+```wgsl
+let a = sigmoid(gate);                       // in (0, 1)
+return vec2<f32>(a, (1.0 - a) * tanh(input)); // the pair (a_t, b_t)
+```
+
+and the state update is $h_t = a_t h_{t-1} + b_t$. Both $a_t$ and $b_t$ are computed from the part's own local features, not from $h_{t-1}$. That is what makes the step an affine map of the previous state, and affine maps have the property DFA tables lack: composing two gives another affine map of exactly the same size,
+
+$$
+(a_2, b_2) \circ (a_1, b_1) = (a_2 a_1,\; a_2 b_1 + b_2).
+$$
+
+A block of 32 parts, or a million, summarizes to one pair $(A, B)$ per channel. There is no closure to precompute and nothing that grows with the grammar. This is the same trick as the selective scan in [Mamba](/architectures/mamba-ssm), applied to lexing.
+
+The kernels split it into three passes, which I read off the shader:
+
+- `hybrid_scan_blocks`: one workgroup per 32-part block. Each channel folds its block serially into a forward and a reverse pair, so the scan runs in both directions.
+- `hybrid_scan_prefixes`: per stream, 32 lanes take 32 block pairs and run a Hillis-Steele inclusive scan in five doubling rounds, carrying the total into the next 32 blocks. Each block then knows the exact state it starts from.
+- `hybrid_mix_tree_up`: each block replays its 32 steps from that carried start, then feeds the tree.
+
+The architecture doc puts it in one line: "block boundaries do not reset context".
+
+<AffineBlockScan />
+
+The widget runs that on one channel with hand-picked gates: a quote that looks like an opening (after `=`, `(` or a space) writes +1, one that looks like a closing writes −1, everything else leaks the state slowly. Change the block size and the block pairs change, but the replayed states do not.
+
+I checked the exactness claim numerically (`affine-scan.mjs`, measured). On 1,000,000 random gated steps in float32, the blocked scan with gpu-lexer's block size and lane count differs from a plain serial loop by at most $1.19 \times 10^{-7}$, one float32 rounding step near 1. Both sit within $1.12 \times 10^{-7}$ of a float64 reference. Because $a_t < 1$ the recurrence is contractive, so re-associating it does not let errors grow. That agrees with the repository's own parity test: the new kernels produced zero label mismatches across 5,028 corpus files and 5,979,352 spans, in both f16 and f32 (reported).
+
+### What the affine scan gives up
+
+There is a catch, and it is the same quote parity that kept my DFA from converging. With $a_t \in (0, 1)$ and $a_t$ independent of the state, a channel cannot flip its sign at a quote. It can only *overwrite* itself ("I just saw something that looks like an opening quote") or decay. So the scan cannot count quotes. Whether a `"` opens or closes a string has to come from local evidence, like the character before it, plus whatever the tree pass adds (reasoned). That is the price of a scan that stays two numbers wide. It is also consistent with the accuracy being high but not perfect: 86.8% agreement with Shiki on the site's popularity-weighted measure, against 84.1% for Prism.js and 70.1% for Highlight.js (reported, essay), and 83.02% per-part on the held-out corpus (reported, README). I have not checked which classes the errors land on.
+
+## Where the 3.8x came from
+
+Here is what the two numbers in the post are:
+
+| | 16 September | 22 October |
+|---|---|---|
+| gpu-lexer | **850** ms | **220.5** ms |
+| Samples | 1 warm-up, 1 measured call | median of 3 fresh workers |
+| Browser | Chrome 152 | headless Chrome 156 |
+| Prism.js | 8,391.9 ms | 1,238.1 ms |
+| Highlight.js | 15,906.7 ms | 1,364.0 ms |
+| Sugar High | 4,829.6 ms | 820.0 ms |
+| Starry Night | 72,312.8 ms | 11,356.1 ms |
+| Shiki | 33,096.7 ms | 30,438.8 ms |
+
+All reported, from the two `browser-performance` JSON files in the repository. The ratio 850 / 220.5 is 3.85 (reasoned), so the headline arithmetic holds. But four of the five comparison libraries also got 5.9x (Sugar High) to 11.7x (Highlight.js) faster between those runs, with the same versions and no code change; only Shiki barely moved, at 1.09x (reasoned). The October report says so itself: "Re-measured comparison libraries were 4-12x faster than that run under the same versions … so the earlier figures were not representative."
+
+The controlled comparison is in the same file. The same runner, run on the old commit `07f3e56` and the new tree, five fresh-worker samples per series, gives medians of 289.6 and 290.2 ms before and 212.1 and 212.8 ms after (reported). That is about **1.37x** (reasoned, 290 / 212). So of the 3.85x, the code accounts for roughly 1.37x and the measurement change for roughly 2.8x (reasoned, 3.85 / 1.37).
+
+<Figure
+  src="/articles/gpu-lexer/fig4.png"
+  alt="Horizontal bar chart titled 'Highlight 10× three.min.js, warmed browser time, lower is better'. Highlights 75.3ms, gpu-lexer 220.5ms (highlighted), Sugar High 820.0ms, Prism.js 1.24s, Highlight.js 1.36s, Starry Night 11.4s, Shiki 30.4s, on an axis from 0 to 40 seconds."
+  caption="The chart attached to the post: the October 22 run, median of three fresh-worker samples on an Apple M4 Pro. These are the author's numbers, not mine (Shu Ding, gpu-lexer benchmark, posted on X)."
+/>
+
+The 1.37x is still a real optimization, and the commit (`c82583f`) says where it came from:
+
+- **Column-major weights** for every matrix read across output units, so adjacent threads read adjacent weights. The commit message credits this alone with GPU time going from 176 to 119 ms on the same input (reported).
+- **Recompute instead of round-trip**: local states are rebuilt in workgroup memory by the scan and mix passes instead of being written to a part-by-hidden FP32 buffer and read back. GPU allocation for the 10-copy input fell from 891 to 220 MiB (reported).
+- **A parallel workgroup scan for neighbour prefixes**, which finds the nearest non-whitespace part across block boundaries, and shared tree levels in the classifier.
+- **Table-driven CPU preparation**, about 33% faster (reported).
+
+Nothing changed in the model; the checkpoint is the same `20260916T055435.785Z` in both reports. Someone in the replies asked how the 221 ms splits between the CPU split and the GPU. The repository does not publish that split for this input, so I cannot say.
+
+One more data point shows how noisy these numbers are. The pre-optimization runtime has been timed on this input at 557.85 ms (the architecture doc's repeated benchmark on 16 September, 18 calls with ABBA ordering, Chrome 152), at 400.8 ms (Pierre's run of 0.0.2 on 21 October, Chromium 153, `diffs.com/highlights/benchmark-browser.json`), and at about 290 ms (the October before/after, commit `07f3e56`, Chrome 156). All reported, all on an M4 Pro, and none of them is the 850 ms single sample. Browser timing of a GPU workload moves with the browser build and the harness.
+
+## How Pierre's Highlights differs
+
+<RepoCard repo="pierrecomputer/pierre" />
+
+Highlights is close to the opposite design. From its [repository](https://github.com/pierrecomputer/pierre/tree/main/packages/highlights) and its `ARCHITECTURE.md`:
+
+- **Hand-written lexers, one per language**, in WebAssembly Text. Its README lists 84 languages. Each lexer reads UTF-8 bytes with a cursor and emits token ranges in order. It classifies "from nearby tokens and saved state" without building a syntax tree.
+- **Sequential, but wide where it can be.** The scanning helpers use 128-bit SIMD. `$scanToLineEnd` compares 16 bytes at a time against `\n` and `\r`, and `$scanBlockCommentEnd` finds `*/` across vector boundaries. I counted 63 lines using `v128` or `i8x16` operations in `scan.wat` alone (measured, with grep).
+- **Saved state instead of a scan.** For streams and live documents it saves the lexer state after each line, re-lexes only dirty lines, and stops when the state matches the saved one. This is the incremental answer to the same "where am I?" problem the prefix scan solves in bulk.
+- **Deterministic, written per language.** It does not guess, which is why the gpu-lexer essay uses it, alongside Shiki, as a reference for its correctness chart.
+
+On the benchmark input, Highlights took 75.3 ms in gpu-lexer's run and 81.6 ms in Pierre's (reported). That makes it about 2.9x faster than gpu-lexer (reasoned, 220.5 / 75.3) on a workload chosen to favour the GPU. It is also larger: 98,187 bytes with Brotli for all its languages, against gpu-lexer's 28,599 (reported, gpu-lexer's size benchmark). That is the trade in one line. Highlights spends bytes on per-language lexers and gets determinism and speed; gpu-lexer spends accuracy and gets one 28 KB model for every language, including ones nobody wrote a grammar for.
+
+The comparison is not quite like for like. Highlights is told the language (`lang: "javascript"`) and returns themed tokens. gpu-lexer is told nothing and returns nine-class spans (the benchmark notes say so).
+
+## What I ran
+
+Everything below ran on a shared 4-core cloud VM with no GPU, CPU only, at low priority behind other jobs.
+
+**The two scans on CPU.** `dfa-scan.mjs` (about 100 lines) and `affine-scan.mjs` (about 40) are plain JavaScript on Node 22.22.0; their numbers are in the sections above.
+
+**Both gpu-lexer releases, and Highlights, in headless Chromium.** I loaded the published npm builds of `gpu-lexer` 0.0.3 (before the optimization) and 0.0.4 (after), plus `@pierre/highlights` 0.2.0, into module workers in Playwright's headless Chromium 141 with WebGPU enabled. The adapter it handed out was SwiftShader: `architecture: "swiftshader"`, `isFallbackAdapter: true`, no `shader-f16` (measured). That is Google's software Vulkan, running the compute shaders on the CPU. The input was one copy of three.min.js, 555,650 characters, timed the way gpu-lexer's runner times it: one warm-up call, then one timed call, in each of three fresh workers.
+
+| One copy of three.min.js, SwiftShader | Median of 3 | Samples |
+|---|---|---|
+| gpu-lexer 0.0.3 | 71,561 ms | 64,095 / 78,940 / 71,561 |
+| gpu-lexer 0.0.4 | 72,426 ms | 66,595 / 74,794 / 72,426 |
+| Highlights 0.2.0 | 63.7 ms | 122.2 / 57.2 / 63.7 |
+
+All measured. Three things in that table:
+
+- **It runs.** The shaders compile and execute on a software adapter, and both releases return the same 180,444 spans for the file. I hashed every `(type, start, end)` triple in a separate run: the two releases agree on all of them (measured), in f32, since SwiftShader offers no f16. That is a small, independent echo of the repository's own parity test on a single file.
+- **The optimization does nothing here.** 0.0.3 and 0.0.4 are within noise of each other; the spread inside each row is wider than the gap between rows. That fits what the commit changed: coalesced weight reads and less buffer traffic help a real GPU's memory system, and SwiftShader is a CPU running shader code.
+- **Without a GPU, the design is a non-starter.** gpu-lexer was about 1,100x slower than Highlights on the same input (reasoned, 72,426 / 63.7). The architecture doc warns about this: "WebGPU is most useful for warm, large, or batched inputs".
+
+I did not run ten copies; at this rate one call would take more than ten minutes. I also could not reproduce 220.5 ms or 75.3 ms, because I have no Apple M4 Pro. Those stay reported.
+
+## The take
+
+The interesting idea in gpu-lexer is not "neural network replaces grammar". It is that the network's sequence model is scannable. A state update that is affine in the previous state has a property a DFA table lacks: any run of steps composes into one step of the same size. That is exactly what a GPU needs: fold blocks independently, scan a few pairs, replay. A DFA has the scan but not the fixed size, and Pareas shows what happens to its tables. Highlights keeps the hand-written lexer's determinism and gives up the scan, then makes the sequential pass fast with SIMD and the incremental pass cheap with saved states.
+
+The 3.8x is honest arithmetic on two published numbers, but it is mostly a better benchmark. The engineering improvement is about 1.37x, with a 4x drop in GPU memory, and it is well documented in the commit. If you are choosing a highlighter today: Highlights is faster, and rule-based, for the 84 languages it knows. gpu-lexer is the one that needs no grammar and no language id, and accepts some wrong colours for that.
