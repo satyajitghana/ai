@@ -690,6 +690,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "mlattice/lattice-explorer": () => import("@/components/articles/mlattice/lattice-explorer"),
   "mlattice/op-count": () => import("@/components/articles/mlattice/op-count"),
   "model-casting-sparse-ffn/ffn-skip": () => import("@/components/articles/model-casting-sparse-ffn/ffn-skip"),
+  "mojo-max-open/licence-map": () => import("@/components/articles/mojo-max-open/licence-map"),
+  "mojo-max-open/matmul-runs": () => import("@/components/articles/mojo-max-open/matmul-runs"),
   "monolith-1-0/moe-routing": () => import("@/components/articles/monolith-1-0/moe-routing"),
   "monolith-1-0/self-speculative": () => import("@/components/articles/monolith-1-0/self-speculative"),
   "monolith-1-0/yarn-context": () => import("@/components/articles/monolith-1-0/yarn-context"),
