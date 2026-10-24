@@ -1,0 +1,206 @@
+---
+title: "An Intel Arc Pro B60 on an M1 Max over Thunderbolt: the weights were never the problem"
+description: "joshuaswarren/omarchy-egpu runs Qwen3.8-27B Q4_0 with all 66 layers on a 24 GB Arc Pro B60 in a Thunderbolt enclosure, driven by a 16-inch M1 Max MacBook Pro booted into Linux, at 17.28 tok/s decode and 428 tok/s prompt. I read the repository at 961b2c6, its four published xe patches and its benchmark records, parsed the GGUF header and checked the numbers against the card's 456 GB/s. Decode sits at 57% of the bandwidth ceiling. The win came from moving the driver's own small buffers into VRAM, not the weights, and none of the patches that make it fast are published or upstream."
+date: 2026-10-24
+tags:
+  - gpu
+  - llama-cpp
+  - apple-silicon
+  - inference
+  - on-device
+  - qwen
+  - hardware
+  - benchmarks
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Checks a Mac-plus-eGPU result against the card's bandwidth from the GGUF header, and shows the driver's buffers, not the link, set the speed."
+topic: gpu-systems
+kind: teardown
+level: practitioner
+runsOn: consumer-gpu
+licence: MIT
+---
+
+import { DecodeBudget } from "@/components/articles/omarchy-egpu/decode-budget"
+import { BufferLadder } from "@/components/articles/omarchy-egpu/buffer-ladder"
+
+On 23 October [@QwenAIFans](https://x.com/QwenAIFans/status/2113661738499424353) posted that you no longer need an NVIDIA GPU to run Qwen3.8-27B locally. The setup: an Intel Arc Pro B60 with 24 GB, in a Thunderbolt enclosure, plugged into a 16-inch M1 Max MacBook Pro running Linux. Qwen3.8-27B Q4_0 with all 66 layers on the card, 17.28 tok/s decode and about 428 tok/s prompt processing. The post's own caveat: it needs private `xe` and ANV driver patches that are not upstream, and hot-plug is untested. The source is one repository.
+
+<RepoCard repo="joshuaswarren/omarchy-egpu" />
+
+I cloned it at `961b2c6` (pushed 2026-10-24 03:11 UTC) and read the README, the Arc Pro B60 card guide, the four `xe` patches it publishes, the Apple Silicon host notes and the B60 benchmark record. I cannot run any of it: there is no Mac, no enclosure and no B60 here. What I could do offline was read the model file's header from Hugging Face, check the arithmetic, and check mainline Linux for the code the patches change.
+
+The short version. The headline numbers are internally consistent and well documented. Decode runs at 57% of what the card's memory bandwidth allows, which is a normal place for a Vulkan backend to land. The Thunderbolt link carries almost nothing during inference, because the weights stay on the card. The hard part, and the part that took decode from 18.89 to 65.96 tok/s on a 7B model, was moving the GPU driver's own small buffers off the far side of the link. That fix lives in patches nobody outside the author's machine has.
+
+## The chain
+
+Four pieces sit between the prompt and the answer.
+
+1. **The host.** A 16-inch M1 Max MacBook Pro booted directly into Omarchy Linux through the m1n1 boot chain (m1n1-aurora, then U-Boot, then Limine). Not a VM. The kernel is a downstream Apple Silicon tree, `linux-aurora`, built with **16 KiB pages**.
+2. **The tunnel.** The Mac's USB4/Thunderbolt port carries PCIe inside a tunnel. The Linux Apple PCIe driver owns the root port; Apple's DART is the IOMMU in front of it.
+3. **The enclosure.** A Sonnet Breakaway Box 850 T5 with its own 850 W supply. It is a Thunderbolt 5 box, but the repo notes that a Thunderbolt 5 enclosure does not upgrade an older host's link.
+4. **The card.** An ASRock Arc Pro B60 Creator: Battlemage BMG-G21, 24 GB GDDR6, PCIe 5.0 x8, bound to the kernel's `xe` driver. Userspace is Mesa's ANV Vulkan driver, built by hand from the Mesa 26.2.4 tarball because the aarch64 distribution package ships no Intel Vulkan driver. llama.cpp runs on top through its **Vulkan** backend at commit `65840ed53`. Not SYCL: the repo's stack table lists llama.cpp SYCL, Level Zero and IPEX-LLM as untried on this host.
+
+<Figure
+  src="/articles/omarchy-egpu/fig1.jpg"
+  alt="Intel launch slide for the Arc Pro B60: a blower-style card render on the left; on the right the specifications 20 Xe-cores, 24GB memory, 456 GB/s memory bandwidth, 197 peak TOPS, 120-200W total board power, and Gen 5 PCIe x8."
+  caption="The card's own numbers. The 456 GB/s memory bandwidth is the figure every decode ceiling below is computed from; the 197 TOPS is INT8 (Intel, Arc Pro B-Series press deck, slide 13)."
+/>
+
+On an x86 desktop none of this is news: install `vulkan-intel`, run `llama-bench`. Everything interesting is on the Mac side of the cable.
+
+## Why it does not just work
+
+The card guide lists six blockers for Apple Silicon. Four of them are worth understanding, because they are the general shape of "put a discrete GPU behind an ARM laptop's tunnel".
+
+### 16 KiB pages
+
+The Apple PCIe controller and the tunnel DART only work with a 16K-page kernel: the DART granule is fixed at 16 KiB. Switching the kernel to 4K pages to please a GPU driver is not on the table; the host guide says internal storage and the PCI controller depend on the 16K configuration.
+
+Upstream `xe` refuses to build there. I checked mainline today (**measured**, `torvalds/linux` master):
+
+```text
+drivers/gpu/drm/xe/Kconfig:8:  depends on PAGE_SIZE_4KB || COMPILE_TEST || BROKEN
+```
+
+The reason is that `xe` uses the kernel's `PAGE_SIZE` and `PAGE_SHIFT` in places where it means "one 4 KiB GPU page". On x86 those are the same number. On a 16K kernel they are not, and every such place becomes a unit error. The repo's four published patches are exactly that sweep:
+
+| Patch | What it changes |
+|---|---|
+| `0001` | Buffer allocation rounds to the host page instead of a hard-coded 4 KiB, and the minimum-alignment query tells userspace the real host page |
+| `0002` | GuC log and ADS addresses, the command-transport size asserts and the ring-size encoding stay in 4 KiB GPU units |
+| `0003` | The Kconfig gate also accepts `PAGE_SIZE_16KB` |
+| `0004` | The migration engine masks and steps its page-table writes in GPU pages, not host pages |
+
+The ring-size one shows the class of bug well. The hardware's `RING_CTL` register takes the ring size in 4 KiB units, minus one. Mainline encodes it as `(size) - PAGE_SIZE`, which I also confirmed in today's tree. On a 16K kernel that subtracts four GPU pages instead of one and programs the wrong ring length. Patch `0002` makes it `SZ_4K`:
+
+```diff
+-#define   RING_CTL_SIZE(size)			((size) - PAGE_SIZE) /* in bytes -> pages */
++#define   RING_CTL_SIZE(size)			((size) - SZ_4K)
+```
+
+Same for the GuC: firmware addresses are shifted by `PAGE_SHIFT` (14 on this kernel) where the firmware expects 12. Small diffs, found by reading every use of `PAGE_SIZE` in a large driver.
+
+The repo is careful about status. The four-patch series alone is "BUILT-UNTESTED": it compiled through `xe.o` on a 16K arm64 config. The measured runs used those four **plus** private patches `0005` to `0015` and a private Apple PCIe change, none of which are in the repository.
+
+### The BAR does not fit
+
+On x86 the B60 asks for a 32 GiB resizable BAR so the CPU can see all of VRAM. The M1 Max's device tree gives the tunnel an 8 GiB 64-bit prefetchable window (**reported**, source-defined). 32 does not fit in 8. The run loads with `xe.vram_bar_size=-1` (no resize attempt) and lives with a 256 MiB window onto 24 GiB of VRAM. `xe` supports small-BAR operation; it just means the CPU cannot write most of VRAM directly.
+
+A second problem showed up on this host: every CPU read through the root port's prefetchable window returned all-ones. A `setpci` bisect traced it to the prefetchable-window enable not being set for cold-initialized tunnel ports. The private Apple PCIe change fixes it at boot. A second step, making bus addresses equal CPU addresses, is still a manual `setpci` after every boot.
+
+### Non-posted MMIO
+
+`xe` maps the VRAM BAR write-combining. On Apple's fabric those mappings have to be non-posted, and the CPU's stores into them must be naturally aligned or the arm64 core takes an alignment fault. The private kernel patches map VRAM non-posted and then, to stay safe, put every user buffer the CPU writes into system memory instead of VRAM. Remember that rule. It is what made the first runs slow.
+
+### Coherency and the IOMMU
+
+The tunnel's PCIe devices are non-coherent per the device tree. `xe` assumes coherent system memory: it maps system memory with `DMA_ATTR_SKIP_CPU_SYNC` and forces write-back caching on discrete GPUs. The repo's patch notes say two candidate fixes were rejected in review because they only cover the first map, not continuous CPU writes, GPU-to-CPU reads, TTM moves or dma-buf export. So this one is **deliberately not patched**. The B60 record reports no DART, SError or timeout line in the kernel log across its runs, but a non-coherent device treated as coherent fails as load-dependent corruption, not as a clean error. The absence of log lines is evidence, not proof.
+
+## The fix that mattered: driver buffers, not weights
+
+The first working runs were slow. Qwen2.5-7B Q4_K_M decoded at 20.64 tok/s and Llama-2-7B Q4_0 at 14.39 tok/s with flash attention off (**reported**). The public llama.cpp Vulkan thread has a native-PCIe B60 entry for the same Llama-2 file at 68.55 tok/s. So the tunnel card was at 21% of native.
+
+The weights were not the problem. llama.cpp's buffer log showed weights, KV cache and compute buffers all in VRAM. The problem was the rule above: every buffer the CPU writes goes to system memory. ANV, Intel's Vulkan driver, writes its shader code, descriptor sets, binding tables and several state pools with the CPU. So all of those sat on the Mac's side of the tunnel, and the GPU fetched them across the link on every dispatch.
+
+How much a cross-link read costs was measured on the sibling AMD setup with a pointer-chasing probe: a dependent load took 142.9 ns from VRAM and 2632.6 ns from system memory behind the tunnel, 18 times slower (**reported**, RX 7600 on an M2 Max). Decode issues hundreds of small, dependent dispatches per token. Prompt processing does too, but each one is large, so the fetches are hidden.
+
+The fix is an opt-in `xe` buffer property (patch `0014`) that keeps selected buffers in VRAM, and an ANV patch that sets it for the shader heap and chosen pools, written with aligned 64-bit and byte stores only. The record then moves one buffer class at a time. Every number in this widget is the record's:
+
+<BufferLadder />
+
+For Llama-2-7B Q4_0 with flash attention on (**reported**, n=3 unless noted):
+
+| What is in VRAM | tg128 tok/s |
+|---|---:|
+| Nothing moved (xe 0014, setting off) | 18.89 |
+| Shader code | 45.80 |
+| Shader code + descriptor sets alone (n=2) | 56.12 |
+| Shader code + five pools | 65.96 |
+| Native-PCIe B60, llama.cpp thread | 70.54 |
+
+That is 3.5 times the stock placement and 94% of the native entry. Prompt processing moved too, by 29%. Two more pools, internal surface states and dynamic state, crash with a bus error when moved: their CPU writes are not alignment-safe, so they stay behind the link.
+
+The same split holds for the 27B. On the Q4_0 file with only the shader heap in VRAM, decode is 11.97 tok/s; with the five pools it is 17.27 (**reported**). Per token that is 83.5 ms against 57.9 ms (**reasoned**): about 25.6 ms of every token was the GPU waiting on descriptors and state that lived on the wrong side of a cable.
+
+This is the transferable lesson. On a tunnel the cost is not bulk bandwidth. It is latency on small reads the driver assumed were local.
+
+## Checking 17.28 tok/s against the card
+
+A dense decode step reads every weight on the card once. If memory bandwidth were the only limit, tokens per second would be bandwidth divided by bytes per token. So the first check is how many bytes.
+
+I fetched the first 24 MB of `unsloth/Qwen3.8-27B-GGUF`'s `Qwen3.8-27B-Q4_0.gguf` with an HTTP range request and parsed the header with a short script of my own (**measured**):
+
+- The file is 16,056,478,688 bytes, and its LFS hash matches the SHA-256 in the record.
+- `general.architecture = qwen35`, 65 blocks: 64 layers plus one multi-token-prediction block (`nextn_predict_layers = 1`). llama.cpp's "66 of 66" counts 65 blocks plus the output layer.
+- Every fourth layer is full attention: 16 attention layers with 4 KV heads of 256 dimensions, and 48 Gated DeltaNet layers. That matches the [Qwen3.8-27B on a 12 GB card](/articles/qwen3-8-27b-on-12gb) piece.
+- All tensors except the token-embedding table and block 64 come to 15,065,122,816 bytes. That is 14367.22 MiB, **exactly** the Vulkan model buffer the record reports. So the multi-token-prediction block is not loaded, and the embedding table (715,161,600 bytes, which is the record's 682.03 MiB host-side table to the hundredth) stays in host memory.
+
+The rest of the record's buffers check out from the same header (**reasoned**). The KV cache per token is 16 layers × K and V × 4 heads × 256 dims × 2 bytes = 64 KiB, so 8192 tokens is the 512 MiB KV buffer the record shows. The DeltaNet recurrent state is 48 layers × 48 heads × 128 × 128 × 4 bytes plus the convolution state, which is 149.625 MiB, the record's 149.62 MiB.
+
+Now the ceiling (**reasoned**). 15.07 GB per token at 456 GB/s is 33.0 ms, a ceiling of 30.3 tok/s. The measured 17.28 tok/s is 57.9 ms per token, an effective 260 GB/s: **57% of peak**. The other 24.8 ms is everything that is not streaming weights at full speed: kernels that run below peak, per-dispatch latency, the recurrent-state update, sync.
+
+<DecodeBudget />
+
+Is 57% low? Two comparisons from the same repository say it is about what this backend does on this card.
+
+- **The native B60.** The thread's native Llama-2-7B entry, 70.54 tok/s on roughly 3.75 GB of on-card weights, is about 265 GB/s, 58% of peak (**reasoned**). The tunnel card on a 27B model is at the same fraction as a native card on a 7B. The ceiling here is Vulkan on Battlemage, not the cable.
+- **The per-op log.** On the UD-Q4_K_M file the record measured 72.9 ms of each 76.2 ms token inside GPU kernels. The `q4_K` matrix-vector kernel ran near 375 GB/s for one shape, the `iq4_xs` kernel near 165 GB/s for the same shape (**reported**). That is why the "better" quant decodes slower: 13.12 against 17.28 tok/s. Plain Q4_0 avoids the slow `iq4_xs` path; the record says that last step is inferred, since it did not log the Q4_0 file.
+
+Two more checks.
+
+**Depth.** With 32768 tokens already cached, decode is 14.45 tok/s (**reported**). The KV cache adds 2 GiB per token read. If the card held its 260 GB/s, 17.22 GB per token would give 15.1 tok/s (**reasoned**). The measured 14.45 is 4% under that, about what you would expect from attention kernels being less efficient than the matrix-vector ones. Decode at 32K keeps 84% of the empty-cache rate, which is what a hybrid with only 16 attention layers buys you.
+
+**Another card on the same cable.** The same Mac, same tunnel, ran an RTX 5060 Ti on NVIDIA's open driver: the same Q4_0 file decodes at 22.52 tok/s on Vulkan and 24.63 on CUDA (**reported**). Against NVIDIA's 448 GB/s spec, that is 76% and 83% of peak (**reasoned**). So the tunnel allows a card to get much closer to its bandwidth ceiling than the B60 does. The B60's gap is in its driver and shaders, and the repo says plainly that the remaining driver buffers are still in system memory.
+
+## What the Thunderbolt link actually carries
+
+Turn on the link toggle in the widget above. A USB4/Thunderbolt 4 PCIe tunnel moves at best around 4 GB/s (**reasoned**, from PCIe 3.0 x4-class tunnelling; the repo never measured the link under load and says so). If the 15.07 GB of weights had to cross it every token, decode would be about 0.27 tok/s. The measured 17.28 is 65 times that. The weights are not crossing. The record's `offloaded 66/66 layers` and free VRAM falling from 21573 MiB to 8021 MiB say the same thing directly.
+
+The repo did measure what happens when llama.cpp's own buffers land on the wrong side. Without `GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1`, host-visible device buffers end up in system memory and a small model fell from 16.50 to 1.9 tok/s decode (**reported**). That env var is mandatory on this setup.
+
+Prompt processing is the same story from the other direction. A 512-token prompt crosses the link as 512 token ids, about 2 KB, and only the last token's logits come back. The work is matrix-matrix multiplication on the card. The 25.6 billion parameters on the card cost about 51 GFLOP per prompt token, so 428.04 tok/s is about 22 TFLOPS (**reasoned**, ignoring attention). That is 11% of Intel's 197 TOPS headline, but that headline is INT8 and llama.cpp's Vulkan prompt path does not run there, so the real share is higher and I cannot pin it from the files. The 5060 Ti on the same cable does 673.27 tok/s on Vulkan. Again: card and backend, not the cable.
+
+What the link does cost is the one-time load, seconds for 15 GB, and latency on every small read the driver puts on the wrong side.
+
+## Against the Mac's own GPU
+
+On Llama-2-7B Q4_0, the M1 Max's own GPU under Linux (Mesa's Honeykrisp Vulkan driver) reads 240.08 / 34.28 tok/s prompt/decode with flash attention on, and the B60 over the tunnel reads 1418.34 / 65.96 (**reported**).
+
+But a Mac user's real baseline is Metal. The public llama.cpp Apple Silicon thread lists 61.19 tok/s decode for a 32-core M1 Max on the same model. Against that, the repo works out that the B60 decodes only about 4 to 21% faster, depending on core count. The prompt-processing advantage is real; the decode advantage over Metal is small. The repo has not run its own matched Metal baseline.
+
+The 27B is where 24 GB matters. A 16-inch M1 Max with 32 GB or more of unified memory could load the same 15 GB file on its own GPU. Nobody here measured that, and the repo says it has no built-in number for the large models. What the eGPU buys is prompt speed and keeping the Mac's memory free, not a model that otherwise would not run.
+
+## Status, precisely
+
+The post's caveats are accurate, and the repository is more cautious than the post.
+
+- **Nothing is upstream.** Mainline `xe` still gates on 4K pages (checked today). The four published patches have had internal review only; no pull request, issue or list submission exists, by the repo's own account. The fast path also needs `xe` patches `0005` to `0015`, the ANV patch and the Apple PCIe change, which are published only as SHA-256 hashes. You cannot reproduce 17.28 tok/s from the repository today.
+- **The AMD and NVIDIA paths are further along.** The RX 7600's kernel work is an open pull request against the downstream `linux-aurora` tree, and the RTX 5060 Ti's two 16K fixes are open pull requests against NVIDIA's open kernel modules (**reported**; I could not open either from here).
+- **Hot-plug is untested.** The card was attached at boot. After a GPU hang the device wedges and needs a reboot.
+- **One machine, one card.** The other Apple Silicon laptops have no B60 run. The 13-inch M1 has only a 2 GiB prefetchable window and no 16K `xe` kernel built for it; the 14-inch M2 Max is blocked on the same kernel gate.
+
+## What I ran and what I did not
+
+I ran a range-request fetch of the GGUF header with my own parser over it, the Hugging Face file listing (sizes and hashes), and a read of mainline `xe` for the Kconfig gate, `RING_CTL_SIZE` and the GuC shifts.
+
+I did not run: any kernel build, any of the patches, the repo's `egpu_doctor.py` (it inspects real PCI devices; this VM has none worth inspecting), or anything on GPU hardware. Every tok/s figure in this article is the repository's, not mine.
+
+<Figure
+  src="/articles/omarchy-egpu/fig2.jpg"
+  alt="Screenshot of the benchmark record section titled Qwen3.8-27B fully on the card, 2026-10-23. It lists the two unsloth GGUF files with sizes and SHA-256 hashes, then a table: UD-Q4_K_M 15.32 GiB, pp512 442.61 and 450.55, tg128 13.12 at flash attention 1 and 0; Q4_0 14.94 GiB, pp512 428.04 and 432.70, tg128 17.28 and 17.32."
+  caption="The record the post was built from: both 27B files, all 66 layers on the card, five repetitions per cell. The figures are the repository's measurements, not mine (QwenAIFans post, image 1; a screenshot of the repo's B60 benchmark record)."
+/>
+
+## Takeaway
+
+The interesting result is not "27B on a Mac with an Intel card". It is where the time went. Weights in VRAM were never in doubt. What made a tunnelled GPU slow was the driver's assumption that its own small buffers are cheap to reach, and that assumption broke on both the Intel and the AMD card in this repo. Fix the placement and a B60 over Thunderbolt decodes Llama-2-7B at 94% of a native slot. The remaining gap to the card's bandwidth ceiling is the Vulkan backend on Battlemage, which a native card shares.
+
+For other ways to run this model family on modest hardware, see [Qwen3.8-27B variants: the bill is tokens times bytes](/articles/qwen3-8-27b-variants), and for the Mac's own GPU pushed hard, [lithos-metal on an M5 Max](/articles/lithos-metal). The opposite direction, an NVIDIA card driven from macOS rather than Linux, is in [NullMoth's NVIDIA driver for macOS](/articles/nvidia-macos-driver).

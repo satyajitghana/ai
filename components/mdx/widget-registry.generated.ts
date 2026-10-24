@@ -777,6 +777,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "octop/isolation-map": () => import("@/components/articles/octop/isolation-map"),
   "olmo-core-3/expert-dispatch": () => import("@/components/articles/olmo-core-3/expert-dispatch"),
   "olmo-core-3/parallelism-planner": () => import("@/components/articles/olmo-core-3/parallelism-planner"),
+  "omarchy-egpu/buffer-ladder": () => import("@/components/articles/omarchy-egpu/buffer-ladder"),
+  "omarchy-egpu/decode-budget": () => import("@/components/articles/omarchy-egpu/decode-budget"),
   "one-shot-launch-videos/song-timeline": () => import("@/components/articles/one-shot-launch-videos/song-timeline"),
   "open-1b-auditable-training/trust-chain": () => import("@/components/articles/open-1b-auditable-training/trust-chain"),
   "open-math-harness/tree-scorer": () => import("@/components/articles/open-math-harness/tree-scorer"),
