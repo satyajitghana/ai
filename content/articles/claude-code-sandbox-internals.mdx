@@ -1,0 +1,165 @@
+---
+title: "Claude Code's sandbox from the source: the bwrap argv, the seccomp program, and the proxy"
+description: "A source-level teardown of @anthropic-ai/sandbox-runtime 0.0.81 (Apache-2.0), the sandbox behind Claude Code's Bash tool. I read the 31k lines at commit 98a4016 and ran the Linux path on a VM: the exact generated bwrap command annotated flag by flag, the two seccomp BPF filters apply-seccomp installs (AF_UNIX and io_uring blocked, a second filter that refuses unshare/mount/setns, and a USER_NOTIF observer streaming write-intent syscalls), the socat bridge and the one mux socket that is the only way out of the network namespace, the macOS Seatbelt profile it emits, and what each stage costs per command. A deeper companion to the first sandbox-runtime piece."
+date: 2026-10-26
+tags:
+  - agents
+  - security
+  - agentic-coding
+  - developer-tools
+  - performance
+rating:
+  novelty: 1
+  verification: 3
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Read srt 0.0.81 and ran the Linux path: the real bwrap argv annotated, both seccomp filters, the proxy mux, per-stage overhead, against the code."
+topic: security
+kind: teardown
+level: practitioner
+runsOn: cpu
+licence: Apache-2.0
+---
+
+import { BwrapArgvExplorer } from "@/components/articles/claude-code-sandbox-internals/argv-explorer"
+import { PolicyResolver } from "@/components/articles/claude-code-sandbox-internals/policy-resolver"
+import { SandboxCutaway } from "@/components/articles/claude-code-sandbox-internals/sandbox-cutaway"
+
+I already wrote up `@anthropic-ai/sandbox-runtime` once, from the outside: [what `srt` does when you run it](/articles/sandbox-runtime) — a denied read becomes an empty directory, a write outside the project gets `EROFS`, a non-allowlisted host gets a 403, and each command pays roughly 80-110 ms. That piece measured the behaviour. This one opens the hood. I read the whole backend at commit `98a4016` (package version 0.0.81, Apache-2.0) and ran the Linux path again, this time to dump and annotate the exact artifacts the code generates: the `bwrap` command line, the seccomp BPF program, the Seatbelt profile. If you only want to know what the sandbox *does*, read the first article. This is how it is built.
+
+<RepoCard repo="anthropics/sandbox-runtime" />
+
+The backend is not small. `wc -l` across `src/sandbox/` gives 3,937 lines for `linux-sandbox-utils.ts` alone, 3,581 for `sandbox-manager.ts`, 1,725 for macOS and 4,610 for the alpha Windows backend (measured). But the Linux design fits in one command line, so let us start there.
+
+## The whole box is a bwrap command line
+
+On Linux, `srt` does not run a daemon or a container. It turns your policy into a single `bwrap` invocation and `exec`s it. I captured the real string through `SandboxManager.wrapWithSandbox` for a sample policy — allow `example.com`, deny-read a `secret/` directory, allow-write a `project/` directory — on a shared 4-core cloud VM (Ubuntu 24.04, kernel 6.18, `bwrap` 0.9.0, as root). I abbreviated the scratch path to `$S` and the proxy socket id; everything else is verbatim. Click any flag:
+
+<BwrapArgvExplorer />
+
+Read it as three concerns stacked into one argv. The **filesystem** is a mount table and nothing else: `--ro-bind / /` makes the whole host tree readable, `--bind $S/run/project` re-mounts the one writable root on top, and then every denied thing is a mount that masks it. The **network** is a subtraction: `--unshare-net` leaves the namespace with only `lo`, and the single hole is a Unix socket bind-mounted in. The **command** runs one level deeper, after a wrapper starts the bridge and a helper installs seccomp.
+
+There are no path checks in user space. The kernel's mount table *is* the policy, which is why the mandatory denies matter so much: each one is a real mount, decided once when the command is wrapped.
+
+<SandboxCutaway />
+
+### The deny mounts, and why each file
+
+A `denyRead` directory gets `--tmpfs` — an empty filesystem mounted over it, so the files are not hidden, they are *not there* (and the tmpfs is writable, but its contents evaporate with it). A `denyWrite` path, and every mandatory deny, gets a read-only bind over it: `--ro-bind /dev/null <file>` for a file, an empty read-only directory for a directory. For my one-git-project sample, the wrap produced eleven `/dev/null` placeholders and one empty-directory mask (`.claude`) — twelve caps — plus the `secret/` tmpfs and read-only re-binds of `.git/hooks` and `.git/config` (measured from the dumped argv).
+
+The mandatory-deny list, from `generateFilesystemArgs` in `linux-sandbox-utils.ts`, is write-denied even inside an allowed directory:
+
+```text
+.bashrc .bash_profile .zshrc .zprofile .profile   # shells source these at startup
+.gitconfig .gitmodules                            # git runs commands from these
+.ripgreprc .mcp.json                              # tool config that executes/connects
+.vscode/ .idea/                                   # editor tasks run outside the sandbox
+.claude/commands/ .claude/agents/                 # Claude Code config that runs later
+.git/hooks/ .git/config                           # git executes these on commit/checkout
+```
+
+The common thread is: every one of these files runs code *later, outside the sandbox*. A shell rc file runs on the next login; a git hook runs on the next commit; `.mcp.json` names servers Claude Code will spawn with full access. Writing them is how a sandboxed command would escape into an unsandboxed context, so they are closed regardless of what `allowWrite` opens. A `ripgrep` scan, three levels deep by default (`mandatoryDenySearchDepth`), finds them in subdirectories too; `.gitignore` does not hide anything from it.
+
+The precedence is asymmetric, and the resolver below is a port of the real rules — reads open by default and carved by `denyRead`, writes closed by default and opened by `allowWrite` but closed again by the mandatory denies, and the five-step network decision from `shouldAllowConnection`:
+
+<PolicyResolver />
+
+## The network is a missing namespace plus one socket
+
+`--unshare-net` is the fence. Inside, there is no interface but `lo`, no route, no resolver. I confirmed it from the first article: `/proc/net/dev` lists only `lo` with zero bytes. A program that does not honour `HTTP_PROXY` does not sneak around this — it simply cannot connect.
+
+The one way out is a filesystem object. The host proxy listens on a Unix socket; `bwrap` bind-mounts that socket into the sandbox; inside, the wrapper starts two `socat` listeners on `localhost:3128` (HTTP) and `localhost:1080` (SOCKS) that forward to it. In 0.0.81 a single mux socket serves both: `getLinuxHttpSocketPath()` and `getLinuxSocksSocketPath()` returned the same path on my run, and `bwrap` rejects a duplicate `--bind`, so it is bound once. The mux peeks at the first byte and routes `0x04`/`0x05` to the SOCKS handler and everything else to HTTP.
+
+The wrapper is careful about ordering. Before it hands off to the command, it polls `/proc/net/sockstat` until two TCP sockets are listening (up to 30 s), so a command never races its own network bridge. You can see the whole `bash -c` payload — the two `socat` background jobs, the `wait` loop, the `trap` that kills them on exit — in the last token of the argv explorer above.
+
+Every outbound connection is decided host-side by five ordered checks, and after an allow the proxy resolves the name once and drops any address that is loopback, link-local, a cloud-metadata endpoint, one of this host's own interfaces, or in `deniedResolvedAddresses` — so an allowed name whose DNS you do not control cannot be pointed at `127.0.0.1`. Private ranges such as `10.0.0.0/8` are not denied by default; you list them.
+
+## apply-seccomp: two filters and an observer
+
+`--unshare-net` stops IP traffic, but `socket(AF_UNIX, …)` would let a command talk to local services, and `socket(AF_VSOCK, …)` could reach a hypervisor past the net namespace entirely. The mount denies stop writes, but a command that could make its own user namespace would get a private copy of the mount tree and rearrange it. Both holes are closed by `apply-seccomp`, a static binary (shipped prebuilt for x64 and arm64) that the wrapper runs last.
+
+It does three things, visible in `vendor/seccomp-src/apply-seccomp.c` and the BPF generator `seccomp-unix-block.c`:
+
+- **A unix-block filter.** `socket(AF_UNIX)` and `socket(AF_VSOCK)` return `EPERM`, and `io_uring_setup`/`io_uring_enter`/`io_uring_register` are blocked outright — because `IORING_OP_SOCKET` on Linux 5.19+ creates sockets without the `socket()` syscall and would sidestep the first rule. The filter uses `SCMP_CMP_MASKED_EQ` with a 32-bit mask on `arg0`, because the domain is a 32-bit int and a 64-bit compare would miss calls with the upper bits set. The source is candid that 32-bit x86 is unsupported: there `socketcall()` multiplexes `socket()` and the filter does not cover it.
+- **A namespaces filter.** A second BPF program returns `EPERM` for `unshare`/`clone` with the user- or mount-namespace flags, `setns`, `mount`, `umount2`, `pivot_root`, and the newer mount API (`open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`, `mount_setattr`, `open_tree_attr`). `clone3` returns `ENOSYS`, not `EPERM`, on purpose: libc reads that as "no `clone3` here" and falls back to `clone`, which the first rule already covers — returning `EPERM` would break thread creation. This filter is what keeps a command, especially one running as root, from undoing its own write denies.
+- **A USER_NOTIF observer.** When the embedder turns it on, `apply-seccomp` installs a third filter that traps roughly two dozen write-intent syscalls (`openat`, `openat2`, `unlinkat`, `renameat2`, `mkdirat`, `chmod`, `truncate`, the legacy `creat`/`unlink`/`rename`, …) to `SECCOMP_RET_USER_NOTIF` and ships the listener fd to an outer stub that answers every notification with `CONTINUE` — so the command's behaviour is unchanged — and streams one JSON line per attempt to a Unix socket. The comment is blunt about trust: the path is read from the workload's memory with `process_vm_readv`, so it is "ATTACKER-CONTROLLED and racy" and "must never gate a policy decision." The mount table stays the boundary; these are hints.
+
+The process layout is the point. `apply-seccomp` nests a second PID + mount + user namespace below bwrap's, acts as a non-dumpable PID 1 there, then forks the worker and applies the filters. The header comment lays out the tree: bwrap init, then `bash`/`socat` in bwrap's PID namespace, then `apply-seccomp` as the inner init, then the user command as inner PID 2.
+
+## How violations come back
+
+A block is only useful if the model learns what was blocked, or it just tries another way. I turned the monitor on (the third argument of `SandboxManager.initialize`), wrapped a command that writes outside the project and calls a non-allowlisted host, and called `annotateStderrWithSandboxFailures` on its stderr. The appended block (measured):
+
+```text
+<sandbox_violations>
+deny openat $S/run/outside/x.txt
+deny network-outbound example.org:443 (host is not on the allow list)
+</sandbox_violations>
+```
+
+That is what a model reads. The filesystem line comes from the seccomp observer; the network line comes from the proxy, which decides and so can give a reason. `deniedDomainReasons` lets you write that reason yourself — "SSH pushes to GitHub are blocked; use an https:// remote" — so the model learns the sanctioned alternative, not just the refusal. On a plain-HTTP request the proxy answers with a real `403` whose body is `Connection blocked by network allowlist` and an `X-Proxy-Error: blocked-by-allowlist` header.
+
+## macOS: a Seatbelt profile instead of a namespace
+
+There is no namespace to build on macOS; `srt` writes a Seatbelt profile and runs `sandbox-exec -p <profile>`. I read this from `macos-sandbox-utils.ts` — I have no Mac to run it on. The profile opens with:
+
+```scheme
+(deny default (with message "CMD64_<base64-of-command>_END_<random-suffix>"))
+```
+
+That log tag is how violations come back on macOS: `srt` runs `log stream` filtered on the suffix, decodes the command from each `Sandbox: … deny …` line, and files it. From there the profile adds back only what a shell needs — `(allow process-exec)`, `(allow process-fork)`, `(allow process-info* (target same-sandbox))`, a *named* list of Mach services with no wildcard (`com.apple.logd`, `com.apple.fonts`, launchservices, …), some IOKit and sysctl reads. Reads are `(allow file-read*)` then the `denyRead` subpaths then the `allowRead` re-allows; writes allow the `allowWrite` roots and deny the mandatory paths as globs.
+
+The network section is the macOS equivalent of the missing namespace. With restrictions on, outbound is allowed only to the two proxy ports:
+
+```scheme
+(allow network-outbound (remote ip "localhost:35343"))   ; the host HTTP/mux proxy
+```
+
+and nothing else. The code notes a real subtlety: it uses `(remote ip "localhost:*")`, not `(local ip …)`, because a `(local ip …)` filter on `network-outbound` is evaluated against the source address, which is `INADDR_ANY` for an unbound socket, and Seatbelt's `localhost` matches the any-address — so a local filter would admit every outbound connection. Two opt-ins open real holes, and the README says so: `enableWeakerNetworkIsolation` re-allows `com.apple.trustd.agent` for Go TLS ("a potential data exfiltration vector"), and `allowAppleEvents` lets a command `open` or `osascript` other apps, which run outside the sandbox — "removes code-execution isolation, not just weakens it."
+
+## How Claude Code wires it in
+
+This part is from the Claude Code docs, not its source, which I did not read (reported). The docs say Claude Code "builds the sandbox on the open source `@anthropic-ai/sandbox-runtime` package", and wraps the **Bash tool only**. Read, Edit, Write and WebFetch follow permission rules; hooks, MCP servers, LSP servers and the status-line command run "with your full access". The default read scope is "most of the machine, including credential files such as `~/.ssh` and `~/.aws/credentials`" — which is tolerable only because the network fence is there. If you widen the network, narrow the reads.
+
+<Figure src="/articles/claude-code-sandbox-internals/fig1.png" alt="Diagram in three columns: the user, Claude Code and the sandbox. A bash command runs inside the sandbox; a write to ~/.bad_file and HTTPS to a denied host are denied, a write to ./README.md is allowed. Network calls leave the sandbox through socat to a domain socket and on to the SOCKS or HTTP proxy inside Claude Code; allowed hosts pass, denied hosts are refused, and unknown hosts on port 80 or 443 trigger a permission prompt." caption="Claude Code's sandbox: socat and a domain socket are the only way out, the proxies decide per host, and an unknown host becomes a permission prompt. (Anthropic engineering blog, 'Beyond permission prompts', also in the sandbox-runtime README.)" />
+
+With `autoAllowBashIfSandboxed` (default true) a sandboxed command is approved without a prompt — the mechanical form of the blog's "84% fewer permission prompts" claim (reported; I cannot verify it). The escape hatch is `dangerouslyDisableSandbox`: when a command fails sandboxed, Claude can retry it unsandboxed, gated by your permission mode. `failIfUnavailable: true` stops Claude Code from silently running unsandboxed when `bwrap` is missing — which, by default, the docs say it will.
+
+Claude Code on the web takes the heavier route: the whole session runs in a gVisor sandbox with no git credentials inside, and a git proxy holds the token and checks the branch and destination before attaching it.
+
+<Figure src="/articles/claude-code-sandbox-internals/fig2.png" alt="Three panels: a gVisor sandbox containing Claude Code where git add is auto-allowed and git commit/push send requests carrying a JWT; a git proxy that validates the JWT, the branch name and the repo destination; and github.com, which receives the push only after those checks." caption="Claude Code on the web keeps credentials out of the sandbox: the in-sandbox git client holds a scoped JWT, and the proxy attaches the real token only after checking branch and destination. (Anthropic engineering blog, 'Beyond permission prompts'.)" />
+
+## What each stage costs
+
+Every figure below is from the same shared VM (4 cores, CPU only), measured through the library harness; the load average was around 8-10 while they ran, so treat them as upper bounds. Medians over 20-25 runs:
+
+| Stage | Median |
+|---|---|
+| bare `bash -c true`, from a shell loop | 3.9 ms |
+| `bash -c true` through the Node `execSync` harness | 6.2 ms |
+| `SandboxManager.initialize` (proxies + bridge), once per session | 26.8 ms |
+| `wrapWithSandbox("true")`: build the argv + ripgrep scan | 27.9 ms |
+| run the wrapped `true`, proxies already up | 58.0 ms |
+| whole `srt -c true` CLI: Node start, init, wrap, run | 447.9 ms |
+
+For an embedder like Claude Code, which initialises once per session, the per-command price is the wrap plus the wrapped run: about 86 ms here against 6 ms unwrapped (reasoned, from the rows above). Part of that is fixed by design — the wrapper waits for both `socat` listeners before starting your command. For a command that takes seconds, it is noise; for a loop of a thousand `grep`s, wrap once or batch them.
+
+## Where the design is thin
+
+The honest edges are the same ones the README lists, now with the mechanism attached:
+
+- **An allowed domain is the whole domain.** The proxy decides from the hostname or CONNECT target and does not look inside TLS, so allowing `github.com` allows pushing to any repo, and domain fronting may slip past. The fix is a TLS-terminating proxy (`network.filterRequest`, `mitmProxy`) at the cost of a CA in the sandbox.
+- **`AF_VSOCK` is blocked for a reason.** On a VM with a vsock transport, a `socket(AF_VSOCK)` would reach the hypervisor past the net namespace entirely — which is why the seccomp filter denies it alongside `AF_UNIX`, and why `allowAllUnixSockets` (which drops that filter) is all-or-nothing on Linux.
+- **The namespaces filter is load-bearing.** Without it, a command that can `unshare(CLONE_NEWUSER)` gets a private mount tree and can undo every write deny. It is a seccomp filter, not a capability check, precisely so it holds for a command running as root inside the sandbox.
+- **Install `srt` outside every writable path.** A copy in `<project>/node_modules` that the sandbox can write means the next `srt` runs tampered code, unsandboxed. `checkDependencies()` warns about this.
+- **Not everything is wrapped.** In Claude Code, hooks, MCP servers and built-in tools run outside the sandbox. For a boundary around all of that, run Claude Code itself under `srt` or in a container.
+
+This is a design that chose OS primitives over a VM, and the choice shows in both directions. Compare [NVX](/articles/nvx), which builds a micro-VM from nothing, and [OpenShell](/articles/openshell), which puts Landlock and a seccomp supervisor between the agent and every connection; [Strands Box](/articles/strands-agents-and-box) uses the same macOS Seatbelt primitive with a policy language on top, and [Octop](/articles/octop)'s bubblewrap backend is a mount-namespace jail with no network fence. The isometric style of the cutaway above is borrowed from the [Anatomy machine skill](/articles/anatomy-machine-skill). `srt` is the lightest of these: nothing is started, the command runs on your kernel, and you pay about 86 ms a command for a boundary you can read in one argv.
+
+## What I ran, and what I did not
+
+I ran the Linux path end to end on one VM: dumped and annotated the real `bwrap` argv, reproduced the reads/writes/network denials from the first article, captured a live violation block, and measured the per-stage overhead above. I read — but did not run — the macOS Seatbelt generator, the TLS-terminating proxy, credential masking, the alpha Windows backend, and Claude Code's own wiring. The 84% prompt-reduction figure is Anthropic's; I have no way to check it. Everything labelled measured came off this machine; treat the timings as upper bounds on a busy host.
