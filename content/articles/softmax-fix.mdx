@@ -1,7 +1,8 @@
 ---
 title: "A fix for softmax and cross-entropy: the target gradient that rounds to zero"
-description: "Jon Barron, Dan Gnanapragasam and Michael Tschannen show that every standard softmax cross-entropy adds a tiny number to 1.0 and loses it: past a logit margin of about 16.6 in fp32 the target gradient is exactly zero while the others are not, and Adam turns that into the grokking 'slingshot'. A second bug leaves a gradient when a student equals its teacher. I reproduced both in PyTorch on a CPU, ported the fix, and ran the grokking experiment: the fix removed every slingshot, and in my runs it did not speed grokking up."
+description: "Jon Barron, Dan Gnanapragasam and Michael Tschannen show that every standard softmax cross-entropy adds a tiny number to 1.0 and loses it: past a logit margin of about 16.6 in fp32 the target gradient is exactly zero while the others are not, and Adam turns that into the grokking 'slingshot'. A second bug leaves a gradient when a student equals its teacher. I reproduced both in PyTorch on a CPU, ported the fix, and ran the grokking experiment: the fix removed every slingshot, and in my runs it did not speed grokking up. Updated 26 October: the same zero-sum property is lost in FlashAttention's backward pass under stochastic rounding (CroissAttn), and I measured the row sum of dS in bf16, fp8 and fp4."
 date: 2026-10-24
+updated: 2026-10-26
 tags:
   - training
   - theory
@@ -25,6 +26,7 @@ runsOn: cpu
 
 import { CliffProbe } from "@/components/articles/softmax-fix/cliff-probe"
 import { SlingshotRuns } from "@/components/articles/softmax-fix/slingshot-runs"
+import { RowsumProbe } from "@/components/articles/softmax-fix/rowsum-probe"
 
 [A Fix for Softmax and Cross-Entropy](https://arxiv.org/abs/2610.31642) (Jonathan T. Barron, Dan Gnanapragasam, Michael Tschannen, Google DeepMind, arXiv 22 October 2026) makes a claim that sounds like it cannot be true: the softmax and cross-entropy in JAX, PyTorch and the textbooks are wrong in two places. Not unstable in some exotic regime. Wrong, in the sense that they return a different gradient from the one the formula defines, in a regime that ordinary training reaches.
 
@@ -233,13 +235,47 @@ The paper is candid that "the extreme margins and near-zero student–teacher ga
 - **bf16 losses.** The bf16 cliff is a margin of 5.55, a probability of about 0.996 on the right answer (reasoned). Most training code upcasts logits to fp32 before the loss for this reason among others; code that does not is collapsing on every easy token.
 - **Small-output problems trained long.** Grokking, classifiers with a few classes, anything past memorisation with weight decay and default $\epsilon$.
 - **Distillation from a close teacher**, and KL penalties that start the policy as a copy of the reference, which is how most RL fine-tuning begins. One reply points at continual-learning penalties that start the new model as an exact copy of the old one.
-- **Attention.** Attention is a softmax too. A reply to the thread from the authors of [Broken Symmetry in BF16 Attention](https://arxiv.org/abs/2609.34272) argues the same broken zero-sum shows up in FlashAttention's bf16 backward. That is their claim; I have not checked it.
+- **Attention.** Attention is a softmax too. A reply to the thread from the authors of [Broken Symmetry in BF16 Attention](https://arxiv.org/abs/2609.34272) argues the same broken zero-sum shows up in FlashAttention's bf16 backward. That claim is their own; a second group has since made the stochastic-rounding version of it, and I measured that one in [the 25 October section below](#25-october-the-same-bug-in-flashattentions-backward-pass).
 
 Prior fixes treated symptoms: [Liu et al.](https://arxiv.org/abs/2605.06152) project the gradient to zero sum, StableMax (Prieto et al., 2025) replaces the exponential, and others cast to fp64. The paper's Table 1 finds zero-sum projection stalls the margin near 18 and drops test accuracy below 50% at $\epsilon \le 10^{-12}$, and StableMax lets margins run to about $10^4$ (reported). Liu replied that their main contribution is the mechanism, "Numerical Feature Inflation", and that the projection was a causal test.
 
 What the fix costs: an argmax, a masked log-sum-exp and a softplus instead of one fused kernel. The paper says it runs "without meaningful slowdown" (reported). I did not benchmark it, and a reply asking about fused vocabulary-scale kernels has no public answer yet. My unfused port allocates a few extra $B \times K$ temporaries, which at a large vocabulary is the memory a fused cross-entropy exists to avoid.
 
 Two notes on provenance. Barron writes that the bug was "first found and fixed by Gemini Flash 3.7", that most experiments were run by Flash 3.8 and the first draft written by a Gemini model before he rewrote it (reported, from his thread); a reply points out the paper itself does not say so. And no code repository is published: the code is the listings on the project page, which is what I ported.
+
+## 25 October: the same bug in FlashAttention's backward pass
+
+A day after this page went up, Alexander Johansen (@AlexRoseJo) posted that "FlashAttention's backward pass has the same zero-sum bug Jon Barron just fixed in softmax. With FP4 stochastic rounding it's wrong on every single draw." The fix is in his ICLR 2027 submission, CroissAttn, a complete FP4 attention backward. The [repository](https://github.com/alrojo/fp4Attn) holds one file, the anonymous submission PDF (reported; no kernels are published). Everything below about the paper is from that PDF and his thread.
+
+<RepoCard repo="alrojo/fp4Attn" />
+
+**What the backward computes.** For one query row, attention gives probabilities $P$ and output $O = PV$. The backward forms $dP = dO\,V^\top$ and then the softmax derivative
+
+$$
+dS = P \odot (dP - D), \qquad D = \operatorname{rowsum}(P \odot dP) = \operatorname{rowsum}(dO \odot O).
+$$
+
+Because $P$ sums to one, the row sum of $dS$ is $\sum_j P_j dP_j - D$, which is zero exactly when $D$ equals the $P$-weighted mean of the row it is subtracted from. FlashAttention never stores $P$, so it takes the second form of $D$, the dot product of $dO$ with the stored output $O$. With rounded operands it is a different number from $\langle P, \widehat{dP}\rangle$ computed from the row actually used, and the gap is the row sum of $dS$ (reasoned).
+
+**Where the property is lost.** Two places. If $O$ is stored in bf16, its rounding error is a fixed offset per row. With stochastic rounding of $dO$ and $V$, $\widehat{dP}$ is a random draw, while $D$ taken from $O$ is the average draw. The expected gradient is right, but each draw has a non-zero row sum, and the error lands on the key that holds most of the row: the attention sink. The submitted CroissAttn kernels use a high-precision auxiliary product $O' = PV_f$ for $D$, which fixes the mean and not the individual draw (reported, PDF Eq. 4 and Appendix A.3).
+
+**What CroissAttn changes.** Compute $D$ from the same rounded $\widehat{dP}$ row: $D = \langle P, \widehat{dP}\rangle$. Then $\sum_j P_j(\widehat{dP}_j - D) = 0$ on every draw, and the mean is unchanged because the rule is linear in $\widehat{dP}$. Johansen's thread says the per-draw rule was derived after the submitted kernels were built, and training results with it are "to follow" (reported). All the paper's training numbers, such as the 0.0439-nat gap at 500M parameters and the 1.5 to 2.2 times backward speedup on B200, were produced with the auxiliary version, so they do not test this claim.
+
+**Their evidence.** In the PDF, an exact enumeration of E2M1 rounding on a two-key row gives a total squared error of 0.21037027 with the auxiliary rule and 0.01670725 with per-draw centering, and 0 against 0.03609975 on a one-key row (reported, Table 8). The variance ratio falls from 1.98 on peaky rows to 1.14 on diffuse ones (reported, Table 9). The thread adds that on one sink row, 150 draws land within 1 times the true gradient 1 time in 150 with the shortcut and 150 times in 150 with CroissAttn; that experiment is not in the PDF, so I could not check it against a table. The paper notes a catch: for some downstream maps, sampled centering gives a larger error than the auxiliary rule (reported, Appendix C.1, a toy with 1/16 against 0).
+
+### I ran the row sum
+
+<RowsumProbe />
+
+(measured) I rebuilt the claim in PyTorch 2.14.1 on the shared 4-core CPU, two threads. One attention row, 256 keys, head size 64, Gaussian tensors; a sink row adds +6 or +12 to the first key's logit and shrinks its value vector to 0.01 of the others. Gradient operands $dO$ and $V$ are rounded to bf16, fp8 (E4M3) or fp4 (E2M1, blocks of 16 with an E4M3 scale), by round to nearest or by stochastic rounding I emulated myself; the stored $O$ is bf16. Each cell is 150 draws. Three choices of $D$ are compared, and the target is the exact-arithmetic gradient of the rounded forward. I did not run the authors' code, because none exists, so this is my reading of the rules, not their kernel.
+
+- Stored output, fp4 with stochastic rounding, +6 sink row: the row sum of $dS$ averaged $3.2 \times 10^{-2}$ in absolute value, from a mean of $-5.7 \times 10^{-3}$. That is zero on average and wrong on each draw, which is what the thread says.
+- Per-draw rule, same cell: $1.6 \times 10^{-8}$, which is fp32 rounding of $P$ and nothing else. It is $1.4 \times 10^{-9}$ or lower on diffuse rows and $3.9 \times 10^{-10}$ on the +12 sink row.
+- bf16 with round to nearest gives a deterministic offset, not noise: $1.3 \times 10^{-3}$ on a diffuse row from the stored $O$.
+- The sink amplifies it. On the +12 row the sink holds 99.9% of the probability and its true $dS$ is only $-1.3 \times 10^{-3}$. With fp4 and stochastic rounding the shortcut's sink gradient stayed within 1 times the true value in 16 of 150 draws and the per-draw rule in 150 of 150; with fp8 and stochastic rounding, 29 of 150 against 150 of 150. Mean relative error of $dS$ was 7.4 for the shortcut against 0.11 for per-draw (fp4, stochastic).
+- On diffuse rows the three rules have the same error in $dS$ (0.138, 0.138 and 0.137 in fp4 with stochastic rounding), matching the thread's "about 1 times on diffuse rows".
+
+Limits: one row and one seed per cell, Gaussian tensors rather than a trained model's, my own rounding emulation, no training. I did not check the speedup, the training gaps or a reply's claim that GProj fixes the bf16 side with a rank-one correction.
 
 ## The takeaway
 
