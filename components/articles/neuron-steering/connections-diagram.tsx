@@ -61,7 +61,7 @@ export function ConnectionsDiagram() {
         {links.map((k, i) => {
           const x1 = X0 + src * DX + (DX - 5) / 2
           const x2 = X0 + k.layer * DX + (DX - 5) / 2
-          const h = 36 + i * 22
+          const h = 36 + i * 28
           return (
             <g key={i}>
               <path
@@ -71,11 +71,8 @@ export function ConnectionsDiagram() {
                 strokeWidth={1 + (k.z / zmax) * 2.5}
                 strokeOpacity={0.8}
               />
-              <T x={x2} y={150 - h * 0.75 - 15} anchor="middle" size={8.5} opacity={0.9}>
-                L{k.layer} N{k.n}
-              </T>
-              <T x={x2} y={150 - h * 0.75 - 4} anchor="middle" size={8} opacity={0.6}>
-                z {k.z.toFixed(1)}
+              <T x={x2 + (x2 > 600 ? 8 : 0)} y={150 - h * 0.75 - 5} anchor={x2 > 600 ? "end" : "middle"} size={8.5} opacity={0.9}>
+                L{k.layer} N{k.n} · z {k.z.toFixed(1)}
               </T>
             </g>
           )

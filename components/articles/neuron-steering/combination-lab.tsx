@@ -15,7 +15,19 @@ import { ACCENT, Frame, GREEN, Pill, T } from "./viz"
 
 export function CombinationLab() {
   const [pi, setPi] = useState(0)
-  const [di, setDi] = useState(0)
+  const [di, setDi] = useState(() => {
+    const first = COMBO.filter((r) => r.words.join("+") === COMBO[0].words.join("+"))
+    let best = 0
+    let most = -1
+    first.forEach((r, i) => {
+      const hits = [...r.single, ...r.pair].reduce((a, s) => a + s.c1 + s.c2, 0)
+      if (hits > most) {
+        most = hits
+        best = i
+      }
+    })
+    return best
+  })
   const pairKeys = Array.from(new Set(COMBO.map((r) => r.words.join("+"))))
   const key = pairKeys[pi]
   const doses = Array.from(new Set(COMBO.filter((r) => r.words.join("+") === key).map((r) => r.dose)))
