@@ -6,11 +6,19 @@ Writes $NL_SCRATCH/lens/L{LL}.json (up/down per neuron).  usage: data_logitlens.
 from data_common import *
 
 K = 6
-tok, model = load()
+from transformers import AutoTokenizer
+from safetensors import safe_open
+tok = AutoTokenizer.from_pretrained(MODEL)
+_f = sorted(glob.glob(os.path.join(os.environ.get("HF_HOME", ""), "hub", "models--Qwen--Qwen3-0.6B", "snapshots", "*", "model.safetensors")))
+if not _f:
+    from huggingface_hub import hf_hub_download
+    _f = [hf_hub_download(MODEL, "model.safetensors")]
+SF = safe_open(_f[0], framework="pt")   # read only embed, final norm and down_proj: ~1.5 GB peak instead of the whole fp32 model
+VOCAB = SF.get_slice("model.embed_tokens.weight").get_shape()[0]
 os.makedirs(os.path.join(SCRATCH, "lens"), exist_ok=True)
 nreal = 151643
-ok = torch.zeros(model.config.vocab_size, dtype=torch.bool)
-strs = [None] * model.config.vocab_size
+ok = torch.zeros(VOCAB, dtype=torch.bool)
+strs = [None] * VOCAB
 for i in range(nreal):
     s = tok.decode([i])
     if "�" in s:
@@ -20,15 +28,16 @@ for i in range(nreal):
     ok[i] = True
     strs[i] = display_token(s)
 print("usable tokens", int(ok.sum()))
-E = model.lm_head.weight.float()  # tied with embed_tokens
-Ereal = E[ok]                      # [V',1024]
+E = SF.get_tensor("model.embed_tokens.weight").float()  # lm_head is tied with embed_tokens
+Ereal = E[ok].contiguous()         # [V',1024]
 vid = torch.nonzero(ok).squeeze(1)
-nw = model.model.norm.weight.float()
+nw = SF.get_tensor("model.norm.weight").float()
+del E
 for L in range(NL):
     p = os.path.join(SCRATCH, "lens", f"L{L:02d}.json")
     if os.path.exists(p):
         continue
-    W = model.model.layers[L].mlp.down_proj.weight.float() * nw[:, None]  # [1024,3072]
+    W = SF.get_tensor(f"model.layers.{L}.mlp.down_proj.weight").float() * nw[:, None]  # [1024,3072]
     up, dn = [], []
     for c in range(0, NN, 384):
         lg = Ereal @ W[:, c:c + 384]                      # [V',384]
