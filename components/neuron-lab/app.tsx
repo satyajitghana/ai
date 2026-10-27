@@ -693,7 +693,7 @@ export function NeuronLabApp() {
               <b>What it is not:</b> there is no AI agent here. The Investigate tab runs fixed tools over published data. The model, when you load it, runs inside this tab on your device; nothing you type is sent anywhere.
             </p>
             <p>
-              Read how it works and what we measured in <Link href="/articles/neuron-lab">the article</Link> and in <Link href="/articles/neuron-steering">the neuron steering deep dive</Link>.
+              Read how it works and what we measured in <Link href="/articles/neuron-lab">the article</Link> and in <Link href="/articles/neuron-steering">the neuron steering article</Link>.
             </p>
             <ul style={{ paddingLeft: 18 }}>
               <li><span className="nl-kbd">/</span> or <span className="nl-kbd">Ctrl K</span> search · <span className="nl-kbd">PgUp</span>/<span className="nl-kbd">PgDn</span> change layer · <span className="nl-kbd">r</span> reset view</li>
