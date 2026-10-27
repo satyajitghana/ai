@@ -36,10 +36,12 @@ export function SteerPanel(p: {
   toast: (s: string) => void
   prompt: string
   setPrompt: (s: string) => void
+  chat: boolean
+  setChat: (b: boolean) => void
 }) {
+  const { chat, setChat } = p
   const { meta, steers } = p
   const [compare, setCompare] = useState<"3" | "2">("3")
-  const [chat, setChat] = useState(true)
   const [maxNew, setMaxNew] = useState(60)
   const [temp, setTemp] = useState(0)
   const [seed, setSeed] = useState(1)
@@ -59,7 +61,8 @@ export function SteerPanel(p: {
 
   const loadDiscovery = (d: Discovery) => {
     p.setSteers(() => d.neurons.slice(0, MAX_STEERS).map((n) => ({ ...n })))
-    if (!p.prompt.trim() && d.samples[0]) p.setPrompt(d.samples[0].prompt)
+    if (d.samples[0]) p.setPrompt(d.samples[0].prompt)
+    setChat(false)
     setOpenDisc(d.id)
     p.toast(`Loaded "${d.label}": ${d.neurons.length} neuron${d.neurons.length === 1 ? "" : "s"}.`)
   }
@@ -288,7 +291,7 @@ export function SteerPanel(p: {
               base / steered
             </button>
           </div>
-          <span className="nl-note">Enter runs, Shift+Enter adds a line.</span>
+          <span className="nl-note">Enter runs, Shift+Enter adds a line.{!chat ? " Chat format is off: the model continues your text." : ""}</span>
         </div>
         <details style={{ marginTop: 8 }}>
           <summary className="nl-note" style={{ cursor: "pointer" }}>
@@ -301,7 +304,7 @@ export function SteerPanel(p: {
             <input id="nl-temp" className="nl-input nl-mono" type="number" min={0} max={1.5} step={0.1} value={temp} onChange={(e) => setTemp(Math.max(0, Math.min(1.5, +e.target.value || 0)))} style={{ width: 80 }} />
             <label htmlFor="nl-seed">Seed</label>
             <input id="nl-seed" className="nl-input nl-mono" type="number" value={seed} onChange={(e) => setSeed(Math.round(+e.target.value || 0))} style={{ width: 80 }} />
-            <label htmlFor="nl-chat">Chat format</label>
+            <label htmlFor="nl-chat" title="On: the prompt is a user message and the model answers. Off: the model simply continues your text, which is how the recipes we found were tested.">Chat format</label>
             <input id="nl-chat" type="checkbox" checked={chat} onChange={(e) => setChat(e.target.checked)} style={{ justifySelf: "end" }} />
           </div>
         </details>
