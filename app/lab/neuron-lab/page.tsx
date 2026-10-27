@@ -38,7 +38,7 @@ export default function NeuronLabPage() {
           Qwen3-0.6B has 28 layers of 3,072 MLP neurons each. Each neuron writes a fixed direction into the model&apos;s residual stream when it fires. Steering adds that direction by hand, at a dose measured in typical residual lengths, so the same dose means the same thing in every layer. This page lets you search neurons by the words they promote, inspect them, and run the model with a recipe of up to four steered neurons, entirely in your browser. There is no AI agent and no server: the model is fetched from Hugging Face the first time you press load and kept in the browser.
         </p>
         <p className="mt-3 leading-7">
-          How it works and what we measured: <Link href="/articles/neuron-lab">the neuron lab article</Link> and <Link href="/articles/neuron-steering">the neuron steering deep dive</Link>.
+          How it works and what we measured: <Link href="/articles/neuron-lab">the neuron lab article</Link> and <Link href="/articles/neuron-steering">the neuron steering article</Link>.
         </p>
       </main>
     </>
