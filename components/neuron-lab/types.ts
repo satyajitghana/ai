@@ -17,19 +17,29 @@ export interface LayerLens {
   up: string[][]
   down: string[][]
   actMax: number[]
+  /** most negative activation (SwiGLU units can go negative); absent in older files */
+  actMin?: number[]
   actMean: number[]
 }
+
+/** Largest absolute activation of a neuron over the reference corpus. */
+export const peakOf = (lens: LayerLens, n: number) => Math.max(lens.actMax[n], -(lens.actMin?.[n] ?? 0))
 
 export interface Context {
   text: string
   tokenIndex: number
   act: number
+  /** language of the source passage, when the pipeline recorded it */
+  lang?: string
 }
 
 export interface Edge {
   layer: number
   neuron: number
+  /** signed weight-level cosine (positive: this neuron's write pushes the target toward firing) */
   score: number
+  /** the cosine with the target's up row, when the pipeline stored it */
+  up?: number
 }
 
 export interface Steer {

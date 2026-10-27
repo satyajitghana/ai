@@ -262,11 +262,11 @@ export function NeuronLabApp() {
     const k = nkey(selected.layer, selected.neuron)
     const out: EdgeLine[] = []
     const f = (links.get(k) ?? []).slice(0, 8)
-    const mx = Math.max(0.0001, ...f.map((e) => e.score))
-    for (const e of f) out.push({ a: [selected.layer, selected.neuron], b: [e.layer, e.neuron], kind: "feeds", w: e.score / mx })
+    const mx = Math.max(0.0001, ...f.map((e) => Math.abs(e.score)))
+    for (const e of f) out.push({ a: [selected.layer, selected.neuron], b: [e.layer, e.neuron], kind: "feeds", w: Math.abs(e.score) / mx })
     const g = (fedBy.get(k) ?? []).slice(0, 8)
-    const mg = Math.max(0.0001, ...g.map((e) => e.score))
-    for (const e of g) out.push({ a: [e.layer, e.neuron], b: [selected.layer, selected.neuron], kind: "fed", w: e.score / mg })
+    const mg = Math.max(0.0001, ...g.map((e) => Math.abs(e.score)))
+    for (const e of g) out.push({ a: [e.layer, e.neuron], b: [selected.layer, selected.neuron], kind: "fed", w: Math.abs(e.score) / mg })
     return out
   }, [selected, links, fedBy])
 
