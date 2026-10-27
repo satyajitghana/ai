@@ -285,7 +285,7 @@ export class NeuronScene {
     this.styles.clear()
     const n = list.length
     // many highlighted neurons: draw them smaller so the map stays legible
-    this.crowd = n > 3000 ? 0.45 : n > 800 ? 0.6 : n > 250 ? 0.8 : 1
+    this.crowd = n > 3000 ? 0.45 : n > 800 ? 0.6 : n > 250 ? 0.8 : n > 60 ? 1 : 1.5
     for (const s of list) this.styles.set(s.layer * this.opts.neurons + s.neuron, s.kind)
     this.recolor()
   }
@@ -461,17 +461,23 @@ export class NeuronScene {
     this.focusLayer(Math.min(this.opts.layers - 1, Math.max(0, this.selectedLayer)))
   }
 
+  /** Tell the overlay (labels, ring) the camera moved, with matrices that already include the move. */
+  private notifyCamera() {
+    this.matrices()
+    this.opts.onCamera?.()
+  }
+
   zoomBy(f: number) {
     this.dist = Math.min(80, Math.max(3, this.dist * f))
     this.invalidate()
-    this.opts.onCamera?.()
+    this.notifyCamera()
   }
 
   orbitBy(dyaw: number, dpitch: number) {
     this.yaw += dyaw
     this.pitch = Math.min(1.45, Math.max(-1.45, this.pitch + dpitch))
     this.invalidate()
-    this.opts.onCamera?.()
+    this.notifyCamera()
   }
 
   // ---- projection & picking -------------------------------------------
@@ -584,6 +590,7 @@ export class NeuronScene {
       this.target[2] += (sy * dx) * k
       this.target[1] += dy * k
       this.invalidate()
+      this.notifyCamera()
     } else {
       this.orbitBy(-dx * 0.006, dy * 0.006)
     }
@@ -624,6 +631,7 @@ export class NeuronScene {
     this.canvas.width = Math.round(w * dpr)
     this.canvas.height = Math.round(h * dpr)
     this.invalidate()
+    this.notifyCamera()
   }
 
   private frame = (t: number) => {
@@ -636,7 +644,7 @@ export class NeuronScene {
       for (let i = 0; i < 3; i++) this.target[i] = this.tween.from[i] + (this.tween.to[i] - this.tween.from[i]) * e
       if (k >= 1) this.tween = null
       else animating = true
-      this.opts.onCamera?.()
+      this.notifyCamera()
     }
     this.draw()
     this.dirty = false

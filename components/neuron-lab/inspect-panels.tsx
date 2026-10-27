@@ -5,7 +5,7 @@ import { useMemo, useState, type ReactNode } from "react"
 import { showToken } from "./data"
 import { fmtDose, parseNeuron, similarNeurons } from "./search"
 import type { Context, Edge, LayerLens, ModelMeta, NeuronEngine, NeuronKey } from "./types"
-import { fmtNeuron, nkey } from "./types"
+import { fmtNeuron, nkey, peakOf } from "./types"
 
 const sgn = (v: number) => (v >= 0 ? "p" : "m")
 
@@ -31,8 +31,8 @@ function Lens({ lens, n }: { lens: LayerLens; n: number }) {
 /** Rank of a neuron's peak activation within its layer (1 = strongest). */
 function layerRank(lens: LayerLens, n: number) {
   let r = 1
-  const v = lens.actMax[n]
-  for (const x of lens.actMax) if (x > v) r++
+  const v = peakOf(lens, n)
+  for (let i = 0; i < lens.actMax.length; i++) if (peakOf(lens, i) > v) r++
   return r
 }
 
@@ -76,8 +76,10 @@ export function DetailsPanel(p: {
       <div className="nl-card">
         <h3>Numbers</h3>
         <dl className="nl-kv">
-          <dt>Peak activation on the reference text</dt>
-          <dd className="nl-mono">{lens.actMax[s.neuron]}</dd>
+          <dt>Highest / lowest activation on the reference text</dt>
+          <dd className="nl-mono">
+            {lens.actMax[s.neuron]} / {lens.actMin ? lens.actMin[s.neuron] : "n/a"}
+          </dd>
           <dt>Mean activation</dt>
           <dd className="nl-mono">{lens.actMean[s.neuron]}</dd>
           <dt>Rank in its layer</dt>
@@ -97,7 +99,7 @@ export function DetailsPanel(p: {
         {ctx.length ? (
           ctx.map((c, i) => (
             <div key={i} className="nl-ctx">
-              {c.text} <b className="nl-mono">{c.act}</b>
+              {c.text} <b className="nl-mono">{c.act}</b>{c.lang && c.lang !== "en" ? <span className="nl-note"> ({c.lang})</span> : null}
             </div>
           ))
         ) : (
@@ -107,23 +109,26 @@ export function DetailsPanel(p: {
         )}
       </div>
       <div className="nl-card">
-        <h3>Feeds (strongest later neurons it writes toward)</h3>
+        <h3>Feeds (strongest links into the next layer)</h3>
         {feeds.length ? (
           feeds.map((e, i) => (
             <div key={i} className="nl-kv" style={{ gridTemplateColumns: "1fr auto" }}>
               <NeuronLink l={e.layer} n={e.neuron} onSelect={p.onSelect} />
-              <span className="nl-mono">{e.score}</span>
+              <span className="nl-mono">{e.score > 0 ? "+" : "\u2212"}{Math.abs(e.score)}</span>
             </div>
           ))
         ) : (
           <p className="nl-note" style={{ margin: 0 }}>None stored for this neuron.</p>
         )}
+        <p className="nl-note" style={{ margin: "6px 0 0" }}>
+          Score: how well this neuron&apos;s write, seen through the next layer&apos;s norm, lines up with the other neuron&apos;s gate row. Positive pushes that neuron toward firing, negative away. A reading of the weights, not a test of what happens.
+        </p>
         <h3 style={{ marginTop: 10 }}>Fed by</h3>
         {fed.length ? (
           fed.slice(0, 8).map((e, i) => (
             <div key={i} className="nl-kv" style={{ gridTemplateColumns: "1fr auto" }}>
               <NeuronLink l={e.layer} n={e.neuron} onSelect={p.onSelect} />
-              <span className="nl-mono">{e.score}</span>
+              <span className="nl-mono">{e.score > 0 ? "+" : "\u2212"}{Math.abs(e.score)}</span>
             </div>
           ))
         ) : (
@@ -198,7 +203,7 @@ export function InvestigatePanel(p: {
       <div className="nl-result">
         <Lens lens={lens} n={n} />
         <div style={{ marginTop: 6 }}>
-          Peak activation {lens.actMax[n]} (rank {rank} of {p.meta.neurons} in layer {l}); mean {lens.actMean[n]}.
+          Peak activation {Math.round(peakOf(lens, n) * 100) / 100} (rank {rank} of {p.meta.neurons} in layer {l}); mean {lens.actMean[n]}.
           {ctx[0] ? (
             <>
               {" "}
@@ -293,7 +298,7 @@ export function InvestigatePanel(p: {
           body = <div className="nl-result">Layer {l} has not finished loading.</div>
           break
         }
-        const order = lens.actMax.map((v, i) => [v, i] as const).sort((a, b) => b[0] - a[0]).slice(0, 8)
+        const order = lens.actMax.map((_, i) => [peakOf(lens, i), i] as const).sort((a, b) => b[0] - a[0]).slice(0, 8)
         body = (
           <div className="nl-result">
             {order.map(([v, i]) => (

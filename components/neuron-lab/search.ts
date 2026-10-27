@@ -1,4 +1,5 @@
 import type { Context, LayerLens, ModelMeta, Steer } from "./types"
+import { peakOf } from "./types"
 import { matchesToken, showToken } from "./data"
 
 export interface Hit {
@@ -31,7 +32,7 @@ export function searchLens(layers: Map<number, LayerLens>, query: string): Searc
   if (!words.length) return { hits, tokenCount: 0, layersSearched: layers.size }
   for (const [layer, lens] of layers) {
     let amax = 1
-    for (const v of lens.actMax) if (v > amax) amax = v
+    for (let i = 0; i < lens.actMax.length; i++) amax = Math.max(amax, peakOf(lens, i))
     const N = lens.up.length
     for (let n = 0; n < N; n++) {
       const test = (list: string[]) => {
@@ -57,7 +58,7 @@ export function searchLens(layers: Map<number, LayerLens>, query: string): Searc
         neuron: n,
         sign: up ? 1 : -1,
         tokens,
-        score: (8 - Math.min(7, best)) * 10 + (lens.actMax[n] / amax) * 6 + (tokens.length - 1) * 2,
+        score: (8 - Math.min(7, best)) * 10 + (peakOf(lens, n) / amax) * 6 + (tokens.length - 1) * 2,
       })
     }
   }

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { DARK, LIGHT, NeuronScene, type EdgeLine, type Style } from "./scene"
 import type { LayerLens, ModelMeta } from "./types"
 import { showToken } from "./data"
-import { fmtNeuron } from "./types"
+import { fmtNeuron, peakOf } from "./types"
 
 export interface MapProps {
   meta: ModelMeta
@@ -128,7 +128,7 @@ export function NeuronMap(p: MapProps) {
     for (const [l, lens] of p.layers) {
       if (!topSeen.current.has(l)) {
         topSeen.current.add(l)
-        s.setLayerTop(l, lens.actMax)
+        s.setLayerTop(l, lens.actMax.map((_, i) => peakOf(lens, i)))
       }
     }
   }, [p.version, p.layers])

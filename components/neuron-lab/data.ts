@@ -43,22 +43,33 @@ function toEdge(e: RawEdge): Edge | null {
   return e && typeof e === "object" ? { layer: e.layer, neuron: e.neuron, score: e.score } : null
 }
 
-/** Strongest "feeds" edges from a neuron to neurons in later layers, keyed "L.N". */
+/** Strongest "feeds" edges from a neuron to neurons in the next layer, keyed "L.N".
+ *  Real file: { layers: { "L": [[fromNeuron, toNeuron (layer L+1), gateCos, upCos], ...] } }.
+ *  Older/flat shapes ({ edges: { "L.N": [[layer, neuron, score], ...] } }) are accepted too. */
 export async function loadLinks(): Promise<Map<NeuronKey, Edge[]>> {
   const raw = await getJson<Record<string, unknown>>("links.json")
   const out = new Map<NeuronKey, Edge[]>()
   if (!raw) return out
+  const byLayer = raw.layers as Record<string, number[][]> | undefined
+  if (byLayer && typeof byLayer === "object") {
+    for (const [l, rows] of Object.entries(byLayer)) {
+      const layer = +l
+      for (const r of rows) {
+        const k = nkey(layer, r[0])
+        const list = out.get(k) ?? []
+        list.push({ layer: layer + 1, neuron: r[1], score: r[2], up: r[3] })
+        out.set(k, list)
+      }
+    }
+    for (const list of out.values()) list.sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
+    return out
+  }
   const body = (raw.edges ?? raw.feeds ?? raw) as Record<string, unknown>
   for (const [k, v] of Object.entries(body)) {
     const m = /^L?(\d+)[.\sN:-]+(\d+)$/i.exec(k)
     if (m && Array.isArray(v)) {
       const list = (v as RawEdge[]).map(toEdge).filter((x): x is Edge => !!x)
       out.set(nkey(+m[1], +m[2]), list)
-    } else if (/^\d+$/.test(k) && v && typeof v === "object") {
-      // nested { layer: { neuron: [edges] } }
-      for (const [n, es] of Object.entries(v as Record<string, unknown>)) {
-        if (Array.isArray(es)) out.set(nkey(+k, +n), (es as RawEdge[]).map(toEdge).filter((x): x is Edge => !!x))
-      }
     }
   }
   return out
@@ -82,7 +93,7 @@ export function invertLinks(links: Map<NeuronKey, Edge[]>): Map<NeuronKey, Edge[
       inv.set(kk, a)
     }
   }
-  for (const a of inv.values()) a.sort((x, y) => y.score - x.score)
+  for (const a of inv.values()) a.sort((x, y) => Math.abs(y.score) - Math.abs(x.score))
   return inv
 }
 

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 
 import type { LayerLens, ModelMeta } from "./types"
-import { fmtNeuron } from "./types"
+import { fmtNeuron, peakOf } from "./types"
 import { showToken } from "./data"
 import type { Style } from "./scene"
 
@@ -38,12 +38,14 @@ export function NeuronGrid(p: {
     c.height = rows * CELL
     ctx.fillStyle = pal.bg
     ctx.fillRect(0, 0, c.width, c.height)
-    const amax = p.lens ? Math.max(1, ...p.lens.actMax) : 1
+    const lensNow = p.lens
+    const peaks = lensNow ? lensNow.actMax.map((_, i) => peakOf(lensNow, i)) : []
+    const amax = peaks.length ? Math.max(1, ...peaks) : 1
     const byN = new Map<number, string>()
     for (const s of p.styles) if (s.layer === p.layer) byN.set(s.neuron, s.kind)
     for (let n = 0; n < p.meta.neurons; n++) {
       const x = (n % COLS) * CELL, y = Math.floor(n / COLS) * CELL
-      const a = p.lens ? Math.min(1, Math.log1p(p.lens.actMax[n]) / Math.log1p(amax)) : 0.2
+      const a = peaks.length ? Math.min(1, Math.log1p(peaks[n]) / Math.log1p(amax)) : 0.2
       const k = byN.get(n) as keyof typeof pal | undefined
       let rgb = pal.dot
       let alpha = 0.1 + 0.55 * a * a
