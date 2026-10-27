@@ -34,13 +34,14 @@ function useReducedMotion() {
   )
 }
 
-function encodeHash(steers: Steer[], prompt: string) {
+function encodeHash(steers: Steer[], prompt: string, chat: boolean) {
   const r = steers.map((s) => `${s.layer}.${s.neuron}.${s.dose}`).join(",")
   const q = prompt.trim() ? `&p=${encodeURIComponent(prompt.trim().slice(0, 300))}` : ""
-  return steers.length || q ? `#r=${r}${q}` : ""
+  const c = chat ? "" : "&c=0"
+  return steers.length || q ? `#r=${r}${q}${c}` : ""
 }
 
-function decodeHash(h: string, layers: number, neurons: number): { steers: Steer[]; prompt: string } | null {
+function decodeHash(h: string, layers: number, neurons: number): { steers: Steer[]; prompt: string; chat: boolean } | null {
   const m = /[#&]r=([^&]*)/.exec(h)
   if (!m) return null
   const steers: Steer[] = []
@@ -54,7 +55,7 @@ function decodeHash(h: string, layers: number, neurons: number): { steers: Steer
     }
   }
   const p = /[#&]p=([^&]*)/.exec(h)
-  return { steers: steers.slice(0, MAX_STEERS), prompt: p ? decodeURIComponent(p[1]) : "" }
+  return { steers: steers.slice(0, MAX_STEERS), prompt: p ? decodeURIComponent(p[1]) : "", chat: !/[#&]c=0/.test(h) }
 }
 
 export function NeuronLabApp() {
@@ -75,6 +76,7 @@ export function NeuronLabApp() {
   const [steers, setSteersRaw] = useState<Steer[]>([])
   const history = useRef<Steer[][]>([])
   const [prompt, setPrompt] = useState("")
+  const [chat, setChat] = useState(true)
   const [tab, setTab] = useState<Tab>("steer")
   const [pane, setPane] = useState<Pane>("map")
   const [about, setAbout] = useState(false)
@@ -113,6 +115,7 @@ export function NeuronLabApp() {
     if (fromHash && (fromHash.steers.length || fromHash.prompt)) {
       setSteersRaw(fromHash.steers)
       setPrompt(fromHash.prompt)
+      setChat(fromHash.chat)
       if (fromHash.steers[0]) {
         setSelected({ layer: fromHash.steers[0].layer, neuron: fromHash.steers[0].neuron })
         setLayer(fromHash.steers[0].layer)
@@ -124,6 +127,7 @@ export function NeuronLabApp() {
       if (s) {
         setSteersRaw(Array.isArray(s.steers) ? s.steers.slice(0, MAX_STEERS) : [])
         setPrompt(typeof s.prompt === "string" ? s.prompt : "")
+        setChat(s.chat !== false)
       }
     } catch {}
   }, [meta])
@@ -131,10 +135,10 @@ export function NeuronLabApp() {
   useEffect(() => {
     if (!hashed.current) return
     try {
-      localStorage.setItem(`${LS}:state`, JSON.stringify({ steers, prompt }))
-      history_replace(encodeHash(steers, prompt))
+      localStorage.setItem(`${LS}:state`, JSON.stringify({ steers, prompt, chat }))
+      history_replace(encodeHash(steers, prompt, chat))
     } catch {}
-  }, [steers, prompt])
+  }, [steers, prompt, chat])
 
   const setSteers = useCallback((f: (s: Steer[]) => Steer[]) => {
     setSteersRaw((cur) => {
@@ -497,6 +501,7 @@ export function NeuronLabApp() {
                         onClick={() => {
                           setSteers(() => d.neurons.slice(0, MAX_STEERS).map((n) => ({ ...n })))
                           if (d.samples[0]) setPrompt(d.samples[0].prompt)
+                          setChat(false)
                           select(d.neurons[0].layer, d.neurons[0].neuron)
                           setTab("steer")
                           setPane("panel")
@@ -629,6 +634,8 @@ export function NeuronLabApp() {
                 toast={toast}
                 prompt={prompt}
                 setPrompt={setPrompt}
+                chat={chat}
+                setChat={setChat}
               />
             ) : tab === "details" ? (
               <DetailsPanel meta={meta} layers={layers} contexts={contexts} links={links} fedBy={fedBy} selected={selected} onSelect={select} names={names} />
