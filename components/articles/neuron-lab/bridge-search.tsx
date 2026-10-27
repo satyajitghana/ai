@@ -14,7 +14,7 @@ const ACCENT = "oklch(0.65 0.16 55)"
 const GREY = "oklch(0.6 0.04 255)"
 
 const STEPS = [
-  { n: "86,016", label: "neurons ranked by how differently they fire on 16 bridge texts and 30 other texts", w: 100 },
+  { n: "58,368", label: "neurons of layers 8 to 26, ranked by how differently they fire on 16 bridge texts and 30 other texts", w: 100 },
   { n: "6 of 40", label: "of the 40 strongest in the first half of the texts kept their sign and |d'| above 1 on the second half", w: 52 },
   { n: "6", label: "best candidates (of 32 screened) taken to a dose sweep next to 6 random neurons", w: 34 },
   { n: "1", label: "worked: L23 N1505 pushed down at dose 0.5, with perplexity 38.0 against 21.5", w: 14 },
