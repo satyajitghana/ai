@@ -85,26 +85,45 @@ export function SteerPanel(p: {
     setRunning(true)
     setCols(spec.map((s) => ({ ...s, text: "", state: "queued", tokens: 0, msPerToken: 0 })))
     requestAnimationFrame(() => outRef.current?.scrollIntoView({ block: "nearest", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }))
-    for (let i = 0; i < spec.length; i++) {
-      if (ac.signal.aborted) break
-      const s = spec[i]
-      const st = steers.map((x) => ({ ...x, dose: x.dose * s.sign })).filter((x) => x.dose !== 0)
-      setCols((c) => c.map((x, j) => (j === i ? { ...x, state: "running" } : x)))
+    const withSign = (sign: number) => steers.map((x) => ({ ...x, dose: x.dose * sign })).filter((x) => x.dose !== 0)
+    if (eng.generateMany) {
+      setCols((c) => c.map((x) => ({ ...x, state: "running" })))
       try {
-        const r = await eng.generate({
+        const rs = await eng.generateMany({
           prompt: chat ? chatWrap(prompt) : prompt,
-          steers: st,
+          variants: spec.map((s) => withSign(s.sign)),
           maxNewTokens: maxNew,
           temperature: temp,
           topK: 40,
           seed,
           signal: ac.signal,
-          onToken: (t) => setCols((c) => c.map((x, j) => (j === i ? { ...x, text: x.text + t } : x))),
+          onToken: (v, t) => setCols((c) => c.map((x, j) => (j === v ? { ...x, text: x.text + t } : x))),
         })
-        setCols((c) => c.map((x, j) => (j === i ? { ...x, state: ac.signal.aborted ? "stopped" : "done", tokens: r.tokens, msPerToken: r.msPerToken } : x)))
+        setCols((c) => c.map((x, j) => ({ ...x, state: ac.signal.aborted ? "stopped" : "done", tokens: rs[j]?.tokens ?? 0, msPerToken: rs[j]?.msPerToken ?? 0 })))
       } catch (e) {
-        setCols((c) => c.map((x, j) => (j === i ? { ...x, state: "error", text: x.text || String(e instanceof Error ? e.message : e) } : x)))
-        break
+        setCols((c) => c.map((x) => ({ ...x, state: "error", text: x.text || String(e instanceof Error ? e.message : e) })))
+      }
+    } else {
+      for (let i = 0; i < spec.length; i++) {
+        if (ac.signal.aborted) break
+        const s = spec[i]
+        setCols((c) => c.map((x, j) => (j === i ? { ...x, state: "running" } : x)))
+        try {
+          const r = await eng.generate({
+            prompt: chat ? chatWrap(prompt) : prompt,
+            steers: withSign(s.sign),
+            maxNewTokens: maxNew,
+            temperature: temp,
+            topK: 40,
+            seed,
+            signal: ac.signal,
+            onToken: (t) => setCols((c) => c.map((x, j) => (j === i ? { ...x, text: x.text + t } : x))),
+          })
+          setCols((c) => c.map((x, j) => (j === i ? { ...x, state: ac.signal.aborted ? "stopped" : "done", tokens: r.tokens, msPerToken: r.msPerToken } : x)))
+        } catch (e) {
+          setCols((c) => c.map((x, j) => (j === i ? { ...x, state: "error", text: x.text || String(e instanceof Error ? e.message : e) } : x)))
+          break
+        }
       }
     }
     setRunning(false)
