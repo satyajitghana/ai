@@ -84,6 +84,17 @@ export interface GenerateArgs {
   signal?: AbortSignal
 }
 
+export interface GenerateManyArgs {
+  prompt: string
+  variants: Steer[][]
+  maxNewTokens: number
+  temperature: number
+  topK: number
+  seed: number
+  onToken: (variant: number, t: string, info: { index: number }) => void
+  signal?: AbortSignal
+}
+
 export interface NeuronEngine {
   /** Human description of what loading means (download size etc.). */
   info: { model: string; downloadMB: number; memoryMB: number; backend: string }
@@ -92,5 +103,7 @@ export interface NeuronEngine {
   load(onProgress: (frac: number, msg: string) => void): Promise<void>
   unload(): void
   generate(a: GenerateArgs): Promise<{ text: string; tokens: number; msPerToken: number }>
+  /** Several steered variants of one prompt decoded together (1-4); the engine does one pass over the weights per token. */
+  generateMany?(a: GenerateManyArgs): Promise<{ text: string; tokens: number; msPerToken: number }[]>
   activations(text: string): Promise<{ tokens: string[]; max: Float32Array }>
 }
