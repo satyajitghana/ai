@@ -106,7 +106,7 @@ out vec4 vCol;
 void main(){
   vec4 p = uVP * vec4(aPos, 1.0);
   gl_Position = p;
-  gl_PointSize = aSize * uScale * clamp(7.0 / max(p.w, 0.5), 0.55, 3.2);
+  gl_PointSize = aSize * uScale * clamp(13.0 / max(p.w, 0.5), 0.6, 3.4);
   vCol = aCol;
 }`
 const FS_POINTS = `#version 300 es
@@ -191,7 +191,7 @@ export class NeuronScene {
   // camera
   yaw = 0.78
   pitch = 0.3
-  dist = 34
+  dist = 15
   target = [10, 0, 0]
   private tween: null | { from: number[]; to: number[]; t0: number; ms: number } = null
   private vp: Mat = new Float32Array(16)
@@ -279,8 +279,13 @@ export class NeuronScene {
     this.recolor()
   }
 
+  private crowd = 1
+
   setStyles(list: Style[]) {
     this.styles.clear()
+    const n = list.length
+    // many highlighted neurons: draw them smaller so the map stays legible
+    this.crowd = n > 3000 ? 0.45 : n > 800 ? 0.6 : n > 250 ? 0.8 : 1
     for (const s of list) this.styles.set(s.layer * this.opts.neurons + s.neuron, s.kind)
     this.recolor()
   }
@@ -354,8 +359,8 @@ export class NeuronScene {
     for (let l = 0; l < layers; l++) {
       const x = l * this.spacing
       const sel = l === this.selectedLayer
-      const a = sel ? 0.1 : 0.03
-      const la = sel ? 0.7 : 0.16
+      const a = sel ? 0.12 : P.light ? 0.04 : 0.055
+      const la = sel ? 0.85 : P.light ? 0.26 : 0.42
       const q = [[x, h, -w], [x, h, w], [x, -h, w], [x, -h, -w]]
       for (const i of [0, 1, 2, 0, 2, 3]) {
         fill.push(...q[i])
@@ -392,12 +397,12 @@ export class NeuronScene {
       const onSel = l === this.selectedLayer
       const k = this.styles.get(i)
       let c = P.dot
-      let a = onSel ? 0.34 : 0.1
-      let s = onSel ? 1.6 : 1.1
+      let a = onSel ? 0.4 : 0.14
+      let s = onSel ? 1.7 : 1.2
       if (this.base[i] > 0) {
         c = P.top
-        a = onSel ? 0.7 : 0.34
-        s = onSel ? 2.2 : 1.6
+        a = onSel ? 0.85 : 0.5
+        s = onSel ? 2.6 : 1.9
       }
       if (this.dim < 1 && this.styles.size) {
         a *= this.dim
@@ -405,7 +410,7 @@ export class NeuronScene {
       if (k) {
         c = P[k === "dim" ? "dot" : (k as keyof Palette) as "match"] as [number, number, number]
         a = k === "match" || k === "match2" ? 1 : 0.95
-        s = k === "sel" ? 7 : k === "up" || k === "down" ? 5.5 : k === "fed" || k === "feeds" ? 3.4 : 3.6
+        s = k === "sel" ? 8 : k === "up" || k === "down" ? 5.5 * this.crowd : k === "fed" || k === "feeds" ? 3.8 : k === "match2" ? 6 : 3.6
         if (light && k === "dim") a = 0.1
       }
       this.col[i * 4] = Math.round(c[0] * 255)
@@ -452,12 +457,12 @@ export class NeuronScene {
   resetView() {
     this.yaw = 0.78
     this.pitch = 0.3
-    this.dist = 34
+    this.dist = 15
     this.focusLayer(Math.min(this.opts.layers - 1, Math.max(0, this.selectedLayer)))
   }
 
   zoomBy(f: number) {
-    this.dist = Math.min(90, Math.max(3.5, this.dist * f))
+    this.dist = Math.min(80, Math.max(3, this.dist * f))
     this.invalidate()
     this.opts.onCamera?.()
   }
@@ -677,6 +682,12 @@ export class NeuronScene {
     c.removeEventListener("pointercancel", this.onUp)
     c.removeEventListener("pointerleave", this.onLeave)
     c.removeEventListener("wheel", this.onWheel)
-    this.gl.getExtension("WEBGL_lose_context")?.loseContext()
+    // Free what we made but keep the context alive: React may mount again on the same canvas, and a
+    // context we had "lost" would make every shader on it fail to compile with an empty log.
+    const gl = this.gl
+    for (const b of [this.bufPos, this.bufCol, this.bufSize, this.planeBuf, this.planeCol, this.lineBuf, this.lineCol]) gl.deleteBuffer(b)
+    for (const v of [this.vaoPts, this.planeVao, this.lineVao]) gl.deleteVertexArray(v)
+    gl.deleteProgram(this.progP)
+    gl.deleteProgram(this.flatP)
   }
 }

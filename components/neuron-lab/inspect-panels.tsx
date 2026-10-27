@@ -275,9 +275,13 @@ export function InvestigatePanel(p: {
         const r = p.searchCount(arg)
         p.onSearch(arg)
         const top = [...r.byLayer].sort((x, y) => y[1] - x[1]).slice(0, 3)
-        body = (
+        body = r.count ? (
           <div className="nl-result">
-            {r.count} neurons promote or suppress &ldquo;{arg}&rdquo;; most in {top.map(([l, c]) => `L${l} (${c})`).join(", ") || "no layer"}. They are listed on the left and lit on the map.
+            {r.count} neurons promote or suppress &ldquo;{arg}&rdquo;; most in {top.map(([l, c]) => `L${l} (${c})`).join(", ")}. They are listed on the left and lit on the map.
+          </div>
+        ) : (
+          <div className="nl-result">
+            No neuron has &ldquo;{arg}&rdquo; among its top tokens. Try a related or shorter word, or switch the search to <i>fires</i>.
           </div>
         )
         break

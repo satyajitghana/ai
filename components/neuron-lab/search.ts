@@ -49,7 +49,7 @@ export function searchLens(layers: Map<number, LayerLens>, query: string): Searc
       const d = test(lens.down[n])
       if (!u.out.length && !d.out.length) continue
       const up = u.out.length > 0 && (!d.out.length || u.best <= d.best)
-      const tokens = up ? u.out : d.out
+      const tokens = [...new Map((up ? u.out : d.out).map((t) => [t.toLowerCase(), t])).values()]
       const best = up ? u.best : d.best
       for (const t of tokens) seen.add(t.toLowerCase())
       hits.push({

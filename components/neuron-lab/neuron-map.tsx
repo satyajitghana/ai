@@ -31,6 +31,8 @@ export function NeuronMap(p: MapProps) {
   const labelHost = useRef<HTMLDivElement>(null)
   const scene = useRef<NeuronScene | null>(null)
   const labels = useRef<HTMLDivElement[]>([])
+  const ring = useRef<HTMLDivElement>(null)
+  const selRef = useRef(p.selected)
   const layerRef = useRef(p.layer)
   const topSeen = useRef(new Set<number>())
   const [tip, setTip] = useState<{ layer: number; neuron: number; x: number; y: number } | null>(null)
@@ -39,6 +41,7 @@ export function NeuronMap(p: MapProps) {
   useEffect(() => {
     pickRef.current = p.onPick
     layerRef.current = p.layer
+    selRef.current = p.selected
   })
 
   const updateLabels = useCallback(() => {
@@ -51,6 +54,13 @@ export function NeuronMap(p: MapProps) {
       el.dataset.sel = String(l === layerRef.current)
       if (show) el.style.transform = `translate(${pos.x}px, ${pos.y}px) translate(-100%, -100%)`
     })
+    const r = ring.current
+    const sel = selRef.current
+    if (r) {
+      const pos = sel ? s.project(sel.layer, sel.neuron) : null
+      r.style.display = pos?.visible ? "block" : "none"
+      if (pos?.visible) r.style.transform = `translate(${pos.x}px, ${pos.y}px) translate(-50%, -50%)`
+    }
   }, [p.meta.layers])
 
   // create the scene once
@@ -71,6 +81,7 @@ export function NeuronMap(p: MapProps) {
         onCamera: updateLabels,
       })
     } catch (e) {
+      console.warn("neuron map: scene setup failed", e)
       p.onUnsupported(e instanceof Error ? e.message : "WebGL unavailable")
       return
     }
@@ -156,6 +167,7 @@ export function NeuronMap(p: MapProps) {
         aria-label="Map of every neuron in the model: drag to orbit, scroll to zoom, click a neuron to select it. The grid view and the list on the left do the same job with the keyboard."
       />
       <div ref={labelHost} className="nl-labels" aria-hidden />
+      <div ref={ring} className="nl-ring" aria-hidden />
       {tip && t ? (
         <div
           className="nl-tip"
