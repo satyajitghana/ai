@@ -187,6 +187,18 @@ TERSE = [
 REPEAT = [f"{s} {s} {s}" for s in EN]
 NOREPEAT = [f"{EN[i]} {EN[(i + 5) % 16]} {EN[(i + 11) % 16]}" for i in range(16)]
 
+BRIDGE = [
+ "The suspension bridge swings its steel cables high above the bay.", "Cars cross the long bridge at dawn while fog hides the towers.",
+ "The old stone bridge has three arches and spans the river.", "Engineers inspected the cables and the towers of the great bridge.",
+ "The red bridge is the most famous landmark in the city.", "Tourists walk across the bridge to photograph the harbour.",
+ "The bridge was painted every year to protect its steel from the salt air.", "A footbridge connects the two halves of the park.",
+ "The longest bridge in the country crosses the strait on tall piers.", "Fog rolled under the bridge as the ferry passed beneath it.",
+ "The railway bridge shook as the evening train went over the gorge.", "Workers repaired a girder on the bridge before the winter storms.",
+ "The famous gate of the harbour is a bridge that glows orange at sunset.", "They built a new bridge to replace the ferry between the islands.",
+ "The drawbridge rose slowly to let the tall ships pass.", "Lanterns lit the covered bridge on festival nights."]
+BRIDGE_B = [x for x in OTHER if "bridge" not in x.lower()]
+BRIDGE_W = set("bridge bridges suspension span spans spanned cable cables tower towers girder girders arch arches pier piers crossing crossings gate golden landmark landmarks harbour harbor strait gorge drawbridge footbridge".split())
+
 AXES = {
  "french":   dict(label="Reply in French", kind="language", A=FR, B=EN + ES),
  "spanish":  dict(label="Reply in Spanish", kind="language", A=ES, B=EN + FR),
@@ -199,6 +211,7 @@ AXES = {
  "archaic":  dict(label="Old-English style", kind="persona-style", A=ARCHAIC, B=MODERN),
  "positive": dict(label="Positive sentiment", kind="sentiment", A=POS, B=NEG),
  "verbose":  dict(label="Longer sentences", kind="verbosity", A=LONG, B=TERSE),
+ "bridges":  dict(label="Talk about bridges and landmarks", kind="topic", A=BRIDGE, B=BRIDGE_B[:20] + COOKING[:5] + SPACE[:5]),
  "repeat":   dict(label="Repeat itself", kind="repetition", A=REPEAT, B=NOREPEAT),
 }
 
@@ -239,6 +252,7 @@ def score(axis, text):
     if axis == "french":  return _rate(w, FR_W) + 100.0 * sum(c in ACC for c in text.lower()) / max(1, len(text)) * 4
     if axis == "spanish": return _rate(w, ES_W) + 100.0 * sum(c in ACC for c in text.lower()) / max(1, len(text)) * 4
     if axis == "cooking": return _rate(w, COOK_W)
+    if axis == "bridges": return _rate(w, BRIDGE_W)
     if axis == "space":   return _rate(w, SPACE_W)
     if axis == "legal":   return _rate(w, LEGAL_W)
     if axis == "casual":  return _rate(w, CASUAL_W) + 100.0 * text.count("!") / max(1, len(w))
@@ -255,4 +269,4 @@ def score(axis, text):
     raise KeyError(axis)
 
 # a lift smaller than this (in the score's own units) is noise; it also gates "works"
-MIN_LIFT = dict(french=4, spanish=4, cooking=3, space=3, legal=3, casual=3, villain=3, pirate=2, archaic=2, positive=4, verbose=4, repeat=15)
+MIN_LIFT = dict(french=4, spanish=4, cooking=3, space=3, legal=3, casual=3, villain=3, pirate=2, archaic=2, positive=4, verbose=4, repeat=15, bridges=3)
