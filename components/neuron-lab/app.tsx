@@ -82,6 +82,7 @@ export function NeuronLabApp() {
   const [idText, setIdText] = useState("")
   const [resetKey, setResetKey] = useState(0)
   const [noGl, setNoGl] = useState("")
+  const [wide, setWide] = useState(false)
   const [names, setNames] = useState<Record<string, string>>({})
   const [engine, setEngine] = useState<NeuronEngine | null>(null)
   const [eng, setEng] = useState<EngineState>({ status: "none", frac: 0, msg: "", cached: "unknown" })
@@ -100,7 +101,6 @@ export function NeuronLabApp() {
     try {
       const t = localStorage.getItem(`${LS}:theme`)
       if (t === "light" || t === "dark") setTheme(t)
-      else if (!document.documentElement.classList.contains("dark") && window.matchMedia("(prefers-color-scheme: light)").matches) setTheme("light")
       setNames(JSON.parse(localStorage.getItem(`${LS}:names`) ?? "{}"))
     } catch {}
   }, [])
@@ -431,13 +431,13 @@ export function NeuronLabApp() {
         </button>
       </header>
 
-      <div className="nl-main" data-pane={pane}>
+      <div className="nl-main" data-pane={pane} data-wide={wide}>
         <aside className="nl-left" aria-label="Neuron list">
           <div className="nl-panelhead">
             {searching ? (
               <>
                 <div className="nl-count">
-                  <b style={{ color: "var(--nl-fg)" }}>{result.hits.length.toLocaleString("en-US")}</b> neurons · {result.tokenCount} tokens
+                  <b style={{ color: "var(--nl-fg)" }}>{result.hits.length.toLocaleString("en-US")}</b> {result.hits.length === 1 ? "neuron" : "neurons"} · {result.tokenCount} {result.tokenCount === 1 ? "token" : "tokens"}
                   {loadingLayers && mode === "lens" ? ` · still indexing (${data.loadedLayers}/${meta?.layers})` : ""}
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -578,8 +578,9 @@ export function NeuronLabApp() {
 
         <aside className="nl-right" aria-label="Neuron details and steering">
           <div className="nl-panelhead" style={{ paddingBottom: 6 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             {selected ? (
-              <div className="nl-neuronhead">
+              <div className="nl-neuronhead" style={{ flex: 1 }}>
                 <h2 className="nl-mono" style={{ margin: 0, fontSize: 16 }}>{fmtNeuron(selected.layer, selected.neuron)}</h2>
                 <input
                   className="nl-input"
@@ -591,8 +592,12 @@ export function NeuronLabApp() {
                 />
               </div>
             ) : (
-              <div className="nl-count">No neuron selected</div>
+              <div className="nl-count" style={{ flex: 1 }}>No neuron selected</div>
             )}
+            <button className="nl-iconbtn nl-widebtn" aria-pressed={wide} aria-label={wide ? "Narrow this panel" : "Widen this panel to read outputs side by side"} title={wide ? "Narrow this panel" : "Widen this panel"} onClick={() => setWide((w) => !w)}>
+              {wide ? "\u21e5" : "\u21e4"}
+            </button>
+            </div>
           </div>
           <div className="nl-tabs" role="tablist">
             {(

@@ -46,6 +46,7 @@ export function SteerPanel(p: {
   const [cols, setCols] = useState<Col[]>([])
   const [running, setRunning] = useState(false)
   const abort = useRef<AbortController | null>(null)
+  const outRef = useRef<HTMLDivElement>(null)
   const [openDisc, setOpenDisc] = useState<string | null>(null)
 
   const ready = p.engineState.status === "ready"
@@ -83,6 +84,7 @@ export function SteerPanel(p: {
     abort.current = ac
     setRunning(true)
     setCols(spec.map((s) => ({ ...s, text: "", state: "queued", tokens: 0, msPerToken: 0 })))
+    requestAnimationFrame(() => outRef.current?.scrollIntoView({ block: "nearest", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }))
     for (let i = 0; i < spec.length; i++) {
       if (ac.signal.aborted) break
       const s = spec[i]
@@ -286,10 +288,8 @@ export function SteerPanel(p: {
         </details>
       </div>
 
-      <EngineStatus engine={p.engine} state={p.engineState} onLoad={p.onLoad} />
-
       {cols.length ? (
-        <div className="nl-cols" data-n={cols.length}>
+        <div className="nl-cols" data-n={cols.length} ref={outRef}>
           {cols.map((c) => (
             <div key={c.key} className="nl-col" data-kind={c.kind}>
               <header>
@@ -306,6 +306,8 @@ export function SteerPanel(p: {
           ))}
         </div>
       ) : null}
+      <EngineStatus engine={p.engine} state={p.engineState} onLoad={p.onLoad} />
+
     </div>
   )
 }
