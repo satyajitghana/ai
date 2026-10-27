@@ -124,7 +124,8 @@ def simulate(rng, Rg, cg, ch, p):
             Xl = cl[None] + sl * s_ * (Rl @ (pts_cam[t] * d[:, None]).T).T
             P_R.append(Rl); P_c.append(cl); X.append(Xl)
         preds.append(dict(idx=idx, R=np.array(P_R), c=np.array(P_c), X=np.array(X),
-                          s_eff=np.array([w / (1 + eps * j / (n - 1)) for j in range(n)])))  # true local->world scale per frame
+                          s_eff=np.array([w / (1 + eps * j / (n - 1)) for j in range(n)]),
+                          Xw=Xw[idx]))  # s_eff: true local->world scale per frame; Xw: true world points (used by chunkgraph_ext.py only)
     return true_A, preds
 
 
