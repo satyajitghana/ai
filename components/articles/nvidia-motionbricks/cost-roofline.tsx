@@ -4,7 +4,7 @@ import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
 
-import { CPU_MS, POSE_FLOPS, POSE_WEIGHT_BYTES, TRT_4090, type Family } from "./data"
+import { CPU_MS, POSE_FLOPS, TORCH_MS, POSE_WEIGHT_BYTES, TRT_4090, type Family } from "./data"
 
 // Why the pose pass costs the same at 6 tokens as at 16. The FLOP count is
 // arithmetic on the shapes (reasoned); the CPU times are bench.py on a shared
@@ -25,6 +25,7 @@ export function CostRoofline() {
   const intensity = flops / POSE_WEIGHT_BYTES
   const cpu = CPU_MS[`B${batch}_L${L}`]
   const cpuMid = (cpu[0] + cpu[1]) / 2
+  const torch = TORCH_MS[`B${batch}_L${L}`]
   const gflops = flops / 1e9 / (cpuMid / 1000)
   const bw = POSE_WEIGHT_BYTES / 1e9 / (cpuMid / 1000)
   const trt = TRT_4090[fam]
@@ -79,7 +80,12 @@ export function CostRoofline() {
         </dl>
         <p className="text-sm text-muted-foreground">
           The CPU run did {gflops.toFixed(1)} GFLOP/s and streamed weights at {bw.toFixed(1)} GB/s. Going from 6 to 16 positions nearly triples the work and
-          barely moves the time at batch 1, because the 16 layers&apos; weights are read once per pass whatever the length. Two runs shown; the box was shared.
+          barely moves the time at batch 1 in that numpy run, because the 16 layers&apos; weights are read once per pass whatever the length. Two runs shown; the box was shared.
+        </p>
+        <p className="text-sm text-muted-foreground">
+          With the real weights loaded in PyTorch, the same shape took {torch[0].toFixed(0)} ms (median; {torch[1].toFixed(0)} to {torch[2].toFixed(0)} ms over 15
+          calls), {(cpuMid / torch[0]).toFixed(1)} times faster than the numpy figure, and the time does grow with positions. That run did{" "}
+          {(flops / 1e9 / (torch[0] / 1000)).toFixed(1)} GFLOP/s.
         </p>
         <div>
           <div className="mb-2 flex items-center justify-between gap-2">

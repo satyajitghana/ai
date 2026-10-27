@@ -148,6 +148,18 @@ export const CPU_MS: Record<string, [number, number]> = {
   B8_L16: [1273.7, 1399.1],
 }
 
+// Measured: PyTorch 2.14 CPU float32, the released G1 pose-predictor weights
+// loaded (all keys matched), synthetic inputs, 2 threads, median of 15 calls,
+// one run on a shared box. [median, min, max] ms. Keys are batch then positions.
+export const TORCH_MS: Record<string, [number, number, number]> = {
+  B1_L6: [93.9, 84.7, 114.5],
+  B1_L11: [143.2, 128.1, 156.1],
+  B1_L16: [162.5, 130.8, 189.7],
+  B8_L6: [244.1, 198.5, 394.3],
+  B8_L11: [298.0, 259.6, 356.6],
+  B8_L16: [344.0, 284.3, 414.6],
+}
+
 // Counted from the shapes: multiply-adds x2 for the four big matrices of a
 // layer plus the two attention products, one sample, one forward pass.
 export const POSE_FLOPS: Record<number, number> = { 6: 1_612_972_032, 11: 2_960_719_872, 16: 4_311_744_512 }
