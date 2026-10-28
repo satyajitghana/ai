@@ -1,0 +1,243 @@
+---
+title: "Rivet 3.0 and WarpDrive: S3 as the only dependency, and what the open tree shows"
+description: "Rivet 3.0 Preview says every Actor's SQLite database lives on WarpDrive: writes acknowledged by a majority of three zones, S3 offloaded later and never on the write path. I read the open rivet-dev/rivet tree at commit 80ee8b8 (the Depot page store: 4 KiB pages, 256 KiB shards, a delta log folded by workflows; the S3 tier is Enterprise-only; no WarpDrive code), then built a toy of the pattern and ran it: 6,000 commits cost 6,000 PUTs written straight to S3 and 188 with a 60 s fold, and recovery matched an oracle in 300 of 300 crash trials."
+date: 2026-10-27
+tags:
+  - agents
+  - infrastructure
+  - storage
+  - sqlite
+  - object-storage
+  - open-source
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Reads the open Depot tree, finds the S3 tier Enterprise-only and WarpDrive absent, and runs a seeded toy: 6,000 PUTs direct vs 188 folded, 300/300 recoveries."
+topic: tools-infra
+kind: teardown
+level: practitioner
+runsOn: cpu
+licence: Apache-2.0
+---
+
+import { TierMap } from "@/components/articles/rivet-warpdrive/tier-map"
+import { WritePath } from "@/components/articles/rivet-warpdrive/write-path"
+import { ColdWake } from "@/components/articles/rivet-warpdrive/cold-wake"
+
+On 26 October Rivet [posted](https://x.com/rivet_dev/status/2114732348428456214) a preview of Rivet 3.0, "built on
+WarpDrive, a new storage engine with bottomless storage on S3 and the speed of an SSD." The thread links the
+[GitHub repository](https://github.com/rivet-dev/rivet) and the [changelog post](https://rivet.dev/changelog/2026-10-26-introducing-rivet-3-0-preview/).
+The claim that matters to me is structural: S3 is the only dependency, Rivet is one stateless binary, and S3 never sits
+on the write path.
+
+I wanted to know what is checkable. So I cloned the repo, read the storage layer, and built a small model of the access
+pattern to see what the claim costs and buys. This page keeps three labels apart. **Read** means I read it in the tree.
+**Reported** means Rivet says it and I could not check it. **Measured** or **simulated** means I ran it, and the
+simulated numbers rest on latencies I assumed, which the widgets let you change.
+
+<RepoCard repo="rivet-dev/rivet" />
+
+## What the post claims
+
+Every number below is Rivet's, from the changelog. None of it is mine.
+
+- Every Actor gets its own SQLite database on WarpDrive. A write lands on disk in **three availability zones** and is
+  acknowledged when **a majority** of them have it. Later, in the background, the data is offloaded to S3.
+- SQLite write latency is 0.69 ms at p50 and 0.80 ms at p99. SQLite read latency is 0.20 ms p50 and 0.24 ms p99.
+- A cold Actor starts in 6.9 ms. An Actor is 72.4 KB, against 200 MB for a Kubernetes pod.
+- When an Actor's data has been offloaded and is not on WarpDrive's SSDs, waking it and answering the first SQLite query
+  takes 689 ms at p50 for a 47 MiB database. With the data on SSD it is about 5 ms.
+- If S3 is unavailable, writes and reads of recent data continue. Only reads of older, offloaded Actors wait.
+- Most databases on S3 write directly to S3, so every write waits and becomes S3 requests; WarpDrive "batches them into
+  far fewer S3 operations."
+- Missing from the preview: multi-region, serverless and ACLs. Licence: Apache 2.0.
+
+That is a clear design, and an old one in shape. A replicated log gives you durability and latency. An object store gives
+you capacity and a cheap copy of everything. The log is folded into big immutable objects so the object store sees few,
+large requests. The interesting questions are in the folding and the reads, so those are what I modelled.
+
+## What is in the open tree
+
+I cloned `rivet-dev/rivet` at commit `80ee8b8` (26 October 2026, 13:28 UTC), about ninety minutes before the post.
+`engine/packages/depot` is the SQLite page store: 34,500 lines of Rust in `src`, plus one test file per invariant. The
+design is written down in `docs-internal/engine/depot.md`.
+
+**Read.** Depot stores SQLite pages in UniversalDB ("UDB"), and the doc says UDB is the durable source of truth.
+`engine/packages/universaldb` has Postgres and RocksDB drivers. The page is 4,096 bytes (`PAGE_SIZE` in
+`conveyer/keys.rs`) and a shard is 64 pages (`SHARD_SIZE` in `depot-client-types`), so a **shard is 256 KiB**.
+
+A commit encodes its dirty pages as LTX `DELTA` chunks, writes a `PIDX` row per page saying which delta owns it, writes
+`COMMITS` and `VTX` rows, and updates `META/head`. It never publishes a shard and never deletes history. That is the
+write-ahead log half. The other half is a set of per-database workflows. One manager plus a hot and a reclaim companion
+run per database branch. The hot companion folds deltas into full 256 KiB shard images and stages them; the manager
+copies them to the reader-visible `SHARD` rows, advances a watermark and clears the page-index entries; the reclaimer
+deletes old deltas only after re-proving, inside the delete transaction, that replacement coverage exists.
+
+Two details are worth the trip. The first is in `conveyer/constants.rs`: a commit's pages are cut into segments on shard
+boundaries, at most five shards (320 pages) per segment. The comment explains why. A shard whose pages were split across
+two segments could be folded from one of them and written as an image missing the other's newer pages. I turn that into
+an experiment below. The second is `MAX_COMMIT_DIRTY_PAGES = 32,768`, which is 128 MiB of 4 KiB pages. The file says it is
+a bound from FoundationDB's 10 MB transaction limit, which is a hint about which store the hot tier was written against.
+
+**Read, and not in the open tree.** The same repository contains constants for an S3 tier. `CMP_S3_UPLOAD_LIMIT_BYTES` is
+64 MiB per upload activity, `CMP_S3_UPLOAD_MAX_OBJECTS` is 256, `CMP_S3_DELETE_MAX_OBJECTS` is 100, and a retired cold
+object waits 500 ms before deletion. There are key builders for `CMP/cold_shard/` and codecs for cold shard references.
+But `docs-internal/engine/oss-to-ee-upgrade.md` says it plainly: "The cold storage subsystem is Enterprise-only, but OSS
+keeps its row schema rather than deleting it." The `depot` crate's `lib.rs` declares no `cold_tier` module, yet
+`tests/fold_index.rs` imports `depot::cold_tier::{ColdTier, FilesystemColdTier}` and a `DbColdCompactorWorkflow`. Those
+tests cannot build from this tree. The `FilesystemColdTier` the FAQ alludes to ("Rivet can offload data to a filesystem")
+exists only as an import.
+
+**Absent.** `grep -ri warpdrive` over the tree at this commit finds nothing. No code path writes a replicated
+local-disk log across three zones. At this commit the README still describes the product as "Postgres or FoundationDB for
+persistence and tiered storage to S3," and its benchmark footnote says the 12.3 ms cold start and the 72.4 KB figure were
+"Measured September 2026 on FoundationDB." The post's 6.9 ms cold start is a different number on a different engine.
+
+<TierMap />
+
+I do not read this as a problem with the claim. A preview announced after a commit lands can ship the code in the next
+commit, and the Enterprise cold tier is evidently the ancestor of what the post describes. It means that today you can
+read the page layout, the compaction protocol and the safety proofs, and you cannot read the three-zone log, the
+majority-ack path, or the thing that makes S3 the only dependency. Everything in the next two sections is therefore my
+model of the pattern, not Rivet's code.
+
+## What the S3 half costs
+
+I need object-store numbers to model anything. The AWS performance guide says that for requests under 512 KB, "median
+latencies are often in the tens of milliseconds range," and that the per-prefix limits are 3,500 write and 5,500 read
+requests per second. [S3 Express One Zone](https://aws.amazon.com/s3/storage-classes/express-one-zone/) is sold on
+"consistent single-digit millisecond request latency." Request pricing is what makes writes expensive. I used S3
+Standard's list price in us-east-1 as I remember it, \$0.005 per 1,000 PUTs and \$0.0004 per 1,000 GETs, and I did not
+re-check it against a bill. These are the prices in the dollar columns below.
+
+I did not find a primary source for a latency distribution, so the toy assumes one: a lognormal around a chosen median
+with p99 at 4.5 times the median, plus 256 KiB at 60 MB/s per stream for the transfer. I swept the median over 15 to 80 ms.
+Treat every millisecond figure from here on as an assumption propagated through code, not a measurement of S3.
+
+## The toy
+
+The script is [`toy.py`](/articles/rivet-warpdrive/toy.py), about 150 lines of Python with numpy, seeded, and it runs in
+seconds on one core. It has three parts.
+
+**Workload.** A 47 MiB database is 12,032 pages in 188 shards. Commits arrive at 100 per second for 60 seconds, 6,000 in
+all. Each dirties one plus a Poisson(2) number of pages, 3.01 on average. Shards are chosen by a Zipf(1) law, pages within
+a shard uniformly. That is a guess at an Actor with a hot working set. A real SQLite file clusters its writes differently,
+so the absolute counts below are for this workload only.
+
+**Four write policies.**
+
+1. *PUT per commit.* Each commit uploads its delta as one object and acknowledges when the PUT returns.
+2. *Rewrite shard per commit.* Each commit uploads a whole 256 KiB image for every shard it touched.
+3. *WAL, fold, one object per shard.* Acknowledge from a modelled majority of three zones (each replica a lognormal around
+   0.45 ms, ack at the second fastest plus 0.15 ms for the local sync). Every W seconds, upload one image per dirty shard.
+4. *WAL, fold, packed segment.* Same, but all of a window's dirty shards go into one object.
+
+The third is what Depot's S3 constants describe: a complete shard set per fold, up to 256 objects. The fourth is the
+alternative I would reach for when the request count is the cost, and it trades that for range GETs on read.
+
+<WritePath />
+
+On the 40 ms PUT setting, writing straight to the object store acknowledged at 39.7 ms p50 and 177 ms p99, and cost 6,000
+PUTs, which is \$5.00 per million commits and 74.4 MB uploaded. Rewriting touched shards per commit made 17,066 PUTs and
+uploaded 4,474 MB for the same 74.4 MB of logical changes, a 60-fold write amplification and \$14.22 per million commits. At
+25 ms and 80 ms medians the direct PUT acknowledged at 25.8 ms and 81.3 ms p50 (p99 110.9 and 340.6 ms), and the WAL rows did not
+move.
+
+With the log in front, the acknowledgement is decoupled from S3 and the bill depends on the fold window. A 1 s window made
+5,713 PUTs (\$4.76 per million) and uploaded 1,498 MB, because at 100 commits per second nearly every shard in the hot set is
+dirty every second and is rewritten whole. A 5 s window made 2,057 PUTs. A 30 s window made 376. A 60 s window made 188,
+one image for each of the 188 shards, \$0.16 per million commits and 49.3 MB uploaded, less than the 74.4 MB the commits
+carried because overlapping writes to a page collapse into one image. Packing the 60 s window into a single object
+made 1 PUT.
+
+Two things follow, both from this model only. First, the claim "far fewer S3 operations" is arithmetic: requests scale with
+dirty shards per window, not with commits, so the ratio is commit rate times window over shard count. Second, the window is
+a real dial. A longer one costs fewer PUTs, and it also lengthens the log you replay on recovery and the span an S3 outage
+can cover before local disks fill. Rivet's FAQ says reads and writes of recent data survive an S3 outage. In this model
+that holds for as long as the log has room, and the post does not say how large that is.
+
+## Does the fold keep the data right
+
+Cost numbers are cheap to produce. Correctness is where a pattern like this fails. The toy has a second, real component
+that does not use the latency model: a page store on a local directory, with an append-only WAL of records
+checksummed with SHA-256, immutable shard-image files, and a manifest swapped in with an atomic rename. A trial applies 5
+to 40 random commits to a few shards, folds now and then (and 20% of the time abandons a fold after some
+images are written but before the manifest swap), and sometimes crashes in the middle of a commit, leaving a torn record that was never
+acknowledged. Recovery loads the manifest's images, replays WAL records newer than its watermark, and stops at the first
+torn or failing checksum. The oracle is a dictionary of acknowledged writes.
+
+In 300 of 300 trials, recovery equalled the oracle.
+
+I then broke the one rule from `constants.rs`. In the second variant a fold writes a shard image containing only the
+pages changed since the last fold, replacing the old image instead of rewriting the whole shard. That is the "image
+missing the other's newer pages" case the comment describes, and recovery matched the oracle in 196 of 300 trials. I did not
+classify the 104 failures further. Shard-aligned, complete images are what
+let the reclaimer delete the old deltas safely, and the cost is the write amplification visible in the 1 s row above.
+This is a test of my toy's logic and not of Depot, but it is the same invariant the Depot comment gives, and it fails
+the way the comment says.
+
+## Waking from S3
+
+The post's least flattering number is also the most useful: 689 ms at p50 to wake an Actor whose 47 MiB database is only in
+S3 and answer its first query, against about 5 ms when it is on SSD. I cannot say what the query read. The post does
+not say, and a first query rarely touches every page. So I asked a bounded version of the question: how long to fetch all
+188 shards of a 47 MiB database, at several GET latencies and degrees of parallelism?
+
+<ColdWake />
+
+At a 25 ms median and one GET at a time, the full fetch takes 6.6 s. With 4 in flight it takes 1.7 s, with 16 it takes
+467 ms (p99 575 ms), and with 64 it takes 192 ms. At a 40 ms median and 16 in flight it takes 704 ms, close to the reported
+689 ms. I read that as a plausibility check on the order of magnitude and nothing more: many combinations of latency,
+parallelism and bytes read produce 689 ms, and a design with a persisted preload set would read far fewer than 188 shards.
+The unit of fetch is what the table in the widget shows. At 25 ms, 12,032 serial GETs of one 4 KiB page each would
+take 371 s. Even 16 in parallel would take 23 s. 188 serial GETs of one shard each take 6.7 s. Object stores reward large
+requests, which is why a page store on S3 groups pages into shards at all.
+
+The repo has its own evidence of the same pressure. `SQLITE_OPTIMIZATIONS.md` records a baseline of a 50 MiB cold
+full scan taking 20.14 s end to end, with 1,249 `get_pages` calls and 19.33 s spent in VFS transport, which is about
+15.5 ms per call. Bounded speculative read-ahead of 64 pages cut the calls from 1,249 to 368. That document is a tracker that
+points to local notes, and it gives no latency for the 368-call case, so I do not know what the improvement was. Those
+calls also go to the hot tier in the open tree, not S3, so I would not subtract 20.14 s from 689 ms and call it a result.
+It does show the team measured a serial page-at-a-time cold read, saw it was too slow, and has been working on batching
+and preload hints (`OpenConfig.preload_pgnos`, persisted hot-page hints) ever since. The post's "pages it needs are
+already loaded before your code runs" is that preload story, and it is the part of the design I would most like to read.
+
+## What I could not check
+
+- **The write latency.** 0.69 ms at p50 is a plausible number for a majority ack across three zones in one region, and my
+  model, with an assumed 0.45 ms replica latency, lands at 0.60 ms p50 and 0.82 ms p99. That agreement is a property of the
+  numbers I assumed, not evidence for the claim. I have no WarpDrive binary and no harness.
+- **Where the log lives.** The post says "disk in three availability zones." Whether that is Rivet's own replicated log,
+  a Raft group per Actor or per shard, or something else, I cannot tell from the post or the tree.
+- **How S3 is used for messaging.** The post says S3 replaces the message broker, which in 2.x was NATS. A broker built on
+  an object store has its own latency floor, and the post gives no figure for it.
+- **The Actor start and size numbers.** 6.9 ms, 72.4 KB, and the comparison with a 200 MB pod are Rivet's. The README says
+  the pod figures are "typical published values, not a matched benchmark."
+- **The cost claim.** "Tens of thousands of dollars even for small workloads" for databases that write straight to S3
+  is not tied to a workload. In my toy, writing every commit directly cost \$5 per million at \$0.005 per 1,000 PUTs. It could
+  be much worse for a database that writes many objects per transaction; I did not model one.
+- **Building Depot's tests.** I did not compile the workspace or run `cargo test`. It is a large Rust build on a shared
+  4-core machine, and the cold-tier tests would not build anyway. Everything about Depot above is from reading it.
+- **Migration and the missing features.** Multi-region, serverless, ACLs and the zero-downtime migration tool are
+  future work according to the post.
+
+## What I take from it
+
+The structure is sound and old. A small replicated log gives you the latency and the durability, and the object store gives
+you capacity. The log is folded into large, complete, immutable objects so that requests scale with dirty shards and not
+with commits. In my toy that ratio was 188 PUTs against 6,000 for the same 6,000 commits. The invariant that does the
+work is the one Depot's `constants.rs` states: fold whole shards, never partial ones, and only delete what a complete
+image covers. Break it in my toy and 104 of 300 trials end with the wrong data.
+
+If you run Rivet today, the open tree gives you a UDB-backed page store with a full compaction protocol. The S3 tier is
+Enterprise code, and WarpDrive is a claim until its code lands. I would read the three-zone log first when it does,
+then the preload path that decides the cold wake, and then check the 689 ms against a database you can tell the
+shape of. The script that produced every simulated number here is one file; change the three latency assumptions at the
+top and rerun it.
