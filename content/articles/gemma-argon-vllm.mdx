@@ -1,0 +1,271 @@
+---
+title: "Gemma 4 E2B on vLLM: reading the eight PRs behind the 2.85x"
+description: "Google's Gemma account says Gemini 4 Argon took gemma-4-E2B-it on an A100 from about 37,900 to 108,000+ tokens/sec through eight vLLM pull requests. I found the PRs, read the diffs, sorted what each one changes, and rebuilt the two biggest ideas as CPU toys. No single PR claims the headline; three of the eight are the ones that can touch E2B text serving, and the biggest, KV-sharing fast prefill, skips 70% of the layer weight work for every prompt token but one per request."
+date: 2026-10-27
+tags:
+  - vllm
+  - gemma
+  - inference
+  - kv-cache
+  - triton
+  - kernel-fusion
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 2
+  unique: 2
+  why: "Finds and reads the eight vLLM PRs behind Gemma's 2.85x claim, shows no PR states it, and rebuilds fast prefill and kernel fusion as runnable CPU toys."
+topic: inference-serving
+kind: teardown
+level: practitioner
+runsOn: cpu
+licence: Apache-2.0
+---
+
+import { FastPrefillStack } from "@/components/articles/gemma-argon-vllm/fast-prefill-stack"
+import { PrMap } from "@/components/articles/gemma-argon-vllm/pr-map"
+import { SpeedupCompose } from "@/components/articles/gemma-argon-vllm/speedup-compose"
+
+On 26 October 2026 the [Google Gemma account posted](https://x.com/googlegemma/status/2114757896563253305):
+
+> Gemini 4 Argon enabled a 2.85x speedup on an A100 via vLLM, jumping from ~37,900 to 108,000+ tokens/sec on gemma-4-E2B-it.
+
+The post adds three check marks (100% token parity, zero quality drop, done in days not months) and "the exact changes across 8 PRs".
+
+The credit in the thread goes to Luciano Martins, whose GitHub account `lucianommartins` opened the pull requests. I do not have an A100, so I cannot reproduce the throughput. What I can do is read the code. This article finds the eight PRs, says what each one changes, rebuilds the two ideas that carry most of the weight as small CPU programs, and checks what "100% token parity" can and cannot mean.
+
+Every claim below is labelled. **Measured** means I ran it on a shared 4-core CPU VM. **Reported** means it is in a PR description or the post and I did not reproduce it. **Reasoned** means I derived it from code or shapes.
+
+| | |
+|---|---|
+| Claim | 2.85x, ~37,900 to 108,000+ tok/s, `gemma-4-E2B-it`, A100, vLLM (reported) |
+| Link in the post | `goo.gle/4zNtANl`, which redirects to a GitHub search: `is:pr author:lucianommartins created:>2026-10-05 created:<2026-10-10` in `vllm-project/vllm` |
+| What I read | the diffs of #60445, #60674, #60317, #60689 and the descriptions of all eight |
+| What I ran | CPU toys (below) and the safetensors header of `google/gemma-4-E2B-it` |
+| What I could not run | any of it on a GPU |
+
+<ModelCard repo="google/gemma-4-E2B-it" />
+
+## The arithmetic first
+
+108,000 / 37,900 = 2.8496, which rounds to 2.85. The post's own numbers agree with each other (measured arithmetic). Both figures are approximate ("~37,900", "108,000+"), so 2.85x is a rounded ratio. Exactly 2.85 x 37,900 is 108,015.
+
+What the number does not say is which workload. "Tokens/sec" could be prompt tokens per second (prefill), generated tokens per second (decode), or a mix. The PR descriptions give hints. #60674 reports E2B prefill at 35,480.8 tok/s going to 67,488.9 tok/s on an A100 at batch size 4 with a 1k-token prompt. #60317 reports E2B prefill between 30,697 and 43,659 tok/s. Those are the same order as 37,900, so I read the baseline as prefill-flavoured. That is reasoned, not stated.
+
+One coincidence to avoid: the string "2.85x" also appears in #60317, but there it is a single microbenchmark row, sliding-window decode on E2B shapes going from 0.079 ms to 0.028 ms (reported). It is unrelated to the headline.
+
+## Finding the eight
+
+The short link resolves with `curl -sIL` to the GitHub search above. That query returns ten pull requests from the same author, opened between 6 and 8 October. Two are about EmbeddingGemma 2 (#60254 and #60289, both closed, no performance claims). The other eight are tagged `[Perf]`, and I take them to be the eight. The post does not list numbers, so this is an inference, though a tight one: eight is the count, and the tag is the discriminator.
+
+State when I searched, 27 October: seven open, one closed (#60643). I did not check beyond that open or closed flag, so I cannot say whether any of them has landed. What the post describes is a stack of branches measured together, and I have the PRs only one at a time.
+
+Here they are, sorted by what they change. Filter by category, or by whether the PR touches E2B text serving at all.
+
+<PrMap />
+
+Only four of the eight touch E2B at all, and the fourth, #60689, is the speculative-decoding path. The other four are for the 26B MoE, the 12B vision path, the multimodal encoders, and a diffusion variant. They are fine work, and they cannot move a text-only E2B number. That leaves three that plausibly produce the headline: #60445, #60674 and #60317.
+
+## What is in E2B
+
+I read the safetensors header of `google/gemma-4-E2B-it` with two HTTP range requests (8 bytes for the length, then the 263,952-byte JSON header) and never downloaded the 10.2 GB of weights. Counted from tensor shapes (measured):
+
+| Part | Parameters |
+|---|---|
+| Whole checkpoint | 5.123 B |
+| Language model | 4.647 B |
+| of which per-layer-embedding (PLE) table, 262,144 x 35 x 256 | 2.349 B |
+| of which token embedding, 262,144 x 1,536 | 0.403 B |
+| of which 35 decoder layers | 1.882 B |
+| Vision tower | 0.169 B |
+| Audio tower | 0.307 B |
+
+So the "E" for effective is real: 2.35 B of the 5.1 B sit in a lookup table that costs a row read per token, not a matrix multiply. The layers plus the main embedding are about 2.30 B.
+
+Three facts from `config.json` matter for everything below (measured, read from the file): `num_hidden_layers` is 35, `num_kv_shared_layers` is 20, and `use_double_wide_mlp` is true. The layer types repeat four sliding layers (window 512, head dim 256, one KV head) and one global layer (head dim 512).
+
+The shapes confirm what that means. Layers 0 to 14 own their KV cache. Layers 15 to 34 do not: they read the cache of an earlier layer of the same attention type. Those 20 shared layers have an MLP of width 12,288 where the first 15 have 6,144. The checkpoint still stores `k_proj` and `v_proj` for all 35 layers, which tells you the sharing is a runtime decision, not a different architecture.
+
+Here is the number that makes #60445 interesting. Counting multiply-accumulates per token for the q, o, k, v and MLP weights (reasoned, from the header shapes), the 15 owner layers cost 552,075,264 and the 20 shared layers cost 1,283,457,024. **The shared layers are 69.9% of the layer weight work.**
+
+## #60445: the shared layers do not need your prompt
+
+A prefill step processes every prompt token through every layer, mostly so each layer can write its keys and values. But a shared layer writes nothing. It only reads a donor's cache. Its output at token $t$ matters for exactly one purpose: producing the hidden state that goes to the LM head. During prefill, only the last token of each prompt needs logits.
+
+So for those 20 layers, every row except the last per request is wasted work. This is the idea in the YOCO line of work, and vLLM already had a `kv_sharing_fast_prefill` switch for it. What #60445 does is turn it on by default for Gemma 4 and remove the costs around it.
+
+The switch, from the diff (`vllm/model_executor/models/config.py`):
+
+```python
+if (
+    getattr(hf_text_config, "num_kv_shared_layers", 0) > 0
+    and vllm_config.speculative_config is None
+    and vllm_config.parallel_config.pipeline_parallel_size == 1
+    and "DiffusionGemmaForBlockDiffusion" not in getattr(model_config, "architectures", [])
+):
+    vllm_config.cache_config.kv_sharing_fast_prefill = True
+```
+
+Note the second line. Fast prefill is off whenever a speculator is configured. That is why #60689 is a separate path rather than a multiplier: they cannot be on together in this version (reasoned, from this condition).
+
+The model code gathers the rows that need logits, runs the cross-decoder (the 20 shared layers) on only those, and scatters the result back:
+
+```python
+self.positions[:num_padded].copy_(positions[logits_indices_padded])
+self.hidden_states[:num_padded].copy_(self_decoder_hidden_states[logits_indices_padded])
+...
+cross_hidden_states = self.cross_decoder(self.positions[:num_padded], self.hidden_states[:num_padded], ...)
+self_decoder_hidden_states[logits_indices_padded[:num_logits_indices]] = cross_hidden_states[:num_logits_indices]
+```
+
+Move the slider. With fast prefill on, the shared layers compute one row per request.
+
+<FastPrefillStack />
+
+Two honest caveats on that figure. The ceiling is 3.32x: even if the shared layers cost nothing, the 15 owner layers still see every token. And it counts weight work only. Attention scores, the LM head and kernel launches are outside it.
+
+### The rest of the PR is overhead removal
+
+The PR body lists six changes. Beyond the switch, they are all about the host and the graph:
+
+- **Cross-decoder norm inside the compiled region.** The final `self.norm` moves into `Gemma4CrossDecoderLayers`, so `torch.compile` and piecewise CUDA graphs capture it instead of running it eagerly outside (graph capture).
+- **Metadata by `arange`.** When every request samples one token, `decode_query_start_loc` must be `[0, 1, ..., num_reqs]`. The old code built it with `bucketize`, `zeros`, `ones_like`, `scatter_add_`, `fill_` and `cumsum`, plus a device-to-host copy. The new code is one `torch.arange` on each side (host and batching).
+- **A guard on pure-decode steps.** `_prepare_kv_sharing_fast_prefill` is skipped when `max_query_len == 1`.
+- **`functools.lru_cache`** on the metadata wrapper class, which was being rebuilt through `ABCMeta.__new__` and `dataclasses.fields()` on every forward step.
+- **Same-group metadata reuse** on decode, so a recipient attention group reuses the metadata its donor group already built.
+
+The PR reports a 4.22x to 5.28x speedup on the metadata function and about 0.17 ms saved per prefill step (reported). I wanted to see the shape of that, so I ran the old and new construction on CPU.
+
+### Toy 1: skip the shared layers (measured, CPU, a toy)
+
+I built a 35-layer stack with the same layout: 15 owner layers that write K and V, 20 shared layers that read the last owner's cache. Hidden size 192, MLP 768 for owners and 1,536 for shared (real size divided by 8), 8 query heads and one KV head, float32, 2 threads. The full path computes every row in the shared layers and takes the last row. The fast path computes only the last row there.
+
+| Prompt tokens | Full | Fast | Speedup | Max abs difference |
+|---|---|---|---|---|
+| 128 | 138.7 ms | 67.4 ms | 2.06x | 8.3e-6 |
+| 512 | 1,199.4 ms | 454.2 ms | 2.64x | 1.1e-5 |
+
+Two things to take from it. The speedup rises with prompt length. By the same weight count the toy's own ceiling is about 3.4x, and it stays under it (the toy's attention work is not in that count). And the two outputs are **not bit-equal**. They agree to about 1e-5 in float32, because a matrix multiply over one row and a matrix multiply over 512 rows can pick different accumulation orders. The *mathematics* is identical, since a shared layer's output at the last token depends on the donor's K and V and the last token's own state, never on other tokens' shared-layer states. The *arithmetic* is not. I come back to this under parity.
+
+### Toy 2: the metadata kernel (measured, CPU, a toy)
+
+Same inputs, 64 requests, one logit each. Old construction versus `arange`, 200 repetitions, median:
+
+| | Time |
+|---|---|
+| bucketize, zeros, scatter_add_, cumsum | 32.8 us |
+| `torch.arange` | 3.3 us |
+
+They return identical tensors (asserted in the script), a 9.8x ratio. The PR's own range is 4.22x to 5.28x on an A100. A CPU call has no launch cost to remove, and the ratio differs for that reason. Treat my number as showing that five ops collapse to one, not as a prediction.
+
+## #60674: fewer launches, fewer trips to HBM
+
+This is the largest diff by far: 3,032 lines of Triton in `fused_gemma4_ops.py`, 601 changed in `gemma4.py`, and 1,032 lines of tests. Gemma 4 wraps each sublayer in extra normalisation: a norm on q, on k and on v per head, a pre-FFN and a post-FFN norm, scalar scaling, and the per-layer-embedding (PLE) path. Done as separate PyTorch ops, each one reads its input from HBM and writes its output back.
+
+The flagship kernel, `_fused_qkv_norm_rope_kernel`, does QKV split, RMSNorm on each head and rotary embedding in one launch. Each program handles one head of one token. For a query head it loads the two halves of the head, computes the sum of squares in float32, casts back to bf16 before multiplying by the weight (the comment says this is "exact BF16 RMSNorm parity"), then rotates the halves with the cached cos and sin and stores:
+
+```python
+x1_norm = (x1_f32 * r).to(tl.bfloat16)
+x1_norm = x1_norm * w1
+o1 = (x1_norm_f32 * cos_f32 - x2_norm_f32 * sin_f32).to(tl.bfloat16)
+o2 = (x2_norm_f32 * cos_f32 + x1_norm_f32 * sin_f32).to(tl.bfloat16)
+```
+
+The same kernel handles values (norm, no rope), KV-shared layers (queries only) and the `k_eq_v` case on global layers. Around it are about a dozen epilogue kernels that fuse residual adds with the following norm.
+
+Reported on an A100 for E2B: SWA QKV norm+RoPE falls from about 1.17 ms to 0.34 ms in the batch-1 case (3.50x), and the end-to-end gains are up to 1.90x on prefill and 1.06x on decode with 100.0% token match (reported). The decode figure is the telling one. Fusion helps most where launch count and memory passes dominate, which is a large prefill batch of small ops, and least where weight reads dominate, which is single-token decode.
+
+### Toy 3: what fusing buys on a CPU (measured, CPU, a toy, read with care)
+
+I cannot run Triton here. The closest honest stand-in is `torch.compile`, whose C++ backend fuses a chain of elementwise ops into one loop. I took the same arithmetic (RMSNorm then neox RoPE) on a 512 x 8 x 256 tensor, float32, and compared eager PyTorch against the compiled version.
+
+| | Time |
+|---|---|
+| eager, about 15 separate ops | 15.1 ms |
+| `torch.compile`, one fused loop | 0.45 ms |
+
+That is 34x, and you should not read it as a prediction for the GPU. The PR's per-kernel gain is 3 to 4x. Eager CPU PyTorch is unusually bad at this shape (slices, a `cat`, lots of temporaries), and my measurement has no launch-cost story at all. What the toy does show is the direction and that the output is the same up to rounding: maximum difference 1.9e-6 in float32. In bf16 the compiled and eager results matched exactly on 60.1% of elements, with a maximum difference of 0.031. That is the same kind of mismatch the PR reports for its own kernels (44.5% to 100% exact, maximum difference up to 3.1e-2, cosine similarity 1.0000).
+
+## #60317: attention tuning for head dimension 512
+
+Gemma 4 has the unusual global head dimension of 512, and vLLM's Triton unified attention kernel was tuned for 64 to 256. The diff does three things (read from the diff):
+
+1. **Tiles by shared memory.** For head dim 512 or sliding-window head dim 256, on a GPU with 160,000 bytes or more of shared memory (A100, H100), it picks `BLOCK_M=32`, 8 warps, 1 pipeline stage, and `TILE_SIZE_PREFILL` 128 for head dim 256 or 64 for 512. Smaller-memory GPUs get smaller tiles, and short shapes fall back to the old heuristic so they do not get slower.
+2. **Skip evicted tiles in sliding-window decode.** Segments of a long sequence used to be spread over the whole sequence even though the window covers the last 512 tokens. The new `start_tile_idx = max(0, (seq_len - query_len - window + 1) // TILE_SIZE)` starts the loop at the window edge.
+3. **2D versus 3D decode.** When `num_seqs * num_kv_heads` reaches 128, it picks the 2D kernel for occupancy.
+
+Reported for E2B: 1.02x to 1.12x end to end and up to 4.29x on one microbenchmark. This is the smallest of the three and the least in doubt: it changes tile shapes, not the arithmetic order inside a tile, and the PR keeps the dot products in float32. Even so, its accuracy table is not 100% agreement, as the parity section shows.
+
+## #60689: the speculative path
+
+This one is aimed at MTP drafting, a different serving mode. Its main kernel `_sparse_gather_gemv_kernel` replaces `lm_head_weight[selected].view(T, S, H)` followed by an einsum with one Triton program per (token, block of candidates) that streams rows of the LM head and accumulates in float32 registers, never writing the `(T, S, H)` tensor out. The PR says this cuts intermediate memory by 99.61% and gives up to 2.84x on that op (reported).
+
+### Toy 4: gather-GEMV (measured, CPU, a toy)
+
+Sizes are mine, not the real assistant head: vocabulary 262,144, hidden 256, 4 tokens, 4,096 candidates each, bf16 weights.
+
+| Approach | Time | Materialised |
+|---|---|---|
+| gather rows then einsum | 10.6 ms | 8.4 MB |
+| row by row, no big gather | 8.0 ms | 0 |
+
+Identical output (maximum difference 0.0). A full dense head over this vocabulary at hidden 256 would be 134 MB of bf16 weights. The point is the traffic, not my timing: reading 4,096 candidate rows instead of 262,144 is the entire trick.
+
+The PR also adds an opt-in lossy mode (`enable_relaxed_mtp`) that accepts draft tokens more leniently inside a thinking span. It is off by default and not part of any "100% parity" statement. Reported E2B result, gamma 4, batch 1: 651.1 tok/s with MTP, 1.08x over `main` (reported). That is a single-stream decode number, more than two orders of magnitude below 108,000, so it cannot be what the headline measures.
+
+## Composing the headline
+
+Three PRs report an end-to-end gain for E2B. Here are their reported ranges as sliders, multiplied.
+
+<SpeedupCompose />
+
+The product of the three reported maxima is 4.38x, so 2.85x is reachable. The defaults I chose are mid-range, and they land at 2.23x. Treat the sliders as a range check, not a model (reasoned). The PRs overlap: #60445 and #60674 both remove prefill work, so the second one's gain on a prefill that already skips 70% of the layers is not the 1.90x measured on the baseline. The only evidence for the stack is the post itself.
+
+## What "100% token parity" can mean
+
+The PR descriptions use the phrase for greedy decoding on their test sets: same tokens out as `main`. Check what that rests on.
+
+- **Not bit-exact.** #60674 reports exact element matches of 44.5% to 100% with maximum difference 3.1e-2 in bf16; #60317 reports 94.2% to 100% within 1 ULP. A kernel that is not bit-exact can still produce the same argmax almost always, but it is a statement about margins.
+- **#60317 does not report 100% anywhere I could find.** Its end-to-end table for E2B gives MMLU top-1 agreement of 97.60% and GSM8K final-answer agreement of 93.50% against `main` (reported), with accuracy 50.00% to 50.60% and 80.00% to 80.50%. Those are measured by the PR author on 500 and 200 questions, and accuracy did not drop. But agreement is not parity.
+- **The "100%" is a count over some prompts.** If a fused kernel flips the top-1 token with per-token probability $p$, a sequence of $N$ tokens survives with probability $(1-p)^N$.
+
+### Toy 5: how often noise flips an argmax (measured, CPU, a toy with my own noise level)
+
+Draw 262,144 Gaussian logits, add multiplicative noise of up to $2^{-8}$ relative to every logit after rounding to bf16, and check whether the argmax changes. Over 300 draws at a logit scale of 3 the flip rate was 1.3%; at a scale of 6 it was 4.0%. The median gap between the top two logits was 0.43 and 0.90 respectively.
+
+This is pessimistic compared to a trained model, where the top token usually leads by a wide margin and the noise from a fused kernel is smaller than my uniform choice. It is not an estimate of Gemma's flip rate. It shows only that the flip probability is governed by the margin distribution, so "100% match" on a few hundred prompts is evidence about those prompts, not a guarantee. The honest line is the one the PR itself supports: no observed divergence on its test set, with kernels that are not bitwise identical.
+
+## What I could not check
+
+- **The throughput.** No A100 here. Every speed number from a GPU in this article is reported.
+- **The stacked branch.** The headline comes from a build that includes the PRs together. I only have them individually, and a shallow clone with history cut off, so I cannot confirm they apply cleanly on one another.
+- **Which workload.** Prefill-heavy, decode-heavy and mixed workloads respond very differently to these changes, and the post does not say.
+- **Merge status.** Seven of eight were open when I looked. A reviewer may ask for changes that move the numbers.
+- **Four diffs.** I read #60445, #60674, #60317 and #60689 in full. For #60504, #60478, #60643 and #60663 I relied on their descriptions, which is enough to say they target other models and paths but not to vouch for them.
+
+## What to take from it
+
+1. **Most of the gain is one idea plus plumbing.** The 20 KV-shared layers do not need prompt rows, and a prefill-heavy load saves most of their weight work. Everything else in the stack is removing launches, copies and Python.
+2. **The speedup is prefill-shaped.** Decode gains reported in these PRs are 1.04x to 1.21x. If your traffic is long generations, expect less.
+3. **Check the switch on your own server.** In #60445 fast prefill turns on only with no speculator, one pipeline stage and a Gemma 4 model with shared layers. Enable MTP and you leave that path.
+4. **Do your own parity run.** Greedy match on your prompts is a ten-minute test with and without the branch.
+
+## Reproduce the toys
+
+The script and its raw output are at [`toy.py`](/articles/gemma-argon-vllm/toy.py) and [`toy-results.json`](/articles/gemma-argon-vllm/toy-results.json). It needs only PyTorch on CPU; running it took a few minutes on a shared 4-core VM with `OMP_NUM_THREADS=2`.
+
+```bash
+OMP_NUM_THREADS=2 nice -n 19 python toy.py
+# header only, no weights:
+curl -sL -r 0-7 https://huggingface.co/google/gemma-4-E2B-it/resolve/main/model.safetensors | xxd
+```
+
+The PR list itself is one GitHub search: `repo:vllm-project/vllm is:pr author:lucianommartins created:2026-10-05..2026-10-10`.
+
+<RepoCard repo="vllm-project/vllm" />
+
+Sources: [the post](https://x.com/googlegemma/status/2114757896563253305), [vllm-project/vllm](https://github.com/vllm-project/vllm) PRs [#60445](https://github.com/vllm-project/vllm/pull/60445), [#60674](https://github.com/vllm-project/vllm/pull/60674), [#60317](https://github.com/vllm-project/vllm/pull/60317), [#60689](https://github.com/vllm-project/vllm/pull/60689), [#60504](https://github.com/vllm-project/vllm/pull/60504), [#60478](https://github.com/vllm-project/vllm/pull/60478), [#60643](https://github.com/vllm-project/vllm/pull/60643), [#60663](https://github.com/vllm-project/vllm/pull/60663), and the [`google/gemma-4-E2B-it`](https://huggingface.co/google/gemma-4-E2B-it) model files.
