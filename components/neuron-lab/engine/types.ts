@@ -15,7 +15,10 @@ export interface Calibration {
 export interface Steer {
   layer: number
   neuron: number
+  /** add mode: a dose in residual-norm units. mul mode: the factor the activation is multiplied by (1 = unchanged, 0 = ablated). */
   dose: number
+  /** "add" (default) shifts the activation; "mul" scales it. */
+  mode?: "add" | "mul"
   /** Test hook: an absolute activation shift that replaces the dose-derived one. */
   delta?: number
 }

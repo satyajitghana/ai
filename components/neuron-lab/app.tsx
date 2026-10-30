@@ -10,7 +10,7 @@ import { DetailsPanel, FindPanel, InvestigatePanel } from "./inspect-panels"
 import { NeuronGrid } from "./neuron-grid"
 import { NeuronMap } from "./neuron-map"
 import type { EdgeLine, Style } from "./scene"
-import { fmtDose, MAX_STEERS, parseNeuron, searchFires, searchLens, type Hit } from "./search"
+import { MAX_STEERS, parseNeuron, searchFires, searchLens, type Hit } from "./search"
 import { EngineStatus, SteerPanel, type EngineState } from "./steer-panel"
 import type { NeuronEngine, Steer } from "./types"
 import { fmtNeuron, nkey } from "./types"
@@ -35,7 +35,7 @@ function useReducedMotion() {
 }
 
 function encodeHash(steers: Steer[], prompt: string, chat: boolean) {
-  const r = steers.map((s) => `${s.layer}.${s.neuron}.${s.dose}`).join(",")
+  const r = steers.map((s) => `${s.layer}.${s.neuron}.${s.mode === "mul" ? "x" : ""}${s.dose}`).join(",")
   const q = prompt.trim() ? `&p=${encodeURIComponent(prompt.trim().slice(0, 300))}` : ""
   const c = chat ? "" : "&c=0"
   return steers.length || q ? `#r=${r}${q}${c}` : ""
@@ -49,9 +49,11 @@ function decodeHash(h: string, layers: number, neurons: number): { steers: Steer
     const [l, n, d] = part.split(".")
     const layer = +l, neuron = +n
     // dose may contain a decimal point and a minus sign, e.g. 3.2210.-0.5 splits as 3,2210,"-0","5"
-    const dose = +part.split(".").slice(2).join(".")
+    const raw = part.split(".").slice(2).join(".")
+    const mul = raw.startsWith("x")
+    const dose = +(mul ? raw.slice(1) : raw)
     if (Number.isInteger(layer) && Number.isInteger(neuron) && layer >= 0 && layer < layers && neuron >= 0 && neuron < neurons && Number.isFinite(dose) && d !== undefined) {
-      steers.push({ layer, neuron, dose: Math.max(-3, Math.min(3, dose)) })
+      steers.push(mul ? { layer, neuron, dose: Math.max(0, Math.min(4, dose)), mode: "mul" } : { layer, neuron, dose: Math.max(-3, Math.min(3, dose)) })
     }
   }
   const p = /[#&]p=([^&]*)/.exec(h)
@@ -60,7 +62,7 @@ function decodeHash(h: string, layers: number, neurons: number): { steers: Steer
 
 export function NeuronLabApp() {
   const data = useLabData(16)
-  const { meta, layers, contexts, links, fedBy, discoveries } = data
+  const { meta, layers, contexts, links, fedBy, discoveries, findings } = data
   const reduced = useReducedMotion()
 
   const [theme, setTheme] = useState<"dark" | "light">("dark")
@@ -490,29 +492,45 @@ export function NeuronLabApp() {
                     </button>
                   ))}
                 </div>
-                {discoveries.length ? (
+                {findings.length ? (
                   <>
-                    <div className="nl-sec">Recipes we found</div>
-                    {discoveries.map((d) => (
-                      <button
-                        key={d.id}
-                        className="nl-row"
-                        style={{ gridTemplateColumns: "1fr" }}
-                        onClick={() => {
-                          setSteers(() => d.neurons.slice(0, MAX_STEERS).map((n) => ({ ...n })))
-                          if (d.samples[0]) setPrompt(d.samples[0].prompt)
-                          setChat(false)
-                          select(d.neurons[0].layer, d.neurons[0].neuron)
-                          setTab("steer")
-                          setPane("panel")
-                          toast(`Loaded "${d.label}".`)
-                        }}
-                      >
-                        <span>
-                          <b>{d.label}</b> <span className="toks">{d.axis}: {d.neurons.map((n) => `${fmtNeuron(n.layer, n.neuron)} ${fmtDose(n.dose)}`).join(", ")}</span>
-                        </span>
-                      </button>
-                    ))}
+                    <div className="nl-sec">What we tried ({findings.length} axes)</div>
+                    {[...findings].sort((x, y) => (x.verdict === y.verdict ? 0 : x.verdict === "works" ? -1 : 1)).map((f) => {
+                      const mine = discoveries.filter((d) => d.axis === f.axis)
+                      const best = [...mine.filter((d) => d.kind !== "pair")].sort(
+                        (x, y) => (y.evidence?.lift ?? 0) / Math.max(0.1, y.evidence?.controlScores?.bestRandomLiftAtDose ?? 0.1) - (x.evidence?.lift ?? 0) / Math.max(0.1, x.evidence?.controlScores?.bestRandomLiftAtDose ?? 0.1),
+                      )[0]
+                      return (
+                        <button
+                          key={f.axis}
+                          className="nl-row"
+                          style={{ gridTemplateColumns: "1fr" }}
+                          disabled={!best}
+                          onClick={() => {
+                            if (!best) return
+                            setSteers(() => best.neurons.slice(0, MAX_STEERS).map((n) => ({ ...n })))
+                            if (best.samples[0]) setPrompt(best.samples[0].prompt)
+                            setChat(false)
+                            select(best.neurons[0].layer, best.neurons[0].neuron)
+                            setTab("steer")
+                            setPane("panel")
+                            toast(`Loaded the strongest recipe for "${f.label}".`)
+                          }}
+                        >
+                          <span>
+                            <b>{f.label}</b>{" "}
+                            <span className="toks" style={{ color: f.verdict === "works" ? "var(--nl-amber)" : "var(--nl-violet)" }}>
+                              {f.verdict === "works" ? `${mine.length} ${mine.length === 1 ? "recipe" : "recipes"}` : "nothing worked"}
+                            </span>
+                            <br />
+                            <span className="toks">
+                              {f.contrast.splitHalfReplicated_top40}/40 contrasts held up
+                              {f.verdict === "miss" ? ", but no neuron changed the output" : ""}
+                            </span>
+                          </span>
+                        </button>
+                      )
+                    })}
                   </>
                 ) : null}
                 <div className="nl-sec">How this works</div>
@@ -627,6 +645,7 @@ export function NeuronLabApp() {
                 steers={steers}
                 setSteers={setSteers}
                 discoveries={discoveries}
+                findings={findings}
                 engine={engine}
                 engineState={eng}
                 onLoad={onLoad}
