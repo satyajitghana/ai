@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from "react"
 
-import { invertLinks, loadContexts, loadDiscoveries, loadLayer, loadLinks, loadMeta } from "./data"
-import type { Context, Discovery, Edge, LayerLens, ModelMeta, NeuronKey } from "./types"
+import { invertLinks, loadContexts, loadDiscoveries, loadFindings, loadLayer, loadLinks, loadMeta } from "./data"
+import type { AxisFinding, Context, Discovery, Edge, LayerLens, ModelMeta, NeuronKey } from "./types"
 
 export interface LabData {
   meta: ModelMeta | null
@@ -15,6 +15,7 @@ export interface LabData {
   links: Map<NeuronKey, Edge[]>
   fedBy: Map<NeuronKey, Edge[]>
   discoveries: Discovery[]
+  findings: AxisFinding[]
   status: "loading" | "ready" | "missing"
 }
 
@@ -27,6 +28,7 @@ export function useLabData(firstLayer = 0): LabData {
     links: new Map(),
     fedBy: new Map(),
     discoveries: [],
+    findings: [],
     status: "loading",
   })
   const [version, setVersion] = useState(0)
@@ -64,9 +66,9 @@ export function useLabData(firstLayer = 0): LabData {
       await Promise.all([worker(), worker(), worker(), worker()])
       if (dead) return
       setVersion((v) => v + 1)
-      const [contexts, links, discoveries] = await Promise.all([loadContexts(), loadLinks(), loadDiscoveries()])
+      const [contexts, links, discoveries, findings] = await Promise.all([loadContexts(), loadLinks(), loadDiscoveries(), loadFindings()])
       if (dead) return
-      setState((s) => ({ ...s, contexts, links, fedBy: invertLinks(links), discoveries, status: "ready" }))
+      setState((s) => ({ ...s, contexts, links, fedBy: invertLinks(links), discoveries, findings, status: "ready" }))
     })()
     return () => {
       dead = true

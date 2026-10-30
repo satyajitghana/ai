@@ -1,10 +1,11 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import { showToken } from "./data"
 import { activationDelta, fmtDose, MAX_STEERS, writeLength } from "./search"
-import type { Discovery, LayerLens, ModelMeta, NeuronEngine, Steer } from "./types"
+import { RecipesFound } from "./recipes-card"
+import type { AxisFinding, Discovery, LayerLens, ModelMeta, NeuronEngine, Steer } from "./types"
 import { fmtNeuron } from "./types"
 
 // Qwen3 chat template with thinking switched off (the model's own enable_thinking=false form).
@@ -29,6 +30,7 @@ export function SteerPanel(p: {
   steers: Steer[]
   setSteers: (f: (s: Steer[]) => Steer[]) => void
   discoveries: Discovery[]
+  findings: AxisFinding[]
   engine: NeuronEngine | null
   engineState: EngineState
   onLoad: () => void
@@ -75,7 +77,14 @@ export function SteerPanel(p: {
     // Name each column by the push it applies: the actual dose for a one-neuron recipe, else the recipe
     // reversed / as set. A recipe with a negative dose must not put "+ dose" over the column that pushes down.
     const one = steers.length === 1 ? steers[0] : null
-    const named = (sign: -1 | 1) => (one ? `dose ${fmtDose(one.dose * sign)}${sign === 1 ? " (as set)" : " (mirrored)"}` : sign === 1 ? "recipe as set" : "recipe reversed")
+    const named = (sign: -1 | 1) =>
+      one
+        ? one.mode === "mul"
+          ? `× ${Math.round((1 + sign * (one.dose - 1)) * 100) / 100}${sign === 1 ? " (as set)" : " (mirrored)"}`
+          : `dose ${fmtDose(one.dose * sign)}${sign === 1 ? " (as set)" : " (mirrored)"}`
+        : sign === 1
+          ? "recipe as set"
+          : "recipe reversed"
     const spec: Omit<Col, "text" | "state" | "tokens" | "msPerToken">[] =
       compare === "3"
         ? [
@@ -92,7 +101,15 @@ export function SteerPanel(p: {
     setRunning(true)
     setCols(spec.map((s) => ({ ...s, text: "", state: "queued", tokens: 0, msPerToken: 0 })))
     requestAnimationFrame(() => outRef.current?.scrollIntoView({ block: "nearest", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }))
-    const withSign = (sign: number) => steers.map((x) => ({ ...x, dose: x.dose * sign })).filter((x) => x.dose !== 0)
+    // The mirror of a multiply factor f is 2 - f (the same distance from 1 on the other side), as in the studio.
+    const withSign = (sign: number): Steer[] =>
+      steers.flatMap((x) => {
+        if (x.mode === "mul") {
+          const f = 1 + sign * (x.dose - 1)
+          return f === 1 ? [] : [{ ...x, dose: f }]
+        }
+        return x.dose * sign !== 0 ? [{ ...x, dose: x.dose * sign }] : []
+      })
     if (eng.generateMany) {
       setCols((c) => c.map((x) => ({ ...x, state: "running" })))
       try {
@@ -141,7 +158,6 @@ export function SteerPanel(p: {
 
   const sel = p.selected
   const selLens = sel ? p.layers.get(sel.layer) : undefined
-  const open = useMemo(() => p.discoveries.find((d) => d.id === openDisc) ?? null, [p.discoveries, openDisc])
 
   return (
     <div className="nl-pane">
@@ -173,82 +189,65 @@ export function SteerPanel(p: {
         </div>
       )}
 
-      {p.discoveries.length ? (
-        <div className="nl-card">
-          <h3>Recipes we found (measured offline)</h3>
-          <div className="nl-chips" style={{ padding: 0 }}>
-            {p.discoveries.map((d) => (
-              <button key={d.id} className="nl-chip" aria-pressed={openDisc === d.id} onClick={() => loadDiscovery(d)} title={`${d.axis}: ${d.neurons.map((n) => `${fmtNeuron(n.layer, n.neuron)} ${fmtDose(n.dose)}`).join(", ")}`}>
-                {d.label}
-              </button>
-            ))}
-          </div>
-          {open ? (
-            <div style={{ marginTop: 8 }}>
-              <div className="nl-note">
-                {open.axis}
-                {open.evidence?.contrastScore != null ? ` · contrast score ${open.evidence.contrastScore}` : ""}
-                {open.evidence?.controlScores?.length ? ` · random neurons ${Math.min(...open.evidence.controlScores)}–${Math.max(...open.evidence.controlScores)}` : ""}
-              </div>
-              {open.samples.slice(0, 2).map((s, i) => (
-                <div key={i} className="nl-cols" data-n="2" style={{ marginTop: 6 }}>
-                  <div className="nl-col" style={{ minHeight: 0 }}>
-                    <header>
-                      <b>baseline</b>
-                    </header>
-                    <div className="out">{s.baseline}</div>
-                  </div>
-                  <div className="nl-col" data-kind="pos" style={{ minHeight: 0 }}>
-                    <header>
-                      <b>steered</b>
-                    </header>
-                    <div className="out">{s.steered}</div>
-                  </div>
-                </div>
-              ))}
-              {open.coherenceNote ? <p className="nl-note">{open.coherenceNote}</p> : null}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      <RecipesFound discoveries={p.discoveries} findings={p.findings} openId={openDisc} onLoad={loadDiscovery} />
 
       <div className="nl-card">
         <h3>Recipe ({steers.length}/{MAX_STEERS})</h3>
         {steers.length === 0 ? <p className="nl-note" style={{ margin: 0 }}>Empty. The model runs unchanged until you add a neuron.</p> : null}
         {steers.map((s, i) => {
+          const mul = s.mode === "mul"
           const wl = writeLength(meta, s)
           const dl = activationDelta(meta, s)
+          const patch = (f: (x: Steer) => Steer) => p.setSteers((a) => a.map((x, j) => (j === i ? f(x) : x)))
           return (
             <div key={`${s.layer}.${s.neuron}`} className="nl-steerrow">
               <button className="nl-link nl-mono" onClick={() => p.onSelect(s.layer, s.neuron)} title="Show this neuron on the map">
                 {fmtNeuron(s.layer, s.neuron)}
               </button>
-              <button className="nl-iconbtn" aria-label={`Remove ${fmtNeuron(s.layer, s.neuron)}`} onClick={() => p.setSteers((a) => a.filter((_, j) => j !== i))}>
-                {"×"}
-              </button>
+              <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <span className="nl-seg" role="group" aria-label={`Mode for ${fmtNeuron(s.layer, s.neuron)}`}>
+                  <button aria-pressed={!mul} onClick={() => patch((x) => (x.mode === "mul" ? { ...x, mode: "add", dose: 0.8 } : x))} title="Add a dose of the neuron's own direction">
+                    add
+                  </button>
+                  <button aria-pressed={mul} onClick={() => patch((x) => (x.mode === "mul" ? x : { ...x, mode: "mul", dose: 0 }))} title="Multiply the neuron's activation: 1 leaves it alone, 0 switches it off">
+                    multiply
+                  </button>
+                </span>
+                <button className="nl-iconbtn" aria-label={`Remove ${fmtNeuron(s.layer, s.neuron)}`} onClick={() => p.setSteers((a) => a.filter((_, j) => j !== i))}>
+                  {"×"}
+                </button>
+              </span>
               <div className="nl-slider">
                 <input
                   type="range"
-                  min={-2}
+                  min={mul ? 0 : -2}
                   max={2}
                   step={0.05}
                   value={s.dose}
-                  aria-label={`Dose for ${fmtNeuron(s.layer, s.neuron)}`}
-                  onChange={(e) => p.setSteers((a) => a.map((x, j) => (j === i ? { ...x, dose: +e.target.value } : x)))}
+                  aria-label={mul ? `Factor for ${fmtNeuron(s.layer, s.neuron)}` : `Dose for ${fmtNeuron(s.layer, s.neuron)}`}
+                  onChange={(e) => patch((x) => ({ ...x, dose: +e.target.value }))}
                 />
                 <input
                   className="nl-input nl-mono"
                   type="number"
                   step={0.05}
-                  min={-3}
-                  max={3}
+                  min={mul ? 0 : -3}
+                  max={mul ? 4 : 3}
                   value={s.dose}
-                  aria-label="Dose"
-                  onChange={(e) => p.setSteers((a) => a.map((x, j) => (j === i ? { ...x, dose: Math.max(-3, Math.min(3, +e.target.value || 0)) } : x)))}
+                  aria-label={mul ? "Factor" : "Dose"}
+                  onChange={(e) => patch((x) => ({ ...x, dose: Math.max(mul ? 0 : -3, Math.min(mul ? 4 : 3, +e.target.value || 0)) }))}
                 />
               </div>
               <div className="sub">
-                dose {fmtDose(s.dose)} writes {Math.abs(Math.round(wl * 10) / 10)} units {s.dose < 0 ? "against" : "along"} the neuron&apos;s direction: {fmtDose(s.dose)} {"×"} {Math.round(meta.resNormMedian[s.layer] * 10) / 10} (a typical residual length at L{s.layer}). That is {fmtDose(Math.round(dl * 10) / 10)} on the neuron&apos;s activation.
+                {mul ? (
+                  <>
+                    activation {"×"} {Math.round(s.dose * 100) / 100}: {s.dose === 0 ? "the neuron is switched off." : s.dose === 1 ? "no change." : s.dose < 1 ? "it is damped." : "it is amplified."} Applied at every position.
+                  </>
+                ) : (
+                  <>
+                    dose {fmtDose(s.dose)} writes {Math.abs(Math.round(wl * 10) / 10)} units {s.dose < 0 ? "against" : "along"} the neuron&apos;s direction: {fmtDose(s.dose)} {"×"} {Math.round(meta.resNormMedian[s.layer] * 10) / 10} (a typical residual length at L{s.layer}). That is {fmtDose(Math.round(dl * 10) / 10)} on the neuron&apos;s activation.
+                  </>
+                )}
               </div>
             </div>
           )
