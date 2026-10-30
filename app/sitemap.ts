@@ -35,6 +35,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     "/snippets",
     "/notes",
     "/colophon",
+    "/lab/neuron-lab",
     "/changelog",
     "/developers",
     "/developers/versioning",
