@@ -1,4 +1,4 @@
-import type { Context, Discovery, Edge, LayerLens, ModelMeta, NeuronKey } from "./types"
+import type { AxisFinding, Context, Discovery, Edge, LayerLens, ModelMeta, NeuronKey } from "./types"
 import { nkey } from "./types"
 
 // Loads the static JSON the DATA pipeline publishes. Tolerant on purpose: the edge and discovery
@@ -76,9 +76,21 @@ export async function loadLinks(): Promise<Map<NeuronKey, Edge[]>> {
 }
 
 export async function loadDiscoveries(): Promise<Discovery[]> {
-  const raw = await getJson<Discovery[] | { discoveries: Discovery[] }>("discoveries.json")
+  const raw = await getJson<Discovery[] | { discoveries?: Discovery[]; items?: Discovery[] }>("discoveries.json")
   if (!raw) return []
-  return Array.isArray(raw) ? raw : (raw.discoveries ?? [])
+  return Array.isArray(raw) ? raw : (raw.items ?? raw.discoveries ?? [])
+}
+
+/** Every axis we searched, including the misses. Lives beside the data folder: qwen3-0.6b-findings.json. */
+export async function loadFindings(): Promise<AxisFinding[]> {
+  try {
+    const r = await fetch(`${DATA_BASE}-findings.json`)
+    if (!r.ok) return []
+    const j = (await r.json()) as { axes?: AxisFinding[] }
+    return Array.isArray(j.axes) ? j.axes : []
+  } catch {
+    return []
+  }
 }
 
 /** The reverse of `feeds`: which earlier neurons feed this one. */
