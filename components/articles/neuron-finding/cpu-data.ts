@@ -17,26 +17,57 @@ export type CpuRun = {
   confirmed: { layer: number; neuron: number; dose: number; hits: number; of: number; src: string; verdict: string }[]
   samples: string[]
   layers: number[]
+  anyHit: number
+  nonControl: number
+  controlAnyHit: number
+  controlN: number
+  degenerateShare: number
+  earlier: { layer: number; neuron: number; dose: number; hit: number }[]
 }
 
 export const CPU_RUNS: CpuRun[] = [
  {
+  "anyHit": 7,
+  "nonControl": 86,
+  "controlAnyHit": 0,
+  "controlN": 12,
+  "degenerateShare": 0.25,
+  "earlier": [
+   {
+    "layer": 16,
+    "neuron": 477,
+    "dose": 0.8,
+    "hit": 0.0
+   },
+   {
+    "layer": 16,
+    "neuron": 477,
+    "dose": 1.5,
+    "hit": 0.0
+   }
+  ],
   "target": "french",
   "bySource": {
    "read": {
-    "settings": 20,
-    "mean_hit": 0.062,
-    "frac_ge_0375": 0.1,
-    "best": 0.625
+    "settings": 40,
+    "mean_hit": 0.031,
+    "frac_ge_0375": 0.05,
+    "best": 0.375
    },
    "write": {
-    "settings": 20,
-    "mean_hit": 0.05,
-    "frac_ge_0375": 0.05,
-    "best": 0.625
+    "settings": 40,
+    "mean_hit": 0.003,
+    "frac_ge_0375": 0.0,
+    "best": 0.125
+   },
+   "both": {
+    "settings": 6,
+    "mean_hit": 0.0,
+    "frac_ge_0375": 0.0,
+    "best": 0.0
    },
    "control": {
-    "settings": 1,
+    "settings": 12,
     "mean_hit": 0.0,
     "frac_ge_0375": 0.0,
     "best": 0.0
@@ -45,48 +76,392 @@ export const CPU_RUNS: CpuRun[] = [
   "best": {
    "layer": 22,
    "neuron": 245,
-   "dose": -1.0,
-   "hits": 6,
+   "dose": -1.5,
+   "hits": 10,
    "of": 32,
-   "src": "read+write"
+   "src": "read"
   },
   "nullP95": 0.0,
   "verdict": "partial",
-  "totalS": 1136,
+  "totalS": 854,
   "timing": {
-   "load_s": 7.4,
-   "pairs_s": 77.9,
-   "baseline_s": 14.5,
-   "read_screen_s": 15.3,
-   "write_screen_s": 30.1,
-   "steer_screen_s": 868.1,
-   "steer_screen_sequences": 272,
-   "steer_screen_seq_per_s": 0.31,
-   "confirm_s": 122.3,
-   "total_s": 1135.8,
-   "peak_rss_gb": 5.21
+   "load_s": 174.2,
+   "pairs_s": 57.4,
+   "baseline_s": 24.0,
+   "read_screen_s": 39.1,
+   "write_screen_s": 114.7,
+   "steer_screen_s": 404.9,
+   "steer_screen_sequences": 784,
+   "steer_screen_seq_per_s": 1.94,
+   "confirm_s": 40.0,
+   "total_s": 854.4,
+   "peak_rss_gb": 5.19
   },
-  "nCandidates": 33,
-  "nControls": 1,
+  "nCandidates": 43,
+  "nControls": 6,
   "doses": [
-   1.0
+   0.8,
+   1.5
   ],
   "confirmed": [
    {
     "layer": 22,
     "neuron": 245,
-    "dose": -1.0,
-    "hits": 6,
+    "dose": -1.5,
+    "hits": 10,
     "of": 32,
-    "src": "read+write",
+    "src": "read",
+    "verdict": "partial"
+   },
+   {
+    "layer": 19,
+    "neuron": 920,
+    "dose": 0.8,
+    "hits": 9,
+    "of": 32,
+    "src": "read",
+    "verdict": "partial"
+   },
+   {
+    "layer": 24,
+    "neuron": 202,
+    "dose": -1.5,
+    "hits": 1,
+    "of": 32,
+    "src": "read",
     "verdict": "partial"
    }
   ],
   "samples": [
-   "Quisquis, a debovente, a l’acèd",
-   "Quisquis de quos quisquis? Signa, in quo in",
-   "Quem você é? É uma empoção de uma lumiante em",
-   "Hola, debo esqvarar por tantumè de la qne"
+   "Quévoa de de de de de de de de de de de de",
+   "Qué a de quarà, qui alce què de sant",
+   "Quéé la la la la de la la la la de la la la",
+   "Santé Épéúde �argèèpà, de"
+  ],
+  "layers": [
+   5,
+   25
+  ]
+ },
+ {
+  "anyHit": 26,
+  "nonControl": 92,
+  "controlAnyHit": 1,
+  "controlN": 12,
+  "degenerateShare": 0.248,
+  "earlier": [],
+  "target": "space",
+  "bySource": {
+   "read": {
+    "settings": 42,
+    "mean_hit": 0.173,
+    "frac_ge_0375": 0.238,
+    "best": 0.875
+   },
+   "both": {
+    "settings": 2,
+    "mean_hit": 0.25,
+    "frac_ge_0375": 0.5,
+    "best": 0.375
+   },
+   "write": {
+    "settings": 48,
+    "mean_hit": 0.018,
+    "frac_ge_0375": 0.021,
+    "best": 0.375
+   },
+   "control": {
+    "settings": 12,
+    "mean_hit": 0.031,
+    "frac_ge_0375": 0.083,
+    "best": 0.375
+   }
+  },
+  "best": {
+   "layer": 6,
+   "neuron": 1185,
+   "dose": 0.8,
+   "hits": 30,
+   "of": 32,
+   "src": "read"
+  },
+  "nullP95": 0.375,
+  "verdict": "found",
+  "totalS": 473,
+  "timing": {
+   "load_s": 1.8,
+   "pairs_s": 24.7,
+   "baseline_s": 11.6,
+   "read_screen_s": 11.4,
+   "write_screen_s": 24.0,
+   "steer_screen_s": 359.1,
+   "steer_screen_sequences": 832,
+   "steer_screen_seq_per_s": 2.32,
+   "confirm_s": 40.4,
+   "total_s": 473.0,
+   "peak_rss_gb": 5.21
+  },
+  "nCandidates": 46,
+  "nControls": 6,
+  "doses": [
+   0.8,
+   1.5
+  ],
+  "confirmed": [
+   {
+    "layer": 6,
+    "neuron": 1185,
+    "dose": 0.8,
+    "hits": 30,
+    "of": 32,
+    "src": "read",
+    "verdict": "found"
+   },
+   {
+    "layer": 7,
+    "neuron": 2582,
+    "dose": 0.8,
+    "hits": 17,
+    "of": 32,
+    "src": "read",
+    "verdict": "found"
+   },
+   {
+    "layer": 22,
+    "neuron": 2617,
+    "dose": 1.5,
+    "hits": 16,
+    "of": 32,
+    "src": "read",
+    "verdict": "found"
+   }
+  ],
+  "samples": [
+   "### Who Are You?\n\nOur Solar System\n\nOur solar system is a disk of",
+   "### The Star of the Moon: Neptune\n\nNeptune is a planet located in",
+   "### Our Solar System\n\nThe question is asking for the solar system, which is",
+   "### Who are you?\n\nOur solar system is a close, spinning system of planets"
+  ],
+  "layers": [
+   5,
+   25
+  ]
+ },
+ {
+  "anyHit": 18,
+  "nonControl": 92,
+  "controlAnyHit": 1,
+  "controlN": 12,
+  "degenerateShare": 0.203,
+  "earlier": [],
+  "target": "cooking",
+  "bySource": {
+   "read": {
+    "settings": 46,
+    "mean_hit": 0.092,
+    "frac_ge_0375": 0.13,
+    "best": 0.75
+   },
+   "both": {
+    "settings": 2,
+    "mean_hit": 0.438,
+    "frac_ge_0375": 1.0,
+    "best": 0.5
+   },
+   "write": {
+    "settings": 44,
+    "mean_hit": 0.003,
+    "frac_ge_0375": 0.0,
+    "best": 0.125
+   },
+   "control": {
+    "settings": 12,
+    "mean_hit": 0.01,
+    "frac_ge_0375": 0.0,
+    "best": 0.125
+   }
+  },
+  "best": {
+   "layer": 7,
+   "neuron": 3054,
+   "dose": 0.8,
+   "hits": 21,
+   "of": 32,
+   "src": "read"
+  },
+  "nullP95": 0.125,
+  "verdict": "found",
+  "totalS": 469,
+  "timing": {
+   "load_s": 1.8,
+   "pairs_s": 24.9,
+   "baseline_s": 11.7,
+   "read_screen_s": 11.2,
+   "write_screen_s": 24.0,
+   "steer_screen_s": 354.1,
+   "steer_screen_sequences": 832,
+   "steer_screen_seq_per_s": 2.35,
+   "confirm_s": 41.4,
+   "total_s": 469.1,
+   "peak_rss_gb": 5.21
+  },
+  "nCandidates": 46,
+  "nControls": 6,
+  "doses": [
+   0.8,
+   1.5
+  ],
+  "confirmed": [
+   {
+    "layer": 7,
+    "neuron": 3054,
+    "dose": 0.8,
+    "hits": 21,
+    "of": 32,
+    "src": "read",
+    "verdict": "found"
+   },
+   {
+    "layer": 6,
+    "neuron": 2154,
+    "dose": -1.5,
+    "hits": 18,
+    "of": 32,
+    "src": "read",
+    "verdict": "found"
+   },
+   {
+    "layer": 22,
+    "neuron": 1530,
+    "dose": 0.8,
+    "hits": 17,
+    "of": 32,
+    "src": "read+write",
+    "verdict": "found"
+   }
+  ],
+  "samples": [
+   "# Step 1: Prepare the ingredients\n\n## Step 1: Get the",
+   "# Basic Recipe\n\n## Steps to follow\n\n### Step 1: Learn the",
+   "# Step 1: Choose a Way to Use This Recipe\n\n## Option",
+   "# Step 1: Making the Base Recipe\n\n## Step 1.1"
+  ],
+  "layers": [
+   5,
+   25
+  ]
+ },
+ {
+  "anyHit": 11,
+  "nonControl": 86,
+  "controlAnyHit": 0,
+  "controlN": 12,
+  "degenerateShare": 0.075,
+  "earlier": [
+   {
+    "layer": 16,
+    "neuron": 477,
+    "dose": 0.3,
+    "hit": 0.25
+   },
+   {
+    "layer": 16,
+    "neuron": 477,
+    "dose": 0.6,
+    "hit": 0.0
+   }
+  ],
+  "target": "french, low dose",
+  "bySource": {
+   "write": {
+    "settings": 40,
+    "mean_hit": 0.013,
+    "frac_ge_0375": 0.025,
+    "best": 0.5
+   },
+   "read": {
+    "settings": 40,
+    "mean_hit": 0.034,
+    "frac_ge_0375": 0.0,
+    "best": 0.25
+   },
+   "both": {
+    "settings": 6,
+    "mean_hit": 0.104,
+    "frac_ge_0375": 0.0,
+    "best": 0.25
+   },
+   "control": {
+    "settings": 12,
+    "mean_hit": 0.0,
+    "frac_ge_0375": 0.0,
+    "best": 0.0
+   }
+  },
+  "best": {
+   "layer": 8,
+   "neuron": 122,
+   "dose": 0.3,
+   "hits": 13,
+   "of": 32,
+   "src": "write"
+  },
+  "nullP95": 0.0,
+  "verdict": "found",
+  "totalS": 448,
+  "timing": {
+   "load_s": 1.9,
+   "pairs_s": 24.0,
+   "baseline_s": 11.8,
+   "read_screen_s": 10.8,
+   "write_screen_s": 23.1,
+   "steer_screen_s": 335.7,
+   "steer_screen_sequences": 784,
+   "steer_screen_seq_per_s": 2.34,
+   "confirm_s": 40.8,
+   "total_s": 448.1,
+   "peak_rss_gb": 5.21
+  },
+  "nCandidates": 43,
+  "nControls": 6,
+  "doses": [
+   0.3,
+   0.6
+  ],
+  "confirmed": [
+   {
+    "layer": 8,
+    "neuron": 122,
+    "dose": 0.3,
+    "hits": 13,
+    "of": 32,
+    "src": "write",
+    "verdict": "found"
+   },
+   {
+    "layer": 7,
+    "neuron": 130,
+    "dose": 0.3,
+    "hits": 9,
+    "of": 32,
+    "src": "read+write",
+    "verdict": "partial"
+   },
+   {
+    "layer": 5,
+    "neuron": 136,
+    "dose": -0.6,
+    "hits": 4,
+    "of": 32,
+    "src": "read",
+    "verdict": "partial"
+   }
+  ],
+  "samples": [
+   "Who sind Sie?",
+   "Who sind Sie?",
+   "I am the assistant. Who êtes-vous? (I am the assistant. Who",
+   "Who sind Sie?"
   ],
   "layers": [
    5,
