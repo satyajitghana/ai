@@ -1,0 +1,175 @@
+---
+title: "LFM3-1.7B: what \"tri-hybrid\" means in the config, and what it does to the cache"
+description: "Liquid AI released the LFM3 family on 27 October 2026. I read the config, the safetensors header, the modelling code and the licence for the 1.7B text model, then wrote my own forward pass from the code and ran it on the real weights. Of 24 layers, 13 are gated short convolutions with a width-7 window, 5 are sliding-window attention over 256 tokens and 6 are full attention, so the cache is a quarter of a full-attention stack at long context. On a loaded CPU the layout decodes 3.2 times faster than 24 full layers at 64K tokens and no faster below 4K. The model card's own table has it winning 14 of 29 benchmarks against Qwen3.5-9B and losing 15, the largest loss on RULER at 128K."
+date: 2026-10-30
+updated: 2026-10-30
+tags:
+  - liquid-ai
+  - lfm3
+  - hybrid-architecture
+  - kv-cache
+  - on-device
+  - long-context
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 2
+  unique: 2
+  why: "Layout, parameter and cache counts from config and header; card table recounted; own forward pass answers on real weights. No bf16 reference, no benchmarks run."
+topic: llm-architecture
+kind: model
+level: practitioner
+runsOn: cpu
+licence: custom
+---
+
+import { LayerStrip } from "@/components/articles/lfm3/layer-strip"
+import { CacheCalc } from "@/components/articles/lfm3/cache-calc"
+import { StepCost } from "@/components/articles/lfm3/step-cost"
+import { CardDeltas } from "@/components/articles/lfm3/card-deltas"
+
+Liquid AI announced LFM3 on 27 October. The family has six models of about 2B parameters: text, vision, audio, omni, and two decision models. The one I read is the text model, [LiquidAI/LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B). Liquid calls its architecture "tri-hybrid" and says it was found by an automated search that measures real devices.
+
+I wanted to know what that word means in files. So I read `config.json`, the safetensors header, `modeling_lfm3.py`, the licence and the model card, and then wrote my own forward pass from the code and ran it on the real weights. This page says which numbers I measured, which I only read, and which are Liquid's claims. Those are marked **measured**, **reasoned** and **reported**.
+
+## What was released
+
+**Reported**, from [Liquid's thread](https://x.com/liquidai/status/2115128329003303107) and its [blog post](https://www.liquid.ai/blog/lfm3):
+
+- `LFM3-1.7B`: text, 256K context. `LFM3-VL-2B`: vision and video. `LFM3-Audio-2B`: voice and tool calls in 18 languages. `LFM3-Omni-2B`: all three. `d1-2B` and `d1-Omni-2B`: decision models with typed outputs.
+- All six branch from one `LFM3-1.7B-Base`, pre-trained on 22T tokens, 3.5T of them a mid-training stage that adds agent traces and extends context to 256K.
+- Liquid says the 1.7B text model beats its own 2.6B predecessor with 35% fewer parameters, and that it fits in about 1 GB at 4-bit.
+- The weights come in many forms. The Hub lists BF16, FP8, NVFP4, GGUF, MLX at four to eight bits and ONNX variants (**measured**, from the Hub listing).
+
+## The layout in `config.json`
+
+**Measured.** The config lists a type for each of 24 layers. I counted them. There are 13 `conv`, 5 `sliding_attention` and 6 `full_attention`. The model card says the same. Pick a layer below to see what it holds.
+
+<LayerStrip />
+
+The pattern is regular. Layers 0 and 1 are convolutions. From layer 2 to layer 22 every even layer is attention, alternating full and windowed, starting with full: full at 2, 6, 10, 14, 18 and 22, windowed at 4, 8, 12, 16 and 20. Every odd layer from 3 to 23 is a convolution. So one layer in four reads the whole context, one in four reads a 256-token window, and the rest look only at a width-7 window.
+
+## What each block is
+
+**Measured**, from reading `modeling_lfm3.py` and `lfm3_conv.py`. I did not run that code: it needs `trust_remote_code`, and the `transformers` I have installed knows `lfm2` but not `lfm3`.
+
+**The gated short convolution** is the block LFM2 introduced. A linear layer maps the 2,048-wide input to three streams, `B`, `C` and `x`. It multiplies `B` and `x`, runs the product through a depthwise causal convolution, multiplies by `C`, and projects out:
+
+```python
+B, C, x = in_proj(h).chunk(3)          # in_proj: 2048 -> 6144
+y = C * depthwise_conv1d(B * x, k=7)   # width 7, one filter per channel, no bias
+out = out_proj(y)                      # 2048 -> 2048
+```
+
+Each channel is filtered on its own along the sequence, so a token sees only the last seven positions of its own channel. At decode time the layer keeps the last six inputs per channel and nothing else. Liquid says the kernel is 7 wide, up from 3 in LFM2 (**reported**). The code ships Triton kernels for it, one for prefill and one for single-token decode.
+
+**The attention layers** are Llama-style grouped-query attention with four additions, all visible in the code:
+
+- 16 query heads share 4 key-value heads of 128 dimensions.
+- Queries and keys are RMS-normalised per head before RoPE.
+- A sigmoid gate computed from the layer input scales each head's output (`gate_proj`, 2,048 to 16). Liquid says this lets a head switch off and helps quantization (**reported**).
+- The two kinds differ in position handling. Full layers use RoPE base 1,000,000 and rotate only half of each head: the first 32 of 64 frequency pairs rotate and the other 32 have a frequency of zero, so those dimensions carry content with no position. Windowed layers use base 10,000 with full rotation and a 256-token window.
+
+**The rest of the layer.** Every layer, of either kind, then runs a SwiGLU MLP with `w1`, `w3` and `w2` at width 7,680. There is a norm before and after the mixer and before and after the MLP. Liquid calls that sandwich norm. A last RMSNorm, named `embedding_norm`, runs after layer 23. The output matrix is the tied embedding.
+
+```python
+x = x + post_operator_norm(mixer(operator_norm(x)))   # conv or attention
+x = x + post_ffn_norm(mlp(ffn_norm(x)))
+```
+
+## Where the parameters are
+
+**Measured**, summed from the 286 tensor shapes in the safetensors header, which total 1,728,801,536 parameters.
+
+| Part | Count | Parameters each | Mixer | MLP |
+|---|---|---|---|---|
+| Convolution layer | 13 | 63,985,664 | 16,791,552 | 47,185,920 |
+| Attention layer (either kind) | 11 | 57,712,896 | 10,518,784 | 47,185,920 |
+| Embedding, tied with the output | 1 | 262,144,000 | | |
+
+The MLP is 1,132,462,080 parameters, which is 77% of the 1,466,657,536 outside the embedding. The embedding is 15% of the total. A convolution layer holds more weights than an attention layer, because its two projections are larger (12.6M and 4.2M, against 10.5M for the whole attention mixer). The convolution is cheap in compute but not small in weights. That matters at short context, where decoding reads the weights and little else.
+
+## What the cache costs
+
+**Reasoned**, from the shapes above. Each attention layer stores a key and a value per token: 2 × 4 heads × 128 dimensions × 2 bytes, which is 2,048 bytes in bf16. The six full layers grow with context. The five windowed layers stop growing at 256 tokens. A convolution layer keeps 6 × 2,048 values, 24,576 bytes, and never grows.
+
+At 262,144 tokens that is 3,072 MiB for the full layers, 2.5 MiB for the windowed ones and 0.3 MiB for the convolutions, 3,075 MiB in all. A stack of 24 full-attention layers with the same key-value shape would need 12,288 MiB. Move the slider.
+
+<CacheCalc />
+
+The ratio is not a magic number. It is 24 over 6, approached from below as the windowed and convolution layers become negligible. Below about 4K tokens it is smaller, because the convolutions' 0.3 MiB and the windows' 2.5 MiB are a visible part of a small total.
+
+Three gibibytes at 256K is still a lot for a phone. Liquid's "about 1 GB" is the 4-bit weights, not the cache (**reported**). A cache quantized to 8 bits would halve the 3 GiB, and a window over the full layers would shrink it further, but neither is in the release (**reasoned**).
+
+## Writing it myself
+
+**Measured.** If I misread a detail of the block, the model would not talk. So I wrote a single-token forward pass in under 200 lines of PyTorch from the code I had read, streamed the real weights from the Hub over Range requests, held the linear layers as per-row int8 and ran them with PyTorch's dynamic int8 kernel. The script is `lfm3_ref.py` in the [files for this article](/articles/lfm3/lfm3_ref.py).
+
+It answered "What is C. elegans?" with "C. elegans, also known as the roundworm or C. elegans, is a small, free-living nematode (a type of roundworm) that has been extensively studied in molecular and developmental biology." It gave three sensible sleep tips. It translated "The library closes at six." to "La bibliothèque ferme à six heures."
+
+That is evidence for the structure, not for the numbers. A wrong norm order, a swapped gate or the wrong RoPE layout would give nonsense in a model with 24 layers, and this one does not. But I compared no logits against a reference, since that would mean running Liquid's code, and the int8 weights and activations move every logit. The speed is not a benchmark either: 1.1 to 1.3 seconds a token in a Python loop on a shared CPU, with the 18- and 22-token prompts taking 17 to 27 seconds to prefill one token at a time.
+
+## Cost against context
+
+**Measured**, with a caveat that matters. `bench_layers.py` times one decode step for each kind of layer on CPU with random weights of the real shapes, and the attention core alone at each context length. The machine was shared and its load average was 10 to 12 on four cores, so the milliseconds are inflated and noisy. I took the best of 15 repeats, then the best of three runs for each piece. Read the shape and the ratio, not the milliseconds.
+
+<StepCost />
+
+The attention core grows with context, as it must: 0.35 ms per layer at 1K tokens, 55.9 ms at 16K and 378 ms at 128K in my fp32 loop. The convolution and windowed layers do not grow. Adding the fixed costs, the layout and a hypothetical stack of 24 full layers cross near 4K tokens. At 16K the layout is 2.2 times cheaper per token, at 64K 3.2 times and at 128K 3.5 times.
+
+Below 4K the layout is slightly slower, about 0.9 times the speed at 256 tokens. That fits the parameter table. A convolution layer is 64.0M parameters and an attention layer 57.7M, and with nothing to attend to the weights are the whole cost. The ceiling is 4, for the same reason as in the cache: 6 of 24 layers are all that grow (**reasoned**). This is a CPU microbenchmark of an unoptimised loop. It says nothing about a GPU, a phone or an NPU.
+
+Liquid's own speed claims are on devices I do not have. **Reported**:
+
+- At 32K context, Q4_0 in llama.cpp, LFM3-1.7B prefills at least 2.5 times and decodes at least 1.8 times faster than the compared models on an AMD Ryzen AI Max+ 395, an Apple M5 Max and an iPhone 17 Pro, with the lowest memory.
+- Per parameter it matches LFM2-1.2B on short prompts, and with 8K tokens in context it is about 25% faster.
+- [Xenova](https://x.com/xenovacom/status/2115277783022862613) shows a coding agent running it in the browser at over 300 tokens a second on an M4 Max with custom WebGPU kernels and 4-bit GGUF weights.
+- [A Locals post](https://x.com/machinestein/status/2115346395817275869) quotes 620 tokens a second on an M2 with 16 GB, three times faster than `mlx-lm`, and says the speed is with 8 agents. That reads as aggregate throughput, not one stream.
+
+## What the benchmark claim says
+
+**Reported**, then recounted by me. The model card has a table of 29 benchmarks for six models and says the 1.7B model "can power agentic applications that used to need 9B parameters." I parsed the table. The card's Average row is the unweighted mean of every score, and I recomputed it: 49.37 for LFM3-1.7B and 47.24 for Qwen3.5-9B. Per benchmark, though, the 1.7B model wins 14 against the 9B and loses 15. Against Qwen3.5-4B it wins 22 and loses 7.
+
+<CardDeltas />
+
+The wins are large where they happen. AutomationBench is 41.29 against 15.10. IFBench is 73.03 against 48.84. WebArena-Verified is 38.42 against 28.94 and LiveClaw is 45.60 against 35.77. The losses are in knowledge and long context: RULER at 128K is 65.56 against 87.11, GPQA Diamond 63.37 against 80.40, SWE-bench Multilingual 23.0 against 35.0 and MCP-Atlas 32.57 against 42.67. So the average is real and the claim is narrower than it sounds. It holds for agent-style tasks, and it fails where the question needs a lot of knowledge or a long retrieval.
+
+The long-context rows are the ones the layout bears on. RULER at 128K is the largest gap, and only six layers can read across 128K tokens. I did not test whether the two are connected, and AA-LCR is level with Qwen3.5-4B (52.83 and 52.67), so I would not say they are (**reasoned**). The point is that the cheap cache has a cost somewhere, and the card's table is where to look for it.
+
+## What the search is and is not
+
+**Reported.** Liquid says an automated search, run against 14 device and backend combinations, chose the architecture. The list is two phones (Galaxy S26 Ultra, OnePlus 15), a Raspberry Pi 5, two laptops (Apple M4 Max, AMD Ryzen AI), Arm and x86 cloud CPUs, GPUs and the Qualcomm Hexagon NPU. The search scores quality together with measured speed and memory on those targets. For LFM2 it ran on CPUs in one phone and one laptop.
+
+The files show the result, not the search. The result looks like a template: a repeating unit of convolution, attention and convolution, with the attention alternating between full and windowed. The blog says windowed attention replaced some convolutions because it gave the best trade between quality and speed. I cannot say what was searched over, which layouts lost, or how much of the 13, 5 and 6 came from the search and how much was chosen by hand.
+
+## The licence
+
+**Measured**, from the `LICENSE` file. It is the LFM Open License v1.0, labelled `other` on the Hub. It reads like Apache 2.0 with one addition. Section 5 says the commercial rights apply only if you or your legal entity are below a threshold of \$10,000,000 in annual revenue. A commercial use above it is not licensed. Qualified non-profits are exempt for non-commercial and research use. Redistribution needs a copy of the licence and a notice on changed files, and derivative works carry the same terms. So a fine-tune of this model for a company above \$10M in revenue needs a separate agreement. The modelling files carry Apache 2.0 headers, and the card says to load them with `trust_remote_code`.
+
+## What I did not do
+
+- I ran no benchmarks. Every score here is Liquid's.
+- I have no bf16 reference, so the forward pass is checked by what it says and not by its logits.
+- I did not read the vision, audio, omni or decision models. The 1.7B text model is the only one in this article.
+- The speed claims for the M5 Max, the iPhone, the M4 Max and the M2 are Liquid's and other people's. My timings are from a loaded CPU.
+- I did not test the long-context link. A model that holds 128K tokens in six full layers is a hypothesis I can state and cannot check from the files.
+
+What would settle it is the same table with the layout varied: the same data and recipe with 6, 12 and 24 full-attention layers. Liquid has the runs. The files do not.
+
+## Files
+
+The scripts and raw outputs are under `/articles/lfm3/`: [`lfm3_ref.py`](/articles/lfm3/lfm3_ref.py), [`bench_layers.py`](/articles/lfm3/bench_layers.py), [`bench_combine.py`](/articles/lfm3/bench_combine.py), [`bench_final.json`](/articles/lfm3/bench_final.json), [`gen.json`](/articles/lfm3/gen.json), the model card's table as [`card_table.json`](/articles/lfm3/card_table.json) and the safetensors header as [`header.json`](/articles/lfm3/header.json). The weights are not in this repository. The scripts fetch them from the Hub.
+
+<ModelCard repo="LiquidAI/LFM3-1.7B" />
+
+## Sources
+
+- [LFM3-1.7B on the Hub](https://huggingface.co/LiquidAI/LFM3-1.7B): config, code, licence and model card.
+- [Introducing LFM3](https://www.liquid.ai/blog/lfm3), 27 October 2026.
+- [Liquid AI's announcement thread](https://x.com/liquidai/status/2115128329003303107) and the [search post](https://x.com/liquidai/status/2115128333054964049).
+- [Xenova's browser demo post](https://x.com/xenovacom/status/2115277783022862613) and the [Locals post](https://x.com/machinestein/status/2115346395817275869).
