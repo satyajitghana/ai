@@ -45,7 +45,9 @@ export interface Edge {
 export interface Steer {
   layer: number
   neuron: number
+  /** add mode: a dose in residual-norm units. mul mode: the factor the activation is multiplied by (1 = unchanged, 0 = ablated). */
   dose: number
+  mode?: "add" | "mul"
 }
 
 export interface DiscoverySample {
@@ -54,14 +56,43 @@ export interface DiscoverySample {
   steered: string
 }
 
+export interface DiscoveryEvidence {
+  contrastScore?: number
+  dEven?: number
+  dOdd?: number
+  /** change in axis words per 100 words against the unsteered model, and the bar it had to clear */
+  lift?: number
+  minLift?: number
+  perplexity?: number
+  baselinePerplexity?: number
+  controlScores?: {
+    bestRandomLiftAtDose?: number
+    randomPerplexityRange?: [number, number]
+    stage1BestRandomLifts?: number[]
+  }
+}
+
 export interface Discovery {
   id: string
   label: string
   axis: string
+  kind?: "single" | "pair"
   neurons: Steer[]
-  evidence?: { contrastScore?: number; controlScores?: number[] }
+  evidence?: DiscoveryEvidence
   samples: DiscoverySample[]
   coherenceNote?: string
+}
+
+/** One axis of the search, hits and misses alike (qwen3-0.6b-findings.json). */
+export interface AxisFinding {
+  axis: string
+  label: string
+  kind: string
+  verdict: "works" | "miss"
+  contrast: { setA: number; setB: number; topAbsD: number; randomMeanAbsD: number; randomP99AbsD: number; splitHalfReplicated_top40: number }
+  screened: number
+  controlsStage1: { n: number; top: number[]; meanBestLift: number }
+  scores?: { minLift?: number; baselinePerplexity?: number; pairsTried?: number; pairsWorking?: number }
 }
 
 export type NeuronKey = `${number}.${number}`

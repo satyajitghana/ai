@@ -33,7 +33,7 @@ export interface BatchCtx { streams: KVStream[]; deltas: (NonNullable<StepHooks[
 
 export interface StepHooks {
   /** Per layer: neuron indices and activation shifts to add to silu(gate)*up at every position. */
-  deltas?: ({ n: Int32Array; d: Float32Array } | null)[]
+  deltas?: ({ n: Int32Array; d: Float32Array; mn?: Int32Array; mf?: Float32Array } | null)[]
   /** Called with each layer's hidden activations [T][intermediate] after any delta (for statistics). */
   onHidden?: (layer: number, h: Float32Array, t0: number, nTok: number) => void
 }
@@ -193,13 +193,22 @@ export class Qwen3Core {
   }
 
   buildDeltas(steers: Steer[]): NonNullable<StepHooks["deltas"]> {
-    const per: ({ n: number[]; d: number[] } | null)[] = new Array(this.nLayer).fill(null)
+    const per: ({ n: number[]; d: number[]; mn: number[]; mf: number[] } | null)[] = new Array(this.nLayer).fill(null)
     for (const s of steers) {
+      if (s.mode === "mul") {
+        // multiply mode: the activation of the neuron is scaled by `dose` (1 = unchanged, 0 = ablated)
+        if (!(s.layer >= 0 && s.layer < this.nLayer && s.neuron >= 0 && s.neuron < this.inter)) throw new Error(`no such neuron ${s.layer}.${s.neuron}`)
+        if (!Number.isFinite(s.dose)) throw new Error("multiply factor must be a number")
+        if (s.dose === 1) continue
+        const e = (per[s.layer] ??= { n: [], d: [], mn: [], mf: [] })
+        e.mn.push(s.neuron); e.mf.push(s.dose)
+        continue
+      }
       if (!s.dose && typeof s.delta !== "number") continue
-      const e = (per[s.layer] ??= { n: [], d: [] })
+      const e = (per[s.layer] ??= { n: [], d: [], mn: [], mf: [] })
       e.n.push(s.neuron); e.d.push(this.deltaFor(s))
     }
-    return per.map((e) => (e ? { n: Int32Array.from(e.n), d: Float32Array.from(e.d) } : null))
+    return per.map((e) => (e ? { n: Int32Array.from(e.n), d: Float32Array.from(e.d), mn: Int32Array.from(e.mn), mf: Float32Array.from(e.mf) } : null))
   }
 
   private ensureCap(n: number) {
@@ -377,7 +386,11 @@ export class Qwen3Core {
       for (let i = 0; i < T * I; i++) { const a = g[i]; qin[i] = (a / (1 + Math.exp(-a))) * u[i] }
       for (let t = 0; t < T; t++) {
         const dl = batch ? batch.deltas[t]?.[l] : hooks.deltas?.[l]
-        if (dl) for (let j = 0; j < dl.n.length; j++) qin[t * I + dl.n[j]] += dl.d[j]
+        if (dl) {
+          // scale first, then shift, so a neuron in both lists behaves like the studio's multiply-then-add
+          if (dl.mn) for (let j = 0; j < dl.mn.length; j++) qin[t * I + dl.mn[j]] *= dl.mf![j]
+          for (let j = 0; j < dl.n.length; j++) qin[t * I + dl.n[j]] += dl.d[j]
+        }
       }
       if (hooks.onHidden) hooks.onHidden(l, qin, c0, T)
       this.quant(I, T)
