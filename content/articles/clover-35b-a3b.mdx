@@ -1,0 +1,248 @@
+---
+title: "Clover-35B-A3B: how a diffusion model gets to 680 tokens a second, read from its files"
+description: "DiffuSpace's Clover-35B-A3B-Preview turns Qwen3.6-35B-A3B into a block-diffusion model, and its launch blog reports 680 tokens a second on one GB300 at batch size 1. I did not run it. I read the checkpoint's 813 tensor shapes, its config, its sampler and the SGLang pull request, then asked what the number has to mean: a step reads 5.89 GB per token the usual way, and reaching 515 tokens a second on an H200 takes about 4 to 13 tokens kept per round, depending on assumptions the checkpoint does not settle. Three CPU toys show the mechanisms."
+date: 2026-10-30
+tags:
+  - diffusion-lm
+  - mixture-of-experts
+  - speculative-decoding
+  - gated-deltanet
+  - inference
+  - qwen
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 2
+  unique: 2
+  why: "Reads the shapes, config, sampler and serving PR: 92.9% routed experts, 5.89 GB a token, the accept rule. Our toys, not Clover; no speed measured."
+topic: inference-serving
+kind: model
+level: practitioner
+runsOn: datacenter
+licence: Apache-2.0
+---
+
+import { ParamStack } from "@/components/articles/clover-35b-a3b/param-stack"
+import { BlockDenoiser } from "@/components/articles/clover-35b-a3b/block-denoiser"
+import { AcceptRule } from "@/components/articles/clover-35b-a3b/accept-rule"
+import { StepBudget } from "@/components/articles/clover-35b-a3b/step-budget"
+
+[@DiffuSpace_Labs](https://x.com/DiffuSpace_Labs/status/2115288124691820738) announced Clover-35B-A3B-Preview on 28
+October as "the first open-weight production diffusion language model (dLLM) with 35B total parameters capable of 680
+tps on a single card at BF16." The weights are on the Hub under Apache-2.0. The number comes from the launch blog, which
+says where it was measured: one NVIDIA GB300, BF16, batch size 1, on the team's "internal Agent scenario data" (the blog
+is in Chinese; the translations here are mine).
+
+I did not run Clover. This box has no GPU, the weights are 69 GB, and the model's loader executes the repository's own
+Python. What I could do without any of that is read. I summed the 813 tensor shapes in the safetensors headers by range
+request, read the config and the sampler, and read the SGLang pull request that carries the serving code. That is enough to
+say what the model is, how it writes, and what the speed claim has to be made of. Every claim below is labelled
+**measured** (from the files, or run by me), **reported** (someone else's number) or **reasoned** (my arithmetic on the
+first two).
+
+<RepoCard repo="DiffuSpace/Clover-35B-A3B-Preview" />
+
+<ModelCard repo="Diffuspace/Clover-35B-A3B-Preview" />
+
+## What Clover is
+
+The model card says Clover is "derived from" [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), and the
+config agrees (**measured**): 40 layers, of which 30 are Gated DeltaNet layers and 10 are full attention, in the repeating
+pattern of three recurrent layers and then one attention layer. Every layer has 256 routed experts, routes each token to 8
+of them, and adds one shared expert that is always on. The hidden size is 2,048, the vocabulary is 248,320, and the context
+limit is 131,072 tokens. What is new is in four config keys: `block_size` is 32, `mask_token_id` is 151669, the
+`denoising_config` is `low_confidence` with a threshold of 0.95, and `moe_block_coreset_enabled` is true with a `top_p` of
+0.9.
+
+The licence file preserves the upstream Apache-2.0 text with Alibaba Cloud's 2026 copyright, and the card's header says
+`apache-2.0`. The weights need `trust_remote_code=True`, because the model class, the sampler and the config class are
+Python files in the repository.
+
+<ParamStack />
+
+Summing the shapes (**measured**) gives 34,661,350,848 parameters, which is exactly the Hub's own count. Routed experts
+are 32,212,254,720 of them, 92.93%. One expert is three matrices, gate and up at 2,048 by 512 and down at 512 by 2,048,
+which is 3,145,728 parameters or 6.29 MB in BF16. A token uses the 8 experts its router picks in each of 40 layers, plus
+everything that is not a routed expert: that is 1,006,632,960 expert parameters plus 1,940,536,768 others, 2,947,169,728 in
+all. That is the "3B active" in the name, and in BF16 it is 5.89 GB that a plain decode step must read for every token it
+produces. Keep that figure, because the speed claim is a claim about beating it.
+
+Two details are worth the space. The output head (508,559,360 parameters) is untied from the embedding and is read in full
+at every step, so it is 1.47% of the weights but 17% of the 3B a token touches. And the parts DiffuSpace says it added for
+diffusion are tiny: the `bd_` softmax controls and the right-hand convolution weights total 740,160 parameters, 0.002%. The
+card says Clover adds "bidirectional attention within each block" through "additional learned GDN parameters"; the
+checkpoint shows how little of the file that is. It does not show what else was trained, and there is no paper or training
+code yet: the repository's `sft/` folder says "Coming soon".
+
+## How it writes
+
+An autoregressive model writes one token per forward pass. Clover writes a block of 32. The loop is in
+`modeling_clover_moe.py`, and it is short (**measured**, by reading):
+
+1. Fill a block of 32 slots with the mask token and run the model over it, with the prompt and everything already written
+   in the cache.
+2. For every slot, take the most likely token and its probability. The mask token's logit is set to minus infinity first, so
+   a slot can never "predict" a mask.
+3. Commit every still-masked slot whose probability is above 0.95. If none clears it, commit the single most confident one,
+   so every step makes progress.
+4. Repeat from step 1 until no slot is masked. That takes at most 32 steps and, if the model is sure of everything, one.
+5. Run the finished block through the model again as ordinary causal text to update the cache, and start the next block.
+
+There is nothing mysterious in it. The two numbers that matter are how many slots clear 0.95 on a typical step, and what
+a step costs. The first is a property of the trained model and the text. I cannot measure it without the weights, so the
+widget below shows the rule on a model that is not Clover.
+
+<BlockDenoiser />
+
+I ran the same rule on `distilroberta-base`, a masked language model with 82 million parameters, on CPU: 48 tokens of
+prefix taken from paragraphs of this site, then a block of 16 masked slots with nothing to their right. The model was not
+trained to fill a block this way, and the point of the toy is the rule, not the quality (**measured**, but it is my toy,
+not Clover).
+
+At the 0.95 threshold the model commits 1.16 slots per step on average and needs 13.8 of the 16 possible steps; with a block
+of 32 it commits 1.41 per step and needs 22.7 of 32. Lowering the bar to 0.4 gets it to 2.09 per step in 7.7 steps, and the
+cost shows in the table: the share of neighbouring tokens that are the same token goes from 19% to 43%. The first step
+commits exactly one slot at every threshold, including 0.4: before a neighbour is filled in, at most one slot clears the bar. What gets written
+is mostly page furniture, "ARTICLE CONTINUES BELOW" and runs of equals signs or hash marks, and in 10 of the 24 blocks at
+0.95 a single token fills at least half the slots (a separate pass over the same paragraphs). The blocks match the original
+continuation in under 1% of slots, a weak test since many continuations would be fine, so the repeats are the better
+signal. None of this is a result about Clover. It is the reason Clover is trained for the job: a model that was never
+taught to be sure about slots it cannot yet see commits one slot at a time and fills the rest with noise, and the number
+the blog's speed rests on is how much better the trained model does.
+
+### The expert selection
+
+The fourth config key is the one that makes a block step affordable. In an ordinary MoE forward pass each token picks its
+own 8 experts, and a block of 32 tokens would read the union of 32 such sets. If routing were independent that union would
+be about 163 of the 256 experts in every layer (the closed form is $256(1-(1-8/256)^{32})$, and a simulation agrees with
+it at 163.4), which is 41 GB of expert weights read for one step, nearly two thirds of the 64 GB of experts in the model.
+
+Clover's `coreset_torch` limits that. For a block, it adds up each token's top-8 routing probabilities per expert, sorts
+the experts by that total, keeps the smallest set whose share of the total reaches `top_p` (0.9, and always at least the
+top expert), and forbids every token in the block from routing outside it. The selector runs only in the denoising
+("preview") passes, never in the causal replay that commits a block.
+
+I ran the selector's logic on synthetic router logits, with a knob for how much the 32 tokens of a block share their
+preferences (**measured**, on invented routing; Clover's real routing is not measured). With independent routing a block touches 163.4 of the 256 experts on average, and the selector at 0.9 keeps 126.7 of them.
+When the block's tokens share a preference (a block-wide term added to every token's router scores, in units of the
+per-token noise), the union before the selector shrinks to 79.0, 40.8 and 27.5 experts at weights 1, 2 and 3, and the
+selector at 0.9 keeps 45.5, 16.2 and 8.6. The price is that tokens lose some of their own choices: on average 1.1, 1.2, 1.6
+and 2.5 of a token's 8 slots are re-routed at weights 0, 1, 2 and 3. The real
+correlation is the number that decides the speed claim, and it is not in the checkpoint.
+
+## Two ways to run it
+
+The README lists the backends: the Transformers path does block diffusion denoising only, SGLang does both denoising and
+"self-speculative decoding", and llama.cpp does self-speculative decoding only. The team's reply to the launch thread
+says the self-speculative mode is what reaches "600+ tps". The code is in two pull requests, [SGLang
+\#46927](https://github.com/sgl-project/sglang/pull/46927) and [llama.cpp
+\#31306](https://github.com/ggml-org/llama.cpp/pull/31306); the GitHub repository itself holds a README, a benchmark image
+and an empty fine-tuning folder.
+
+In self-speculative decoding (**measured**, by reading `clover_worker.py` and `clover_utils.py` at the PR's head commit
+2243dc6e), one model plays both roles. A round previews a block of slots with the diffusion pass, then runs the same model
+causally over those candidates, and keeps the longest prefix the causal pass accepts, plus one new token sampled at the
+boundary. If $r$ drafts are accepted the round produces $r+1$ tokens. The block can be 32 or any divisor of it, and a
+setting, `speculative_clover_accept_rule`, picks the test: `exact` keeps a candidate only if it is the causal pass's argmax,
+and `threshold` keeps it if the causal pass gives it probability at least
+
+$$
+\min\bigl(\text{ratio},\ \delta\,e^{-H}\bigr),
+$$
+
+where $H$ is the entropy of the causal distribution at that position. The function's defaults are a ratio of 0.9 and a
+$\delta$ of 0.6. With those defaults the ratio never binds, because $0.6\,e^{-H}$ cannot exceed 0.6: the working threshold is
+$0.6\,e^{-H}$, which asks for probability 0.6 when the model is certain and only 0.22 when its entropy is one nat. That
+makes it a lossy rule: it will accept a draft token the causal model would not have picked, so the output is not the
+causal model's greedy output. (I recognise the form from the typical-acceptance rule of the Medusa line of work, but I did
+not check the source.)
+
+<AcceptRule />
+
+To see what the rule does, I paired a 70-million-parameter drafter with a 160-million-parameter verifier (both Pythia),
+generated 32 tokens for each of 8 paragraphs of this site in rounds of 8 draft tokens (so at most 9 tokens a round), and
+counted what each rule keeps (**measured**, stand-in models and not Clover's own preview pass).
+
+Exact matching keeps 3.55 tokens per round and reproduces the verifier's own greedy text in 90.6% of positions; the gap
+from 100% is most likely floating-point noise between a cached generate and a full forward pass, not the rule (I did not trace it). The threshold rule with
+Clover's default delta of 0.6 keeps 8.69 per round, almost the maximum of 9, and the text agrees with the verifier's in
+12.5% of positions: nearly everything the drafter proposes passes, so the output is closer to the drafter's than to the
+verifier's. Raising delta to 3 gives 5.40 tokens per round and 9.8% agreement, and delta 10 gives 2.33 and 22.3%.
+Agreement is a harsh measure, because one early difference changes everything after it, so read it as "did the text
+diverge from the verifier alone", not as a quality score. The stand-in drafter is a weaker model than the verifier, where
+Clover's drafter and verifier are the same weights, so these numbers show the shape of the trade, that a lenient rule
+turns verification into a rubber stamp, and not Clover's own acceptance rate.
+
+## What 680 tokens a second has to be
+
+The blog gives three speed claims (**reported**): 680 tokens a second on one GB300 at BF16 and batch size 1, on internal
+agent-scenario data; 515 on one H200 on agent tasks, against 365 for Qwen with a speculative-decoding method it calls
+DFlash2; and 101.8 on a 16 GB RTX 5070 Ti at INT4 on MATH-500, against 48.5 for comparable models. It also says
+Clover has the highest score among the models it lists on six agent benchmarks, including 73.6 on SWE-bench Verified, 51.7
+on Terminal-Bench 2.1 and 65.3 on $\tau^3$ Overall, ahead of LLaDA2.2 flash, Mercury 2.5 and the two Qwen 35B-A3B models,
+and gives 83.8 on GPQA Diamond, 95.8 on ZebraLogic and 72.0 on AA-LCR. I did not re-run any benchmark.
+
+The weights give a floor to reason from. At batch size 1 a pass is limited by the bytes it must read. One token at a time
+the same weights cost 5.89 GB a token, so even a perfectly efficient decode of this model on an H200 (4.8 TB/s, NVIDIA's
+published figure, not re-checked) tops out near 814 tokens a second, and on a GB300 (about 8 TB/s, same caveat) near 1,357
+(**reasoned**). The reported 515 and 680 are 63% and 50% of those ceilings. They are not impossible for a plain model, so
+the claim is not that Clover beats physics. It is that a diffusion model can hold more of its ceiling: each pass reads the
+weights once for many tokens, so fixed costs such as 40 layers of kernel launches are shared by them.
+
+A round, though, is two passes, and each reads more than a single token's 5.89 GB: the dense part (3.88 GB in BF16, the head
+included) plus every expert the block touches. This is the budget in the widget, with the unknowns left to you:
+
+<StepBudget />
+
+Take the H200 at 60% of its bandwidth and a block of 32. If the preview pass touches 64 experts per layer and the verify pass
+touches 163 (the independent-routing number), a round reads 65 GB and takes 22.5 ms, so 515 tokens a second needs 11.6
+tokens kept per round. If both passes touch only 64, a round reads 40 GB and the same speed needs 7.1. At 80% of the
+bandwidth and 32 preview experts with 64 for verify it needs 4.3. Across the combinations I tried the H200's 515 needs
+between 4.3 and 13.2 tokens per round, and the GB300's 680 between 3.4 and 10.5 (**reasoned**). The checkpoint does not
+say which combination is true.
+
+What follows is a pair of readings, not findings. Tokens kept per round is a property of the text, and agent traffic is
+full of stretches the model can call with near certainty, such as JSON keys, repeated tool names and boilerplate. The blog
+itself says the figure is an average over internal agent data, not a general rate. A free-form essay will keep fewer tokens
+per round than a tool call does, and the speed will move with it. And the RTX 5070 Ti line does not fit in its card:
+at 4 bits the 34.66 billion parameters are 17.3 GB before any overhead, more than 16 GB of video memory, so some of the
+weights must sit elsewhere, and the blog does not say how (**reasoned**).
+
+## What to take from it
+
+Read as a systems result, the speed is a product of three terms. A round reads the dense weights twice plus whatever
+experts the block touches; the expert selection exists to keep that from being most of the model; and the acceptance rule
+decides how many tokens a round keeps. The checkpoint fixes the first term. It cannot give the other two, which are how
+correlated a block's routing is and how many drafts the causal pass keeps on real traffic.
+
+If you want to check it, the facts above give you the shape of the test. You need one 80 GB card for the BF16 weights, the
+SGLang build from the pull request, and a trace of your own workload, because the speed will track how predictable your
+text is. Pin the revision, since the loader runs the repository's Python. Measure kept tokens per round and the share of the
+time the expert reads take, not only tokens a second.
+
+## What I did not check
+
+- **Any speed.** Nothing here is a Clover timing. The 680, 515 and 101.8 are the blog's, on hardware and data I could not
+  reproduce.
+- **Tokens kept per round and the expert union** on real routing. Both are assumptions in the budget, and the budget leaves
+  out attention state, activations and launch time.
+- **The training recipe and the benchmark settings.** There is no paper, the fine-tuning code is not released, and the
+  benchmark chart is an image on the blog.
+- **Whether SGLang's verify pass uses the coreset.** I read the draft pass's use of it in the Transformers code; I did not
+  trace the serving path far enough to say.
+- **The community GGUF files** the team's account mentions, and the 100 tokens a second someone reported on a 3090.
+
+## Sources
+
+- [Launch post](https://x.com/DiffuSpace_Labs/status/2115288124691820738), [blog](https://diffuspace.ai/blog/clover-35b/)
+  (Chinese), [model card and files](https://huggingface.co/Diffuspace/Clover-35B-A3B-Preview) at the Hub revision of
+  28 October 2026, [repository](https://github.com/DiffuSpace/Clover-35B-A3B-Preview).
+- [SGLang pull request 46927](https://github.com/sgl-project/sglang/pull/46927) (head commit 2243dc6e) and [llama.cpp pull
+  request 31306](https://github.com/ggml-org/llama.cpp/pull/31306).
+- [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), the base model.
+- The toys, on CPU: `distilroberta-base`, `pythia-70m` and `pythia-160m` from the Hub, and paragraphs from this site.
