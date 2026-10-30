@@ -21,11 +21,11 @@ def ppl_of(steers):
 picks = []
 for f in sorted(glob.glob(os.path.join(SCRATCH, "disc", "*.json"))):
     d = json.load(open(f))
-    if d["singles"]:
-        s = d["singles"][0]
+    for s in d["singles"][:3]:   # up to 3 accepted neurons per axis, so a 5-axis run still gives a useful grid
         picks.append((s["lift"] / d["minLift"], d["axis"], d["label"], s))
 picks.sort(key=lambda x: -x[0])
 picks = picks[:10]
+seen = set(); picks = [p for p in picks if not (p[3]["layer"], p[3]["neuron"]) in seen and not seen.add((p[3]["layer"], p[3]["neuron"]))]
 rng = random.Random(7)
 grid = []
 for _, axis, label, s in picks:
