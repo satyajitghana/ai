@@ -1,0 +1,178 @@
+---
+title: "Delta-Matching: the one number that lets attention train in FP8"
+description: "Delta-Matching (Tang, Kang, Cai, Han and Xiong, arXiv 2609.37852) trains attention with all seven core matmuls in FP8 by changing how one scalar per row of the softmax backward is computed. I rebuilt the mechanism in a CPU simulation of E4M3 attention: the saved-output shortcut leaves a row-sum residual of 3×10⁻³ to 2×10⁻², growing with how sharp the attention is, and the matched delta sits at 10⁻⁸ before the cast. A three-seed toy training run shows no gap at that scale; the paper's claims, up to 5.29B parameters, are reported, not re-run."
+date: 2026-10-30
+tags:
+  - fp8
+  - attention
+  - training
+  - low-precision
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Residual measured in a CPU simulation of FP8 attention, a worked row and a toy run; the kernel needs a Hopper GPU and the paper's training is not re-run."
+topic: quantization
+kind: paper
+level: research
+runsOn: datacenter
+licence: Apache-2.0
+---
+
+import { DeltaRow } from "@/components/articles/delta-matching/delta-row"
+import { RowSumLab } from "@/components/articles/delta-matching/rowsum-lab"
+import { PassMap } from "@/components/articles/delta-matching/pass-map"
+import { ScaleGaps } from "@/components/articles/delta-matching/scale-gaps"
+import { TrainToy } from "@/components/articles/delta-matching/train-toy"
+
+FP8 attention training has a failure that short runs hide. [Delta-Matching](https://arxiv.org/abs/2609.37852) (Haozhan Tang, Hao Kang, Han Cai, Song Han and Chenyan Xiong, arXiv 2609.37852; announced on X on 28 October) traces it to one scalar per attention row, the correction in the softmax backward pass, and changes how that scalar is computed. The authors report training with all seven core attention matmuls in FP8 at a loss that matches BF16/FP32 mixed precision, from 569 million to 5.29 billion parameters. The standard shortcut, in the same runs, tracks the reference for a while and then climbs.
+
+The claim is narrow and checkable in pieces, so this page does it in pieces. Three kinds of evidence, each labelled. **Measured**: I ran it, in PyTorch 2.14 on a shared 4-core CPU box with no GPU, using my own simulation of block-scaled E4M3 attention. **Reported**: the paper's training results, repository and figures, not re-run. **Reasoned**: my inference from either. The kernel itself needs an NVIDIA Hopper GPU and a CUDA 13 toolchain, so I read it and did not run it.
+
+<Figure
+  src="/articles/delta-matching/fig1.png"
+  alt="Left: training cross-entropy against optimizer step for a 1.67B hybrid. Naive FP8 with stale delta climbs to 1.89; cuDNN and Transformer Engine FP8 spikes to 12.10 and ends at 1.57; consistent-dO ends at 1.50; Delta-Matching and BF16/FP32 end at 1.43. Right: bar charts of validation loss and downstream scores for the same five methods."
+  caption="A 1.67B Gated-DeltaNet/GQA hybrid trained on 30B tokens: the paper's headline result. Delta-Matching tracks BF16/FP32; the FP8 baselines degrade. Reported, not re-run (paper, Figure 1)."
+/>
+
+## The invariant the backward pass leans on
+
+For one attention head, with scores $S = QK^\top/\sqrt{d}$, probabilities $P = \operatorname{softmax}(S)$ row by row, and output $O = PV$, the backward pass receives $dO$ and computes
+
+$$
+dP = dO\,V^\top, \qquad dS_{ij} = P_{ij}\,(dP_{ij} - \delta_i), \qquad \delta_i = \sum_j P_{ij}\,dP_{ij}.
+$$
+
+In exact arithmetic every row of $dS$ sums to zero: $\sum_j P_{ij}(dP_{ij} - \delta_i) = \delta_i - \delta_i \sum_j P_{ij} = 0$. That is softmax's shift invariance written as a gradient: adding a constant to a row of scores changes no probability, so the gradient with respect to the scores cannot have a component along the all-ones direction. It has a consequence for the keys. The gradient of key channel $c$, summed over all tokens, is $\sum_j dK_{jc} = \sum_i \left(\sum_j dS_{ij}\right) q_{ic}$, which is zero when every row sums to zero (the paper's Appendix A.3).
+
+FlashAttention avoids storing $P$ in the backward pass by using a shortcut. Since $dP_{ij} = \sum_k dO_{ik} V_{jk}$, the sum $\sum_j P_{ij} dP_{ij}$ equals $\sum_k dO_{ik} O_{ik}$, so the kernel needs only the saved output $O$ and $dO$. That is an identity, but only while $O$ was built from the same $P$ and the same $V$, and $dO$ is the same $dO$ that $dP$ used. The paper calls the shortcut's value the **stale delta**. The same property, and the same kind of loss of it, appears in our page on [a fix for softmax and cross-entropy](/articles/softmax-fix), where it is the FP4 case; [FlashAttention-3](/articles/flash-attention-3) is the kernel family the shortcut lives in.
+
+## What rounding to FP8 does to it
+
+In an FP8 kernel nothing in that chain is the same number twice. The forward pass multiplies a rounded probability matrix $\widehat{P}$ with a rounded $\widehat{V}$ and stores $O$ in BF16. The backward pass rounds $dO$ to $\widehat{dO}$, forms $\widehat{dP} = \widehat{dO}\,\widehat{V}^\top$, and takes $\delta$ from the stored output with the unrounded $dO$. Under the paper's idealisation (normalised $P$, the same $\widehat{V}$ in both passes, FP32 accumulation, no output rounding) the row sum of the stale gradient is, exactly,
+
+$$
+\sum_j dS^{\text{stale}}_{ij} \;=\; \sum_k \widehat{dO}_{ik} \sum_j \underbrace{(P_{ij} - \widehat{P}_{ij})}_{\text{probability rounding}} \widehat{V}_{jk} \;+\; \sum_k \underbrace{(\widehat{dO}_{ik} - dO_{ik})}_{\text{gradient rounding}} \sum_j \widehat{P}_{ij}\widehat{V}_{jk}.
+$$
+
+Two mismatches: the $P$ that scales the gradient is not the $\widehat{P}$ that built $O$, and the $dO$ that built $\widehat{dP}$ is not the $dO$ in the shortcut. Nothing forces the two terms to cancel. The paper notes they may, which is why a short test can pass.
+
+Here is one row, small enough to read. I ran the last query of an 8-key toy head through my simulation of the kernel's rounding (one E4M3 block per operand, FP32 scales, the output stored in BF16) and computed all three versions of $\delta$. This is **measured**, and it is one row, an illustration and not a statistic.
+
+<DeltaRow />
+
+With the stale delta the row of $dS$ sums to −0.0318, 3.1% of the row's total absolute weight. Splitting that with the paper's formula gives −0.00044 from probability rounding and −0.0312 from gradient rounding, so in this row the gradient term is about 70 times the probability term; the formula's two terms sum to −0.0317, close to the measured value, and the remainder is the BF16 rounding of the stored output that the idealisation leaves out. Using the dequantised $\widehat{dO}$ in the shortcut removes the larger term and leaves −6.4×10⁻⁴. The matched version leaves 7.9×10⁻⁸.
+
+## Delta-Matching: take δ from the numbers the gradient uses
+
+The fix is one line. Compute $\delta$ from the same operands the gradient is built from:
+
+$$
+\delta_i^{\text{matched}} = \sum_j P_{ij}\,\widehat{dP}_{ij}, \qquad \sum_j dS_{ij} = \sum_j P_{ij}\bigl(\widehat{dP}_{ij} - \delta_i^{\text{matched}}\bigr) = \delta_i^{\text{matched}}\Bigl(1 - \sum_j P_{ij}\Bigr) = 0.
+$$
+
+Whatever rounding went into $\widehat{dP}$, subtracting its own $P$-weighted mean makes the row sum vanish, up to FP32 round-off, before $dS$ is cast to FP8. The paper reports this holds in its probes at the level of FP32 rounding and that the correction needs no higher-precision matmul and no extra forward output. Two things it does not claim: ordinary FP8 operand errors remain, and the later cast of $dS$ to E4M3 breaks the zero sum again by a smaller amount (the paper's Appendix A.4 says so in its limitations).
+
+The price is a pass. The matched delta needs $P$ and $\widehat{dP}$ for every row before $dS$ exists, so the repository's backward starts with a recompute pass that stores one FP32 value per row, and only then does the gradient work.
+
+<PassMap />
+
+The paper also tried alternatives (its Appendix C.4). Keeping $dO$ consistent in the stale shortcut helps but leaves the probability mismatch; computing $dP$ in BF16 keeps quality near the reference but retains one higher-precision matmul and, the authors say, markedly different training dynamics; and a max-shift probability encoding in the style of FlashAttention-3 still leaves stale delta. These are reported.
+
+## Measured: the residual in a toy head
+
+The paper measures the normalised row-sum residual $|\sum_j dS_{ij}| / \sum_j |dS_{ij}|$ on a trained 1.67B model. I measured the same quantity on random heads through my simulation: four heads of 512 tokens and dimension 64, E4M3 blocks and scales as the paper's Appendix B.6 describes them (128-row blocks for $Q$ and $dO$, 64-key blocks for $K$ and $V$, 64-key groups for $P$, 64×64 tiles for $dS$), BF16 output storage, FP32 accumulation, six seeds, the median over rows. The simulation is mine; its code ships with this page as `fp8sim.py` and `toy_rowsum.py` under `public/articles/delta-matching/code/`. I varied how sharp the attention is, because the paper's worst layer was its last, where attention is sharpest, and tried a second set of inputs with outlier value channels and heavy-tailed gradients.
+
+<RowSumLab />
+
+What the numbers say, **measured**:
+
+- **Before the cast to E4M3, the matched delta is at FP32 round-off.** Median residual 1.3×10⁻⁸, 2.4×10⁻⁸ and 6.1×10⁻⁸ at logit spreads 1, 2 and 4 (Gaussian inputs). The stale shortcut leaves 3.1×10⁻³, 6.4×10⁻³ and 1.8×10⁻², and consistent-dO leaves 1.9×10⁻³, 2.6×10⁻³ and 3.6×10⁻³.
+- **The stale residual grows with how sharp the rows are; consistent-dO barely moves.** From 3×10⁻³ to 2×10⁻² for stale, a factor of about six, against a factor of two for consistent-dO. The outlier inputs behave the same way (3.0×10⁻³ to 1.6×10⁻² for stale).
+- **The zero column sums follow.** Summing the key gradient over tokens, relative to its total absolute size: 2.4×10⁻³ to 3.5×10⁻³ for stale, about 10⁻³ for consistent-dO, 2×10⁻⁸ for matched.
+- **After the cast of $dS$, matched is no longer near zero.** It rises to 2.3×10⁻³, 4.3×10⁻³ and 8.1×10⁻³, because the cast to E4M3 is itself a rounding. Stale ends 1.7 to 2.5 times higher than matched, and consistent-dO about 1.2 to 1.3 times higher.
+- **The simulation behaves like FP8.** Against exact FP64 attention gradients the relative error is 4.6% for the output and 6.3% for $dQ$ at logit spread 1, which matches what the repository's README quotes for its kernel on Gaussian inputs (about 0.04 and 0.06), and it grows to 8.1% and 11.5% at spread 4, as the README says it does as the logit range grows.
+
+How this compares with the paper's Table 9, **reported** for its 1.67B checkpoint (layers 3 to 19): stale 1.1×10⁻², consistent-dO 2.5×10⁻³, matched 1.4×10⁻⁷ before the cast, and after it 1.2×10⁻², 3.9×10⁻³ and 2.7×10⁻³; for its last layer, stale reaches 4.7×10⁻². My absolute values are not those, since random heads are not trained attention. The ordering, the five-orders-of-magnitude drop to FP32 round-off before the cast, and the growth with sharpness are what carry over. One thing does not: the paper finds stale residuals 5.3 to 6.3 times the matched ones after the cast, and my ratio is 1.7 to 2.5. I would not read much into the gap; I have no trained model to probe.
+
+## Measured: a tiny training run, and why it cannot settle anything
+
+The residual is a property of one backward pass. The paper's claim is about what it does over thousands of steps, so I trained something, with the smallest setup that has the paper's ingredients: a two-layer character-level transformer (428,928 parameters, 97-character vocabulary, width 128, four heads of 32) with QK-RMSNorm and learnable gains, trained for 800 AdamW steps of 4 sequences of 64 characters on the prose of this site's own articles (about 205,000 characters seen per run). Four variants: exact attention, and my simulated FP8 attention with the stale, consistent-dO and matched delta. Three seeds each, twelve runs in all, a few minutes of CPU apiece (`toy_train.py`). The paper's setting is a 1.67B hybrid on 30B tokens; this is not that, and I say so up front because the result is a null.
+
+<TrainToy />
+
+**Measured**, mean of three seeds, validation cross-entropy on held-out text:
+
+| attention | validation CE | difference from exact, per seed |
+|---|---|---|
+| exact | 2.7447 | n/a |
+| FP8, stale delta | 2.7447 | +0.0003, −0.0011, +0.0009 |
+| FP8, consistent dO | 2.7446 | +0.0004, +0.0014, −0.0020 |
+| FP8, matched delta | 2.7462 | +0.0027, −0.0008, +0.0025 |
+
+- **No gap is visible.** The variants differ from exact attention by at most 0.003, while the exact run itself moves by 0.063 between seeds (2.7143, 2.7421, 2.7777). The matched delta is 0.0014 higher on average, which three seeds cannot tell from zero; I would not read it as worse.
+- **The residual is there the whole time.** Averaged over the training run and the seeds, the median row-sum residual of the gradient actually used is 1.0×10⁻² for stale (9.6×10⁻³ at the start of seed 0 and 1.2×10⁻² at the end), 5.2×10⁻³ for consistent-dO, and 3.5×10⁻⁸ for matched before the dS cast, with 1.3×10⁻², 8.5×10⁻³ and 6.1×10⁻³ after it. That is the same pattern as the random-head sweep, now on a model that was trained.
+- **The gains have not run away.** The paper's mechanism concentrates the key and query RMSNorm gains in a few channels. The share of the sum of squared gain products held by the single largest channel, in the second layer at the end of training, is 4.9% for stale, 4.8% for consistent-dO, 4.7% for matched and 4.6% for exact, against a uniform 3.1% over 32 channels. Across the three seeds, stale runs from 4.4% to 5.3% and exact from 4.4% to 4.9%: a hint at most, inside the seed spread, and nowhere near the more than 99% the paper reports at 5.29B.
+
+I read this as the paper's own warning confirmed on the small end. A two-layer model trained for 205,000 characters has nothing to compound over: the residual is present at the same size the sweep predicts, and it has no visible effect, because the effect is slow, selective and larger at scale. A longer, bigger run is the experiment that could separate the variants, and I did not run it.
+
+## Why a small, nearly cancelling residual matters (reported)
+
+A residual of 10⁻² looks harmless: it is a small fraction of the row's weight, and across rows its sign varies. The paper's argument is that it does not cancel where it counts. For a fixed $P$ and $\widehat{dP}$, a stale delta adds $\varepsilon_i P_{ij}$ to the correct gradient, which in isolation sharpens the row when $\varepsilon_i < 0$ and flattens it when $\varepsilon_i > 0$. The rows can cancel each other while the channels do not: channels favoured by sharpened rows get a consistent upward push on the key RMSNorm gain, and the push compounds.
+
+<Figure
+  src="/articles/delta-matching/fig2.png"
+  alt="Three panels. Left: bar charts of the top four attention weights for two rows, showing stale delta sharpening one row (entropy 1.93 against 2.54) and flattening another (3.16 against 2.58). Middle: scatter of push consistency against sharpened-row preference, with only the stale-delta channels 7, 8, 23 and 24 far from the origin. Right: key RMSNorm gain over 6,000 optimizer steps, where the stale-delta curve climbs to about 5.5 and the BF16/FP32 and Delta-Matching curves stay near 1."
+  caption="Last-layer data from a 1.67B hybrid at step 6,000. Stale delta sharpens or flattens attention rows (left), pushes selected channels consistently (middle), and amplifies their RMSNorm gains over training (right); Delta-Matching follows BF16/FP32. Reported (paper, Figure 4)."
+/>
+
+The paper reports that a few channels end up holding more than 99% of $\sum_c (g_{q,c} g_{k,c})^2$ in affected layers, which concentrates attention on a few keys. That is a slow process, and slow processes hide in small models and short runs.
+
+<Figure
+  src="/articles/delta-matching/fig3.png"
+  alt="Four panels in two pairs. Left pair for a 0.569B model: channel gains stay between about 0 and 1.7 for all three methods, and the training loss curves for stale delta, BF16/FP32 and Delta-Matching nearly coincide (1.57, 1.54, 1.54). Right pair for 5.29B: the stale-delta channel gain climbs to about 11 while the others stay near 1, and the stale-delta loss rises to about 2.2 and ends at 1.99 while BF16/FP32 and Delta-Matching both end at 1.35."
+  caption="Channel gain over the first 6,000 steps and training loss, at 0.569B and 5.29B parameters. At the small scale the stale-delta gains barely move; at 5.29B one channel runs away and the loss turns upward. Reported (paper, Figure 5)."
+/>
+
+<ScaleGaps />
+
+The scale dependence is the most useful number in the paper, and it is **reported**: at 0.569B the stale-delta validation loss is 1.5399 against 1.5233 for BF16/FP32, a gap of 0.017 that most evaluations would call noise; at 5.29B it is 1.9327 against 1.3349, while Delta-Matching reaches 1.3374; the stale run's RULER-8K recall falls from 53.5% to 16.3% and the nine-task commonsense average from 63.1% to 45.4%. At 1.67B the stale gap is 0.48, cuDNN/Transformer Engine FP8 reaches 1.6105, and consistent-dO alone 1.4667, while Delta-Matching is at 1.4162 against 1.4178. The other tested cures delay the damage and do not remove it: QK normalisation prevents the collapse (without it stale-delta training diverges) but leaves a gap, a head dimension of 256 leaves a gap of 0.6574, and removing positional encoding from attention leaves 0.2362. During the 8K to 64K context extension at a lower learning rate, the stale baseline's training-loss gap exceeds 0.01 only after about 19,000 optimizer steps, 20B tokens in.
+
+## The code
+
+The kernel repository, [jet-ai-projects/delta-matching](https://github.com/jet-ai-projects/delta-matching) (Apache-2.0; parts of the CUDA adapted from FlashAttention-3 keep its BSD 3-Clause notice), is read here, not run. What it holds, **reported** from its README and file layout:
+
+```python
+from delta_matching import dm_attn_func
+
+o = dm_attn_func(q, k, v, causal=True, mode="matched")  # q (B, N, H, D) bf16, GQA allowed
+o = dm_attn_func(q, k, v, causal=True, mode="stale")    # the conventional delta, on the same binary
+```
+
+- **Scope.** NVIDIA Hopper (sm90), CUDA 13, PyTorch 2.12 or later; head dimensions 128 and 256; the matched mode needs causal attention; sequence lengths in multiples of 256 (128 at dimension 256). The same binary serves both modes, so the comparison is on the same code.
+- **Numerics.** E4M3 codes with FP32 block scales for $Q$, $K$, $V$ and $dO$ (with $K$ centred per head), a per-row, per-32-key basis for $P$ in the forward, five FP8 matmuls in the backward, deterministic outputs. The build flags are a certified set that the repository treats as part of the kernel's numerical identity.
+- **Cost.** The backward stores $dS$ in E4M3 over batch × heads × sequence² bytes: 1 GiB at batch 1, 16 heads and 8,192 tokens, 64 GiB at 64k, which it splits per head group once past a workspace limit. The README's accuracy note matches what the paper says about forward FP8 error growing with logit range.
+- **Tests.** The test suite checks both modes against an FP32 reference and the mode identities, and needs a Hopper GPU; the benchmark script compares against FlashAttention if it is installed.
+
+Companion repositories are named in the README, a training pipeline ([cxcscmu/delta-matching-train](https://github.com/cxcscmu/delta-matching-train)) and a collection of model checkpoints on Hugging Face; I did not open either.
+
+## What I did not check, and where it might not hold
+
+I did not run the kernel (no Hopper GPU here), none of the paper's training numbers, and not a model larger than a toy. The paper's own limits, from its Appendix A.4, are worth knowing: the largest model is 5.29B on 30B tokens, so what happens at substantially larger scale is open; most runs use AdamW, with one 28,610-step Muon study on a single configuration and seed; the main tables use two seeds; a 2.58B pure-GQA model and a 1.67B Mamba-2/GQA hybrid show severe gain corruption despite small loss gaps, and the authors do not know whether more scale would turn that into loss; Delta-Matching's RULER-8K in the default configuration is 47.8 against 52.3 for the reference; and the kernel is slower than cuDNN BF16 at head dimension 128 under the paper's accounting, faster than FlashAttention-3 BF16 on an H100, with the extra pass and the quadratic $dS$ storage still to be engineered away. The authors say kernel development is not their focus.
+
+My simulation has its own limits: it rounds to E4M3 with block scales as the paper describes, but not the accumulation windows or the exact probability encoding of the real kernel, and it runs on random heads, so the absolute residuals mean little beyond the shape. I would trust the mechanism and the ordering; I would not quote my numbers as the kernel's.
+
+Related reading on this site: [Muon](/articles/muon-optimizer), which the paper uses for one of its studies, [DeepGEMM](/articles/deepgemm) for FP8 matmul kernels, and [Nemotron in NVFP4](/articles/nemotron-nvfp4) for the 4-bit end of the same direction.
+
+## Sources
+
+- Tang, Kang, Cai, Han, Xiong, "Delta-Matching: Closing the Final Gap of Native 8-bit Training for LLMs", [arXiv 2609.37852](https://arxiv.org/abs/2609.37852) (v2 HTML read in full).
+- Kernel code: [jet-ai-projects/delta-matching](https://github.com/jet-ai-projects/delta-matching), commit `3d4cd5b` (27 October 2026); blog: [jet-ai-projects.github.io/delta-matching](https://jet-ai-projects.github.io/delta-matching/).
+- Announcement: [@hztang602 on X](https://x.com/hztang602/status/2115274990090096784), 28 October 2026.
+- The saved-output shortcut: Tri Dao, [FlashAttention-2](https://arxiv.org/abs/2307.08691) (ICLR 2024).
+- Code for the simulation and the toy runs on this page, in `public/articles/delta-matching/code/`: `fp8sim.py`, `toy_rowsum.py`, `worked_row.py`, `toy_train.py` and `build_corpus.py`, with the measured JSON beside them.
