@@ -523,7 +523,7 @@ export function NeuronLabApp() {
                               {f.verdict === "works" ? `${mine.length} ${mine.length === 1 ? "recipe" : "recipes"}` : "nothing worked"}
                             </span>
                             <br />
-                            <span className="toks">
+                            <span className="toks wrap">
                               {f.contrast.splitHalfReplicated_top40}/40 contrasts held up
                               {f.verdict === "miss" ? ", but no neuron changed the output" : ""}
                             </span>
