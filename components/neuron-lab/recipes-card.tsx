@@ -51,7 +51,7 @@ export function RecipesFound(p: {
                   <span className="nl-mono">
                     {d.neurons.map((n) => `${fmtNeuron(n.layer, n.neuron)} ${fmtDose(n.dose)}`).join(" + ")}
                   </span>{" "}
-                  <span className="toks">
+                  <span className="toks wrap">
                     lift {lift(e?.lift)} vs random {lift(e?.controlScores?.bestRandomLiftAtDose)}
                     {e?.perplexity != null && e.baselinePerplexity != null ? ` · perplexity ${lift(e.perplexity)} (was ${lift(e.baselinePerplexity)})` : ""}
                   </span>
