@@ -72,16 +72,20 @@ export function SteerPanel(p: {
     if (!eng) return
     if (!ready) return p.onLoad()
     const prompt = p.prompt.trim() || DEFAULT_PROMPT
+    // Name each column by the push it applies: the actual dose for a one-neuron recipe, else the recipe
+    // reversed / as set. A recipe with a negative dose must not put "+ dose" over the column that pushes down.
+    const one = steers.length === 1 ? steers[0] : null
+    const named = (sign: -1 | 1) => (one ? `dose ${fmtDose(one.dose * sign)}${sign === 1 ? " (as set)" : " (mirrored)"}` : sign === 1 ? "recipe as set" : "recipe reversed")
     const spec: Omit<Col, "text" | "state" | "tokens" | "msPerToken">[] =
       compare === "3"
         ? [
-            { key: "n", label: "− dose", sign: -1, kind: "neg" },
-            { key: "b", label: "baseline", sign: 0, kind: "base" },
-            { key: "p", label: "+ dose", sign: 1, kind: "pos" },
+            { key: "n", label: named(-1), sign: -1, kind: "neg" },
+            { key: "b", label: "baseline (no push)", sign: 0, kind: "base" },
+            { key: "p", label: named(1), sign: 1, kind: "pos" },
           ]
         : [
-            { key: "b", label: "baseline", sign: 0, kind: "base" },
-            { key: "p", label: "steered", sign: 1, kind: "pos" },
+            { key: "b", label: "baseline (no push)", sign: 0, kind: "base" },
+            { key: "p", label: named(1), sign: 1, kind: "pos" },
           ]
     const ac = new AbortController()
     abort.current = ac
