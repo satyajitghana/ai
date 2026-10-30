@@ -786,6 +786,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "nemotron-nvfp4/bit-layout": () => import("@/components/articles/nemotron-nvfp4/bit-layout"),
   "nemotron-nvfp4/memory-calc": () => import("@/components/articles/nemotron-nvfp4/memory-calc"),
   "nemotron-nvfp4/precision-map": () => import("@/components/articles/nemotron-nvfp4/precision-map"),
+  "neuron-lab/axis-results": () => import("@/components/articles/neuron-lab/axis-results"),
   "neuron-lab/bridge-search": () => import("@/components/articles/neuron-lab/bridge-search"),
   "neuron-lab/dose-scale": () => import("@/components/articles/neuron-lab/dose-scale"),
   "neuron-lab/engine-budget": () => import("@/components/articles/neuron-lab/engine-budget"),
