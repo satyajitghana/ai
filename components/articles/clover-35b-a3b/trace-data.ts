@@ -522,4 +522,28 @@ export const TRACES: { tau: number; rounds: [number, string, number][][]; final:
   "truth": " harness it follows system prompts and personas much better and says less. If your"
  }
 ]
-export const EXP_B: { rule: string; perRound: number; same: number }[] = []
+// Measured on CPU: pythia-70m drafts 8 tokens, pythia-160m verifies them, 8 paragraphs from this site, 32 tokens generated each.
+// "same" is the share of positions where the text equals pythia-160m's own greedy text (one early difference changes all that follows).
+export const EXP_B: { rule: string; perRound: number; same: number }[] = [
+  {
+    "rule": "exact match",
+    "perRound": 3.55,
+    "same": 0.906
+  },
+  {
+    "rule": "threshold, delta 0.6 (Clover default)",
+    "perRound": 8.69,
+    "same": 0.125
+  },
+  {
+    "rule": "threshold, delta 3",
+    "perRound": 5.4,
+    "same": 0.098
+  },
+  {
+    "rule": "threshold, delta 10",
+    "perRound": 2.33,
+    "same": 0.223
+  }
+]
+

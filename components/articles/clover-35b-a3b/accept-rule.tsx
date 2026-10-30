@@ -104,7 +104,7 @@ export function AcceptRule() {
       <div className="mt-4 overflow-x-auto border-t px-4 py-3">
         <table className="w-full text-left font-mono text-[11px]">
           <caption className="pb-2 text-left text-muted-foreground">
-            a 70M drafter and a 160M verifier (pythia), 30 paragraphs, blocks of 16, 64 tokens generated (measured)
+            a 70M drafter and a 160M verifier (pythia), 8 paragraphs, drafts of 8, 32 tokens generated, ratio 0.9 (measured)
           </caption>
           <thead className="text-muted-foreground">
             <tr>
