@@ -1,7 +1,8 @@
-// Public API of the in-browser Qwen3-0.6B engine (client only: import it from effects / "use client"
-// components, never during SSR). The model is NOT part of the site: `loadModel` downloads it from
-// huggingface.co at run time (Qwen3-0.6B-Q8_0.gguf, 639 MB, plus the 11 MB tokenizer.json), keeps it in
-// the browser's origin-private file system, and runs it in a Web Worker (WebAssembly SIMD, CPU).
+// Public API of the in-browser engine for Qwen3-0.6B (default) and Qwen3.5-0.8B (selectModel / configureEngine
+// ({ model })); client only: import it from effects / "use client" components, never during SSR. The model is NOT
+// part of the site: `loadModel` downloads it from huggingface.co at run time (a pinned Q8_0 GGUF, 651 MB for the
+// 0.6B and 846 MB for the 0.8B, plus the tokenizer), keeps it in the browser's origin-private file system, and runs
+// it in a Web Worker (WebAssembly SIMD on the CPU by default; setBackend("webgpu") is an opt-in GPU path).
 //
 // Steering is exact and follows the neuron-explorer recipe: at layer L the MLP hidden activation
 // silu(gate) * up of neuron n gets  delta = dose x medianResidualNorm[L] / ||W_down[:, n]||  added at

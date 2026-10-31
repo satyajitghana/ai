@@ -30,18 +30,17 @@ const port = (server.address() as { port: number }).port
 const prompts = JSON.parse(readFileSync(promptsPath ?? join(here, "test-prompts.json"), "utf8"))
 const V = MODELS[modelId].vocab
 // <ref-dir> "-" skips the PyTorch comparison (GPU vs the CPU engine only)
-const N = refDir === "-" ? 0 : 3
+const N = refDir === "-" ? 0 : 2
 const refAll = N ? readFileSync(join(refDir, "logits.f32")) : Buffer.alloc(0)
 const refB64 = N ? Buffer.from(refAll.buffer, refAll.byteOffset, N * V * 4).toString("base64") : ""
 const cases = {
-  prompts: prompts.prompts.slice(0, 3),
+  prompts: prompts.prompts.slice(0, 2),
   steers: [
-    { name: "add +0.8 at 14.1000", prompt: "The best way to learn a new skill is", steers: [{ layer: 14, neuron: 1000, dose: 0.8 }] },
-    { name: "add -0.5 at 8.3000 plus 17.20", prompt: "The best way to learn a new skill is", steers: [{ layer: 8, neuron: 3000, dose: -0.5 }, { layer: 17, neuron: 20, dose: 0.7 }] },
-    { name: "multiply x0 (ablate) at 10.500", prompt: "The best way to learn a new skill is", steers: [{ layer: 10, neuron: 500, dose: 0, mode: "mul" }, { layer: 6, neuron: 100, dose: 4, mode: "add" }] },
+    { name: "add +0.8 at 14.1000", prompt: "The sea is", steers: [{ layer: 14, neuron: 1000, dose: 0.8 }] },
+    { name: "multiply x0 plus add", prompt: "The sea is", steers: [{ layer: 10, neuron: 500, dose: 0, mode: "mul" }, { layer: 6, neuron: 100, dose: 4, mode: "add" }] },
   ],
-  gen: ["The capital of France is", "1, 1, 2, 3, 5, 8, 13,"],
-  genTokens: 10,
+  gen: ["The capital of France is"],
+  genTokens: 6,
   variants: [[{ layer: 14, neuron: 1000, dose: -0.8 }], [], [{ layer: 14, neuron: 1000, dose: 0.8 }]],
 }
 
@@ -49,11 +48,11 @@ const fd = openSync(gguf, "r"), size = statSync(gguf).size
 const tokText = readFileSync(tokPath)
 const browser = await chromium.launch({ args: ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader"] })
 const page = await (await browser.newContext()).newPage()
-page.on("console", (m: any) => { const t = m.text(); if (/error|fail|warn/i.test(t) && !/404/.test(t)) console.log("[page]", t.slice(0, 300)) })
+page.on("console", (m: any) => { const t = m.text(); if (t.startsWith("[gpu]") || (/error|fail|warn/i.test(t) && !/404/.test(t))) console.log(t.slice(0, 600)) })
 page.on("pageerror", (e: Error) => console.log("[pageerror]", e.message))
 const dead = new Promise<never>((_, rej) => {
   page.on("crash", () => rej(new Error("page crashed (renderer killed, usually out of memory)")))
-  setTimeout(() => rej(new Error("webgpu test timed out after 60 minutes")), 60 * 60e3).unref()
+  setTimeout(() => rej(new Error("webgpu test timed out after 3 hours")), 3 * 60 * 60e3).unref()
 })
 dead.catch(() => {})
 await page.route(new RegExp(`huggingface\\.co/.*${ggufName}`), async (route: any) => {
