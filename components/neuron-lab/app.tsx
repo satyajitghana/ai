@@ -247,7 +247,7 @@ export function NeuronLabApp() {
       } catch {}
       setEng({ status: engine ? "idle" : "none", frac: 0, msg: "", cached: "unknown", backend: "cpu" })
       engine?.cached(id).then((c) => setEng((s) => (s.status === "idle" ? { ...s, cached: c } : s))).catch(() => {})
-      toast(`Switched to ${MODELS[id].label}. The other model was unloaded; its recipe and selection were cleared.`)
+      toast(`Switched to ${MODELS[id].label}. The other model was unloaded. The recipe shown is the one you last used with this model.`)
     },
     [engine, modelId, toast],
   )
