@@ -51,8 +51,12 @@ self.onmessage = async (e: MessageEvent) => {
       case "load": await load(id, m.config, m.calibration); post({ id, type: "done", result: null }); return
       case "calibrate": need().setCalibration(m.calibration as Calibration); post({ id, type: "done", result: null }); return
       case "tokenize": post({ id, type: "done", result: need().tokenize(m.text) }); return
+      case "backend": {
+        const r = await need().setBackend(m.kind, (f, msg) => post({ id, type: "progress", frac: f, msg }))
+        post({ id, type: "done", result: r }); return
+      }
       case "logits": {
-        const lg = need().logits(m.prompt, m.steers as Steer[])
+        const lg = m.backend === "webgpu" ? await need().logitsGpu(m.prompt, m.steers as Steer[]) : need().logits(m.prompt, m.steers as Steer[])
         post({ id, type: "done", result: lg }, [lg.buffer]); return
       }
       case "activations": {
