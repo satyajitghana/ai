@@ -11,6 +11,7 @@ $CODEX_HOME/rules/default.rules). Semantics ported from execpolicy/README.md and
     else under approval policy on-request with a restricted filesystem sandbox -> Allow (run in the sandbox)
   - bypass_sandbox is true only if EVERY segment is allowed by an explicit rule (exec_policy.rs:468-481)
 Our re-implementation: the shell is parsed by a small scanner, not tree-sitter; Windows rules are not modelled.
+Checked against the real engine and parser in verify/ (2026-10-31): 37 of 37 segments agree; the one miss, a trailing ";", is fixed here.
 """
 import json, re, shlex, sys
 
@@ -54,19 +55,21 @@ def plain_commands(script):
             if c == '"': quote = None
         else:
             if c in "'\"": quote = c; cur += c
-            elif c in "$`<>(){}~*?[]#\n\\" : return None
+            elif c in "$`<>(){}~*?[]#\\" : return None
             elif script.startswith("&&", i) or script.startswith("||", i):
                 parts.append(cur); cur = ""; i += 1
             elif c == "&": return None
-            elif c in ";|": parts.append(cur); cur = ""
+            elif c in ";|\n": parts.append(cur); cur = ""   # newline also separates (real parser, verify/)
             else: cur += c
         i += 1
     if quote: return None
-    parts.append(cur)
+    # the real tree-sitter splitter accepts one trailing ';' ('ls; ' is a plain command): found by running it, see verify/
+    if cur.strip() == "" and parts and script.rstrip()[-1:] in ";\n": pass
+    else: parts.append(cur)
     for p in parts:
         try: w = shlex.split(p)
         except ValueError: return None
-        if not w: return None
+        if not w or re.match(r"^\w+=", w[0]): return None   # an empty segment or a VAR=x prefix is not a plain command
         cmds.append(w)
     return cmds
 

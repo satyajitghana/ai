@@ -52,23 +52,24 @@ function plain(script: string): string[][] | null {
     } else if (c === "'" || c === '"') {
       q = c
       cur += c
-    } else if ("$`<>(){}~*?[]#\n\\".includes(c)) return null
+    } else if ("$`<>(){}~*?[]#\\".includes(c)) return null
     else if ((c === "&" && script[i + 1] === "&") || (c === "|" && script[i + 1] === "|")) {
       parts.push(cur)
       cur = ""
       i++
     } else if (c === "&") return null
-    else if (c === ";" || c === "|") {
+    else if (c === ";" || c === "|" || c === "\n") {
       parts.push(cur)
       cur = ""
     } else cur += c
   }
   if (q) return null
-  parts.push(cur)
+  // a single trailing ";" or newline is fine (the real parser accepts "ls;")
+  if (!(cur.trim() === "" && parts.length > 0 && /[;\n]\s*$/.test(script))) parts.push(cur)
   const out: string[][] = []
   for (const p of parts) {
     const w = words(p)
-    if (!w || w.length === 0) return null
+    if (!w || w.length === 0 || /^\w+=/.test(w[0])) return null
     out.push(w)
   }
   return out
@@ -142,7 +143,7 @@ export function ExecpolicyLab() {
         ) : (<span className="text-muted-foreground">Type a command.</span>)}
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
-        A <code>bash -lc</code> script is split only if it is words, quoted strings and numbers joined by <code>&amp;&amp;</code>, <code>||</code>, <code>;</code> or <code>|</code>. A <code>$(…)</code>, a redirection or a <code>&amp;</code> makes the whole script one command that no prefix rule matches; the literal-word parser is used only to spot a dangerous <code>rm</code>, never to match rules. <Src>shell-command/src/bash.rs:29-52, 136</Src>
+        A <code>bash -lc</code> script is split only if it is words, quoted strings and numbers joined by <code>&amp;&amp;</code>, <code>||</code>, <code>;</code>, <code>|</code> or a newline. A <code>$(…)</code>, a redirection or a <code>&amp;</code> makes the whole script one command that no prefix rule matches; the literal-word parser is used only to spot a dangerous <code>rm</code>, never to match rules. <Src>shell-command/src/bash.rs:29-52, 136</Src>
       </p>
       <div className="mt-4 border-t border-border pt-3">
         <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[12px]">
