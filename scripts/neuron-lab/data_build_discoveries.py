@@ -25,7 +25,7 @@ for f in sorted(glob.glob(os.path.join(SCRATCH, "disc", "*.json"))):
         up, dn = lens(*k)
         note = (f"Pushed toward the '{d['label']}' side with a {'positive' if sg > 0 else 'negative'} dose. Lexical lift {s['lift']:.1f} (needs >= {ML}) at dose {s['dose']}, "
                 f"against a best random-neuron lift of {ctrl_max[str(s['dose'])]:.1f} at the same dose; held-out perplexity {s['ppl']:.1f} vs {ppl0:.1f} unsteered. "
-                f"Visible on {s.get('promptsHit', 0)} of {len(AX.PROMPTS)} neutral prompts. "
+                f"Visible on {s.get('promptsHit', 0)} of {d.get("nPrompts", len(AX.PROMPTS))} neutral prompts. "
                 + (f"Perplexity passes 3x baseline from dose {min(bad)}." if bad else "Perplexity stays under 3x baseline up to dose 0.5.")
                 + f" Works at doses {s['okDoses']}. Its column promotes {up}.")
         disc.append(dict(id=f"{axis}-L{k[0]}N{k[1]}", label=f"{d['label']} - L{k[0]} N{k[1]}", axis=axis, kind="single",
@@ -65,6 +65,6 @@ json.dump(dict(model=MODEL, generated=meta["generated"], decoding="greedy, 40 ne
                note=f"Tunes found on {MODEL}. 'dose' is signed and already points toward the axis. Every item passed: lexical lift >= minLift, lift above the best of 6 random same-range neurons, held-out perplexity <= 3x baseline.",
                items=disc), open(os.path.join(OUT, "discoveries.json"), "w"), ensure_ascii=False, indent=1)
 json.dump(dict(model=MODEL, generated=meta["generated"],
-               pipeline="scripts/neuron-lab/data_discover.py: token-level d' contrast over hand-written sets, top-32 screened by steering at doses 0.15/0.3 against 32 random controls, top-6 validated at 6 doses with 6 fresh controls and held-out perplexity.",
+               pipeline="scripts/neuron-lab/data_discover.py: token-level d' contrast over hand-written sets, top-32 (top-16 on the lighter 0.8B screen, see each axis' screened/nPrompts) screened by steering at doses 0.15/0.3 against 32 random controls, top-6 validated at 6 doses with 6 fresh controls and held-out perplexity.",
                axes=finds), open(FINDINGS, "w"), ensure_ascii=False, indent=1)
 print(len(disc), "discoveries;", {f["axis"]: f["verdict"] for f in finds})
