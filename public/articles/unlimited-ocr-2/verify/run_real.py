@@ -7,6 +7,8 @@ import json, os, re, struct, sys, time, resource, math
 sys.path.insert(0, os.environ.get("TF_DEPS", "")); sys.path.append(os.environ.get("EXTRA_DEPS", ""))
 import numpy as np, requests, torch
 torch.set_num_threads(int(os.environ.get("THREADS", "2")))
+# The model code calls .cuda() on the image-token mask (modeling_unlimitedocr.py lines 785 and 789); on CPU that is the only edit needed.
+torch.Tensor.cuda = lambda self, *a, **k: self
 MODEL_DIR, PAGES, OUT = sys.argv[1:4]; JOBS = sys.argv[4:]
 REPO = "baidu/Unlimited-OCR-2"; BASE = f"https://huggingface.co/{REPO}/resolve/main/"
 DT = {"BF16": torch.bfloat16, "F32": torch.float32, "F16": torch.float16, "I64": torch.int64}
@@ -15,7 +17,12 @@ rss = lambda: resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6  # GB (li
 def cur_rss():
     return int(open("/proc/self/statm").read().split()[1]) * 4096 / 1e9
 def rng(url, a, b):
-    r = sess.get(url, headers={"Range": f"bytes={a}-{b}"}, timeout=600); r.raise_for_status(); return r.content
+    for attempt in range(8):  # the stream drops now and then; a range read is idempotent
+        try:
+            r = sess.get(url, headers={"Range": f"bytes={a}-{b}"}, timeout=600); r.raise_for_status(); return r.content
+        except (requests.exceptions.RequestException, OSError):
+            if attempt == 7: raise
+            time.sleep(2 * (attempt + 1))
 def header(url):
     n = struct.unpack("<Q", rng(url, 0, 7))[0]; h = json.loads(rng(url, 8, 8 + n - 1)); h.pop("__metadata__", None); return h, 8 + n
 
@@ -23,6 +30,12 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer
 from transformers.modeling_utils import no_init_weights
 t0 = time.time()
 cfg = AutoConfig.from_pretrained(MODEL_DIR, trust_remote_code=True)
+DRY = bool(os.environ.get("DRY"))  # DRY=1: 2-layer random-weight model, only to exercise the code path
+if DRY:
+    lc = cfg.language_config
+    if isinstance(lc, dict): lc["num_hidden_layers"] = 2
+    else: lc.num_hidden_layers = 2
+    cfg.num_hidden_layers = 2
 tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
 torch.set_default_dtype(torch.bfloat16)
 with no_init_weights():
@@ -31,12 +44,12 @@ torch.set_default_dtype(torch.float32)
 model = model.to(torch.bfloat16).eval()
 print(f"built {type(model).__name__} in {time.time()-t0:.0f}s rss={cur_rss():.2f}GB", flush=True)
 sd = model.state_dict(); idx = json.load(open(f"{MODEL_DIR}/model.safetensors.index.json"))["weight_map"]
-missing = [k for k in sd if k not in idx]; unexpected = [k for k in idx if k not in sd]
+missing = [] if DRY else [k for k in sd if k not in idx]; unexpected = [] if DRY else [k for k in idx if k not in sd]
 print("state_dict keys", len(sd), "index keys", len(idx), "missing_in_ckpt", len(missing), "unexpected", len(unexpected), flush=True)
 print("missing sample", missing[:5], "unexpected sample", unexpected[:5], flush=True)
 nparam = sum(p.numel() for p in model.parameters()); print("parameters (module)", nparam, flush=True)
 loaded = 0; t1 = time.time()
-for shard in sorted(set(idx.values())):
+for shard in ([] if DRY else sorted(set(idx.values()))):
     url = BASE + shard; hdr, base = header(url)
     for name, info in sorted(hdr.items(), key=lambda kv: kv[1]["data_offsets"][0]):
         if name not in sd: continue
@@ -53,7 +66,8 @@ load_s = time.time() - t0; load_rss = rss()
 print(f"loaded: {load_s:.0f}s, peak rss so far {load_rss:.2f}GB", flush=True)
 
 # --- attention hook ---
-mod = next(m for n, m in sys.modules.items() if hasattr(m, "_decode_attend") and hasattr(m, "configure_dash_inference"))
+import types
+mod = next(m for n, m in list(sys.modules.items()) if isinstance(m, types.ModuleType) and "modeling_" in n and not n.startswith("torch") and hasattr(m, "_decode_attend") and hasattr(m, "configure_dash_inference"))
 orig = mod._decode_attend; STATE = {"img": None, "rec": []}
 def hooked(q, k_all, v_all, topi, bias, valid, q_pos, block_size, local_window, scale):
     S = k_all.shape[2]; kpos = torch.arange(S)
@@ -63,7 +77,7 @@ def hooked(q, k_all, v_all, topi, bias, valid, q_pos, block_size, local_window, 
     causal = kpos[None, None, :] <= qp; local = causal & (kpos[None, None, :] > (qp - local_window))
     keep = (causal & (local | (base_ > mod._MASK_NEG * 0.5)))[0, 0]
     img = STATE["img"]
-    STATE["rec"].append((int(S), int(keep.sum()), int((keep & img[:S]).sum()) if img is not None else -1,
+    STATE["rec"].append((int(S), int(keep.sum()), int((keep & torch.nn.functional.pad(img[:S], (0, max(0, S - img.numel())))).sum()) if img is not None else -1,
                          int(local[0, 0].sum()), int(valid.sum())))
     return orig(q, k_all, v_all, topi, bias, valid, q_pos, block_size, local_window, scale)
 mod._decode_attend = hooked
@@ -89,13 +103,13 @@ for job in JOBS:
     ims = [Image.open(f"{PAGES}/{p}.png").convert("RGB") for p in pages]
     STATE["rec"] = []
     # image-token mask is built inside infer; recompute it the same way to classify kept keys
-    import importlib; um = next(m for n, m in sys.modules.items() if hasattr(m, "_uocr_build_inputs"))
+    import importlib; um = next(m for n, m in list(sys.modules.items()) if isinstance(m, types.ModuleType) and n.endswith("modeling_unlimitedocr") and hasattr(m, "_uocr_build_inputs"))
     crop = (kind == "gundam")
     pr = ("<PAGE><image>" * len(ims) + "Multi page parsing.")
     ids, imgs, seq_mask, spatial = um._uocr_build_inputs(tok, pr, ims, crop_mode=crop)
     STATE["img"] = seq_mask.clone()
     n_in = int(ids.numel()); n_img = int(seq_mask.sum())
-    maxnew = {"single": 700, "gundam": 700, "multi": 1500}[kind]
+    maxnew = 6 if DRY else {"single": 700, "gundam": 700, "multi": 1500}[kind]
     ru0 = cur_rss(); t = time.time()
     out = model.infer(tok, prompt=pr, image_file=ims, crop_mode=crop, max_new_tokens=maxnew, return_dict=True,
                       eval_mode=True, save_results=False, no_repeat_ngram_size=35, ngram_window=1024)
