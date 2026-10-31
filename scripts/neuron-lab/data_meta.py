@@ -11,7 +11,7 @@ cn = col_norms(model)
 meta = dict(model=MODEL, layers=NL, neurons=NN, hidden=HID, vocab=model.config.vocab_size,
             resNormMedian=[round(x, 3) for x in rn],
             colNorm=[[round(float(v), 3) for v in cn[L]] for L in range(NL)],
-            corpus=dict(name="WikiText-103 raw train (English Wikipedia, 440 x 128-token chunks) + French/Spanish/German Wikipedia (wikimedia/wikipedia 20231101, 36 chunks each)",
+            corpus=dict(name="(" + SLUG + " tokenizer) WikiText-103 raw train (English Wikipedia, 440 x 128-token chunks) + French/Spanish/German Wikipedia (wikimedia/wikipedia 20231101, 36 chunks each)",
                         tokens=int(st["cnt"]), license="CC BY-SA 3.0 (Wikipedia text; contexts are short quoted windows)"),
             generated=date.today().isoformat(),
             notes="resNormMedian[L] = median ||residual leaving decoder layer L|| over corpus tokens at positions >= 1; "

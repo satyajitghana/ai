@@ -1,20 +1,47 @@
-"""Shared helpers for the neuron-lab DATA pipeline (Qwen3-0.6B, CPU, fp32).
+"""Shared helpers for the neuron-lab DATA pipeline, driven by a model config (CPU, fp32).
 
-Run with:  HF_HOME=<scratch> nice -n 19 /root/kokoro-venv/bin/python scripts/neuron-lab/<script>.py
-Scratch (activations, caches) lives under $NL_SCRATCH, never in the repo.
+Choose the model with NL_MODEL (default qwen3-0.6b).  Run with:
+  NL_MODEL=qwen3.5-0.8b HF_HOME=<cache> NL_SCRATCH=<scratch> nice -n 19 /root/kokoro-venv/bin/python scripts/neuron-lab/<script>.py
+Scratch (activations, caches) lives under $NL_SCRATCH, never in the repo.  For qwen3-0.6b the scratch files sit directly in
+$NL_SCRATCH (the layout the first run used); every other model gets its own $NL_SCRATCH/<slug>/ folder.
 """
 import os, json, glob, math, random
 import torch
 
 torch.set_num_threads(int(os.environ.get("NL_THREADS", "2")))
-MODEL = "Qwen/Qwen3-0.6B"
-NL = 28          # layers
-NN = 3072        # MLP neurons per layer
-HID = 1024
-SCRATCH = os.environ.get("NL_SCRATCH", "/tmp/nl-scratch")
+
+# layers/neurons/hidden: MLP intermediate size is the neuron count per layer.
+# norm_offset: RMSNorm computes x * (offset + weight): 0 for Qwen3, 1 for Qwen3.5 (zero-centred weights).
+# st_prefix: tensor-name prefix of the text model inside the safetensors checkpoint.
+MODELS = {
+    "qwen3-0.6b":   dict(id="Qwen/Qwen3-0.6B",   layers=28, neurons=3072, hidden=1024, norm_offset=0.0, st_prefix="model"),
+    "qwen3.5-0.8b": dict(id="Qwen/Qwen3.5-0.8B", layers=24, neurons=3584, hidden=1024, norm_offset=1.0, st_prefix="model.language_model"),
+}
+SLUG = os.environ.get("NL_MODEL", "qwen3-0.6b")
+CFG = MODELS[SLUG]
+MODEL = CFG["id"]
+NL = CFG["layers"]       # layers
+NN = CFG["neurons"]      # MLP neurons per layer
+HID = CFG["hidden"]
+NORM_OFFSET = CFG["norm_offset"]
+ST = CFG["st_prefix"]
+# discovery screens the middle of the network (layers 8..26 of 28 for the first model), scaled to the depth
+LAYER_LO, LAYER_HI = round(8 * NL / 28), round(27 * NL / 28)
+_BASE = os.environ.get("NL_SCRATCH", "/tmp/nl-scratch")
+SCRATCH = _BASE if SLUG == "qwen3-0.6b" else os.path.join(_BASE, SLUG)
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-OUT = os.path.join(REPO, "public", "neuron-lab", "qwen3-0.6b")
+OUT = os.path.join(REPO, "public", "neuron-lab", SLUG)
+FINDINGS = os.path.join(os.path.dirname(OUT), f"{SLUG}-findings.json")
 os.makedirs(SCRATCH, exist_ok=True)
+
+
+def checkpoint_file():
+    """Local path of the (single) safetensors file of the text model; downloads it if the cache is empty."""
+    from huggingface_hub import snapshot_download
+    d = snapshot_download(MODEL, allow_patterns=["*.safetensors", "*.json", "merges.txt"])
+    fs = sorted(glob.glob(os.path.join(d, "*.safetensors")))
+    assert len(fs) == 1, fs
+    return fs[0]
 
 
 def load(dtype=torch.float32):
@@ -24,6 +51,11 @@ def load(dtype=torch.float32):
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
+    # the checkpoint's tensor names may not match this class (Qwen3.5 ships a multimodal checkpoint): check, do not assume
+    from safetensors import safe_open
+    ref = safe_open(checkpoint_file(), framework="pt").get_tensor(f"{ST}.layers.{NL // 2}.mlp.down_proj.weight").float()
+    got = model.model.layers[NL // 2].mlp.down_proj.weight.detach().float()
+    assert torch.allclose(ref, got, atol=1e-2), "model weights did not load into this class: check the checkpoint key mapping"
     return tok, model
 
 
@@ -33,7 +65,7 @@ def dose_unit(res_norm_median, col_norm):
 
 
 def col_norms(model):
-    return torch.stack([l.mlp.down_proj.weight.float().norm(dim=0) for l in model.model.layers])  # [28,3072]
+    return torch.stack([l.mlp.down_proj.weight.float().norm(dim=0) for l in model.model.layers])  # [layers, neurons]
 
 
 class Steer:

@@ -29,7 +29,7 @@ mean = st["sm"] / st["cnt"]
 meta = dict(model=MODEL, layers=NL, neurons=NN, hidden=HID, vocab=model.config.vocab_size,
             resNormMedian=[round(x, 3) for x in rn],
             colNorm=[[round(float(v), 3) for v in cn[L]] for L in range(NL)],
-            corpus=dict(name="WikiText-103 raw train (English Wikipedia, 440 x 128-token chunks) + French/Spanish/German Wikipedia (wikimedia/wikipedia 20231101, 36 chunks each)",
+            corpus=dict(name="(" + SLUG + " tokenizer) WikiText-103 raw train (English Wikipedia, 440 x 128-token chunks) + French/Spanish/German Wikipedia (wikimedia/wikipedia 20231101, 36 chunks each)",
                         tokens=int(st["cnt"]), license="CC BY-SA 3.0 (Wikipedia text; contexts are short quoted windows)"),
             generated=date.today().isoformat(),
             notes="resNormMedian[L] = median ||residual leaving decoder layer L|| over corpus tokens at positions >= 1; "
@@ -63,7 +63,7 @@ json.dump(ctx, open(os.path.join(OUT, "contexts.json"), "w"), ensure_ascii=False
 edges = {}
 for L in range(NL - 1):
     W = model.model.layers[L].mlp.down_proj.weight.float()            # [1024,3072]
-    w2 = model.model.layers[L + 1].post_attention_layernorm.weight.float()
+    w2 = model.model.layers[L + 1].post_attention_layernorm.weight.float() + NORM_OFFSET
     D = (W[:, top[L]] * w2[:, None]).T                               # [256,1024]
     D = D / D.norm(dim=1, keepdim=True)
     G = model.model.layers[L + 1].mlp.gate_proj.weight.float()[top[L + 1]]  # [256,1024]
