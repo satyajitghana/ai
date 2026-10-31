@@ -1,4 +1,4 @@
-// Qwen3-0.6B forward pass over Q8_0 weights, in WebAssembly SIMD (int8 x int8 dot products) plus
+// Qwen3 / Qwen3.5 forward pass over Q8_0 weights, in WebAssembly SIMD (int8 x int8 dot products) plus
 // plain JS for the cheap parts (RMSNorm, RoPE, attention, SwiGLU). No DOM, no Node APIs: the same
 // file runs inside a Web Worker and under Node for the PyTorch parity tests.
 import { KERNELS_WASM_BASE64 } from "./kernels-wasm"
@@ -12,10 +12,20 @@ export const MAX_CTX = 2048
 export const MAX_BATCH = 4 // streams decoded together (the three-column comparison uses 3)
 
 interface Q8 { q: number; s: number; rows: number; k: number }
-interface Layer {
+interface FullLayer {
+  kind: "full"
   attnNorm: Float32Array; qNorm: Float32Array; kNorm: Float32Array; ffnNorm: Float32Array
   wq: Q8; wk: Q8; wv: Q8; wo: Q8; gate: Q8; up: Q8; down: Q8
 }
+/** Qwen3.5 Gated DeltaNet block: causal depthwise conv over [q|k|v], then a gated delta-rule recurrence per head. */
+interface LinearLayer {
+  kind: "linear"
+  attnNorm: Float32Array; ffnNorm: Float32Array
+  wqkv: Q8; wz: Q8; wa: Q8; wb: Q8; wout: Q8; gate: Q8; up: Q8; down: Q8
+  convW: Float32Array // [convDim][convK], oldest tap first
+  ssmA: Float32Array; dtBias: Float32Array; ssmNorm: Float32Array
+}
+type Layer = FullLayer | LinearLayer
 interface Kernels {
   matmul_q8(w: number, ws: number, xq: number, xs: number, out: number, rows: number, k: number, t: number): void
   quantize_q8(x: number, q: number, s: number, nblocks: number): void
@@ -27,8 +37,11 @@ function b64(s: string): Uint8Array {
   return Uint8Array.from((globalThis as unknown as { Buffer: { from(s: string, e: string): Uint8Array } }).Buffer.from(s, "base64"))
 }
 
-/** One independent sequence's KV cache, so several steered variants of a prompt can be decoded in one pass. */
-export interface KVStream { kc: Float32Array[]; vc: Float32Array[]; len: number; cap: number }
+/**
+ * One independent sequence's state, so several steered variants of a prompt can be decoded in one pass:
+ * a KV cache per full-attention layer and, for Gated DeltaNet layers, the conv window and the recurrent state.
+ */
+export interface KVStream { kc: Float32Array[]; vc: Float32Array[]; conv: Float32Array[]; rec: Float32Array[]; len: number; cap: number }
 export interface BatchCtx { streams: KVStream[]; deltas: (NonNullable<StepHooks["deltas"]> | null)[] }
 
 export interface StepHooks {
@@ -36,9 +49,13 @@ export interface StepHooks {
   deltas?: ({ n: Int32Array; d: Float32Array; mn?: Int32Array; mf?: Float32Array } | null)[]
   /** Called with each layer's hidden activations [T][intermediate] after any delta (for statistics). */
   onHidden?: (layer: number, h: Float32Array, t0: number, nTok: number) => void
+  /** Called with the residual stream [T][hidden] leaving each layer, after the MLP (for calibration). */
+  onLayerOut?: (layer: number, x: Float32Array, t0: number, nTok: number) => void
 }
+export type Arch = "qwen3" | "qwen35"
 
 export class Qwen3Core {
+  readonly arch: Arch
   readonly nLayer: number
   readonly hidden: number
   readonly inter: number
@@ -48,6 +65,15 @@ export class Qwen3Core {
   readonly vocab: number
   readonly eps: number
   readonly theta: number
+  /** Rotated dims per head (all of headDim for Qwen3; a quarter for Qwen3.5), rotate_half style. */
+  readonly ropeDim: number
+  /** Qwen3.5 full-attention layers: q_proj also emits a per-head output gate. */
+  readonly qGate: boolean
+  readonly isLinear: boolean[]
+  readonly eosIds: Set<number>
+  // Gated DeltaNet dimensions (0 for Qwen3)
+  readonly convK: number; readonly dK: number; readonly dV: number; readonly nKH: number; readonly nVH: number
+  readonly keyDim: number; readonly valueDim: number; readonly convDim: number
   calibration: Calibration | null = null
   private k!: Kernels
   private mem!: WebAssembly.Memory
@@ -63,6 +89,8 @@ export class Qwen3Core {
   // KV cache
   private kc: Float32Array[] = []
   private vc: Float32Array[] = []
+  private convState: Float32Array[] = []
+  private recState: Float32Array[] = []
   private cap = 0
   len = 0
   private cosT: Float32Array | null = null
@@ -72,17 +100,32 @@ export class Qwen3Core {
 
   private constructor(h: GGUFHeader) {
     const m = h.meta
-    const num = (k: string) => { const v = m[k]; if (typeof v !== "number") throw new Error(`gguf missing ${k}`); return v }
-    if (m["general.architecture"] !== "qwen3") throw new Error(`expected a qwen3 GGUF, got ${String(m["general.architecture"])}`)
-    this.nLayer = num("qwen3.block_count")
-    this.hidden = num("qwen3.embedding_length")
-    this.inter = num("qwen3.feed_forward_length")
-    this.nHead = num("qwen3.attention.head_count")
-    this.nKV = num("qwen3.attention.head_count_kv")
-    this.headDim = num("qwen3.attention.key_length")
-    this.eps = num("qwen3.attention.layer_norm_rms_epsilon")
-    this.theta = num("qwen3.rope.freq_base")
+    const arch = m["general.architecture"]
+    if (arch !== "qwen3" && arch !== "qwen35") throw new Error(`expected a qwen3 or qwen35 GGUF, got ${String(arch)}`)
+    this.arch = arch
+    const num = (k: string) => { const v = m[`${arch}.${k}`]; if (typeof v !== "number") throw new Error(`gguf missing ${arch}.${k}`); return v }
+    const opt = (k: string, d: number) => { const v = m[`${arch}.${k}`]; return typeof v === "number" ? v : d }
+    // the last block of a Qwen3.5 GGUF is the multi-token-prediction head: not part of the language model we run
+    this.nLayer = num("block_count") - opt("nextn_predict_layers", 0)
+    this.hidden = num("embedding_length")
+    this.inter = num("feed_forward_length")
+    this.nHead = num("attention.head_count")
+    this.nKV = num("attention.head_count_kv")
+    this.headDim = num("attention.key_length")
+    this.eps = num("attention.layer_norm_rms_epsilon")
+    this.theta = num("rope.freq_base")
+    this.ropeDim = opt("rope.dimension_count", this.headDim)
+    this.qGate = arch === "qwen35"
+    const every = arch === "qwen35" ? num("full_attention_interval") : 1
+    this.isLinear = Array.from({ length: this.nLayer }, (_, l) => arch === "qwen35" && (l + 1) % every !== 0)
+    if (arch === "qwen35") {
+      this.convK = num("ssm.conv_kernel"); this.dK = num("ssm.state_size"); this.nKH = num("ssm.group_count"); this.nVH = num("ssm.time_step_rank")
+      this.dV = num("ssm.inner_size") / this.nVH
+    } else { this.convK = this.dK = this.dV = this.nKH = this.nVH = 0 }
+    this.keyDim = this.dK * this.nKH; this.valueDim = this.dV * this.nVH; this.convDim = 2 * this.keyDim + this.valueDim
     this.vocab = h.tensors.get("token_embd.weight")!.dims[1]
+    this.eosIds = new Set<number>()
+    for (const k of ["tokenizer.ggml.eos_token_id", "tokenizer.ggml.padding_token_id"]) if (typeof m[k] === "number") this.eosIds.add(m[k] as number)
   }
 
   static async load(src: ByteSource, onProgress?: ProgressFn): Promise<Qwen3Core> {
@@ -95,9 +138,11 @@ export class Qwen3Core {
   private async init(src: ByteSource, h: GGUFHeader, onProgress?: ProgressFn) {
     const T = h.tensors
     const want: string[] = ["token_embd.weight", "output_norm.weight"]
-    for (let l = 0; l < this.nLayer; l++)
-      for (const s of ["attn_norm", "attn_q_norm", "attn_k_norm", "ffn_norm", "attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down"])
-        want.push(`blk.${l}.${s}.weight`)
+    const ffnNorm = this.arch === "qwen35" ? "post_attention_norm.weight" : "ffn_norm.weight"
+    const layerTensors = (l: number): string[] => this.isLinear[l]
+      ? ["attn_norm.weight", ffnNorm, "attn_qkv.weight", "attn_gate.weight", "ssm_alpha.weight", "ssm_beta.weight", "ssm_out.weight", "ssm_conv1d.weight", "ssm_a", "ssm_dt.bias", "ssm_norm.weight", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight"]
+      : ["attn_norm.weight", "attn_q_norm.weight", "attn_k_norm.weight", ffnNorm, "attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight"]
+    for (let l = 0; l < this.nLayer; l++) for (const s of layerTensors(l)) want.push(`blk.${l}.${s}`)
     let q8Bytes = 0, totalBytes = 0
     for (const n of want) {
       const t = T.get(n)
@@ -105,8 +150,9 @@ export class Qwen3Core {
       if (t.type === GGML_Q8_0) { const el = t.dims[0] * t.dims[1]; q8Bytes += el + (el / 32) * 4 + 64 } else if (t.type !== GGML_F32) throw new Error(`tensor ${n} has unsupported type ${t.type}`)
       totalBytes += t.bytes
     }
-    const maxBlk = this.inter
-    const scratch = TC * (maxBlk * 4 * 4 + this.hidden * 4 * 8 + this.nHead * this.headDim * 4 * 2) + this.vocab * 4 * MAX_BATCH + STAGE_BLOCKS * 34 + (1 << 20)
+    const qd0 = this.nHead * this.headDim * (this.qGate ? 2 : 1)
+    const maxBlk = Math.max(this.inter, qd0, this.convDim, this.valueDim)
+    const scratch = TC * (maxBlk * 4 * 6 + this.hidden * 4 * 8) + this.vocab * 4 * MAX_BATCH + STAGE_BLOCKS * 34 + (1 << 20)
     const pages = Math.ceil((RESERVED + q8Bytes + scratch) / 65536) + 1
     this.mem = new WebAssembly.Memory({ initial: pages, maximum: pages })
     const mod = await WebAssembly.instantiate(b64(KERNELS_WASM_BASE64) as BufferSource, { env: { memory: this.mem } })
@@ -118,13 +164,16 @@ export class Qwen3Core {
 
     // scratch first (fixed size), weights after
     const hd = this.hidden, qd = this.nHead * this.headDim, kd = this.nKV * this.headDim, I = this.inter
-    this.pQin = alloc(TC * Math.max(I, qd, hd) * 4); this.qin = f32(this.pQin, TC * Math.max(I, qd, hd))
-    this.pXq = alloc(TC * Math.max(I, qd, hd)); this.pXs = alloc(TC * (Math.max(I, qd, hd) / 32) * 4)
-    this.pOq = alloc(TC * qd * 4); this.oq = f32(this.pOq, TC * qd)
-    this.pOk = alloc(TC * kd * 4); this.ok = f32(this.pOk, TC * kd)
-    this.pOv = alloc(TC * kd * 4); this.ov = f32(this.pOv, TC * kd)
-    this.pOg = alloc(TC * I * 4); this.og = f32(this.pOg, TC * I)
-    this.pOu = alloc(TC * I * 4); this.ou = f32(this.pOu, TC * I)
+    const wideIn = Math.max(I, qd, hd, this.valueDim)
+    this.pQin = alloc(TC * wideIn * 4); this.qin = f32(this.pQin, TC * wideIn)
+    this.pXq = alloc(TC * wideIn); this.pXs = alloc(TC * (wideIn / 32) * 4)
+    const qs = this.qGate ? 2 * qd : qd, small = Math.max(kd, this.nVH)
+    this.pOq = alloc(TC * qs * 4); this.oq = f32(this.pOq, TC * qs)
+    this.pOk = alloc(TC * small * 4); this.ok = f32(this.pOk, TC * small)
+    this.pOv = alloc(TC * small * 4); this.ov = f32(this.pOv, TC * small)
+    const wideA = Math.max(I, this.convDim), wideB = Math.max(I, this.valueDim)
+    this.pOg = alloc(TC * wideA * 4); this.og = f32(this.pOg, TC * wideA)
+    this.pOu = alloc(TC * wideB * 4); this.ou = f32(this.pOu, TC * wideB)
     this.pOd = alloc(TC * hd * 4); this.od = f32(this.pOd, TC * hd)
     this.pLogits = alloc(this.vocab * 4 * MAX_BATCH); this.logitsAll = f32(this.pLogits, this.vocab * MAX_BATCH); this.logitsV = this.logitsAll.subarray(0, this.vocab)
     this.x = new Float32Array(TC * hd)
@@ -157,25 +206,66 @@ export class Qwen3Core {
     this.outNorm = await loadF32("output_norm.weight")
     for (let l = 0; l < this.nLayer; l++) {
       const p = `blk.${l}.`
-      const L: Partial<Layer> = {}
-      L.attnNorm = await loadF32(p + "attn_norm.weight")
-      L.qNorm = await loadF32(p + "attn_q_norm.weight")
-      L.kNorm = await loadF32(p + "attn_k_norm.weight")
-      L.ffnNorm = await loadF32(p + "ffn_norm.weight")
-      L.wq = await loadQ8(p + "attn_q.weight")
-      L.wk = await loadQ8(p + "attn_k.weight")
-      L.wv = await loadQ8(p + "attn_v.weight")
-      L.wo = await loadQ8(p + "attn_output.weight")
-      L.gate = await loadQ8(p + "ffn_gate.weight")
-      L.up = await loadQ8(p + "ffn_up.weight")
-      L.down = await loadQ8(p + "ffn_down.weight")
-      this.layers.push(L as Layer)
+      const ffnNormName = this.arch === "qwen35" ? "post_attention_norm.weight" : "ffn_norm.weight"
+      if (this.isLinear[l]) {
+        const L: Partial<LinearLayer> = { kind: "linear" }
+        L.attnNorm = await loadF32(p + "attn_norm.weight")
+        L.ffnNorm = await loadF32(p + ffnNormName)
+        L.wqkv = await loadQ8(p + "attn_qkv.weight")
+        L.wz = await loadQ8(p + "attn_gate.weight")
+        L.wa = await loadQ8(p + "ssm_alpha.weight")
+        L.wb = await loadQ8(p + "ssm_beta.weight")
+        L.wout = await loadQ8(p + "ssm_out.weight")
+        L.convW = await loadF32(p + "ssm_conv1d.weight")
+        L.ssmA = await loadF32(p + "ssm_a")
+        L.dtBias = await loadF32(p + "ssm_dt.bias")
+        L.ssmNorm = await loadF32(p + "ssm_norm.weight")
+        L.gate = await loadQ8(p + "ffn_gate.weight")
+        L.up = await loadQ8(p + "ffn_up.weight")
+        L.down = await loadQ8(p + "ffn_down.weight")
+        this.layers.push(L as LinearLayer)
+        this.convState[l] = new Float32Array(this.convDim * (this.convK - 1))
+        this.recState[l] = new Float32Array(this.nVH * this.dK * this.dV)
+      } else {
+        const L: Partial<FullLayer> = { kind: "full" }
+        L.attnNorm = await loadF32(p + "attn_norm.weight")
+        L.qNorm = await loadF32(p + "attn_q_norm.weight")
+        L.kNorm = await loadF32(p + "attn_k_norm.weight")
+        L.ffnNorm = await loadF32(p + ffnNormName)
+        L.wq = await loadQ8(p + "attn_q.weight")
+        L.wk = await loadQ8(p + "attn_k.weight")
+        L.wv = await loadQ8(p + "attn_v.weight")
+        L.wo = await loadQ8(p + "attn_output.weight")
+        L.gate = await loadQ8(p + "ffn_gate.weight")
+        L.up = await loadQ8(p + "ffn_up.weight")
+        L.down = await loadQ8(p + "ffn_down.weight")
+        this.layers.push(L as FullLayer)
+        this.convState[l] = new Float32Array(0)
+        this.recState[l] = new Float32Array(0)
+      }
     }
     void u8
-    this.invFreq = new Float64Array(this.headDim / 2)
-    for (let i = 0; i < this.invFreq.length; i++) this.invFreq[i] = Math.pow(this.theta, (-2 * i) / this.headDim)
+    this.invFreq = new Float64Array(this.ropeDim / 2)
+    for (let i = 0; i < this.invFreq.length; i++) this.invFreq[i] = Math.pow(this.theta, (-2 * i) / this.ropeDim)
     this.ensureCap(256)
     this.ensureRope(256)
+  }
+
+  /** ||W_down[:, n]|| for every layer and neuron (the length of the vector one unit of the neuron writes). */
+  columnNorms(): number[][] {
+    const out: number[][] = []
+    const I = this.inter
+    for (let l = 0; l < this.nLayer; l++) {
+      const d = this.layers[l].down
+      const q = new Int8Array(this.mem.buffer, d.q, d.rows * d.k), sc = new Float32Array(this.mem.buffer, d.s, (d.rows * d.k) / 32)
+      const acc = new Float64Array(I)
+      for (let r = 0; r < d.rows; r++) {
+        const qo = r * I, so = r * (I >> 5)
+        for (let n = 0; n < I; n++) { const v = q[qo + n] * sc[so + (n >> 5)]; acc[n] += v * v }
+      }
+      out.push(Array.from(acc, (v) => Math.sqrt(v)))
+    }
+    return out
   }
 
   setCalibration(c: Calibration) {
@@ -219,6 +309,7 @@ export class Qwen3Core {
     cap = Math.min(cap, MAX_CTX)
     const kd = this.nKV * this.headDim
     for (let l = 0; l < this.nLayer; l++) {
+      if (this.isLinear[l]) { this.kc[l] = this.vc[l] = new Float32Array(0); continue }
       const nk = new Float32Array(cap * kd), nv = new Float32Array(cap * kd)
       if (this.kc[l]) { nk.set(this.kc[l].subarray(0, this.len * kd)); nv.set(this.vc[l].subarray(0, this.len * kd)) }
       this.kc[l] = nk; this.vc[l] = nv
@@ -229,13 +320,16 @@ export class Qwen3Core {
   private ensureRope(n: number) {
     if (n <= this.ropeCap) return
     const cap = Math.max(256, n)
-    const half = this.headDim / 2
+    const half = this.ropeDim / 2
     const cs = new Float32Array(cap * half), sn = new Float32Array(cap * half)
     for (let p = 0; p < cap; p++) for (let i = 0; i < half; i++) { const a = p * this.invFreq[i]; cs[p * half + i] = Math.cos(a); sn[p * half + i] = Math.sin(a) }
     this.cosT = cs; this.sinT = sn; this.ropeCap = cap
   }
 
-  reset() { this.len = 0 }
+  reset() {
+    this.len = 0
+    for (let l = 0; l < this.nLayer; l++) if (this.isLinear[l]) { this.convState[l].fill(0); this.recState[l].fill(0) }
+  }
 
   private rmsnorm(src: Float32Array, so: number, w: Float32Array, dst: Float32Array, dof: number, n: number) {
     let ss = 0
@@ -273,13 +367,14 @@ export class Qwen3Core {
     const cap = this.len + extra
     if (cap > MAX_CTX) throw new Error(`context limit is ${MAX_CTX} tokens`)
     const kd = this.nKV * this.headDim
-    const kc: Float32Array[] = [], vc: Float32Array[] = []
+    const kc: Float32Array[] = [], vc: Float32Array[] = [], conv: Float32Array[] = [], rec: Float32Array[] = []
     for (let l = 0; l < this.nLayer; l++) {
+      if (this.isLinear[l]) { kc.push(new Float32Array(0)); vc.push(new Float32Array(0)); conv.push(this.convState[l].slice()); rec.push(this.recState[l].slice()); continue }
       const nk = new Float32Array(cap * kd), nv = new Float32Array(cap * kd)
       nk.set(this.kc[l].subarray(0, this.len * kd)); nv.set(this.vc[l].subarray(0, this.len * kd))
-      kc.push(nk); vc.push(nv)
+      kc.push(nk); vc.push(nv); conv.push(new Float32Array(0)); rec.push(new Float32Array(0))
     }
-    return { kc, vc, len: this.len, cap }
+    return { kc, vc, conv, rec, len: this.len, cap }
   }
 
   /** One decode step for several streams at once: stream b advances by ids[b]. Returns logits [B][vocab] (a view: copy before the next call). */
@@ -294,9 +389,74 @@ export class Qwen3Core {
     return this.logitsAll.subarray(0, B * this.vocab)
   }
 
+  private lq = new Float32Array(0); private lk = new Float32Array(0); private lkv = new Float32Array(0); private lout = new Float32Array(0)
+
+  /**
+   * Gated DeltaNet block (Qwen3.5): x += out_proj(gated_rmsnorm(delta_rule(silu(causal_conv(in_proj(norm(x))))))).
+   * The delta rule keeps S[h] (dK x dV) per value head: S = S*exp(g); S += k (x) beta*(v - S^T k); out = S^T q.
+   */
+  private linearMixer(l: number, L: LinearLayer, T: number, batch?: BatchCtx) {
+    const hd = this.hidden, x = this.x, qin = this.qin
+    const K = this.convK, cd = this.convDim, kdim = this.keyDim, vdim = this.valueDim, dK = this.dK, dV = this.dV
+    const nVH = this.nVH, rep = this.nVH / this.nKH
+    if (this.lq.length !== dK) { this.lq = new Float32Array(dK); this.lk = new Float32Array(dK); this.lkv = new Float32Array(dV); this.lout = new Float32Array(dV) }
+    const lq = this.lq, lk = this.lk, kv = this.lkv, out = this.lout
+    for (let t = 0; t < T; t++) this.rmsnorm(x, t * hd, L.attnNorm, qin, t * hd, hd)
+    this.quant(hd, T)
+    this.mm(L.wqkv, this.pOg, T); this.mm(L.wz, this.pOu, T); this.mm(L.wa, this.pOk, T); this.mm(L.wb, this.pOv, T)
+    const mixed = this.og, z = this.ou, av = this.ok, bv = this.ov
+    const invSqrtK = 1 / Math.sqrt(dK)
+    for (let t = 0; t < T; t++) {
+      const conv = batch ? batch.streams[t].conv[l] : this.convState[l]
+      const S = batch ? batch.streams[t].rec[l] : this.recState[l]
+      const mo = t * cd
+      // causal depthwise conv over [previous K-1 inputs, this one], then silu; slide the window
+      for (let c = 0; c < cd; c++) {
+        const cur = mixed[mo + c], so = c * (K - 1), wo = c * K
+        let acc = L.convW[wo + K - 1] * cur
+        for (let j = 0; j < K - 1; j++) acc += L.convW[wo + j] * conv[so + j]
+        for (let j = 0; j < K - 2; j++) conv[so + j] = conv[so + j + 1]
+        conv[so + K - 2] = cur
+        mixed[mo + c] = acc / (1 + Math.exp(-acc))
+      }
+      for (let h = 0; h < nVH; h++) {
+        const kh = (h / rep) | 0
+        const qo = mo + kh * dK, ko = mo + kdim + kh * dK, vo = mo + 2 * kdim + h * dV
+        let qq = 0, kk = 0
+        for (let i = 0; i < dK; i++) { const a = mixed[qo + i], b = mixed[ko + i]; qq += a * a; kk += b * b }
+        const qsc = invSqrtK / Math.sqrt(qq + 1e-6), ksc = 1 / Math.sqrt(kk + 1e-6)
+        for (let i = 0; i < dK; i++) { lq[i] = mixed[qo + i] * qsc; lk[i] = mixed[ko + i] * ksc }
+        const beta = 1 / (1 + Math.exp(-bv[t * nVH + h]))
+        const ap = av[t * nVH + h] + L.dtBias[h]
+        const decay = Math.exp(L.ssmA[h] * (ap > 20 ? ap : Math.log1p(Math.exp(ap))))
+        const so = h * dK * dV
+        kv.fill(0)
+        for (let i = 0; i < dK; i++) {
+          const ro = so + i * dV, ki = lk[i]
+          for (let j = 0; j < dV; j++) { const sv = S[ro + j] * decay; S[ro + j] = sv; kv[j] += sv * ki }
+        }
+        for (let j = 0; j < dV; j++) kv[j] = (mixed[vo + j] - kv[j]) * beta
+        out.fill(0)
+        for (let i = 0; i < dK; i++) {
+          const ro = so + i * dV, ki = lk[i], qi = lq[i]
+          for (let j = 0; j < dV; j++) { const sv = S[ro + j] + ki * kv[j]; S[ro + j] = sv; out[j] += sv * qi }
+        }
+        // gated RMSNorm over the value head: norm(out) * weight * silu(z)
+        let ms = 0
+        for (let j = 0; j < dV; j++) ms += out[j] * out[j]
+        const r = 1 / Math.sqrt(ms / dV + this.eps)
+        const zo = t * vdim + h * dV
+        for (let j = 0; j < dV; j++) { const zz = z[zo + j]; qin[zo + j] = out[j] * r * L.ssmNorm[j] * (zz / (1 + Math.exp(-zz))) }
+      }
+    }
+    this.quant(vdim, T)
+    this.mm(L.wout, this.pOd, T)
+    for (let i = 0; i < T * hd; i++) x[i] += this.od[i]
+  }
+
   private chunk(ids: ArrayLike<number>, c0: number, T: number, wantLogits: boolean, hooks: StepHooks, batch?: BatchCtx) {
     const hd = this.hidden, nh = this.nHead, nkv = this.nKV, D = this.headDim, I = this.inter
-    const qd = nh * D, kd = nkv * D, half = D / 2
+    const qd = nh * D, kd = nkv * D
     const x = this.x, qin = this.qin
     const pos0 = this.len
     // embeddings
@@ -314,70 +474,77 @@ export class Qwen3Core {
     const scale = 1 / Math.sqrt(D)
     const cos = this.cosT!, sin = this.sinT!
     const scores = new Float64Array(batch ? Math.max(...batch.streams.map((s) => s.len)) + 1 : this.len + T)
+    const qs = this.qGate ? 2 * qd : qd // floats per token in the q projection (q, plus a per-head output gate on Qwen3.5)
+    const qh = this.qGate ? 2 * D : D // floats per head in it
+    const rhalf = this.ropeDim / 2
     for (let l = 0; l < this.nLayer; l++) {
       const L = this.layers[l]
-      // ---- attention
-      for (let t = 0; t < T; t++) this.rmsnorm(x, t * hd, L.attnNorm, qin, t * hd, hd)
-      this.quant(hd, T)
-      this.mm(L.wq, this.pOq, T); this.mm(L.wk, this.pOk, T); this.mm(L.wv, this.pOv, T)
-      for (let t = 0; t < T; t++) {
-        const p = batch ? batch.streams[t].len : pos0 + t
-        const kc = batch ? batch.streams[t].kc[l] : this.kc[l], vc = batch ? batch.streams[t].vc[l] : this.vc[l]
-        // q/k norm per head, then rope (rotate_half)
-        for (let h = 0; h < nh; h++) {
-          const o = t * qd + h * D
-          this.rmsnorm(this.oq, o, L.qNorm, this.oq, o, D)
-          const cb = p * half
-          for (let i = 0; i < half; i++) {
-            const a = this.oq[o + i], b = this.oq[o + i + half], cs = cos[cb + i], sn = sin[cb + i]
-            this.oq[o + i] = a * cs - b * sn
-            this.oq[o + i + half] = b * cs + a * sn
+      if (L.kind === "linear") this.linearMixer(l, L, T, batch)
+      else {
+        // ---- attention
+        for (let t = 0; t < T; t++) this.rmsnorm(x, t * hd, L.attnNorm, qin, t * hd, hd)
+        this.quant(hd, T)
+        this.mm(L.wq, this.pOq, T); this.mm(L.wk, this.pOk, T); this.mm(L.wv, this.pOv, T)
+        for (let t = 0; t < T; t++) {
+          const p = batch ? batch.streams[t].len : pos0 + t
+          const kc = batch ? batch.streams[t].kc[l] : this.kc[l], vc = batch ? batch.streams[t].vc[l] : this.vc[l]
+          // q/k norm per head, then rope (rotate_half over the first ropeDim dims)
+          for (let h = 0; h < nh; h++) {
+            const o = t * qs + h * qh
+            this.rmsnorm(this.oq, o, L.qNorm, this.oq, o, D)
+            const cb = p * rhalf
+            for (let i = 0; i < rhalf; i++) {
+              const a = this.oq[o + i], b = this.oq[o + i + rhalf], cs = cos[cb + i], sn = sin[cb + i]
+              this.oq[o + i] = a * cs - b * sn
+              this.oq[o + i + rhalf] = b * cs + a * sn
+            }
+          }
+          for (let h = 0; h < nkv; h++) {
+            const o = t * kd + h * D
+            const dst = p * kd + h * D
+            this.rmsnorm(this.ok, o, L.kNorm, kc, dst, D)
+            const cb = p * rhalf
+            for (let i = 0; i < rhalf; i++) {
+              const a = kc[dst + i], b = kc[dst + i + rhalf], cs = cos[cb + i], sn = sin[cb + i]
+              kc[dst + i] = a * cs - b * sn
+              kc[dst + i + rhalf] = b * cs + a * sn
+            }
+            for (let i = 0; i < D; i++) vc[dst + i] = this.ov[o + i]
           }
         }
-        for (let h = 0; h < nkv; h++) {
-          const o = t * kd + h * D
-          const dst = p * kd + h * D
-          this.rmsnorm(this.ok, o, L.kNorm, kc, dst, D)
-          const cb = p * half
-          for (let i = 0; i < half; i++) {
-            const a = kc[dst + i], b = kc[dst + i + half], cs = cos[cb + i], sn = sin[cb + i]
-            kc[dst + i] = a * cs - b * sn
-            kc[dst + i + half] = b * cs + a * sn
+        // attention (causal) -> qin as [T][qd], times sigmoid(gate) on Qwen3.5
+        for (let t = 0; t < T; t++) {
+          const p = batch ? batch.streams[t].len : pos0 + t
+          const kc = batch ? batch.streams[t].kc[l] : this.kc[l], vc = batch ? batch.streams[t].vc[l] : this.vc[l]
+          for (let h = 0; h < nh; h++) {
+            const kvh = (h / group) | 0
+            const qo = t * qs + h * qh
+            let mx = -Infinity
+            for (let j = 0; j <= p; j++) {
+              const ko = j * kd + kvh * D
+              let s = 0
+              for (let i = 0; i < D; i++) s += this.oq[qo + i] * kc[ko + i]
+              s *= scale
+              scores[j] = s
+              if (s > mx) mx = s
+            }
+            let z = 0
+            for (let j = 0; j <= p; j++) { const e = Math.exp(scores[j] - mx); scores[j] = e; z += e }
+            const inv = 1 / z
+            const oo = t * qd + h * D
+            for (let i = 0; i < D; i++) qin[oo + i] = 0
+            for (let j = 0; j <= p; j++) {
+              const w = scores[j] * inv
+              const vo = j * kd + kvh * D
+              for (let i = 0; i < D; i++) qin[oo + i] += w * vc[vo + i]
+            }
+            if (this.qGate) for (let i = 0; i < D; i++) qin[oo + i] /= 1 + Math.exp(-this.oq[qo + D + i])
           }
-          for (let i = 0; i < D; i++) vc[dst + i] = this.ov[o + i]
         }
+        this.quant(qd, T)
+        this.mm(L.wo, this.pOd, T)
+        for (let i = 0; i < T * hd; i++) x[i] += this.od[i]
       }
-      // attention (causal) -> qin as [T][qd]
-      for (let t = 0; t < T; t++) {
-        const p = batch ? batch.streams[t].len : pos0 + t
-        const kc = batch ? batch.streams[t].kc[l] : this.kc[l], vc = batch ? batch.streams[t].vc[l] : this.vc[l]
-        for (let h = 0; h < nh; h++) {
-          const kvh = (h / group) | 0
-          const qo = t * qd + h * D
-          let mx = -Infinity
-          for (let j = 0; j <= p; j++) {
-            const ko = j * kd + kvh * D
-            let s = 0
-            for (let i = 0; i < D; i++) s += this.oq[qo + i] * kc[ko + i]
-            s *= scale
-            scores[j] = s
-            if (s > mx) mx = s
-          }
-          let z = 0
-          for (let j = 0; j <= p; j++) { const e = Math.exp(scores[j] - mx); scores[j] = e; z += e }
-          const inv = 1 / z
-          const oo = t * qd + h * D
-          for (let i = 0; i < D; i++) qin[oo + i] = 0
-          for (let j = 0; j <= p; j++) {
-            const w = scores[j] * inv
-            const vo = j * kd + kvh * D
-            for (let i = 0; i < D; i++) qin[oo + i] += w * vc[vo + i]
-          }
-        }
-      }
-      this.quant(qd, T)
-      this.mm(L.wo, this.pOd, T)
-      for (let i = 0; i < T * hd; i++) x[i] += this.od[i]
       // ---- MLP (SwiGLU) with the neuron hook
       for (let t = 0; t < T; t++) this.rmsnorm(x, t * hd, L.ffnNorm, qin, t * hd, hd)
       this.quant(hd, T)
@@ -396,6 +563,7 @@ export class Qwen3Core {
       this.quant(I, T)
       this.mm(L.down, this.pOd, T)
       for (let i = 0; i < T * hd; i++) x[i] += this.od[i]
+      if (hooks.onLayerOut) hooks.onLayerOut(l, x, c0, T)
     }
     if (wantLogits && batch) {
       for (let t = 0; t < T; t++) this.rmsnorm(x, t * hd, this.outNorm, qin, t * hd, hd)

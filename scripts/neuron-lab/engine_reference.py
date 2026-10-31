@@ -7,27 +7,32 @@ Writes, into --out:
   act_max.f32       max-over-tokens MLP hidden activation, float32 [n_texts, 28*3072]
   calibration.json  {resNormMedian, colNorm} of this checkout's own small corpus (test use only)
 
-The model is run in float32 from the original bf16 safetensors, the engine in Q8_0: any
-disagreement is the quantization, nothing else. Run: nice -n 19 python engine_reference.py \
-  --model <dir with model.safetensors, config.json, tokenizer.json> --out <dir>
+The model is run in float32 (or bfloat16 with --dtype, for the 0.8B on a small box) from the original
+safetensors, the engine in Q8_0: any disagreement is the quantization (and bf16 rounding), nothing else.
+Run: nice -n 19 python engine_reference.py --arch qwen3|qwen35 [--dtype bfloat16] \
+  --model <dir with model.safetensors, config.json, tokenizer.json> --out <dir> [--prompts test-prompts-q35.json]
 """
 import argparse, json, os
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
 
 torch.set_num_threads(2)
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", required=True)
 ap.add_argument("--out", required=True)
+ap.add_argument("--arch", default="qwen3", choices=["qwen3", "qwen35"])
+ap.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"])
 ap.add_argument("--prompts", default=os.path.join(os.path.dirname(__file__), "test-prompts.json"))
 a = ap.parse_args()
 os.makedirs(a.out, exist_ok=True)
 T = json.load(open(a.prompts))
 
 tok = AutoTokenizer.from_pretrained(a.model)
-model = AutoModelForCausalLM.from_pretrained(a.model, torch_dtype=torch.float32).eval()
-cfg = model.config
+dt = getattr(torch, a.dtype)
+model = (AutoModelForImageTextToText if a.arch == "qwen35" else AutoModelForCausalLM).from_pretrained(a.model, dtype=dt).eval()
+cfg = getattr(model.config, "text_config", model.config)
+LAYERS = model.model.language_model.layers if a.arch == "qwen35" else model.model.layers
 NL, NI = cfg.num_hidden_layers, cfg.intermediate_size
 
 ref = {"tokenizer": [], "prompts": [], "steers": [], "n_layers": NL, "inter": NI, "vocab": cfg.vocab_size}
@@ -38,7 +43,7 @@ for s in T["prompts"] + T["tokenizerExtra"] + [p["prompt"] for p in T["steers"]]
 CORPUS = T["activationTexts"] + T["prompts"]
 res = [[] for _ in range(NL)]
 hooks = []
-for l, layer in enumerate(model.model.layers):
+for l, layer in enumerate(LAYERS):
     hooks.append(layer.register_forward_hook(lambda m, i, o, l=l: res[l].append((o[0] if isinstance(o, tuple) else o)[0, 1:].norm(dim=-1))))
 with torch.no_grad():
     for s in CORPUS:
@@ -46,7 +51,7 @@ with torch.no_grad():
         model(**ids)
 for h in hooks: h.remove()
 resNorm = [float(torch.cat(r).median()) for r in res]
-colNorm = [layer.mlp.down_proj.weight.float().norm(dim=0).tolist() for layer in model.model.layers]
+colNorm = [layer.mlp.down_proj.weight.float().norm(dim=0).tolist() for layer in LAYERS]
 json.dump({"resNormMedian": resNorm, "colNorm": colNorm}, open(os.path.join(a.out, "calibration.json"), "w"))
 
 def run(prompt, steers):
@@ -60,7 +65,7 @@ def run(prompt, steers):
             for s in ss:
                 x[..., s["neuron"]] += s["dose"] * resNorm[l] / colNorm[l][s["neuron"]]
             return (x,)
-        hs.append(model.model.layers[l].mlp.down_proj.register_forward_pre_hook(pre))
+        hs.append(LAYERS[l].mlp.down_proj.register_forward_pre_hook(pre))
     ids = tok(prompt, return_tensors="pt", add_special_tokens=False)
     with torch.no_grad():
         lg = model(**ids).logits[0, -1].float().numpy()
@@ -81,9 +86,9 @@ AM = []
 for s in T["activationTexts"]:
     mx = np.full((NL, NI), -np.inf, dtype=np.float32)
     hs = []
-    for l, layer in enumerate(model.model.layers):
+    for l, layer in enumerate(LAYERS):
         def pre(m, args, l=l):
-            v = args[0][0].max(dim=0).values.numpy()
+            v = args[0][0].max(dim=0).values.float().numpy()
             mx[l] = np.maximum(mx[l], v)
         hs.append(layer.mlp.down_proj.register_forward_pre_hook(pre))
     with torch.no_grad():

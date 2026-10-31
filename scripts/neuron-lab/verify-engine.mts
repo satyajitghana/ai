@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Node parity test for the in-browser engine against the PyTorch reference (engine_reference.py).
-//   tsx scripts/neuron-lab/verify-engine.mts <gguf> <tokenizer.json> <ref-dir>
+//   tsx scripts/neuron-lab/verify-engine.mts <gguf> <tokenizer.json> <ref-dir> [test-prompts.json]
 import { readFileSync, openSync, readSync, fstatSync } from "node:fs"
 import { Runtime } from "../../components/neuron-lab/engine/runtime"
 import type { ByteSource } from "../../components/neuron-lab/engine/types"
@@ -11,7 +11,7 @@ const src: ByteSource = {
   size: fstatSync(fd).size,
   async read(off, dst) { let n = 0; while (n < dst.length) { const r = readSync(fd, dst, n, dst.length - n, off + n); if (!r) throw new Error("eof"); n += r } },
 }
-const prompts = JSON.parse(readFileSync(new URL("./test-prompts.json", import.meta.url), "utf8"))
+const prompts = JSON.parse(readFileSync(process.argv[5] ?? new URL("./test-prompts.json", import.meta.url), "utf8"))
 const ref = JSON.parse(readFileSync(`${refDir}/ref.json`, "utf8"))
 const cal = JSON.parse(readFileSync(`${refDir}/calibration.json`, "utf8"))
 const f32 = (p: string) => { const b = readFileSync(p); return new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4) }

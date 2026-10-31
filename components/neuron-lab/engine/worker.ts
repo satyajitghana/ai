@@ -18,6 +18,7 @@ const need = () => { if (!rt) throw new Error("model not loaded"); return rt }
 
 async function load(id: number, cfgOver: Partial<LoaderConfig> | undefined, calibration: Calibration | undefined) {
   if (rt) { if (calibration) rt.setCalibration(calibration); return }
+  // (a new model starts a new worker: see engine.ts selectModel)
   if (!loading) {
     loading = (async () => {
       const cfg = { ...DEFAULT_LOADER, ...cfgOver }
@@ -34,6 +35,11 @@ async function load(id: number, cfgOver: Partial<LoaderConfig> | undefined, cali
   }
   await loading
   if (calibration) need().setCalibration(calibration)
+  if (!need().core.calibration) {
+    post({ id, type: "progress", frac: 0.99, msg: "measuring the residual norms for steering (one pass over a reference passage)" })
+    await tick()
+    need().setCalibration(need().selfCalibrate())
+  }
 }
 
 self.onmessage = async (e: MessageEvent) => {
