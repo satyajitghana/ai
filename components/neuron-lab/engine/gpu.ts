@@ -86,6 +86,12 @@ export class GpuBackend {
     return (pass) => { pass.setPipeline(pl); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(x, y) }
   }
 
+  /** writeBuffer in 16 MB slices: browsers stage each write in memory, so one 128 MB write costs several times that. */
+  private write(buf: any, mem: ArrayBuffer, off: number, bytes: number) {
+    const SLICE = 16 << 20
+    for (let o = 0; o < bytes; o += SLICE) this.device.queue.writeBuffer(buf, o, mem, off + o, Math.min(SLICE, bytes - o))
+  }
+
   /** Upload a Q8 matrix from wasm memory, split into row chunks that fit one storage binding. */
   private upload(m: Q8, maxRows = Infinity): WBuf[] {
     const cached = this.w.get(m)
@@ -97,9 +103,9 @@ export class GpuBackend {
     for (let r0 = 0; r0 < m.rows; r0 += rowsMax) {
       const rows = Math.min(rowsMax, m.rows - r0)
       const w = this.mk(rows * perRow, USAGE.STORAGE | USAGE.COPY_DST)
-      this.device.queue.writeBuffer(w, 0, mem, m.q + r0 * perRow, rows * perRow)
+      this.write(w, mem, m.q + r0 * perRow, rows * perRow)
       const ws = this.mk(rows * (m.k / 32) * 4, USAGE.STORAGE | USAGE.COPY_DST)
-      this.device.queue.writeBuffer(ws, 0, mem, m.s + r0 * (m.k / 32) * 4, rows * (m.k / 32) * 4)
+      this.write(ws, mem, m.s + r0 * (m.k / 32) * 4, rows * (m.k / 32) * 4)
       out.push({ w, ws, rows, k: m.k })
     }
     this.w.set(m, out)
