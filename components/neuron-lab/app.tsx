@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 
 import "./neuron-lab.css"
 import { loadEngine } from "./engine-loader"
+import { DEFAULT_MODEL, MODELS, MODEL_IDS, MODEL_NOTES, isModelId, modelOptionLabel, type ModelId } from "./lab-models"
 import { showToken } from "./data"
 import { DetailsPanel, FindPanel, InvestigatePanel } from "./inspect-panels"
 import { NeuronGrid } from "./neuron-grid"
@@ -34,14 +35,25 @@ function useReducedMotion() {
   )
 }
 
-function encodeHash(steers: Steer[], prompt: string, chat: boolean) {
+const startLayer = (id: ModelId) => Math.round(MODELS[id].layers * 0.57)
+
+function encodeHash(model: ModelId, steers: Steer[], prompt: string, chat: boolean) {
   const r = steers.map((s) => `${s.layer}.${s.neuron}.${s.mode === "mul" ? "x" : ""}${s.dose}`).join(",")
   const q = prompt.trim() ? `&p=${encodeURIComponent(prompt.trim().slice(0, 300))}` : ""
   const c = chat ? "" : "&c=0"
-  return steers.length || q ? `#r=${r}${q}${c}` : ""
+  const m = model === DEFAULT_MODEL ? "" : `&m=${model}`
+  return steers.length || q ? `#r=${r}${q}${c}${m}` : m ? `#m=${model}` : ""
 }
 
-function decodeHash(h: string, layers: number, neurons: number): { steers: Steer[]; prompt: string; chat: boolean } | null {
+/** The model a shared link names (null when it names none, meaning the default). */
+function hashModel(h: string): ModelId | null {
+  const m = /[#&]m=([^&]*)/.exec(h)
+  return m && isModelId(m[1]) ? m[1] : null
+}
+
+function decodeHash(h: string, model: ModelId, layers: number, neurons: number): { steers: Steer[]; prompt: string; chat: boolean } | null {
+  // a link made for the other model carries neuron ids that mean something else here: ignore its recipe
+  if ((hashModel(h) ?? DEFAULT_MODEL) !== model) return null
   const m = /[#&]r=([^&]*)/.exec(h)
   if (!m) return null
   const steers: Steer[] = []
@@ -61,7 +73,9 @@ function decodeHash(h: string, layers: number, neurons: number): { steers: Steer
 }
 
 export function NeuronLabApp() {
-  const data = useLabData(16)
+  // null until the address and storage have been read, so nothing is fetched for the wrong model first
+  const [modelId, setModelId] = useState<ModelId | null>(null)
+  const data = useLabData(modelId, modelId ? startLayer(modelId) : 16)
   const { meta, layers, contexts, links, fedBy, discoveries, findings } = data
   const reduced = useReducedMotion()
 
@@ -109,11 +123,23 @@ export function NeuronLabApp() {
     } catch {}
   }, [])
 
+  // which model: the link, else the last one used here, else the default
+  useEffect(() => {
+    let id: ModelId = DEFAULT_MODEL
+    try {
+      const fromLink = hashModel(window.location.hash)
+      const stored = localStorage.getItem(`${LS}:model`)
+      id = fromLink ?? (isModelId(stored) ? stored : DEFAULT_MODEL)
+    } catch {}
+    setModelId(id)
+    setLayer(startLayer(id))
+  }, [])
+
   const hashed = useRef(false)
   useEffect(() => {
-    if (!meta || hashed.current) return
+    if (!meta || !modelId || hashed.current) return
     hashed.current = true
-    const fromHash = decodeHash(window.location.hash, meta.layers, meta.neurons)
+    const fromHash = decodeHash(window.location.hash, modelId, meta.layers, meta.neurons)
     if (fromHash && (fromHash.steers.length || fromHash.prompt)) {
       setSteersRaw(fromHash.steers)
       setPrompt(fromHash.prompt)
@@ -125,22 +151,22 @@ export function NeuronLabApp() {
       return
     }
     try {
-      const s = JSON.parse(localStorage.getItem(`${LS}:state`) ?? "null")
+      const s = JSON.parse(localStorage.getItem(`${LS}:state:${modelId}`) ?? "null")
       if (s) {
         setSteersRaw(Array.isArray(s.steers) ? s.steers.slice(0, MAX_STEERS) : [])
         setPrompt(typeof s.prompt === "string" ? s.prompt : "")
         setChat(s.chat !== false)
       }
     } catch {}
-  }, [meta])
+  }, [meta, modelId])
 
   useEffect(() => {
-    if (!hashed.current) return
+    if (!hashed.current || !modelId) return
     try {
-      localStorage.setItem(`${LS}:state`, JSON.stringify({ steers, prompt, chat }))
-      history_replace(encodeHash(steers, prompt, chat))
+      localStorage.setItem(`${LS}:state:${modelId}`, JSON.stringify({ steers, prompt, chat }))
+      history_replace(encodeHash(modelId, steers, prompt, chat))
     } catch {}
-  }, [steers, prompt, chat])
+  }, [steers, prompt, chat, modelId])
 
   const setSteers = useCallback((f: (s: Steer[]) => Steer[]) => {
     setSteersRaw((cur) => {
@@ -161,31 +187,70 @@ export function NeuronLabApp() {
   }, [toast])
 
   // ---- engine ----------------------------------------------------------
+  const engineStarted = useRef(false)
   useEffect(() => {
-    let dead = false
+    if (!modelId || engineStarted.current) return
+    engineStarted.current = true
     const allowMock = new URLSearchParams(window.location.search).get("mock") === "1"
-    loadEngine(allowMock).then(async (e) => {
-      if (dead) return
+    loadEngine(allowMock, modelId).then(async (e) => {
       setEngine(e)
       if (!e) return setEng({ status: "none", frac: 0, msg: "", cached: "unknown" })
       const cached = await e.cached().catch(() => "unknown" as const)
-      if (!dead) setEng({ status: e.isLoaded() ? "ready" : "idle", frac: 0, msg: "", cached })
+      setEng({ status: e.isLoaded() ? "ready" : "idle", frac: 0, msg: "", cached, backend: e.backend() })
     })
-    return () => {
-      dead = true
-    }
-  }, [])
+  }, [modelId])
 
   const onLoad = useCallback(async () => {
     if (!engine || eng.status === "loading" || eng.status === "ready") return
     setEng((s) => ({ ...s, status: "loading", frac: 0, msg: "starting" }))
     try {
       await engine.load((frac, msg) => setEng((s) => ({ ...s, status: "loading", frac, msg })))
-      setEng((s) => ({ ...s, status: "ready", frac: 1, msg: "" }))
+      setEng((s) => ({ ...s, status: "ready", frac: 1, msg: "", cached: "cached", backend: engine.backend() }))
     } catch (e) {
       setEng((s) => ({ ...s, status: "error", error: e instanceof Error ? e.message : String(e) }))
     }
   }, [engine, eng.status])
+
+  // Choose the other CPU/GPU backend for the loaded model (opt-in; needs navigator.gpu).
+  const onBackend = useCallback(
+    async (kind: "cpu" | "webgpu") => {
+      if (!engine || eng.status !== "ready" || eng.backend === kind) return
+      setEng((s) => ({ ...s, backendMsg: kind === "webgpu" ? "preparing the GPU path\u2026" : "switching to the CPU\u2026", backendErr: undefined }))
+      try {
+        const r = await engine.setBackend(kind, (f, m) => setEng((s) => ({ ...s, backendMsg: `${Math.round(f * 100)}% ${m}` })))
+        setEng((s) => ({
+          ...s,
+          backend: r.backend,
+          backendMsg: r.adapter ? `adapter: ${r.adapter.description || r.adapter.architecture || r.adapter.vendor}${r.adapter.fallback ? " (a software adapter)" : ""}` : "",
+        }))
+      } catch (e) {
+        setEng((s) => ({ ...s, backend: engine.backend(), backendMsg: "", backendErr: e instanceof Error ? e.message : String(e) }))
+      }
+    },
+    [engine, eng.status, eng.backend],
+  )
+
+  // Switch model: unload the other one (its weights leave memory), forget what only made sense for it.
+  const switchModel = useCallback(
+    (id: ModelId) => {
+      if (id === modelId) return
+      engine?.select(id)
+      hashed.current = false
+      history.current = []
+      setSteersRaw([])
+      setSelected(null)
+      setIdText("")
+      setLayer(startLayer(id))
+      setModelId(id)
+      try {
+        localStorage.setItem(`${LS}:model`, id)
+      } catch {}
+      setEng({ status: engine ? "idle" : "none", frac: 0, msg: "", cached: "unknown", backend: "cpu" })
+      engine?.cached(id).then((c) => setEng((s) => (s.status === "idle" ? { ...s, cached: c } : s))).catch(() => {})
+      toast(`Switched to ${MODELS[id].label}. The other model was unloaded. The recipe shown is the one you last used with this model.`)
+    },
+    [engine, modelId, toast],
+  )
 
   // ---- search ----------------------------------------------------------
   useEffect(() => {
@@ -326,7 +391,7 @@ export function NeuronLabApp() {
 
   const saveName = (v: string) => {
     if (!selected) return
-    const k = nkey(selected.layer, selected.neuron)
+    const k = `${modelId}:${nkey(selected.layer, selected.neuron)}`
     const n = { ...names, [k]: v }
     if (!v) delete n[k]
     setNames(n)
@@ -348,6 +413,19 @@ export function NeuronLabApp() {
   const loadingLayers = meta && data.loadedLayers < meta.layers
   const effectiveView = noGl ? "grid" : view
   const selKey = selected ? nkey(selected.layer, selected.neuron) : ""
+
+  if (!modelId) {
+    return (
+      <div ref={rootRef} className="nl-root" data-theme={theme}>
+        <div className="nl-top">
+          <Link className="nl-brand" href="/">
+            {"←"} <span>neuron lab</span> <small>ai.thesatyajit.com</small>
+          </Link>
+        </div>
+        <div className="nl-empty" style={{ padding: 24 }}>Loading…</div>
+      </div>
+    )
+  }
 
   if (data.status === "missing") {
     return (
@@ -376,6 +454,19 @@ export function NeuronLabApp() {
         <Link className="nl-brand" href="/" title="Back to the site">
           {"←"} <span>neuron lab</span> <small>ai.thesatyajit.com</small>
         </Link>
+        <select
+          className="nl-select"
+          aria-label="Model"
+          title={`${MODEL_NOTES[modelId].arch} The other model is unloaded when you switch.`}
+          value={modelId}
+          onChange={(e) => switchModel(e.target.value as ModelId)}
+        >
+          {MODEL_IDS.map((id) => (
+            <option key={id} value={id}>
+              {modelOptionLabel(id)}
+            </option>
+          ))}
+        </select>
         <div className="nl-seg" role="group" aria-label="View">
           <button aria-pressed={effectiveView === "map"} onClick={() => !noGl && setView("map")} disabled={!!noGl} title={noGl ? "WebGL is not available here" : "3D map of every layer"}>
             map
@@ -467,7 +558,7 @@ export function NeuronLabApp() {
                       <button key={k} className="nl-row" role="option" aria-selected={selKey === k} onClick={() => select(h.layer, h.neuron)}>
                         <span className="id nl-mono">{fmtNeuron(h.layer, h.neuron)}</span>
                         <span className={`sg nl-mono ${h.sign > 0 ? "p" : "m"}`}>{h.sign > 0 ? "+1" : "−1"}</span>
-                        <span className="toks">{names[k] ? `${names[k]} · ` : ""}{h.tokens.join(" ")}</span>
+                        <span className="toks">{names[`${modelId}:${k}`] ? `${names[`${modelId}:${k}`]} · ` : ""}{h.tokens.join(" ")}</span>
                       </button>
                     )
                   })}
@@ -535,7 +626,7 @@ export function NeuronLabApp() {
                 ) : null}
                 <div className="nl-sec">How this works</div>
                 <div className="nl-empty">
-                  Every layer of Qwen3-0.6B has 3,072 small units called neurons. Pick one, push it up or down, and watch the model&apos;s writing change. Press <span className="nl-kbd">?</span> for a tour.
+                  Every layer of {MODELS[modelId].label} has {MODELS[modelId].neurons.toLocaleString("en-US")} small units called neurons. Pick one, push it up or down, and watch the model&apos;s writing change. Press <span className="nl-kbd">?</span> for a tour.
                 </div>
               </>
             )}
@@ -546,6 +637,7 @@ export function NeuronLabApp() {
           {meta ? (
             effectiveView === "map" ? (
               <NeuronMap
+                key={modelId}
                 meta={meta}
                 layers={layers}
                 version={data.version}
@@ -565,7 +657,7 @@ export function NeuronLabApp() {
                 }}
               />
             ) : (
-              <NeuronGrid meta={meta} lens={lens ?? layers.get(layer)} layer={layer} selected={selected} styles={styles} theme={theme} onPick={select} />
+              <NeuronGrid key={modelId} meta={meta} lens={lens ?? layers.get(layer)} layer={layer} selected={selected} styles={styles} theme={theme} onPick={select} />
             )
           ) : (
             <div className="nl-banner">Loading the neuron data…</div>
@@ -610,7 +702,7 @@ export function NeuronLabApp() {
                   style={{ flex: 1 }}
                   aria-label="Your name for this neuron (saved in this browser)"
                   placeholder="name it (saved here)"
-                  value={names[selKey] ?? ""}
+                  value={names[`${modelId}:${selKey}`] ?? ""}
                   onChange={(e) => saveName(e.target.value)}
                 />
               </div>
@@ -639,6 +731,9 @@ export function NeuronLabApp() {
           {meta ? (
             tab === "steer" ? (
               <SteerPanel
+                key={modelId}
+                modelId={modelId}
+                onBackend={onBackend}
                 meta={meta}
                 layers={layers}
                 selected={selected}
@@ -710,10 +805,10 @@ export function NeuronLabApp() {
           <div onClick={(e) => e.stopPropagation()}>
             <h2>Neuron lab</h2>
             <p>
-              Qwen3-0.6B has 28 layers, and each layer has 3,072 small units (MLP neurons). Each neuron adds a fixed direction to the model&apos;s running state when it fires. Steering writes that direction in by hand: pick a neuron, choose a dose, and the model runs with the extra push at every position.
+              {MODELS[modelId].label} has {MODELS[modelId].layers} layers, and each layer has {MODELS[modelId].neurons.toLocaleString("en-US")} small units (MLP neurons). Each neuron adds a fixed direction to the model&apos;s running state when it fires. Steering writes that direction in by hand: pick a neuron, choose a dose, and the model runs with the extra push at every position.
             </p>
             <p>
-              The dose is a multiple of the layer&apos;s typical state length, divided by the neuron&apos;s own column length, so a dose of 1 means the same thing in every layer. It is the recipe from <a href="https://github.com/lyramakesmusic/neuron-explorer" target="_blank" rel="noreferrer">neuron-explorer</a>; <a href="https://huggingface.co/spaces/webml-community/neuron-studio" target="_blank" rel="noreferrer">Neuron Studio</a> showed it can run in a browser tab with Qwen3.5-4B. This page is our own build for the smaller Qwen3-0.6B.
+              The dose is a multiple of the layer&apos;s typical state length, divided by the neuron&apos;s own column length, so a dose of 1 means the same thing in every layer. It is the recipe from <a href="https://github.com/lyramakesmusic/neuron-explorer" target="_blank" rel="noreferrer">neuron-explorer</a>; <a href="https://huggingface.co/spaces/webml-community/neuron-studio" target="_blank" rel="noreferrer">Neuron Studio</a> showed it can run in a browser tab with Qwen3.5-4B. This page is our own build for two small models, Qwen3-0.6B and the hybrid Qwen3.5-0.8B.
             </p>
             <p>
               <b>What it is not:</b> there is no AI agent here. The Investigate tab runs fixed tools over published data. The model, when you load it, runs inside this tab on your device; nothing you type is sent anywhere.

@@ -6,28 +6,48 @@ import { Range } from "@/components/articles/ui/range"
 import { cn } from "@/lib/utils"
 import { mlog10 } from "@/lib/dmath"
 
-import { AXES, BRIDGES, GRID, GRID_DOSES } from "./data"
+import { AXES_BY_MODEL, GRID_BY_MODEL, GRID_DOSES, type ModelKey } from "./data"
 
-// Both widgets draw data.ts, which is the output of scripts/neuron-lab/data_discover.py and data_steergrid.py for
-// ten axes on Qwen3-0.6B. Nothing is interpolated except the lines between measured doses.
+// Both widgets draw data.ts: the output of scripts/neuron-lab/data_discover.py and data_steergrid.py for each model.
+// Nothing is interpolated except the lines between measured doses.
 
 const ACCENT = "oklch(0.65 0.16 55)"
 const VIOLET = "oklch(0.6 0.16 295)"
 const fmt = (v: number | null) => (v == null ? "n/a" : String(v))
 const dose = (d: number) => `${d < 0 ? "−" : "+"}${Math.abs(d)}`
+const KEYS: { key: ModelKey; label: string }[] = [
+  { key: "qwen3-0.6b", label: "Qwen3-0.6B" },
+  { key: "qwen3.5-0.8b", label: "Qwen3.5-0.8B" },
+]
+
+function ModelTabs({ model, set }: { model: ModelKey; set: (m: ModelKey) => void }) {
+  return (
+    <div className="flex flex-wrap gap-1.5" role="group" aria-label="Model">
+      {KEYS.map((k) => (
+        <button key={k.key} aria-pressed={k.key === model} onClick={() => set(k.key)} className={cn("rounded border px-2 py-0.5 font-mono text-[11px]", k.key === model ? "border-foreground bg-muted" : "text-muted-foreground hover:text-foreground")}>
+          {k.label}
+        </button>
+      ))}
+    </div>
+  )
+}
 
 export function AxisResults() {
+  const [model, setModel] = useState<ModelKey>("qwen3-0.6b")
+  const AXES = AXES_BY_MODEL[model]
   const [open, setOpen] = useState("bridges")
   const cur = AXES.find((a) => a.axis === open) ?? AXES[0]
-  // strip: where each axis sits on "how many of the 40 strongest contrasts held up", worked or not
+  const worked = AXES.filter((a) => a.works).map((a) => a.replicated).sort((a, b) => a - b)
+  const missed = AXES.filter((a) => !a.works).map((a) => a.replicated).sort((a, b) => a - b)
   const W = 520
   const sx = (n: number) => 20 + (n / 40) * (W - 40)
   return (
     <figure className="my-8 overflow-hidden rounded-md border">
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
-        ten axes searched on Qwen3-0.6B: which ones gave a neuron that works (measured)
+        axes searched on each model: which ones gave a neuron that works (measured)
       </div>
       <div className="space-y-3 px-4 py-3">
+        <ModelTabs model={model} set={(m) => { setModel(m); setOpen(AXES_BY_MODEL[m][0].axis) }} />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[480px] text-xs">
             <thead>
@@ -43,9 +63,9 @@ export function AxisResults() {
                 const singles = a.found.filter((f) => !f.pair).length
                 const pairs = a.found.length - singles
                 return (
-                  <tr key={a.axis} className={cn("cursor-pointer border-t", a.axis === open && "bg-muted")} onClick={() => setOpen(a.axis)}>
+                  <tr key={a.axis} className={cn("cursor-pointer border-t", a.axis === cur.axis && "bg-muted")} onClick={() => setOpen(a.axis)}>
                     <td className="py-1 pr-2">
-                      <button className="text-left" aria-pressed={a.axis === open} onClick={() => setOpen(a.axis)}>
+                      <button className="text-left" aria-pressed={a.axis === cur.axis} onClick={() => setOpen(a.axis)}>
                         {a.label}
                       </button>
                     </td>
@@ -60,7 +80,7 @@ export function AxisResults() {
             </tbody>
           </table>
         </div>
-        <svg viewBox={`0 0 ${W} 74`} className="w-full" role="img" aria-label="Each axis placed by how many of its 40 strongest contrasts held up. Axes with a working neuron sit at 6, 17, 26 and 33; axes with none sit at 15, 26, 28, 29, 33 and 34. The two groups overlap.">
+        <svg viewBox={`0 0 ${W} 74`} className="w-full" role="img" aria-label={`Each axis placed by how many of its 40 strongest contrasts held up. Axes with a working neuron sit at ${worked.join(", ")}; axes with none sit at ${missed.join(", ")}.`}>
           <line x1={20} x2={W - 20} y1={34} y2={34} stroke="currentColor" opacity={0.25} />
           {[0, 10, 20, 30, 40].map((n) => (
             <g key={n}>
@@ -71,7 +91,7 @@ export function AxisResults() {
           {AXES.map((a, i) => {
             const stack = AXES.slice(0, i).filter((b) => b.replicated === a.replicated && b.works === a.works).length
             return (
-              <circle key={a.axis} cx={sx(a.replicated)} cy={a.works ? 25 - stack * 9 : 43 + stack * 9} r={4} fill={a.works ? ACCENT : VIOLET} opacity={a.axis === open ? 1 : 0.55} stroke={a.axis === open ? "currentColor" : "none"}>
+              <circle key={a.axis} cx={sx(a.replicated)} cy={a.works ? 25 - stack * 9 : 43 + stack * 9} r={4} fill={a.works ? ACCENT : VIOLET} opacity={a.axis === cur.axis ? 1 : 0.55} stroke={a.axis === cur.axis ? "currentColor" : "none"}>
                 <title>{`${a.label}: ${a.replicated} of 40`}</title>
               </circle>
             )
@@ -83,27 +103,31 @@ export function AxisResults() {
         <div className="border-t pt-3 text-xs leading-5">
           <div className="font-medium">{cur.label}</div>
           <p className="text-muted-foreground">
-            {cur.nA} texts with the idea against {cur.nB} without. Random neurons in those layers have a mean |d&apos;| of {cur.randMean}; the largest was {cur.topD}. In screening, the best of 32 random neurons lifted the score by {fmt(cur.stage1ControlBest)}.
+            {cur.nA} texts with the idea against {cur.nB} without. Random neurons have a mean |d&apos;| of {cur.randMean}; the largest was {cur.topD}. In screening ({cur.screened} candidates against {cur.screened} random neurons), the best random neuron lifted the score by {fmt(cur.stage1ControlBest)}.
           </p>
           {cur.found.length ? (
             <ul className="mt-2 space-y-1">
-              {cur.found.map((f) => (
-                <li key={f.id} className="font-mono text-[11px]">
-                  <a href={f.link} className="underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground">
-                    {f.neurons.map((n) => `L${n[0]} N${n[1]} ${dose(n[2])}`).join(" + ")}
-                  </a>{" "}
-                  <span className="text-muted-foreground">
-                    {f.pair ? "pair, " : ""}lift {fmt(f.lift)} (needs {fmt(f.minLift)}), best random {fmt(f.random)}, perplexity {fmt(f.ppl)} against {BRIDGES.baselinePpl}
-                  </span>
-                </li>
-              ))}
+              {cur.found.map((f) => {
+                const loops = f.rep != null && f.repBase != null && f.rep - f.repBase >= 10
+                return (
+                  <li key={f.id} className="font-mono text-[11px]">
+                    <a href={f.link} className="underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground">
+                      {f.neurons.map((n) => `L${n[0]} N${n[1]} ${dose(n[2])}`).join(" + ")}
+                    </a>{" "}
+                    <span className="text-muted-foreground">
+                      {f.pair ? "pair, " : ""}lift {fmt(f.lift)} (needs {fmt(f.minLift)}), best random {fmt(f.random)}, perplexity {fmt(f.ppl)} against {fmt(f.basePpl)}
+                      {f.rep != null ? <span style={loops ? { color: ACCENT } : undefined}>, repeated trigrams {fmt(f.rep)}% against {fmt(f.repBase)}%</span> : null}
+                    </span>
+                  </li>
+                )
+              })}
             </ul>
           ) : (
-            <p className="mt-2 text-muted-foreground">No neuron changed the output: none of the 32 screened, and none of the 6 swept over doses, cleared the bar.</p>
+            <p className="mt-2 text-muted-foreground">No neuron changed the output: none of the {cur.screened} screened, and none of those swept over doses, cleared the bar.</p>
           )}
-          {cur.axis === "repeat" ? (
+          {cur.found.length && Math.max(...cur.found.map((f) => f.random ?? 0)) >= 5 ? (
             <p className="mt-2 text-muted-foreground">
-              Caution: repetition is the easiest thing to cause. Random neurons reach a lift of 37.4 at some doses, so only the entries whose random control stays low (such as L11 N289) are clean.
+              Caution: random neurons reach a lift of {fmt(Math.max(...cur.found.map((f) => f.random ?? 0)))} on this axis. A lift shows the push changes the text; it does not show the neuron is specific to the idea.
             </p>
           ) : null}
         </div>
@@ -112,31 +136,38 @@ export function AxisResults() {
   )
 }
 
-const PPL_BASE = 21.5
-
 export function PerplexityCliff() {
+  const [model, setModel] = useState<ModelKey>("qwen3-0.6b")
+  const GRID = GRID_BY_MODEL[model]
   const [i, setI] = useState(6)
   const d = GRID_DOSES[i]
+  const base = GRID[0].ppl[0]
+  const all = GRID.flatMap((g) => g.ppl)
+  const lo = Math.floor(Math.min(...all) * 0.8)
+  const hi = Math.max(...all) * 1.3
   const W = 520
   const H = 190
   const x = (k: number) => 38 + (k / (GRID_DOSES.length - 1)) * (W - 60)
-  const y = (p: number) => H - 24 - ((mlog10(p) - mlog10(15)) / (mlog10(4000) - mlog10(15))) * (H - 40)
+  const y = (p: number) => H - 24 - ((mlog10(p) - mlog10(lo)) / (mlog10(hi) - mlog10(lo))) * (H - 40)
   const line = (v: number[]) => v.map((p, k) => `${k ? "L" : "M"}${x(k).toFixed(1)} ${y(p).toFixed(1)}`).join(" ")
+  const ticks = [10, 20, 50, 100, 300, 1000, 3000, 10000].filter((t) => t > lo && t < hi)
+  const at = (dd: number) => GRID.map((g) => g.ppl[GRID_DOSES.indexOf(dd)])
   return (
     <figure className="my-8 overflow-hidden rounded-md border">
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
-        what a push costs: held-out perplexity by dose for the nine neurons in the steer grid (measured, log scale)
+        what a push costs: held-out perplexity by dose for the neurons in each model&apos;s steer grid (measured, log scale)
       </div>
       <div className="space-y-3 px-4 py-3">
-        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Perplexity rises with dose for every neuron. At dose 0.5 the nine neurons range from 26.0 to 172.6; at dose 1.0 they range from 70.1 to 3115.4. The unsteered value is 21.5.">
-          {[20, 50, 100, 300, 1000, 3000].map((v) => (
+        <ModelTabs model={model} set={(m) => { setModel(m) }} />
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`Perplexity rises with dose. At dose 0.5 the ${GRID.length} neurons range from ${Math.min(...at(0.5))} to ${Math.max(...at(0.5))}; at dose 1.0 from ${Math.min(...at(1))} to ${Math.max(...at(1))}. Unsteered it is ${base}.`}>
+          {ticks.map((v) => (
             <g key={v}>
               <line x1={38} x2={W - 22} y1={y(v)} y2={y(v)} stroke="currentColor" opacity={0.1} />
               <text x={32} y={y(v) + 3} textAnchor="end" fontSize={9} fill="currentColor" opacity={0.6}>{v}</text>
             </g>
           ))}
-          <line x1={38} x2={W - 22} y1={y(3 * PPL_BASE)} y2={y(3 * PPL_BASE)} stroke={ACCENT} strokeDasharray="4 3" opacity={0.7} />
-          <text x={W - 22} y={y(3 * PPL_BASE) - 3} textAnchor="end" fontSize={9} fill={ACCENT}>3 &times; unsteered: the bar a recipe had to stay under</text>
+          <line x1={38} x2={W - 22} y1={y(3 * base)} y2={y(3 * base)} stroke={ACCENT} strokeDasharray="4 3" opacity={0.7} />
+          <text x={W - 22} y={y(3 * base) - 3} textAnchor="end" fontSize={9} fill={ACCENT}>3 &times; unsteered: the bar a recipe had to stay under</text>
           {GRID.map((g, k) => (
             <path key={k} d={line(g.ppl)} fill="none" stroke={g.axis === "repeat" ? VIOLET : "currentColor"} strokeWidth={g.axis === "bridges" ? 2.2 : 1.2} opacity={g.axis === "bridges" || g.axis === "repeat" ? 0.9 : 0.4} />
           ))}
@@ -159,7 +190,7 @@ export function PerplexityCliff() {
           ))}
         </ul>
         <p className="text-xs leading-5 text-muted-foreground">
-          Unsteered perplexity is {PPL_BASE}. The bridge neuron (bold) goes to 38.0 at dose 0.5 and 116.9 at 1.0. The violet lines are the three repetition neurons, which reach 221.7, 1,457.7 and 3,115.4 at dose 1.0. Most recipes were found between about 0.1 and 0.5, which is where the text is still readable.
+          Unsteered perplexity is {base}. Every neuron gets worse text as the dose grows, and the repetition neurons (violet, 0.6B only) go furthest. Most recipes were found between about 0.1 and 0.5, which is where the text is still readable.
         </p>
       </div>
     </figure>

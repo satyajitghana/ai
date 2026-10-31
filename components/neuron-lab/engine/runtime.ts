@@ -1,7 +1,15 @@
 // Tokenizer + core + sampler = the engine behind the public API. Environment-agnostic.
 import { MAX_BATCH, Qwen3Core, type KVStream } from "./core"
 import { Tokenizer } from "./tokenizer"
+import { GpuBackend } from "./gpu"
 import type { ActivationsResult, ByteSource, Calibration, GenerateManyOptions, GenerateOptions, GenerateResult, ProgressFn, Steer } from "./types"
+
+/** A fixed plain-English passage the residual norms are measured on when the site ships no calibration. */
+export const CALIBRATION_PASSAGE =
+  "The lighthouse keeper climbed the stairs each evening, counted the steps out of habit, and lit the lamp just as the last boat turned toward the harbour. " +
+  "Below him the sea kept its own accounts: tides, currents, the slow wearing of the rock. He wrote the weather in a notebook, ate his supper standing at the window, " +
+  "and listened to the radio until the static took over. In the morning there would be gulls, a delivery of oil and bread, and perhaps a letter from his daughter, " +
+  "who lived in a city where nobody had ever needed to know which way the wind was blowing."
 
 export const EOS_IDS = new Set([151645, 151643])
 export const KEEP_ALL_MAX_TOKENS = 128
@@ -45,8 +53,112 @@ export function sampleToken(logits: Float32Array, temperature: number, topK: num
   return ti[cnt - 1]
 }
 
+export type Backend = "cpu" | "webgpu"
+
 export class Runtime {
   constructor(readonly core: Qwen3Core, readonly tok: Tokenizer) {}
+
+  /** The WebGPU decode path, once enabled. The CPU path stays the default and the reference. */
+  gpu: GpuBackend | null = null
+  useGpu = false
+
+  async setBackend(kind: Backend, onProgress?: ProgressFn): Promise<{ backend: Backend; adapter?: GpuBackend["info"] }> {
+    if (kind === "cpu") { this.useGpu = false; return { backend: "cpu" } }
+    if (!this.gpu) {
+      this.gpu = await GpuBackend.create(this.core, onProgress)
+      if (!this.gpu) throw new Error("WebGPU is not available in this browser")
+    }
+    this.useGpu = true
+    return { backend: "webgpu", adapter: this.gpu.info }
+  }
+
+  /** Last-position logits on the GPU path (tests; generation uses it automatically once enabled). */
+  async logitsGpu(prompt: string, steers: Steer[]): Promise<Float32Array> {
+    const gpu = this.gpu
+    if (!gpu) throw new Error("WebGPU backend not enabled")
+    const ids = this.tok.encode(prompt)
+    if (!ids.length) throw new Error("empty prompt")
+    const st = gpu.newStream(ids.length + 1, this.core.buildDeltas(steers))
+    try {
+      for (let i = 0; i < ids.length - 1; i++) await gpu.step(st, ids[i], false)
+      return (await gpu.step(st, ids[ids.length - 1], true))!
+    } finally { gpu.freeStream(st) }
+  }
+
+  private async generateGpu(o: GenerateOptions, yieldFn?: () => Promise<void>): Promise<GenerateResult & { promptTokens: number; prefillMs: number }> {
+    const gpu = this.gpu!
+    const ids = this.tok.encode(o.prompt)
+    if (!ids.length) throw new Error("empty prompt")
+    const st = gpu.newStream(ids.length + o.maxNewTokens + 1, this.core.buildDeltas(o.steers))
+    const rand = rng(o.seed)
+    const dec = new TextDecoder("utf-8")
+    let text = ""
+    try {
+      const t0 = performance.now()
+      for (let i = 0; i < ids.length - 1; i++) await gpu.step(st, ids[i], false)
+      let lg = (await gpu.step(st, ids[ids.length - 1], true))!
+      const prefillMs = performance.now() - t0
+      const t1 = performance.now()
+      let n = 0
+      for (; n < o.maxNewTokens; n++) {
+        if (o.signal?.aborted) break
+        const id = sampleToken(lg, o.temperature, o.topK, rand)
+        if (this.core.eosIds.has(id)) break
+        const piece = dec.decode(this.tok.tokenBytes(id), { stream: true })
+        text += piece
+        o.onToken(piece, { index: n })
+        if (n + 1 >= o.maxNewTokens) { n++; break }
+        lg = (await gpu.step(st, id, true))!
+        if (yieldFn) await yieldFn()
+      }
+      const tail = dec.decode()
+      if (tail) { text += tail; o.onToken(tail, { index: n }) }
+      return { text, tokens: n, msPerToken: n ? (performance.now() - t1) / n : 0, promptTokens: ids.length, prefillMs }
+    } finally { gpu.freeStream(st) }
+  }
+
+  private async generateManyGpu(o: GenerateManyOptions, yieldFn?: () => Promise<void>): Promise<(GenerateResult & { promptTokens: number })[]> {
+    const gpu = this.gpu!
+    const B = o.variants.length
+    const ids = this.tok.encode(o.prompt)
+    if (!ids.length) throw new Error("empty prompt")
+    const streams = o.variants.map((v) => gpu.newStream(ids.length + o.maxNewTokens + 1, this.core.buildDeltas(v)))
+    try {
+      const cur: Float32Array[] = []
+      for (let b = 0; b < B; b++) {
+        for (let i = 0; i < ids.length - 1; i++) await gpu.step(streams[b], ids[i], false)
+        cur.push((await gpu.step(streams[b], ids[ids.length - 1], true))!)
+      }
+      const rands = o.variants.map(() => rng(o.seed))
+      const decs = o.variants.map(() => new TextDecoder("utf-8"))
+      const text = o.variants.map(() => "")
+      const n = o.variants.map(() => 0)
+      const alive = o.variants.map(() => true)
+      const t1 = performance.now()
+      while (alive.some(Boolean)) {
+        if (o.signal?.aborted) break
+        for (let b = 0; b < B; b++) {
+          if (!alive[b]) continue
+          const id = sampleToken(cur[b], o.temperature, o.topK, rands[b])
+          if (this.core.eosIds.has(id)) { alive[b] = false; continue }
+          const piece = decs[b].decode(this.tok.tokenBytes(id), { stream: true })
+          text[b] += piece
+          o.onToken(b, piece, { index: n[b] })
+          n[b]++
+          if (n[b] >= o.maxNewTokens) { alive[b] = false; continue }
+          cur[b] = (await gpu.step(streams[b], id, true))!
+        }
+        if (yieldFn) await yieldFn()
+      }
+      const ms = performance.now() - t1
+      const tot = Math.max(1, ...n)
+      return o.variants.map((_, b) => {
+        const tail = decs[b].decode()
+        if (tail) { text[b] += tail; o.onToken(b, tail, { index: n[b] }) }
+        return { text: text[b], tokens: n[b], msPerToken: ms / tot, promptTokens: ids.length }
+      })
+    } finally { for (const s of streams) gpu.freeStream(s) }
+  }
 
   static async create(src: ByteSource, tokenizerJson: unknown, onProgress?: ProgressFn): Promise<Runtime> {
     const core = await Qwen3Core.load(src, onProgress)
@@ -54,6 +166,30 @@ export class Runtime {
   }
 
   setCalibration(c: Calibration) { this.core.setCalibration(c) }
+
+  /**
+   * Measure what the steering recipe needs from the loaded model itself: the median norm of the residual stream
+   * leaving each layer (tokens after the first, over a fixed reference passage) and each neuron's down_proj column
+   * length. Takes a few seconds; used when the site ships no precomputed calibration for the model.
+   */
+  selfCalibrate(): Calibration {
+    const ids = this.tok.encode(CALIBRATION_PASSAGE)
+    const { nLayer, hidden } = this.core
+    const norms: number[][] = Array.from({ length: nLayer }, () => [])
+    this.core.reset()
+    this.core.forward(ids, false, {
+      onLayerOut: (l, x, t0, nTok) => {
+        for (let t = 0; t < nTok; t++) {
+          if (t0 + t === 0) continue
+          let ss = 0
+          for (let i = 0; i < hidden; i++) { const v = x[t * hidden + i]; ss += v * v }
+          norms[l].push(Math.sqrt(ss))
+        }
+      },
+    })
+    const median = (a: number[]) => { const s = [...a].sort((p, q) => p - q); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2 }
+    return { resNormMedian: norms.map(median), colNorm: this.core.columnNorms() }
+  }
 
   tokenize(text: string): number[] { return this.tok.encode(text) }
 
@@ -106,6 +242,7 @@ export class Runtime {
   async generateMany(o: GenerateManyOptions, yieldFn?: () => Promise<void>): Promise<(GenerateResult & { promptTokens: number })[]> {
     const B = o.variants.length
     if (B < 1 || B > MAX_BATCH) throw new Error(`1 to ${MAX_BATCH} variants`)
+    if (this.useGpu && this.gpu) return this.generateManyGpu(o, yieldFn)
     const ids = this.tok.encode(o.prompt)
     if (!ids.length) throw new Error("empty prompt")
     const deltas = o.variants.map((v) => this.core.buildDeltas(v))
@@ -129,7 +266,7 @@ export class Runtime {
       for (let b = 0; b < B; b++) {
         if (!alive[b]) continue
         const id = sampleToken(cur[b], o.temperature, o.topK, rands[b])
-        if (EOS_IDS.has(id)) { alive[b] = false; continue }
+        if (this.core.eosIds.has(id)) { alive[b] = false; continue }
         const piece = decs[b].decode(this.tok.tokenBytes(id), { stream: true })
         text[b] += piece
         o.onToken(b, piece, { index: n[b] })
@@ -153,6 +290,7 @@ export class Runtime {
   }
 
   async generate(o: GenerateOptions, yieldFn?: () => Promise<void>): Promise<GenerateResult & { promptTokens: number; prefillMs: number }> {
+    if (this.useGpu && this.gpu) return this.generateGpu(o, yieldFn)
     const ids = this.tok.encode(o.prompt)
     if (!ids.length) throw new Error("empty prompt")
     const deltas = this.core.buildDeltas(o.steers)
@@ -168,7 +306,7 @@ export class Runtime {
     for (; n < o.maxNewTokens; n++) {
       if (o.signal?.aborted) break
       const id = sampleToken(lg, o.temperature, o.topK, rand)
-      if (EOS_IDS.has(id)) break
+      if (this.core.eosIds.has(id)) break
       const piece = dec.decode(this.tok.tokenBytes(id), { stream: true })
       text += piece
       o.onToken(piece, { index: n })

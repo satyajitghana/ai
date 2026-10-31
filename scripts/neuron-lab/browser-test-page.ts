@@ -1,12 +1,12 @@
 // Page side of browser-test.mts: drives the public engine API from a real browser tab.
-import { configureEngine, loadModel, cacheStatus, clearCache, generate, generateMany, activations, logits, unloadModel, isLoaded, MODEL_INFO, chatPrompt } from "../../components/neuron-lab/engine"
+import { configureEngine, getModelInfo, loadModel, cacheStatus, clearCache, generate, generateMany, activations, logits, unloadModel, isLoaded, MODEL_INFO, chatPrompt } from "../../components/neuron-lab/engine"
 
-declare global { interface Window { run(cal: unknown, steers: unknown, text: string): Promise<unknown>; reload(): Promise<unknown> } }
+declare global { interface Window { run(cal: unknown, steers: unknown, text: string, model: string): Promise<unknown>; reload(): Promise<unknown> } }
 const t = () => performance.now()
 
-window.run = async (cal, steers, text) => {
-  const out: Record<string, unknown> = { crossOriginIsolated: self.crossOriginIsolated, simd: true }
-  configureEngine({ calibration: cal as never, workerFactory: () => new Worker("/worker.js", { type: "module" }) })
+window.run = async (cal, steers, text, model) => {
+  const out: Record<string, unknown> = { crossOriginIsolated: self.crossOriginIsolated, model, info: getModelInfo() }
+  configureEngine({ model: model as never, ...(cal ? { calibration: cal as never } : {}), workerFactory: () => new Worker("/worker.js", { type: "module" }) })
   out.cacheBefore = await cacheStatus()
   const prog: Array<[number, string]> = []
   let t0 = t()

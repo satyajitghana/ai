@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Node parity test for the in-browser engine against the PyTorch reference (engine_reference.py).
-//   tsx scripts/neuron-lab/verify-engine.mts <gguf> <tokenizer.json> <ref-dir>
+//   tsx scripts/neuron-lab/verify-engine.mts <gguf> <tokenizer.json> <ref-dir> [test-prompts.json]
 import { readFileSync, openSync, readSync, fstatSync } from "node:fs"
 import { Runtime } from "../../components/neuron-lab/engine/runtime"
 import type { ByteSource } from "../../components/neuron-lab/engine/types"
@@ -11,7 +11,7 @@ const src: ByteSource = {
   size: fstatSync(fd).size,
   async read(off, dst) { let n = 0; while (n < dst.length) { const r = readSync(fd, dst, n, dst.length - n, off + n); if (!r) throw new Error("eof"); n += r } },
 }
-const prompts = JSON.parse(readFileSync(new URL("./test-prompts.json", import.meta.url), "utf8"))
+const prompts = JSON.parse(readFileSync(process.argv[5] ?? new URL("./test-prompts.json", import.meta.url), "utf8"))
 const ref = JSON.parse(readFileSync(`${refDir}/ref.json`, "utf8"))
 const cal = JSON.parse(readFileSync(`${refDir}/calibration.json`, "utf8"))
 const f32 = (p: string) => { const b = readFileSync(p); return new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4) }
@@ -109,4 +109,15 @@ for (const g of ref.greedy) {
   for (const v of variants) S2.push((await rt.generate({ prompt: P, steers: v, maxNewTokens: 12, temperature: 0.8, topK: 40, seed: 5, onToken: () => {} })).text)
   console.log(`batched sampling (seeded): ${T2.map((x, b) => (x.text === S2[b] ? "identical" : "DIFFERENT")).join(", ")}`)
   console.log("variants:", JSON.stringify(solo.map((x) => x.slice(0, 60))))
+}
+
+// 7. self-calibration (what the browser uses when the site ships no meta.json) against the PyTorch numbers
+{
+  const t7 = performance.now()
+  const sc = rt.selfCalibrate()
+  const ratio = sc.resNormMedian.map((v, l) => v / cal.resNormMedian[l])
+  let cn = 0, cw = 0
+  for (let l = 0; l < cal.colNorm.length; l++) for (let n = 0; n < cal.colNorm[l].length; n++) { const r = Math.abs(sc.colNorm[l][n] / cal.colNorm[l][n] - 1); cn = Math.max(cn, r); cw += r }
+  console.log(`self-calibration (${((performance.now() - t7) / 1000).toFixed(1)} s): median-residual-norm ratio to PyTorch's corpus min ${Math.min(...ratio).toFixed(3)} max ${Math.max(...ratio).toFixed(3)}; colNorm max rel diff ${cn.toExponential(2)}, mean ${(cw / (cal.colNorm.length * cal.colNorm[0].length)).toExponential(2)}`)
+  console.log("self resNormMedian[0,mid,last]:", sc.resNormMedian[0].toFixed(2), sc.resNormMedian[sc.resNormMedian.length >> 1].toFixed(2), sc.resNormMedian[sc.resNormMedian.length - 1].toFixed(2), "| pytorch:", cal.resNormMedian[0].toFixed(2), cal.resNormMedian[cal.resNormMedian.length >> 1].toFixed(2), cal.resNormMedian[cal.resNormMedian.length - 1].toFixed(2))
 }

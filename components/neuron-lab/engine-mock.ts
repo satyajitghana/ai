@@ -1,12 +1,23 @@
+import { MODELS, downloadMB, type ModelId } from "./lab-models"
 import type { NeuronEngine } from "./types"
 
-// UI development stand-in. It streams a fixed sentence and says so in `info.backend`; the page uses it
-// only when the real engine is absent AND the URL carries ?mock=1. It never ships a fake model answer
-// as if it were real: the output is labelled in the first token.
-export function createMockEngine(): NeuronEngine {
+// UI development stand-in. It streams a fixed sentence and says so in `info.backend`; the page uses it only when the
+// real engine is absent AND the URL carries ?mock=1. It never ships a fake model answer as if it were real: the
+// output is labelled in the first token.
+export function createMockEngine(initial: ModelId): NeuronEngine {
   let loaded = false
+  let id: ModelId = initial
+  let kind: "cpu" | "webgpu" = "cpu"
   return {
-    info: { model: "Qwen/Qwen3-0.6B", downloadMB: 0, memoryMB: 0, backend: "mock (UI development only)" },
+    get info() {
+      return { model: MODELS[id].hfModel, downloadMB: downloadMB(id), memoryMB: MODELS[id].memoryMB, backend: "mock (UI development only)" }
+    },
+    modelId: () => id,
+    select(next) {
+      if (next !== id) loaded = false
+      id = next as ModelId
+      kind = "cpu"
+    },
     isLoaded: () => loaded,
     cached: async () => "unknown",
     async load(onProgress) {
@@ -18,6 +29,12 @@ export function createMockEngine(): NeuronEngine {
     },
     unload() {
       loaded = false
+    },
+    webgpuAvailable: true,
+    backend: () => kind,
+    async setBackend(k) {
+      kind = k
+      return { backend: k }
     },
     async generate({ steers, maxNewTokens, onToken, signal }) {
       const words = `[mock output, ${steers.length} steer${steers.length === 1 ? "" : "s"}] This is placeholder text streamed by the UI development stand-in, not a model answer.`.split(" ")
@@ -35,7 +52,7 @@ export function createMockEngine(): NeuronEngine {
     },
     async activations(text) {
       const tokens = text.split(/\s+/).filter(Boolean)
-      return { tokens, max: new Float32Array(28 * 3072) }
+      return { tokens, max: new Float32Array(MODELS[id].layers * MODELS[id].neurons) }
     },
   }
 }

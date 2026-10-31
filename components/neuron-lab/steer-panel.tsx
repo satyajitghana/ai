@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 
 import { showToken } from "./data"
 import { activationDelta, fmtDose, MAX_STEERS, writeLength } from "./search"
+import { MODELS, MODEL_NOTES, type ModelId } from "./lab-models"
 import { RecipesFound } from "./recipes-card"
 import type { AxisFinding, Discovery, LayerLens, ModelMeta, NeuronEngine, Steer } from "./types"
 import { fmtNeuron } from "./types"
@@ -17,6 +18,10 @@ export type EngineState = {
   msg: string
   cached: "cached" | "missing" | "unknown"
   error?: string
+  /** which backend runs the loaded model */
+  backend?: "cpu" | "webgpu"
+  backendMsg?: string
+  backendErr?: string
 }
 
 type Col = { key: string; label: string; sign: -1 | 0 | 1; kind: "neg" | "base" | "pos"; text: string; state: "idle" | "queued" | "running" | "done" | "stopped" | "error"; tokens: number; msPerToken: number }
@@ -40,6 +45,8 @@ export function SteerPanel(p: {
   setPrompt: (s: string) => void
   chat: boolean
   setChat: (b: boolean) => void
+  modelId: ModelId
+  onBackend: (kind: "cpu" | "webgpu") => void
 }) {
   const { chat, setChat } = p
   const { meta, steers } = p
@@ -189,7 +196,7 @@ export function SteerPanel(p: {
         </div>
       )}
 
-      <RecipesFound discoveries={p.discoveries} findings={p.findings} openId={openDisc} onLoad={loadDiscovery} />
+      <RecipesFound discoveries={p.discoveries} findings={p.findings} openId={openDisc} onLoad={loadDiscovery} modelLabel={MODELS[p.modelId].label} notRun={MODEL_NOTES[p.modelId].notRun} />
 
       <div className="nl-card">
         <h3>Recipe ({steers.length}/{MAX_STEERS})</h3>
@@ -331,14 +338,17 @@ export function SteerPanel(p: {
           ))}
         </div>
       ) : null}
-      <EngineStatus engine={p.engine} state={p.engineState} onLoad={p.onLoad} />
+      <EngineStatus engine={p.engine} state={p.engineState} onLoad={p.onLoad} modelId={p.modelId} onBackend={p.onBackend} findings={p.findings} />
 
     </div>
   )
 }
 
-export function EngineStatus(p: { engine: NeuronEngine | null; state: EngineState; onLoad: () => void }) {
+export function EngineStatus(p: { engine: NeuronEngine | null; state: EngineState; onLoad: () => void; modelId: ModelId; onBackend: (kind: "cpu" | "webgpu") => void; findings: AxisFinding[] }) {
   const { engine, state } = p
+  const spec = MODELS[p.modelId]
+  const notes = MODEL_NOTES[p.modelId]
+  const lighter = p.findings.filter((f) => f.screened < 32).length
   if (!engine) {
     return (
       <div className="nl-card">
@@ -349,12 +359,16 @@ export function EngineStatus(p: { engine: NeuronEngine | null; state: EngineStat
       </div>
     )
   }
+  const info = engine.info
   return (
     <div className="nl-card">
-      <h3>Model</h3>
+      <h3>Model: {spec.label}</h3>
+      <p className="nl-note" style={{ margin: "0 0 8px" }}>
+        {notes.arch}
+      </p>
       {state.status === "ready" ? (
         <p className="nl-note" style={{ margin: 0 }}>
-          {engine.info.model} is running in this tab ({engine.info.backend}). Nothing you type leaves the page.
+          {info.model} is running in this tab ({info.backend}). Nothing you type leaves the page.
         </p>
       ) : state.status === "loading" ? (
         <div className="nl-note">
@@ -367,15 +381,36 @@ export function EngineStatus(p: { engine: NeuronEngine | null; state: EngineStat
         <>
           <p className="nl-note" style={{ margin: "0 0 8px" }}>
             {state.cached === "cached"
-              ? "The model is already stored in this browser, so loading is quick and works offline."
-              : `Runs ${engine.info.model} entirely in this tab. The first load downloads about ${engine.info.downloadMB} MB from Hugging Face and keeps it in this browser; after that it is instant. Needs about ${engine.info.memoryMB} MB of memory.`}
+              ? `${spec.label} is already stored in this browser, so loading is quick and works offline.`
+              : `Runs ${info.model} entirely in this tab. The first load downloads about ${info.downloadMB} MB from Hugging Face and keeps it in this browser; after that it is instant. Needs about ${info.memoryMB} MB of memory.`}
           </p>
           <button className="nl-btn" onClick={p.onLoad}>
-            Load model ({engine.info.downloadMB} MB)
+            Load {spec.label} ({info.downloadMB} MB)
           </button>
           {state.status === "error" ? <p className="nl-note nl-warn">Could not load: {state.error}</p> : null}
         </>
       )}
+      {engine.webgpuAvailable && state.status === "ready" ? (
+        <div style={{ marginTop: 10 }}>
+          <div className="nl-seg" role="group" aria-label="Backend">
+            <button aria-pressed={state.backend !== "webgpu"} onClick={() => p.onBackend("cpu")} title="WebAssembly SIMD on the CPU: the default, and the path every number on this page was measured on">
+              CPU (WebAssembly)
+            </button>
+            <button aria-pressed={state.backend === "webgpu"} onClick={() => p.onBackend("webgpu")} title="Opt-in. Verified for correctness against the CPU path on a software adapter only; speed not measured.">
+              WebGPU (experimental)
+            </button>
+          </div>
+          <p className="nl-note" style={{ margin: "6px 0 0" }}>
+            The WebGPU path was checked against the CPU path for correctness on a software adapter only. I have not measured its speed on a real GPU, so it may be slower or faster than the CPU.
+            {state.backendMsg ? ` ${state.backendMsg}` : ""}
+          </p>
+          {state.backendErr ? <p className="nl-note nl-warn">WebGPU failed: {state.backendErr}. The CPU path is still in use.</p> : null}
+        </div>
+      ) : null}
+      <p className="nl-note" style={{ margin: "10px 0 0" }}>
+        <b style={{ color: "var(--nl-fg)" }}>About this model&apos;s data.</b> {notes.data}
+        {lighter ? ` Lighter screen on ${lighter} of ${p.findings.length} axes.` : ""}
+      </p>
     </div>
   )
 }

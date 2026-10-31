@@ -65,6 +65,9 @@ export interface DiscoveryEvidence {
   minLift?: number
   perplexity?: number
   baselinePerplexity?: number
+  /** share of repeated trigrams in the steered samples and in the unsteered ones (percent) */
+  repetitionPct?: number
+  baselineRepetitionPct?: number
   controlScores?: {
     bestRandomLiftAtDose?: number
     randomPerplexityRange?: [number, number]
@@ -126,13 +129,26 @@ export interface GenerateManyArgs {
   signal?: AbortSignal
 }
 
+export interface EngineBackendReport {
+  backend: "cpu" | "webgpu"
+  adapter?: { vendor: string; architecture: string; description: string; fallback: boolean; maxBinding: number }
+}
+
 export interface NeuronEngine {
-  /** Human description of what loading means (download size etc.). */
-  info: { model: string; downloadMB: number; memoryMB: number; backend: string }
+  /** What is selected right now: the model, how much it downloads and holds, and what runs it. Reflects select() and setBackend(). */
+  readonly info: { model: string; downloadMB: number; memoryMB: number; backend: string }
+  modelId(): string
+  /** Choose the model the next load() fetches. Unloads whatever was loaded, so memory is freed. */
+  select(id: string): void
   isLoaded(): boolean
-  cached(): Promise<"cached" | "missing" | "unknown">
+  /** Is this model's file already in the browser's storage? (default: the selected model) */
+  cached(id?: string): Promise<"cached" | "missing" | "unknown">
   load(onProgress: (frac: number, msg: string) => void): Promise<void>
   unload(): void
+  /** True when navigator.gpu exists, so the opt-in WebGPU backend can be offered. */
+  readonly webgpuAvailable: boolean
+  backend(): "cpu" | "webgpu"
+  setBackend(kind: "cpu" | "webgpu", onProgress?: (frac: number, msg: string) => void): Promise<EngineBackendReport>
   generate(a: GenerateArgs): Promise<{ text: string; tokens: number; msPerToken: number }>
   /** Several steered variants of one prompt decoded together (1-4); the engine does one pass over the weights per token. */
   generateMany?(a: GenerateManyArgs): Promise<{ text: string; tokens: number; msPerToken: number }[]>
