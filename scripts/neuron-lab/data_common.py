@@ -44,7 +44,11 @@ def checkpoint_file():
     return fs[0]
 
 
-def load(dtype=torch.float32):
+DTYPE = getattr(torch, os.environ.get("NL_DTYPE", "float32"))   # float32 for the first model; bfloat16 keeps the 0.8B run under the shared memory limit
+
+
+def load(dtype=None):
+    dtype = dtype or DTYPE
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(MODEL)
     model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=dtype)

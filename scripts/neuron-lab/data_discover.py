@@ -27,7 +27,7 @@ rng = random.Random(1234 + sum(map(ord, axis)))
 # ---------------- stage 0: contrast ----------------
 cur = {}
 for L, layer in enumerate(model.model.layers):
-    layer.mlp.down_proj.register_forward_pre_hook(lambda m, a, L=L: cur.__setitem__(L, a[0][0, 1:, :].clone()))
+    layer.mlp.down_proj.register_forward_pre_hook(lambda m, a, L=L: cur.__setitem__(L, a[0][0, 1:, :].float().clone()))
 
 @torch.no_grad()
 def acts(text):
@@ -83,7 +83,7 @@ def rand_ctrl(k, avoid):
 
 # ---------------- generation helpers ----------------
 P = AX.PROMPTS
-def run(jobs, max_new, bs=96):
+def run(jobs, max_new, bs=int(os.environ.get("NL_BS", "48"))):
     """jobs: list of (prompt, steers).  returns list[str] in order."""
     outs = []
     for i in range(0, len(jobs), bs):

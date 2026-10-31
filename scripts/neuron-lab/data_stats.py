@@ -38,7 +38,7 @@ with torch.no_grad():
         model.model(input_ids=x)
         B = x.shape[0]
         for L in range(NL):
-            a = cur[("a", L)][:, 1:, :]
+            a = cur[("a", L)][:, 1:, :].float()
             st["mx"][L] = torch.maximum(st["mx"][L], a.amax((0, 1)))
             st["mn"][L] = torch.minimum(st["mn"][L], a.amin((0, 1)))
             st["sm"][L] += a.sum((0, 1))
