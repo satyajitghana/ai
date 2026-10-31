@@ -1,11 +1,10 @@
 // Fetch the model from Hugging Face at run time and keep it in the browser (OPFS) so the second
 // visit needs no network. Nothing here is committed to git: the weights live on huggingface.co.
 //
-//   weights   Qwen/Qwen3-0.6B-GGUF, Qwen3-0.6B-Q8_0.gguf   639,446,688 bytes (610 MiB)
-//   tokenizer Qwen/Qwen3-0.6B, tokenizer.json                 11,422,654 bytes
-//
-// Both are pinned to a commit so a later upstream edit cannot change what a visitor runs; the size
-// is checked, and HTTP Range requests (3 in flight, 8 MiB each) make the download resumable.
+// Which files, at which pinned revision and size, is the registry in models.ts (Qwen3-0.6B: 639,446,688 byte GGUF +
+// 11 MB tokenizer; Qwen3.5-0.8B: 833,592,096 byte GGUF + 12.8 MB tokenizer). Pinning means a later upstream edit
+// cannot change what a visitor runs; the size is checked, and HTTP Range requests (3 in flight, 8 MiB each) make
+// the download resumable.
 import { DEFAULT_MODEL, MODELS, type ModelFiles } from "./models"
 import type { ByteSource, ProgressFn } from "./types"
 
