@@ -29,11 +29,12 @@ const port = (server.address() as { port: number }).port
 
 const prompts = JSON.parse(readFileSync(promptsPath ?? join(here, "test-prompts.json"), "utf8"))
 const V = MODELS[modelId].vocab
-const refAll = readFileSync(join(refDir, "logits.f32"))
-const N = 3
-const refB64 = Buffer.from(refAll.buffer, refAll.byteOffset, N * V * 4).toString("base64")
+// <ref-dir> "-" skips the PyTorch comparison (GPU vs the CPU engine only)
+const N = refDir === "-" ? 0 : 3
+const refAll = N ? readFileSync(join(refDir, "logits.f32")) : Buffer.alloc(0)
+const refB64 = N ? Buffer.from(refAll.buffer, refAll.byteOffset, N * V * 4).toString("base64") : ""
 const cases = {
-  prompts: prompts.prompts.slice(0, N),
+  prompts: prompts.prompts.slice(0, 3),
   steers: [
     { name: "add +0.8 at 14.1000", prompt: "The best way to learn a new skill is", steers: [{ layer: 14, neuron: 1000, dose: 0.8 }] },
     { name: "add -0.5 at 8.3000 plus 17.20", prompt: "The best way to learn a new skill is", steers: [{ layer: 8, neuron: 3000, dose: -0.5 }, { layer: 17, neuron: 20, dose: 0.7 }] },
