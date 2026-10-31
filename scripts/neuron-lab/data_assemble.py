@@ -16,9 +16,10 @@ from datetime import date
 TOPN = 256
 tok, model = load()
 st = torch.load(os.path.join(SCRATCH, "stats.pt"))
-assert st["done"] >= 548, "stats incomplete"
 corp = torch.load(os.path.join(SCRATCH, "corpus.pt"))
 ids, langs = corp["ids"], corp["lang"]
+assert st["done"] >= ids.shape[0], "stats incomplete"
+n_en, n_fr, n_es, n_de = (langs.count(x) for x in ("en", "fr", "es", "de"))
 os.makedirs(os.path.join(OUT, "layers"), exist_ok=True)
 
 rn = [float(torch.cat(st["rn"][L]).median()) for L in range(NL)]
@@ -29,7 +30,7 @@ mean = st["sm"] / st["cnt"]
 meta = dict(model=MODEL, layers=NL, neurons=NN, hidden=HID, vocab=model.config.vocab_size,
             resNormMedian=[round(x, 3) for x in rn],
             colNorm=[[round(float(v), 3) for v in cn[L]] for L in range(NL)],
-            corpus=dict(name="(" + SLUG + " tokenizer) WikiText-103 raw train (English Wikipedia, 440 x 128-token chunks) + French/Spanish/German Wikipedia (wikimedia/wikipedia 20231101, 36 chunks each)",
+            corpus=dict(name=f"({SLUG} tokenizer) {n_en} x 128-token chunks of WikiText-103 raw train (English Wikipedia) + {n_fr}/{n_es}/{n_de} chunks of French/Spanish/German Wikipedia (wikimedia/wikipedia 20231101)",
                         tokens=int(st["cnt"]), license="CC BY-SA 3.0 (Wikipedia text; contexts are short quoted windows)"),
             generated=date.today().isoformat(),
             notes="resNormMedian[L] = median ||residual leaving decoder layer L|| over corpus tokens at positions >= 1; "
