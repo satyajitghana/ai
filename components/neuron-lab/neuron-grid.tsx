@@ -98,7 +98,7 @@ export function NeuronGrid(p: {
           tabIndex={0}
           role="application"
           aria-label={`Neuron grid for layer ${p.layer}. Use the arrow keys to move between neurons.`}
-          style={{ width: "100%", height: "auto" }}
+          style={{ width: "100%", height: "auto", aspectRatio: `${COLS} / ${rows}` }}
           onPointerMove={(e) => setHover(at(e))}
           onPointerLeave={() => setHover(null)}
           onPointerDown={(e) => {

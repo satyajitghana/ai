@@ -5,12 +5,9 @@ import { nkey } from "./types"
 // files accept a few equivalent shapes, and anything missing becomes an empty value so the UI can
 // say what is absent instead of crashing.
 
-export const DATA_BASE =
-  (typeof process !== "undefined" && process.env.NEXT_PUBLIC_NEURON_LAB_DATA) || "/neuron-lab/qwen3-0.6b"
-
-async function getJson<T>(path: string): Promise<T | null> {
+async function getJson<T>(base: string, path: string): Promise<T | null> {
   try {
-    const r = await fetch(`${DATA_BASE}/${path}`)
+    const r = await fetch(`${base}/${path}`)
     if (!r.ok) return null
     return (await r.json()) as T
   } catch {
@@ -18,16 +15,16 @@ async function getJson<T>(path: string): Promise<T | null> {
   }
 }
 
-export async function loadMeta(): Promise<ModelMeta | null> {
-  return getJson<ModelMeta>("meta.json")
+export async function loadMeta(base: string): Promise<ModelMeta | null> {
+  return getJson<ModelMeta>(base, "meta.json")
 }
 
-export async function loadLayer(layer: number): Promise<LayerLens | null> {
-  return getJson<LayerLens>(`layers/L${String(layer).padStart(2, "0")}.json`)
+export async function loadLayer(base: string, layer: number): Promise<LayerLens | null> {
+  return getJson<LayerLens>(base, `layers/L${String(layer).padStart(2, "0")}.json`)
 }
 
-export async function loadContexts(): Promise<Record<string, Context[]>> {
-  return (await getJson<Record<string, Context[]>>("contexts.json")) ?? {}
+export async function loadContexts(base: string): Promise<Record<string, Context[]>> {
+  return (await getJson<Record<string, Context[]>>(base, "contexts.json")) ?? {}
 }
 
 type RawEdge = [number, number, number] | { layer: number; neuron: number; score: number } | [string, number]
@@ -46,8 +43,8 @@ function toEdge(e: RawEdge): Edge | null {
 /** Strongest "feeds" edges from a neuron to neurons in the next layer, keyed "L.N".
  *  Real file: { layers: { "L": [[fromNeuron, toNeuron (layer L+1), gateCos, upCos], ...] } }.
  *  Older/flat shapes ({ edges: { "L.N": [[layer, neuron, score], ...] } }) are accepted too. */
-export async function loadLinks(): Promise<Map<NeuronKey, Edge[]>> {
-  const raw = await getJson<Record<string, unknown>>("links.json")
+export async function loadLinks(base: string): Promise<Map<NeuronKey, Edge[]>> {
+  const raw = await getJson<Record<string, unknown>>(base, "links.json")
   const out = new Map<NeuronKey, Edge[]>()
   if (!raw) return out
   const byLayer = raw.layers as Record<string, number[][]> | undefined
@@ -75,16 +72,16 @@ export async function loadLinks(): Promise<Map<NeuronKey, Edge[]>> {
   return out
 }
 
-export async function loadDiscoveries(): Promise<Discovery[]> {
-  const raw = await getJson<Discovery[] | { discoveries?: Discovery[]; items?: Discovery[] }>("discoveries.json")
+export async function loadDiscoveries(base: string): Promise<Discovery[]> {
+  const raw = await getJson<Discovery[] | { discoveries?: Discovery[]; items?: Discovery[] }>(base, "discoveries.json")
   if (!raw) return []
   return Array.isArray(raw) ? raw : (raw.items ?? raw.discoveries ?? [])
 }
 
 /** Every axis we searched, including the misses. Lives beside the data folder: qwen3-0.6b-findings.json. */
-export async function loadFindings(): Promise<AxisFinding[]> {
+export async function loadFindings(base: string): Promise<AxisFinding[]> {
   try {
-    const r = await fetch(`${DATA_BASE}-findings.json`)
+    const r = await fetch(`${base}-findings.json`)
     if (!r.ok) return []
     const j = (await r.json()) as { axes?: AxisFinding[] }
     return Array.isArray(j.axes) ? j.axes : []

@@ -23,7 +23,6 @@ export interface MapProps {
 }
 
 const COLS = 64
-const ROWS = 48
 
 export function NeuronMap(p: MapProps) {
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -74,7 +73,7 @@ export function NeuronMap(p: MapProps) {
         layers: p.meta.layers,
         neurons: p.meta.neurons,
         cols: COLS,
-        rows: ROWS,
+        rows: Math.ceil(p.meta.neurons / COLS),
         reducedMotion: p.reducedMotion,
         onPick: (l, n) => pickRef.current(l, n),
         onHover: (h) => setTip(h),
