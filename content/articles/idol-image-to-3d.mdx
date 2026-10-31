@@ -1,0 +1,185 @@
+---
+title: "Idol: the image-to-splat model, and where its three seconds go"
+description: "Idol (Sperid Labs, Apache-2.0) turns one image into up to 1,048,576 Gaussians. The weights headers and SDK show a 658.6M-parameter stack in which a 24-block flow transformer denoises 8,192 latent tokens and two decoders unfold them into anchors and 32 splats each. A FLOP count from the config shows that the sampling steps, not the splat count, set the wait, and that '1M splats in 3 seconds on a consumer GPU' is not what the card's table says."
+date: 2026-10-31
+tags:
+  - 3d
+  - gaussian-splatting
+  - image-to-3d
+  - diffusion
+  - transformers
+rating:
+  novelty: 1
+  verification: 1
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 1
+  why: "Sums parameters from the safetensors headers, counts FLOPs from config.json and tests the 3-second claim; the model itself was not run (no torch, no GPU)."
+topic: spatial-3d
+kind: model
+level: practitioner
+runsOn: consumer-gpu
+licence: Apache-2.0
+---
+
+import { Pipeline } from "@/components/articles/idol-image-to-3d/pipeline"
+import { SplatBudget } from "@/components/articles/idol-image-to-3d/splat-budget"
+import { Roofline } from "@/components/articles/idol-image-to-3d/roofline"
+
+A post from the lab that built it describes Idol as "a 3D-DiT that generates complete 3D objects from just an image; pre-trained from scratch, only 600M parameters, runs on consumer GPUs using less than 7.2 GB VRAM and can generate 1M splats in 3 seconds." Four numbers there can be checked against files, and this article checks them. Where a number can be recomputed from the weights and the code, I did. Where it needs a GPU I did not have, I say so.
+
+Every claim carries one of three labels. **Measured** means I ran something and got that number. **Reported** means it comes from the model card or project page and I did not reproduce it. **Reasoned** means I derived it from the config and the code, and the derivation is in the text.
+
+<ModelCard repo="speridlabs/idol" />
+
+<RepoCard repo="speridlabs/idol-sdk" />
+
+## What it is
+
+Idol turns one picture of an object into a 3D Gaussian splat: a cloud of small anisotropic blobs, each with a position, colour, size, orientation and opacity, in the format that 3D Gaussian Splatting viewers read. It also fills in the sides the picture never showed, which is the generative part. The weights are Apache-2.0 on Hugging Face and so is the SDK (the licence text in the repository is the unmodified Apache License 2.0, and the model card's metadata says `license: apache-2.0`). The project page credits Alejandro Cañada and Chema Garabito at Sperid Labs and offers a BibTeX entry; I found no arXiv paper or technical report, which is why this article has no figures from one. Everything below is from the model card, the project page, the safetensors headers and the SDK source at commit `4702a7f`.
+
+One practical catch before the numbers. The pipeline reads its input through two encoders that are not in the repository and are gated on Hugging Face: DINOv3 ViT-H+/16 and the FLUX.2 VAE. You accept their terms with your own account, and the SDK refuses to download its own roughly 3 GB of weights until it can read them. The Idol licence does not cover those two, so "Apache-2.0" describes the 658.6M parameters that Sperid trained, not the whole request.
+
+<Pipeline />
+
+## The parameter count: 0.6B is right, 1.8B is the request
+
+The tweet says 600M, the project page says 0.66B, and the model card's table lists a 1.80B total. All three are true of different things. I read the first few kilobytes of each `.safetensors` file with an HTTP range request, which is enough to get every tensor's name, shape and dtype without downloading the weights, and summed the shapes.
+
+| File | Tensors | Parameters (measured) | On-disk dtype |
+|---|---|---|---|
+| `denoiser.safetensors` | 560 | 370,550,677 | float32 |
+| `decoder.safetensors` | 60 | 50,791,432 | float32 |
+| `decoder_gs.safetensors` | 328 | 237,262,401 | float32 |
+| **Idol's own three** | | **658,604,510** | |
+| `birefnet.safetensors` | 742 | 220,697,543 | float16 (plus int64 indices) |
+
+The first three sum to 658.6M, which is the project page's 0.66B and the tweet's "600M" rounded down. The model card's 1.80B adds the background remover (220.7M), DINOv3 (840.6M) and the FLUX.2 VAE (84.1M), none of which Idol trained. So the sentence "only 600M parameters" is accurate for the part that is new, and the 7.2 GB figure belongs to the 1.80B request.
+
+The checkpoints are stored in float32, not half precision: 658.6M times 4 bytes is 2.63 GB, plus 0.44 GB for BiRefNet, which matches the roughly 3 GB the SDK says it downloads. On the GPU the transformer blocks are cast to FP16 while embeddings and norms stay FP32, and the card's own table puts the three Idol models at about 1.4 to 2.1 GB of VRAM.
+
+## The denoiser
+
+`config.json` gives the denoiser as `LatentSeqMMFlowModel`: width 1024, 24 joint blocks, 2 refiner blocks per stream, 16 heads of 64, MLP ratio 4. Per joint block the header gives 12,600,320 parameters: a 3072 by 1024 QKV projection, a 1024 by 1024 output projection, and an MLP of 1024 to 4096 and back. Twenty-four of those are 302.4M of the 370.6M; the rest is two refiner stacks of 25.2M each, the learned rotary-position layers and small embedders.
+
+Three design choices are visible in `idol/models/dit.py`.
+
+**The latent is a sequence, not a grid.** The object is encoded as 8,192 tokens of 16 channels (the `q_token_length` and `in_channels` in the config), each with a fixed 3D position drawn from a scrambled Sobol sequence that ships inside the weights as the `pos_pe` buffer. There is no voxel grid. The tokens are positions in space that carry features, and the decoders later treat them as a context to cross-attend into.
+
+**One joint attention over three streams.** The denoiser concatenates the 8,192 noisy latent tokens, the image condition tokens, and a single camera token, then runs full self-attention over all of them. The image condition is 4,101 tokens: DINOv3 at 1024 pixels with patch 16 gives 64 by 64 = 4,096 patches plus 5 special tokens, and the FLUX.2 VAE latent is 64 by 64 = 4,096 tokens that the code pads with 5 zero rows so the two streams line up. They are summed after a linear layer each, 1280 channels from DINOv3 and 128 from the VAE. The camera token is a five-number description of the input view, predicted along with the shape, which is how the pipeline writes `_camera.json` next to the splat file. Total sequence: 8,192 + 4,101 + 1 = 12,294.
+
+**Rotary positions that are learned.** The class `RePo3DRotaryEmbedding` predicts, from each token's features, a 3D offset per head and turns it into rotary angles. Tokens do not get a fixed index position: the network decides where each token sits for attention purposes, in a three-dimensional coordinate space, with frequencies from 1 to 16 that are also trainable. That is a plausible way to let text-like image tokens and spatial latent tokens share one attention without a hand-built layout, though I did not run an ablation and the project page does not report one.
+
+The sampler (`idol/sampler.py`) is 33 lines: Euler steps on a rectified flow from noise at t = 1 to data at t = 0, a time shift of 3.0 that spends more steps at high noise, and classifier-free guidance as `(1 + w) * v_cond - w * v_uncond` with w = 3.0. Each step is therefore two forward passes, or one batched pass of two. This is the fact that matters most for speed.
+
+## From latent to splats
+
+After sampling, two decoders turn the latent into a file. Both are in `idol/models/decoder.py`.
+
+The **octree decoder** (`OctreeProbabilityFixedlenDecoder`, 50.8M parameters, 4 blocks) places anchor points. You ask for `num_gaussians // 32` anchors. The decoder starts with one cell holding all of them. At each of eight levels it takes the centres of the current cells, predicts eight logits per cell for how the points split among the children, softmaxes them, and splits the integer counts by systematic resampling, a stratified draw that keeps the counts exact. Cells that receive no points are dropped. After eight levels each anchor lands at a uniformly random position inside its leaf cell. Eight levels is a 256 by 256 by 256 grid, so the anchors are located to within 1/256 of the object's bounding box, and the sub-cell detail is the Gaussian decoder's job.
+
+The **Gaussian decoder** (`GaussianFixedlenDecoder`, 237.3M, 16 blocks) takes the anchors as tokens with a positional embedding, runs self-attention across all anchors, cross-attends into the 8,192 by 16 latent, and ends in a linear layer with 480 outputs per anchor. That 480 is 32 splats times 15 numbers, and `config.json` sets `num_gaussians: 32` under `representation_config`. The fifteen are: a 3-vector position offset, 3 colour coefficients, 3 scales, 4 rotation numbers, 1 opacity, and 1 offset scale that sets how far the splats may stray from their anchor.
+
+`idol/gaussian.py` then activates them:
+
+- Position: `tanh(raw + fixed_perturbation) * 0.5 * 1.5 * softplus(offset_scale + base)` added to the anchor, so each splat sits within 0.75 times a learned radius of its anchor. The 32 fixed perturbations are a buffer of shape 32 by 3 stored in the weights.
+- Scale: `softplus(raw + inverse_softplus(0.004))`, then combined with a minimum kernel size of 0.0009 as `sqrt(s^2 + 0.0009^2)`. A splat with zero raw output has a scale of 0.004 of the object's unit box, and nothing can be narrower than 0.0009.
+- Rotation: the raw four numbers are added to the identity quaternion `(1, 0, 0, 0)` and normalised, so zero output means no rotation. The learning-rate multiplier for rotation is 0.1.
+- Opacity: `sigmoid(raw + logit(0.1))`, so zero output means opacity 0.1.
+- The object lives in a unit box, `[-0.5, 0.5]^3`, z-up. `save_ply` rotates it to y-up and writes the standard 17-float32 3DGS record: position, three unused normals, three degree-0 colour coefficients, opacity and scale in the log and logit domains the format expects, and the quaternion.
+
+Those biases are a quiet design decision. The decoder starts from "many small, mostly transparent, unrotated blobs near the anchor" rather than from zero, so a randomly initialised head already gives a valid splat cloud. It is the same trick as initialising a residual branch near the identity.
+
+### A check I could run: the output side, in numpy
+
+The sandbox I worked in has no torch and about 1.5 GB of free disk, and the permission layer limits running downloaded code, so I could not load the 237M-parameter decoder and run it. I did not try to work around that. What I could do was reimplement the part that has no weights in it: the octree descent with systematic resampling, the activation formulas above, and the PLY writer, fed with random logits and random raw outputs, and compare the arithmetic with what the SDK documents. That is a test of the file layout and of my reading, not of the model.
+
+```python
+off   = np.tanh(raw[..., 0:3]) * 0.5 * 1.5 * softplus(raw[..., 14:15])
+scale = np.sqrt(softplus(raw[..., 6:9] + inv_softplus(0.004))**2 + 0.0009**2)
+rot   = raw[..., 9:13] * 0.1 + [1, 0, 0, 0];  rot /= np.linalg.norm(rot, axis=1, keepdims=True)
+opac  = sigmoid(raw[..., 13:14] + logit(0.1))
+```
+
+With 262,144 requested Gaussians the descent produced 8,192 anchors (the cells per level grew 8, 64, 498, 2,335, 5,374, 7,343, 8,044, 8,176 under random logits, which fill space instead of hugging a surface, so that run says nothing about shapes). Activation took 0.07 s and the whole descent 0.24 s on one CPU thread. The resulting `.ply` was **17,826,208 bytes** for 262,144 splats: a 354-byte header and 262,144 times 68 bytes. With zero raw output the median scale came out at 0.0041 and the median opacity at 0.1002, matching the biases the code sets. **Measured**, on random inputs.
+
+<SplatBudget />
+
+## Memory: what a million Gaussians cost
+
+The slider above prices N Gaussians from the layout. All of it is **reasoned** except the PLY size, which I measured at 262,144 and which scales linearly.
+
+At 1,048,576 Gaussians there are 32,768 anchors. The decoder head output is 32,768 times 480 times 4 bytes, 60 MiB. The activated attributes (position 3, colour 3, scale 3, rotation 4, opacity 1 is 14 floats) are 56 MiB. The PLY is 68 MiB. The project page's compressed form is about 12 bytes a splat: it lists 0.4 MB at 32,768 Gaussians, 3.2 MB at 262,144 and 12.2 MB at 1,048,576, which is the same order as the packed layouts in [SOG: a Gaussian splat scene as spatially-ordered WebP images](/articles/sog-splat-format), though I do not know what encoding Sperid's viewer uses.
+
+Against that, the card says a full request peaks at 7.2 GB and puts the weights at 3.7 to 4.4 GB. The splat buffers, at under 70 MiB each, are about 1% of the peak. Activations are modest too: with flash-style attention the denoiser never builds a 12,294-squared score matrix, its MLP hidden layer for a batch of 2 is 2 times 12,294 times 4,096 times 2 bytes, about 200 MiB, and the Gaussian decoder's at 32,768 anchors is 32,768 times 4,096 times 2 bytes, 256 MiB. The rest of 7.2 GB is most plausibly the two encoders running at 1024 pixels, the allocator's cache and the compile workspace. The card does not report peak memory at different splat counts, so I cannot say it is flat, but nothing in the code makes it scale with N beyond a few hundred MiB. "Runs under 7.2 GB" is a statement about the model's footprint, and the splat count is nearly irrelevant to it.
+
+For why a splat file is this large in the first place, and how capture pipelines produce splats from many photographs rather than one, see [3DGS capture pipelines](/articles/3dgs-capture-pipelines).
+
+## FLOPs: where the time goes
+
+Everything in this section is **reasoned** from `config.json` and the layer code. I count a matrix multiply of an N-token input by a weight with P parameters as 2NP FLOPs, and full attention as 4N²d for the score and value products (d = 1024).
+
+**The denoiser, one forward pass.** N = 12,294. A joint block has 12.6M linear parameters, so its projections cost 2 times 12,294 times 12.6M, 309 GFLOPs, and its attention 4 times 12,294² times 1,024, 619 GFLOPs: **928 GFLOPs per block, two thirds of it attention**. Twenty-four blocks are 22.3 TFLOPs. The refiners on the 8,192-token and 4,101-token streams add 1.3 TFLOPs and the rotary-position layers 0.17, so a pass is **23.8 TFLOPs**.
+
+**One step, one request.** Guidance doubles it: 47.5 TFLOPs a step. Fifty steps are **2.38 PFLOPs**.
+
+**The decoders.** The Gaussian decoder's cost grows with the square of the anchor count because it has full self-attention. At 262,144 Gaussians (8,192 anchors) I count 12.7 TFLOPs; at 1,048,576 (32,768 anchors) 103 TFLOPs. The octree decoder at 32,768 anchors is at most 7 TFLOPs. The encoders (ViT-H+ over 4,101 tokens, 840M parameters) I put at about 10 TFLOPs.
+
+So at 50 steps, the million-splat request is 2.38 PFLOPs of denoising plus about 0.12 PFLOPs of everything else. **The decoders are about 4% of the work even at the maximum splat count.** Going from 262,144 to 1,048,576 Gaussians adds roughly 100 TFLOPs, or about 4% more compute, to a job that was already 2.4 PFLOPs. The denoiser, which does not know how many splats you asked for, is the bill.
+
+## The roofline for "1M splats in 3 seconds"
+
+The card's "Across GPUs" table gives request times for 262,144 Gaussians at 50 steps. Dividing my FLOP count by those times gives the rate each GPU is implicitly sustaining:
+
+| GPU | Card time (reported) | Implied rate (reasoned) |
+|---|---|---|
+| B300 | 3.4 s | about 706 TFLOP/s |
+| H100 | 6.7 s | about 358 TFLOP/s |
+| RTX 5090 | 14.1 s | about 170 TFLOP/s |
+| RTX 4090 | 19.1 s | about 126 TFLOP/s |
+| RTX 3080 | 46.2 s | about 52 TFLOP/s |
+
+Two things stand out. First, a 4090 sustaining 126 TFLOP/s is a high fraction of what I recall as its dense FP16 tensor peak of about 165 TFLOP/s from the spec sheet (a recollection, not something I checked here), while an H100 at 358 TFLOP/s is well under a third of its datasheet number. A uniform count should not give such different utilisations, so either my FLOP count is high for the way the kernels are fused, or the Hopper numbers are limited by something other than matrix throughput. I cannot tell which from outside. Treat the implied rates as a consistent yardstick across GPUs, not as absolute efficiencies.
+
+Second, the 3-second claim, on that yardstick. For a million Gaussians at the default 50 steps, the same scaling predicts **3.5 s on a B300 and 19.9 s on a 4090**. For a 4090 to finish in 3 s at a million Gaussians the sampler would have to run about 5 steps instead of 50 (2.8 s at five steps by the same model). Only a B300-class GPU is in the neighbourhood of 3 seconds at full settings, and that is a datacentre part, not a consumer card.
+
+<Roofline />
+
+The sources disagree with each other on the speed claim, which is worth laying out:
+
+| Source | Claim |
+|---|---|
+| The post | 1M splats in 3 seconds on consumer GPUs |
+| Model card, prose | "can run in under 2 seconds" (no hardware or settings given) |
+| Model card, table | 262,144 Gaussians, 50 steps: 3.4 s on a B300, 6.7 s on an H100, 19.1 s on an RTX 4090 |
+| Project page | 262,144 Gaussians in 3.4 s, "one image to 262,144 Gaussians" |
+
+The one number that is measured and published, 3.4 s, is for a quarter of a million Gaussians on the fastest listed GPU, not for a million Gaussians on a consumer one. The claim becomes possible only with fewer steps, and the README says as much: its `--steps` flag notes that "fewer are faster but lose some detail". The model card does not publish a quality-versus-steps curve, so how good the 5-step output is I cannot report. Flow models distilled or tuned for few steps can look fine at four to eight, and this one was not described as such.
+
+## What the quality numbers say
+
+The card's benchmark compares Idol to TripoSplat, TRELLIS and LGM on a shared set at the input view and at seven new views, each on one H100. **Reported**, not reproduced:
+
+| Model | LPIPS (lower is better) | DINOv2 | CLIP | Request time |
+|---|---|---|---|---|
+| Idol | 0.213 | 0.781 | 0.885 | 6.8 s |
+| TripoSplat | 0.225 | 0.743 | 0.868 | 9.9 s |
+| TRELLIS | 0.235 | 0.754 | 0.868 | 7.1 s |
+| LGM | 0.237 | 0.575 | 0.784 | 1.1 s |
+
+Idol leads on most columns, and by modest margins: 0.012 LPIPS over the next model and 0.027 on DINOv2. LGM is six times faster and visibly worse on new views. That trade is what the numbers show: a feed-forward 65,536-Gaussian model against iterative samplers. PSNR is a tie within noise (12.25 for Idol against 12.46 for LGM, which the card correctly footnotes as a blur artefact), and an input-view PSNR near 12 dB tells you the metric is dominated by background and framing choices rather than by fidelity. The test set and its size are not described on the card, so I would not read the margins as significant.
+
+## What I would check next
+
+I did not run the model, so everything about image quality, the real peak VRAM at 1M Gaussians, and the actual time on a consumer card is **not measured here**. In order of value:
+
+1. Run the SDK on a 4090 with `--num_gaussians 1048576` and time `--steps` of 50, 20, 10 and 5. The FLOP model predicts about 19.9, 8.5, 4.7 and 2.8 seconds on the card's yardstick; a number far from that means a bottleneck I have missed.
+2. Record `torch.cuda.max_memory_allocated()` at 32,768 and 1,048,576 Gaussians. The code says it should differ by a few hundred MiB.
+3. Run the same image with five seeds and look at the sides the picture never showed. The card calls the model generative and the guidance scale is 3.0; the variance across seeds is the honest measure of what "including the sides the picture never showed" means.
+
+## What holds
+
+The weights are Apache-2.0, the 658.6M count and the "0.66B" description are right, the output is a standard splat file, and the 32-splats-per-anchor decoder is a neat way to get a million Gaussians from an 8,192-token latent. The 7.2 GB figure is plausible and, by my arithmetic, barely depends on the splat count. The speed claim in the post is not what the card publishes: the published 3.4 s is 262,144 Gaussians at 50 steps on a datacentre GPU, and a million in 3 seconds on a consumer card needs about a tenth of the steps. The cost is in the step count, and that is the dial to turn.
