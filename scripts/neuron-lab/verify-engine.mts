@@ -110,3 +110,14 @@ for (const g of ref.greedy) {
   console.log(`batched sampling (seeded): ${T2.map((x, b) => (x.text === S2[b] ? "identical" : "DIFFERENT")).join(", ")}`)
   console.log("variants:", JSON.stringify(solo.map((x) => x.slice(0, 60))))
 }
+
+// 7. self-calibration (what the browser uses when the site ships no meta.json) against the PyTorch numbers
+{
+  const t7 = performance.now()
+  const sc = rt.selfCalibrate()
+  const ratio = sc.resNormMedian.map((v, l) => v / cal.resNormMedian[l])
+  let cn = 0, cw = 0
+  for (let l = 0; l < cal.colNorm.length; l++) for (let n = 0; n < cal.colNorm[l].length; n++) { const r = Math.abs(sc.colNorm[l][n] / cal.colNorm[l][n] - 1); cn = Math.max(cn, r); cw += r }
+  console.log(`self-calibration (${((performance.now() - t7) / 1000).toFixed(1)} s): median-residual-norm ratio to PyTorch's corpus min ${Math.min(...ratio).toFixed(3)} max ${Math.max(...ratio).toFixed(3)}; colNorm max rel diff ${cn.toExponential(2)}, mean ${(cw / (cal.colNorm.length * cal.colNorm[0].length)).toExponential(2)}`)
+  console.log("self resNormMedian[0,mid,last]:", sc.resNormMedian[0].toFixed(2), sc.resNormMedian[sc.resNormMedian.length >> 1].toFixed(2), sc.resNormMedian[sc.resNormMedian.length - 1].toFixed(2), "| pytorch:", cal.resNormMedian[0].toFixed(2), cal.resNormMedian[cal.resNormMedian.length >> 1].toFixed(2), cal.resNormMedian[cal.resNormMedian.length - 1].toFixed(2))
+}

@@ -11,21 +11,21 @@ const STAGE_BLOCKS = 1 << 18 // Q8_0 blocks per read while loading (8.9 MB)
 export const MAX_CTX = 2048
 export const MAX_BATCH = 4 // streams decoded together (the three-column comparison uses 3)
 
-interface Q8 { q: number; s: number; rows: number; k: number }
-interface FullLayer {
+export interface Q8 { q: number; s: number; rows: number; k: number }
+export interface FullLayer {
   kind: "full"
   attnNorm: Float32Array; qNorm: Float32Array; kNorm: Float32Array; ffnNorm: Float32Array
   wq: Q8; wk: Q8; wv: Q8; wo: Q8; gate: Q8; up: Q8; down: Q8
 }
 /** Qwen3.5 Gated DeltaNet block: causal depthwise conv over [q|k|v], then a gated delta-rule recurrence per head. */
-interface LinearLayer {
+export interface LinearLayer {
   kind: "linear"
   attnNorm: Float32Array; ffnNorm: Float32Array
   wqkv: Q8; wz: Q8; wa: Q8; wb: Q8; wout: Q8; gate: Q8; up: Q8; down: Q8
   convW: Float32Array // [convDim][convK], oldest tap first
   ssmA: Float32Array; dtBias: Float32Array; ssmNorm: Float32Array
 }
-type Layer = FullLayer | LinearLayer
+export type Layer = FullLayer | LinearLayer
 interface Kernels {
   matmul_q8(w: number, ws: number, xq: number, xs: number, out: number, rows: number, k: number, t: number): void
   quantize_q8(x: number, q: number, s: number, nblocks: number): void
@@ -76,10 +76,11 @@ export class Qwen3Core {
   readonly keyDim: number; readonly valueDim: number; readonly convDim: number
   calibration: Calibration | null = null
   private k!: Kernels
-  private mem!: WebAssembly.Memory
-  private layers: Layer[] = []
-  private embd!: Q8
-  private outNorm!: Float32Array
+  /** The wasm memory holding every Q8 weight (read by the WebGPU backend to upload them). */
+  mem!: WebAssembly.Memory
+  layers: Layer[] = []
+  embd!: Q8
+  outNorm!: Float32Array
   // scratch (views into wasm memory)
   private pQin = 0; private pXq = 0; private pXs = 0
   private qin!: Float32Array; private oq!: Float32Array; private ok!: Float32Array; private ov!: Float32Array
@@ -250,6 +251,17 @@ export class Qwen3Core {
     this.ensureCap(256)
     this.ensureRope(256)
   }
+
+  /** Dequantized embedding row of token `id` (the input of layer 0). */
+  embedRow(id: number, out: Float32Array) {
+    const hd = this.hidden
+    const mem = new Int8Array(this.mem.buffer, this.embd.q + id * hd, hd)
+    const sc = new Float32Array(this.mem.buffer, this.embd.s + id * (hd >> 5) * 4, hd >> 5)
+    for (let i = 0; i < hd; i++) out[i] = mem[i] * sc[i >> 5]
+  }
+
+  /** Inverse rotary frequencies (float32) for the first ropeDim/2 pairs. */
+  ropeInvFreq(): Float32Array { return Float32Array.from(this.invFreq) }
 
   /** ||W_down[:, n]|| for every layer and neuron (the length of the vector one unit of the neuron writes). */
   columnNorms(): number[][] {

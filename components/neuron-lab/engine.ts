@@ -9,10 +9,12 @@
 // down_proj column.
 import { DEFAULT_LOADER, DOWNLOAD_MB, cacheStatus as cacheStatusRaw, clearCache as clearCacheRaw, type CacheState, type LoaderConfig } from "./engine/loader"
 import { chatPrompt } from "./engine/runtime"
+import { DEFAULT_MODEL, MODELS, MODEL_IDS, downloadMB, type ModelId } from "./engine/models"
 import type { ActivationsResult, Calibration, GenerateManyOptions, GenerateOptions, GenerateResult, Steer } from "./engine/types"
 
 export type { ActivationsResult, Calibration, GenerateManyOptions, GenerateOptions, GenerateResult, Steer, CacheState }
-export { chatPrompt, DOWNLOAD_MB }
+export { chatPrompt, DOWNLOAD_MB, MODELS, MODEL_IDS, DEFAULT_MODEL }
+export type { ModelId }
 
 export const MODEL_INFO = {
   model: "Qwen/Qwen3-0.6B",
@@ -27,6 +29,26 @@ export const MODEL_INFO = {
   maxContext: 2048,
 }
 
+/** What the UI needs to know about a model before it is loaded. */
+export function getModelInfo(id: ModelId = currentModel) {
+  const m = MODELS[id]
+  return { id, label: m.label, model: m.hfModel, arch: m.arch, layers: m.layers, neurons: m.neurons, hidden: m.hidden, vocab: m.vocab, downloadMB: downloadMB(id), memoryMB: m.memoryMB, maxContext: 2048 }
+}
+
+let currentModel: ModelId = DEFAULT_MODEL
+export const currentModelId = (): ModelId => currentModel
+
+/** Switch the model the next loadModel() fetches (unloads the current one). The default is Qwen3-0.6B. */
+export function selectModel(id: ModelId) {
+  if (!(id in MODELS)) throw new Error(`unknown model ${String(id)}`)
+  if (id === currentModel) return
+  unloadModel()
+  currentModel = id
+  config.calibration = undefined
+  config.calibrationUrl = `${MODELS[id].dataBase}/meta.json`
+  config.loader = { ...MODELS[id].files }
+}
+
 export interface EngineConfig {
   /** Where meta.json (resNormMedian, colNorm) lives. */
   calibrationUrl: string
@@ -37,7 +59,11 @@ export interface EngineConfig {
 }
 
 const config: EngineConfig = { calibrationUrl: "/neuron-lab/qwen3-0.6b/meta.json", loader: {} }
-export function configureEngine(c: Partial<EngineConfig>) { Object.assign(config, c) }
+export function configureEngine(c: Partial<EngineConfig> & { model?: ModelId }) {
+  const { model, ...rest } = c
+  if (model) selectModel(model)
+  Object.assign(config, rest)
+}
 
 let worker: Worker | null = null
 let seq = 0
@@ -129,7 +155,7 @@ export async function activations(text: string): Promise<ActivationsResult> {
   if (!loaded) throw new Error("model not loaded")
   const r = await call<{ tokens: string[]; max: Float32Array; all?: Float32Array }>({ op: "activations", text }).promise
   const { tokens, max, all } = r
-  const L = MODEL_INFO.layers, N = MODEL_INFO.neurons
+  const { layers: L, neurons: N } = getModelInfo()
   return {
     tokens, max,
     byToken: all ? (layer, neuron) => { const out = new Float32Array(tokens.length); for (let t = 0; t < tokens.length; t++) out[t] = all[(t * L + layer) * N + neuron]; return out } : undefined,
@@ -137,10 +163,23 @@ export async function activations(text: string): Promise<ActivationsResult> {
 }
 
 /** Last-position logits after `prompt` (for tests and for the logit-lens style probes). */
-export async function logits(prompt: string, steers: Steer[]): Promise<Float32Array> {
+export async function logits(prompt: string, steers: Steer[], opts: { backend?: "cpu" | "webgpu" } = {}): Promise<Float32Array> {
   if (!loaded) throw new Error("model not loaded")
-  return call<Float32Array>({ op: "logits", prompt, steers }).promise
+  return call<Float32Array>({ op: "logits", prompt, steers, backend: opts.backend ?? "cpu" }).promise
 }
+
+/**
+ * Choose where tokens are computed: "cpu" (WebAssembly SIMD: the default, verified against PyTorch) or "webgpu"
+ * (opt-in: weights are uploaded to the GPU and every step runs there; parity with the CPU path is tested on a
+ * software adapter, speed on a real GPU is not measured by us). Throws when WebGPU is unavailable.
+ */
+export async function setBackend(kind: "cpu" | "webgpu", onProgress: (frac: number, msg: string) => void = () => {}): Promise<{ backend: "cpu" | "webgpu"; adapter?: { vendor: string; architecture: string; description: string; fallback: boolean; maxBinding: number } }> {
+  if (!loaded) throw new Error("model not loaded")
+  return call<{ backend: "cpu" | "webgpu"; adapter?: { vendor: string; architecture: string; description: string; fallback: boolean; maxBinding: number } }>({ op: "backend", kind }, (m) => { if (m.type === "progress") onProgress(m.frac as number, m.msg as string) }).promise
+}
+
+/** Cheap feature test for the opt-in WebGPU backend (the page can decide whether to offer it). */
+export const webgpuSupported = (): boolean => typeof navigator !== "undefined" && "gpu" in navigator
 
 export async function tokenize(text: string): Promise<number[]> {
   if (!loaded) throw new Error("model not loaded")
