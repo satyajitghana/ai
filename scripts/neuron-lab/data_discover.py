@@ -1,4 +1,4 @@
-"""Contrast-search + steering validation for one benign axis on Qwen3-0.6B.   usage: data_discover.py <axis>
+"""Contrast-search + steering validation for one benign axis on the model chosen by NL_MODEL.   usage: data_discover.py <axis>
 
 Stage 0  contrast: token-level d' = (mean_A - mean_B) / sqrt((s_A^2 + s_B^2)/2) for all 86,016 neurons
          (positions >= 1), ranked on all pairs; split-half check (rank on even pairs, test on odd).
@@ -16,6 +16,7 @@ import data_axes as AX
 
 axis = sys.argv[1]
 A = AX.AXES[axis]
+NCAND = int(os.environ.get("NL_CAND", "32"))   # candidates screened (and random controls); the lighter 0.8B screen uses 16
 meta = load_meta()
 rn, cn = meta["resNormMedian"], meta["colNorm"]
 tok, model = load()
@@ -27,13 +28,13 @@ rng = random.Random(1234 + sum(map(ord, axis)))
 # ---------------- stage 0: contrast ----------------
 cur = {}
 for L, layer in enumerate(model.model.layers):
-    layer.mlp.down_proj.register_forward_pre_hook(lambda m, a, L=L: cur.__setitem__(L, a[0][0, 1:, :].clone()))
+    layer.mlp.down_proj.register_forward_pre_hook(lambda m, a, L=L: cur.__setitem__(L, a[0][0, 1:, :].float().clone()))
 
 @torch.no_grad()
 def acts(text):
     ids = tok(text, return_tensors="pt").input_ids
     model.model(input_ids=ids)
-    return torch.stack([cur[L] for L in range(NL)], 0)  # [28,T-1,3072]
+    return torch.stack([cur[L] for L in range(NL)], 0)  # [layers,T-1,neurons]
 
 def moments(texts):
     n = 0; s = torch.zeros(NL, NN); q = torch.zeros(NL, NN)
@@ -55,7 +56,7 @@ d_all, ma_all, mb_all = dprime(add(mAe, mAo), add(mBe, mBo))
 d_even, _, _ = dprime(mAe, mBe)
 d_odd, _, _ = dprime(mAo, mBo)
 # split-half replication of the top-40 (layers 8..26)
-mask = torch.zeros(NL, NN, dtype=torch.bool); mask[8:27] = True
+mask = torch.zeros(NL, NN, dtype=torch.bool); mask[LAYER_LO:LAYER_HI] = True
 de = torch.where(mask, d_even.abs(), torch.zeros(()))
 top40 = de.flatten().topk(40).indices
 rep = sum(1 for f in top40.tolist() if d_odd.flatten()[f] * d_even.flatten()[f] > 0 and d_odd.flatten()[f].abs() > 1)
@@ -65,7 +66,7 @@ stat0 = dict(replicated_top40=rep, random_mean_abs_d=float(rand_abs.mean()), ran
 print(axis, "stage0", stat0, f"{time.time()-T0:.0f}s", flush=True)
 
 dm = torch.where(mask, d_all.abs(), torch.zeros(()))
-cand = [(f // NN, f % NN) for f in dm.flatten().topk(32).indices.tolist()]
+cand = [(f // NN, f % NN) for f in dm.flatten().topk(NCAND).indices.tolist()]
 cinfo = {}
 for (L, n) in cand:
     cinfo[(L, n)] = dict(d=float(d_all[L, n]), d_even=float(d_even[L, n]), d_odd=float(d_odd[L, n]), meanA=float(ma_all[L, n]), meanB=float(mb_all[L, n]),
@@ -82,8 +83,8 @@ def rand_ctrl(k, avoid):
     return out
 
 # ---------------- generation helpers ----------------
-P = AX.PROMPTS
-def run(jobs, max_new, bs=96):
+P = AX.PROMPTS[:int(os.environ.get("NL_NPROMPT", "5"))]   # NL_NPROMPT / NL_CAND shrink the screen for the slower hybrid model; recorded in the output
+def run(jobs, max_new, bs=int(os.environ.get("NL_BS", "48"))):
     """jobs: list of (prompt, steers).  returns list[str] in order."""
     outs = []
     for i in range(0, len(jobs), bs):
@@ -116,7 +117,7 @@ def sweep(items, signs, doses, max_new, base):
 
 # ---------------- stage 1 ----------------
 signs = {c: cinfo[c]["sign"] for c in cand}
-ctrl1 = rand_ctrl(32, set(cand))
+ctrl1 = rand_ctrl(NCAND, set(cand))
 for c in ctrl1:
     signs[c] = rng.choice([-1.0, 1.0])
 r1 = sweep(cand + ctrl1, signs, [0.15, 0.3], 24, b24)
@@ -187,7 +188,7 @@ for p in pairs:
         p["samples"] = samples([(x["layer"], x["neuron"], x["dose"]) for x in p["neurons"]])
 
 out = dict(axis=axis, label=A["label"], kind=A["kind"], stat0=stat0, baseline=dict(score40=b40, ppl=ppl0, texts=base40),
-           minLift=ML, controlsStage1=dict(n=len(ctrl1), top=[round(x, 2) for x in ctrl_best1[:5]],
+           minLift=ML, nPrompts=len(P), nCandidates=NCAND, controlsStage1=dict(n=len(ctrl1), top=[round(x, 2) for x in ctrl_best1[:5]],
                                             meanBestLift=sum(ctrl_best1) / len(ctrl_best1)),
            candidates=[dict(layer=c[0], neuron=c[1], **cinfo[c], stage1Best=best1[c]) for c in ranked],
            controlsStage2=[dict(layer=c[0], neuron=c[1], sign=signs[c], byDose={str(d): dict(lift=res[c][d]["lift"], ppl=res[c][d]["ppl"]) for d in DOSES}) for c in ctrl2],
