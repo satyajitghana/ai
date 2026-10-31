@@ -9,14 +9,10 @@ K = 6
 from transformers import AutoTokenizer
 from safetensors import safe_open
 tok = AutoTokenizer.from_pretrained(MODEL)
-_f = sorted(glob.glob(os.path.join(os.environ.get("HF_HOME", ""), "hub", "models--Qwen--Qwen3-0.6B", "snapshots", "*", "model.safetensors")))
-if not _f:
-    from huggingface_hub import hf_hub_download
-    _f = [hf_hub_download(MODEL, "model.safetensors")]
-SF = safe_open(_f[0], framework="pt")   # read only embed, final norm and down_proj: ~1.5 GB peak instead of the whole fp32 model
-VOCAB = SF.get_slice("model.embed_tokens.weight").get_shape()[0]
+SF = safe_open(checkpoint_file(), framework="pt")   # read only embed, final norm and down_proj: ~1.5 GB peak instead of the whole fp32 model
+VOCAB = SF.get_slice(f"{ST}.embed_tokens.weight").get_shape()[0]
 os.makedirs(os.path.join(SCRATCH, "lens"), exist_ok=True)
-nreal = 151643
+nreal = tok.vocab_size  # base vocabulary; the special/added tokens above it are not shown
 ok = torch.zeros(VOCAB, dtype=torch.bool)
 strs = [None] * VOCAB
 for i in range(nreal):
@@ -28,16 +24,16 @@ for i in range(nreal):
     ok[i] = True
     strs[i] = display_token(s)
 print("usable tokens", int(ok.sum()))
-E = SF.get_tensor("model.embed_tokens.weight").float()  # lm_head is tied with embed_tokens
+E = SF.get_tensor(f"{ST}.embed_tokens.weight").float()  # lm_head is tied with embed_tokens
 Ereal = E[ok].contiguous()         # [V',1024]
 vid = torch.nonzero(ok).squeeze(1)
-nw = SF.get_tensor("model.norm.weight").float()
+nw = SF.get_tensor(f"{ST}.norm.weight").float() + NORM_OFFSET   # effective final-norm scale
 del E
 for L in range(NL):
     p = os.path.join(SCRATCH, "lens", f"L{L:02d}.json")
     if os.path.exists(p):
         continue
-    W = SF.get_tensor(f"model.layers.{L}.mlp.down_proj.weight").float() * nw[:, None]  # [1024,3072]
+    W = SF.get_tensor(f"{ST}.layers.{L}.mlp.down_proj.weight").float() * nw[:, None]  # [1024,3072]
     up, dn = [], []
     for c in range(0, NN, 384):
         lg = Ereal @ W[:, c:c + 384]                      # [V',384]

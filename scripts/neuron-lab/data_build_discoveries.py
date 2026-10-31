@@ -1,4 +1,4 @@
-"""Turn $NL_SCRATCH/disc/<axis>.json into public/neuron-lab/{qwen3-0.6b/discoveries.json, qwen3-0.6b-findings.json}.
+"""Turn $NL_SCRATCH/disc/<axis>.json into public/neuron-lab/<slug>/discoveries.json and <slug>-findings.json.
 discoveries.json = accepted items only (single neurons and pairs).  findings.json = every axis, misses included."""
 import glob
 from data_common import *
@@ -62,9 +62,9 @@ disc.sort(key=lambda x: (-(x["evidence"]["lift"] / x["evidence"]["minLift"])))
 if len(disc) > 80:
     disc = disc[:80]
 json.dump(dict(model=MODEL, generated=meta["generated"], decoding="greedy, 40 new tokens, raw text prompts (no chat template)",
-               note="Style tunes on a 0.6B model. 'dose' is signed and already points toward the axis. Every item passed: lexical lift >= minLift, lift above the best of 6 random same-range neurons, held-out perplexity <= 3x baseline.",
+               note=f"Tunes found on {MODEL}. 'dose' is signed and already points toward the axis. Every item passed: lexical lift >= minLift, lift above the best of 6 random same-range neurons, held-out perplexity <= 3x baseline.",
                items=disc), open(os.path.join(OUT, "discoveries.json"), "w"), ensure_ascii=False, indent=1)
 json.dump(dict(model=MODEL, generated=meta["generated"],
                pipeline="scripts/neuron-lab/data_discover.py: token-level d' contrast over hand-written sets, top-32 screened by steering at doses 0.15/0.3 against 32 random controls, top-6 validated at 6 doses with 6 fresh controls and held-out perplexity.",
-               axes=finds), open(os.path.join(os.path.dirname(OUT), "qwen3-0.6b-findings.json"), "w"), ensure_ascii=False, indent=1)
+               axes=finds), open(FINDINGS, "w"), ensure_ascii=False, indent=1)
 print(len(disc), "discoveries;", {f["axis"]: f["verdict"] for f in finds})

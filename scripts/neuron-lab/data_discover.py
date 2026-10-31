@@ -1,4 +1,4 @@
-"""Contrast-search + steering validation for one benign axis on Qwen3-0.6B.   usage: data_discover.py <axis>
+"""Contrast-search + steering validation for one benign axis on the model chosen by NL_MODEL.   usage: data_discover.py <axis>
 
 Stage 0  contrast: token-level d' = (mean_A - mean_B) / sqrt((s_A^2 + s_B^2)/2) for all 86,016 neurons
          (positions >= 1), ranked on all pairs; split-half check (rank on even pairs, test on odd).
@@ -33,7 +33,7 @@ for L, layer in enumerate(model.model.layers):
 def acts(text):
     ids = tok(text, return_tensors="pt").input_ids
     model.model(input_ids=ids)
-    return torch.stack([cur[L] for L in range(NL)], 0)  # [28,T-1,3072]
+    return torch.stack([cur[L] for L in range(NL)], 0)  # [layers,T-1,neurons]
 
 def moments(texts):
     n = 0; s = torch.zeros(NL, NN); q = torch.zeros(NL, NN)
@@ -55,7 +55,7 @@ d_all, ma_all, mb_all = dprime(add(mAe, mAo), add(mBe, mBo))
 d_even, _, _ = dprime(mAe, mBe)
 d_odd, _, _ = dprime(mAo, mBo)
 # split-half replication of the top-40 (layers 8..26)
-mask = torch.zeros(NL, NN, dtype=torch.bool); mask[8:27] = True
+mask = torch.zeros(NL, NN, dtype=torch.bool); mask[LAYER_LO:LAYER_HI] = True
 de = torch.where(mask, d_even.abs(), torch.zeros(()))
 top40 = de.flatten().topk(40).indices
 rep = sum(1 for f in top40.tolist() if d_odd.flatten()[f] * d_even.flatten()[f] > 0 and d_odd.flatten()[f].abs() > 1)
