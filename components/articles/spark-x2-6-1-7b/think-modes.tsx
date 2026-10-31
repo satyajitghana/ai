@@ -3,9 +3,9 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
-import { THINK, PROMPT_TEXT, MODE_NOTE } from "./data"
+import { THINK_SETS, MODE_NOTE } from "./data"
 
-// Measured: the 10 prompts, three modes, one sampled run each (temperature 1.0,
+// Measured: the prompts, three modes, one sampled run each (temperature 1.0,
 // top_p 0.95, seeds 0..9) on an int8 CPU re-implementation of the model. Bars
 // are new tokens generated; a dot is the verdict. A run that hit the token cap
 // before closing its think block is marked as truncated.
@@ -13,7 +13,9 @@ import { THINK, PROMPT_TEXT, MODE_NOTE } from "./data"
 const ACCENT = "oklch(0.66 0.17 45)"
 const MODES = ["none", "low", "high"] as const
 
-export function ThinkModes() {
+export function ThinkModes({ set = "easy" }: { set?: "easy" | "hard" }) {
+  const { prompts: PROMPT_TEXT, modes: THINK } = THINK_SETS[set]
+  const n = PROMPT_TEXT.length
   const [sel, setSel] = useState(0)
   const max = Math.max(...THINK.flatMap((m) => m.runs.map((r) => r.tokens)))
   const row = (mode: (typeof MODES)[number]) => THINK.find((m) => m.mode === mode)!
@@ -22,7 +24,7 @@ export function ThinkModes() {
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex items-center justify-between border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
-        <span>thinking modes · 10 prompts x 3 modes</span>
+        <span>thinking modes · {n} prompts x 3 modes</span>
         <span className="text-muted-foreground/50">measured</span>
       </div>
       <div className="space-y-3 p-3 sm:p-4">
@@ -34,14 +36,14 @@ export function ThinkModes() {
             return (
               <div key={m} className="rounded-md border p-2">
                 <div className="text-muted-foreground">{m}</div>
-                <div className="text-base">{ok}/10 correct</div>
+                <div className="text-base">{ok}/{n} correct</div>
                 <div className="text-muted-foreground">{avg} tokens avg</div>
               </div>
             )
           })}
         </div>
         <div className="space-y-1.5" role="group" aria-label="Prompts">
-          {Array.from({ length: 10 }, (_, i) => (
+          {Array.from({ length: n }, (_, i) => (
             <button
               key={i}
               type="button"
