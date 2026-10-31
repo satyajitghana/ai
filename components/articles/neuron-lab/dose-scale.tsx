@@ -3,41 +3,53 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { cn } from "@/lib/utils"
 
-import { COL_MEDIAN, LAYERS, PEAK_MAX, PEAK_MEDIAN, RES_NORM } from "./data"
+import { DOSE_BY_MODEL, type ModelKey } from "./data"
 
-// What "dose 1" means in each layer of Qwen3-0.6B. Every array comes from the lab's published data files (see
-// data.ts); the three derived numbers are plain arithmetic on them:
+// What "dose 1" means in each layer. Every array comes from the lab's published data files (see data.ts); the derived
+// numbers are plain arithmetic on them:
 //   write length  = dose x RES_NORM[L]                  how far the neuron's direction is pushed, in residual units
-//   offset        = dose x RES_NORM[L] / col length      what is added to the neuron's activation
-//   x median peak = offset / PEAK_MEDIAN[L]              against what a typical neuron there ever reaches
+//   offset        = dose x RES_NORM[L] / col length     what is added to the neuron's activation
+//   x median peak = offset / PEAK_MEDIAN[L]             against what a typical neuron there ever reaches
 
 const fmt = (v: number) => (Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2))
 const ACCENT = "oklch(0.65 0.16 55)"
+const KEYS: ModelKey[] = ["qwen3-0.6b", "qwen3.5-0.8b"]
 
 export function DoseScale() {
-  const [layer, setLayer] = useState(16)
+  const [model, setModel] = useState<ModelKey>("qwen3-0.6b")
+  const [layerRaw, setLayer] = useState(16)
   const [dose, setDose] = useState(0.8)
-  const res = RES_NORM[layer]
-  const col = COL_MEDIAN[layer]
+  const D = DOSE_BY_MODEL[model]
+  const layer = Math.min(layerRaw, D.layers - 1)
+  const res = D.resNorm[layer]
+  const col = D.colMedian[layer]
   const offset = (dose * res) / col
-  const rel = Math.abs(offset) / PEAK_MEDIAN[layer]
-  const maxRel = Math.abs(offset) / PEAK_MAX[layer]
+  const rel = Math.abs(offset) / D.peakMedian[layer]
+  const maxRel = Math.abs(offset) / D.peakMax[layer]
   const bars = [
-    { label: "median neuron's peak", v: PEAK_MEDIAN[layer], note: "on the reference text" },
-    { label: "strongest neuron's peak", v: PEAK_MAX[layer], note: "any neuron of this layer" },
-    { label: `your offset (dose ${dose.toFixed(2)})`, v: Math.abs(offset), note: "added at every position", accent: true },
+    { label: "median neuron's peak", v: D.peakMedian[layer] },
+    { label: "strongest neuron's peak", v: D.peakMax[layer] },
+    { label: `your offset (dose ${dose.toFixed(2)})`, v: Math.abs(offset), accent: true },
   ]
   const top = Math.max(...bars.map((b) => b.v))
   return (
     <figure className="my-8 overflow-hidden rounded-md border">
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
-        what a dose means, layer by layer (measured: Qwen3-0.6B on 69,596 corpus tokens)
+        what a dose means, layer by layer (measured on {D.tokens.toLocaleString("en-US")} corpus tokens)
       </div>
       <div className="space-y-3 px-4 py-3">
+        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Model">
+          {KEYS.map((k) => (
+            <button key={k} aria-pressed={k === model} onClick={() => setModel(k)} className={cn("rounded border px-2 py-0.5 font-mono text-[11px]", k === model ? "border-foreground bg-muted" : "text-muted-foreground hover:text-foreground")}>
+              {DOSE_BY_MODEL[k].label}
+            </button>
+          ))}
+        </div>
         <label className="flex items-center gap-3 text-xs">
           <span className="w-16 shrink-0 font-mono text-muted-foreground">layer</span>
-          <Range className="w-full" min={0} max={LAYERS - 1} step={1} value={layer} onChange={(e) => setLayer(+e.target.value)} accent={ACCENT} aria-label="Layer" />
+          <Range className="w-full" min={0} max={D.layers - 1} step={1} value={layer} onChange={(e) => setLayer(+e.target.value)} accent={ACCENT} aria-label="Layer" />
           <span className="w-12 shrink-0 text-right font-mono tabular-nums">L{layer}</span>
         </label>
         <label className="flex items-center gap-3 text-xs">
@@ -55,7 +67,7 @@ export function DoseScale() {
           <dt className="text-muted-foreground">activation offset (write length &divide; column length)</dt>
           <dd className="text-right font-mono tabular-nums">{offset >= 0 ? "+" : "−"}{fmt(Math.abs(offset))}</dd>
         </dl>
-        <div className="space-y-1.5" role="img" aria-label={`At layer ${layer}, a dose of ${dose} adds ${fmt(Math.abs(offset))} to the neuron's activation, ${rel.toFixed(1)} times the median neuron's peak and ${maxRel.toFixed(2)} times the strongest neuron's peak.`}>
+        <div className="space-y-1.5" role="img" aria-label={`In ${D.label} at layer ${layer}, a dose of ${dose} adds ${fmt(Math.abs(offset))} to the neuron's activation, ${rel.toFixed(1)} times the median neuron's peak and ${maxRel.toFixed(2)} times the strongest neuron's peak.`}>
           {bars.map((b) => (
             <div key={b.label} className="flex items-center gap-2 text-[11px]">
               <span className="w-44 shrink-0 text-muted-foreground">{b.label}</span>
