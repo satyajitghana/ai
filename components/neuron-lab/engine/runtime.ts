@@ -3,6 +3,13 @@ import { MAX_BATCH, Qwen3Core, type KVStream } from "./core"
 import { Tokenizer } from "./tokenizer"
 import type { ActivationsResult, ByteSource, Calibration, GenerateManyOptions, GenerateOptions, GenerateResult, ProgressFn, Steer } from "./types"
 
+/** A fixed plain-English passage the residual norms are measured on when the site ships no calibration. */
+export const CALIBRATION_PASSAGE =
+  "The lighthouse keeper climbed the stairs each evening, counted the steps out of habit, and lit the lamp just as the last boat turned toward the harbour. " +
+  "Below him the sea kept its own accounts: tides, currents, the slow wearing of the rock. He wrote the weather in a notebook, ate his supper standing at the window, " +
+  "and listened to the radio until the static took over. In the morning there would be gulls, a delivery of oil and bread, and perhaps a letter from his daughter, " +
+  "who lived in a city where nobody had ever needed to know which way the wind was blowing."
+
 export const EOS_IDS = new Set([151645, 151643])
 export const KEEP_ALL_MAX_TOKENS = 128
 
@@ -54,6 +61,30 @@ export class Runtime {
   }
 
   setCalibration(c: Calibration) { this.core.setCalibration(c) }
+
+  /**
+   * Measure what the steering recipe needs from the loaded model itself: the median norm of the residual stream
+   * leaving each layer (tokens after the first, over a fixed reference passage) and each neuron's down_proj column
+   * length. Takes a few seconds; used when the site ships no precomputed calibration for the model.
+   */
+  selfCalibrate(): Calibration {
+    const ids = this.tok.encode(CALIBRATION_PASSAGE)
+    const { nLayer, hidden } = this.core
+    const norms: number[][] = Array.from({ length: nLayer }, () => [])
+    this.core.reset()
+    this.core.forward(ids, false, {
+      onLayerOut: (l, x, t0, nTok) => {
+        for (let t = 0; t < nTok; t++) {
+          if (t0 + t === 0) continue
+          let ss = 0
+          for (let i = 0; i < hidden; i++) { const v = x[t * hidden + i]; ss += v * v }
+          norms[l].push(Math.sqrt(ss))
+        }
+      },
+    })
+    const median = (a: number[]) => { const s = [...a].sort((p, q) => p - q); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2 }
+    return { resNormMedian: norms.map(median), colNorm: this.core.columnNorms() }
+  }
 
   tokenize(text: string): number[] { return this.tok.encode(text) }
 
@@ -129,7 +160,7 @@ export class Runtime {
       for (let b = 0; b < B; b++) {
         if (!alive[b]) continue
         const id = sampleToken(cur[b], o.temperature, o.topK, rands[b])
-        if (EOS_IDS.has(id)) { alive[b] = false; continue }
+        if (this.core.eosIds.has(id)) { alive[b] = false; continue }
         const piece = decs[b].decode(this.tok.tokenBytes(id), { stream: true })
         text[b] += piece
         o.onToken(b, piece, { index: n[b] })
@@ -168,7 +199,7 @@ export class Runtime {
     for (; n < o.maxNewTokens; n++) {
       if (o.signal?.aborted) break
       const id = sampleToken(lg, o.temperature, o.topK, rand)
-      if (EOS_IDS.has(id)) break
+      if (this.core.eosIds.has(id)) break
       const piece = dec.decode(this.tok.tokenBytes(id), { stream: true })
       text += piece
       o.onToken(piece, { index: n })
