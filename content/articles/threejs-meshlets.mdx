@@ -1,0 +1,358 @@
+---
+title: "three.js meshlets: what the GPU-driven pipeline does and does not copy from Nanite"
+description: "three.js PR 35191 (sunag, closed 29 October) added MeshletDrawingPipeline and VisibilityBufferDrawingPipeline to WebGPURenderer. I read the 5,571-line pipeline and its builder at master cb0a902, ran the demo's own TeapotGeometry to count its triangles (129,600 teapots x 6,320 = 819,072,000 at full detail), and wrote the cluster builder and the cone and frustum tests myself on a sphere and a torus knot: zero false culls, 48 to 73 percent of the sphere's clusters culled, and a greedy builder that leaves 37 percent of its clusters under half full. Then the Nanite checklist: it has software rasterization and a visibility buffer, a flat per-object LOD chain, and no streaming."
+date: 2026-10-31
+tags:
+  - webgpu
+  - three-js
+  - gpu-driven-rendering
+  - computer-graphics
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 1
+  durability: 1
+  reach: 2
+  unique: 2
+  why: "Reads the merged pipeline source, counts the demo's 819M triangles by running its geometry, and re-implements clustering and cone/frustum culling with numbers."
+topic: gpu-systems
+kind: tool
+level: practitioner
+runsOn: consumer-gpu
+licence: MIT
+---
+
+import { ClusterGrower } from "@/components/articles/threejs-meshlets/cluster-grower"
+import { ConeCull } from "@/components/articles/threejs-meshlets/cone-cull"
+import { DrawArgs } from "@/components/articles/threejs-meshlets/draw-args"
+
+A post went around saying three.js had merged "a Nanite-like" meshlet pipeline,
+with a demo "rendering 1B triangles at 150 FPS". The PR is
+[mrdoob/three.js#35191](https://github.com/mrdoob/three.js/pull/35191), by
+sunag, titled *WebGPURenderer: Introduce `StandardDrawingPipeline`,
+`MeshletDrawingPipeline` and `VisibilityBufferDrawingPipeline`*. It closed on
+29 October. The demo the post names, `webgpu_gpudriven`, has since been renamed
+to `webgpu_meshlets` (PR 35282).
+
+I did not see the post's frame rate, and I have no GPU in this sandbox, so
+the 150 FPS is **reported** and stays that way. What I can check is the code.
+This article does four things. It reads the pipeline. It counts what the demo
+actually draws. It re-implements the cluster builder and the culling tests on
+the CPU and measures them. And it lines the result up against Nanite, because
+"Nanite-like" is the claim worth being exact about.
+
+Labels used below: **measured** means I ran it here. **Read** means I read it
+in the source at the commit named. **Reported** means someone else said it.
+**Reasoned** means I derived it from the above and did not run it.
+
+<RepoCard repo="mrdoob/three.js" />
+
+## What I could and could not run
+
+The repo is cloned shallow at `cb0a902b668f` (30 October), a day or so after
+the merge, so it includes follow-up changes. I read these files:
+`examples/jsm/pipelines/MeshletDrawingPipeline.js` (5,571 lines),
+`VisibilityBufferDrawingPipeline.js` (954), `utils/MeshletGeometryUtils.js`
+(417), and `examples/webgpu_meshlets.html`.
+
+I ran the demo's own `TeapotGeometry(1, 10)` under Node 22 to count triangles.
+That is the only repository code I ran. I also tried to run the repo's cluster
+builder (the meshoptimizer WASM it calls) on CPU for a head-to-head. The
+sandbox's permission layer refused the command, and I did not work around it.
+So **every clustering number below is from my own numpy implementation, not
+from the pipeline's builder**. Where that matters I say so.
+
+I never touched a GPU. Anything about frame time is reported or absent.
+
+## Meshlets in one paragraph
+
+A mesh has tens of thousands of triangles. Testing each one against the camera
+is too fine a grain, and testing the whole mesh is too coarse. A meshlet is the
+middle: a small cluster of neighbouring triangles, built once on the CPU, that
+carries its own bounding sphere and a "normal cone" (the range of directions
+its triangles face). The GPU can then cull a few hundred meshlets per object
+instead of thousands of triangles, and draw only the survivors. Hardware mesh
+shaders settled on 64 vertices and 124 triangles. three.js has no mesh shaders
+in WebGPU, so it picks something different.
+
+## How three.js builds them
+
+`createMeshlets()` in `MeshletGeometryUtils.js` does this for each geometry
+(**read**):
+
+1. Weld identical vertices by hashing position, normal, uv and any extra
+   attributes. A comment says why: non-indexed input would otherwise give
+   clusters of about 21 triangles and no LODs.
+2. Simplify the index buffer through a chain of up to six levels, with target
+   triangle ratios `1, 0.55, 0.25, 0.1, 0.04, 0.015` and growing error budgets.
+   If a level removes less than 15 percent, it retries with `simplifySloppy`
+   and a four-times larger error.
+3. Per level, call `MeshoptClusterizer.buildMeshlets(indices, positions, 3,
+   192, 64, 0.25)` and `computeMeshletBounds`.
+4. Pad each cluster with degenerate triangles to exactly 64, and pack indices as
+   `Uint32` into a pool. Bounds go in a 32-byte record: sphere xyz + radius,
+   cone axis xyz + cutoff.
+
+Two details differ from the hardware convention. The vertex cap is **192, not
+64** (`MAX_MESHLET_VERTICES = MESHLET_SIZE * 3`), because the draw pulls vertices
+by global index, so a cluster is never limited by a local vertex buffer. And
+every cluster is padded to 64 triangles, so a cluster with 30 real triangles
+still costs 64 slots. The file's own comment says faceted geometry would
+otherwise end clusters at about 32 triangles.
+
+## The frame, stage by stage
+
+`MeshletCulling` builds a chain of compute passes (**read**). Per frame:
+
+- **Object pass**, one thread per object. Transforms the geometry's bounding
+  sphere, tests six frustum planes, applies a per-object LOD range, computes a
+  screen radius and drops objects under a minimum, and picks a LOD level by
+  projected error: the last level whose `error * scale * pixelFactor` is under
+  `lodThreshold`. Then it reserves its clusters with one `atomicAdd` per
+  workgroup, not per thread.
+- **Dispatch args.** One thread turns the cluster counter into a workgroup
+  count, `ceil(n / 64)`, split into rows of 65,535 groups.
+- **Cluster pass**, one thread per cluster. Cone test, then six planes, then an
+  optional hierarchical-Z test. Survivors are appended to a work queue with an
+  `atomicAdd`.
+- **Draw args.** One thread per queue writes `[192, visible, 0, 0]`: vertex
+  count `MESHLET_SIZE * 3`, instance count the number of queued clusters.
+- **Draw.** `geometry.setIndirect(argsAttribute, offset)`, a plain indirect
+  instanced draw. As I read it, the vertex shader looks up the work queue by instance index and the pool by `vertexIndex`.
+
+That last point matters for the word "GPU-driven". It is not
+`multiDrawIndirect`, which WebGPU does not have. It is one indirect draw per
+batch, where a batch is the objects sharing a geometry and a material, with a
+near and a far queue. The CPU never learns the visible count unless it reads a
+counter back; the code reads counters every 30 projections to resize its
+budgets.
+
+<DrawArgs />
+
+The widget runs the arithmetic of that chain on the demo's constants. Its level
+sizes are the nominal ratios, so they are **reasoned**, not measured on a GPU.
+
+## The shader line that does the cone test
+
+This is the cluster-level test, copied from `createClusterCull`:
+
+```js
+const coneAxis = normalize( matrixWorld.mul( vec4( cone.xyz, 0.0 ) ).xyz );
+const toCluster = chunkCenter.sub( cameraPosition );
+
+If( dot( toCluster, coneAxis ).greaterThanEqual( cone.w.mul( length( toCluster ) ).add( chunkRadius ) ), () => {
+	chunkVisible.assign( false );
+} );
+```
+
+In words: a cluster is culled when the vector from the camera to its centre,
+projected on the cone axis, exceeds `cutoff * distance + radius`. The `radius`
+term is the slack that makes it safe from the cluster's centre rather than from
+every triangle's own position. It also explains why the test loosens as the
+camera gets close, which the toy below shows. It is gated by a flag, skipped in
+shadow passes, skipped for deformed positions, and requires uniform positive
+scale because the cone is transformed by the world matrix.
+
+<ConeCull />
+
+## What I measured: building clusters
+
+I wrote a greedy builder in numpy (`exp/mesh.py`, not committed) and ran it on
+two meshes I generated: an icosphere at subdivision 5 (10,242 vertices, 20,480
+triangles) and a (2,3) torus knot with a 0.3 tube (14,400 vertices, 28,800
+triangles). The rule: seed next to the last cluster's frontier, then repeatedly
+add the neighbouring triangle with the fewest new vertices, ties broken by
+centroid distance. I ran it at the pipeline's 64-triangle cap, and at the
+hardware convention of 64 vertices and 124 triangles for comparison.
+
+| mesh | cap | clusters | mean tris | at a cap | pad waste to 64 | vertex loads / tri |
+|---|---|---|---|---|---|---|
+| icosphere | 64 tri | 493 | 41.5 | 59% | 35% | 0.73 |
+| icosphere | 64 v / 124 tri | 311 | 65.9 | 64% | n/a | 0.68 |
+| torus knot | 64 tri | 665 | 43.3 | 62% | 32% | 0.75 |
+| torus knot | 64 v / 124 tri | 461 | 62.5 | n/a | n/a | 0.70 |
+
+*Measured, CPU, my builder.* The vertex cap never binds at 64 triangles (a
+cluster of 64 triangles touches about 30 vertices), so the 192 cap in
+three.js is moot for smooth meshes; it matters for faceted ones.
+
+The unflattering number is the mean. A good clusterer should land close to
+the cap on a smooth closed mesh. Mine does not: on the icosphere at the
+124-triangle cap the median is 96 but the 10th percentile is **1 triangle**, and
+the first half of the clusters average 88 triangles while the second half
+average 44. That is the signature of greedy growth: the first clusters eat
+whole regions, and the late ones are the scraps trapped between them.
+**36 percent of clusters end under half full.** For a 64-triangle fixed layout,
+the pad waste is 35 percent of the slots, spent on degenerate triangles that
+the GPU still has to fetch and discard.
+
+<ClusterGrower />
+
+I cannot say how much of this three.js suffers. meshoptimizer's builder is a
+better algorithm than mine (it scores candidates with cone and compactness
+terms and chooses seeds more carefully), and I could not run it. The fair
+reading: the padding cost is real by construction, the size of it depends on
+the builder, and my 35 percent is an upper-ish bound from a naive one.
+
+A second caveat about reuse. "Vertex loads per triangle" of 0.73 says a
+cluster shares vertices well internally: unclustered, each triangle would load
+three. But three.js pulls vertices by global index per triangle corner, with no
+per-cluster vertex cache. Whether the 0.73 turns into saved memory traffic
+depends on the GPU's own post-transform cache. That is **reasoned**, and I did
+not measure it.
+
+## What I measured: culling
+
+For each mesh I placed a camera in several positions, built each cluster's
+sphere and cone, and applied the same two tests the shader does. I also
+computed the truth directly per triangle: a triangle is invisible if it
+faces away from the camera, or all three of its vertices fall outside one
+frustum plane. Occlusion is not in the truth, since neither test sees it.
+
+Icosphere, 64-triangle cap, 50 degree vertical FOV, 16:9 (**measured**):
+
+| camera | cone culls | truly back-facing | tris culled (cone + frustum) | tris truly invisible |
+|---|---|---|---|---|
+| distance 1.5 | 73% | 80% | 82% | 93% |
+| distance 3 | 59% | 64% | 58% | 67% |
+| distance 10 | 48% | 51% | 48% | 55% |
+| distance 3, looking 40 deg away | 59% | 64% | 75% | 83% |
+| distance 3, looking 90 deg away | 59% | 64% | 100% | 100% |
+
+Torus knot, same settings:
+
+| camera | cone culls | truly back-facing | tris culled | tris truly invisible |
+|---|---|---|---|---|
+| distance 4 | 31% | 42% | 26% | 54% |
+| distance 8 | 30% | 39% | 25% | 52% |
+| distance 3, through the hole | 30% | 43% | 30% | 63% |
+
+Three things to take from these.
+
+1. **No false culls.** Across all nine scenarios in each of three builder configs,
+   the number of truly visible triangles inside a culled cluster was zero. The
+   test is conservative, as written.
+2. **The test leaves a lot behind, and the amount depends on shape.** A sphere
+   is the best case, since every cluster's cone is narrow and consistent. The
+   cone catches 91 to 95 percent of the clusters that are truly back-facing.
+   The torus knot is curved in both directions, so its clusters carry wide
+   cones, and the cone discards about half of the invisible triangles. It is
+   not unusable cones: about 97 percent of the clusters in both meshes had a
+   cutoff below 1. It is cones too wide to reject at most angles.
+3. **Frustum culling is the big win for the camera that looks away**, and it
+   is free at this level: one sphere against six planes. Looking 90 degrees
+   off culls the whole object, which the object-level pass does before any
+   cluster thread runs.
+
+What these numbers are not: they are not a measurement of the pipeline. They
+use my clusters, not meshoptimizer's, on meshes with no occluders. The pipeline
+adds the optional two-phase hierarchical-Z occlusion test, and the code skips
+it automatically when it culls under 30 percent of visible clusters
+(`OCCLUSION_MIN_CULLED = 0.3`), which is a decent hint of how much that test
+costs when it does not pay.
+
+## What the demo draws
+
+`webgpu_meshlets.html` builds `rows = cols = 360`, so `instanceCount = 129,600`
+teapots, each `new TeapotGeometry(1, 10)`. The page computes
+`totalTriangles = instanceCount * geometry.index.count / 3` and prints it. I
+ran that geometry:
+
+```text
+TeapotGeometry(1, 10): 6320 triangles, 3872 vertices
+129,600 x 6,320 = 819,072,000 triangles
+```
+
+*Measured (the geometry), arithmetic (the product).* So the demo at this
+commit is **0.82 billion** triangles at full detail, not 1 billion. The post may
+quote an earlier revision, or round up; I cannot tell from here, and the
+example was changed between the merge and my clone (it was renamed). That is
+a ceiling on what the scene contains, not on what is drawn: LOD selection
+picks coarser levels per teapot by screen error, and the object and cluster
+culls drop the rest. By the nominal ratios the coarsest level of a teapot is
+about 95 triangles, so a scene entirely at that level is about 12 million.
+
+The comment in the page about the visibility buffer addressing "up to 131072
+objects per render list" matters here: 129,600 is just under 2^17 = 131,072,
+the cap from `INSTANCE_INDEX_BITS = 17`. The scene was sized to fit.
+
+I do not know what GPU the 150 FPS came from, what resolution, what mode
+(`Meshlet Debug` colours by cluster), which LOD threshold, or whether
+occlusion culling was on (the demo turns it off). A figure of that kind is
+meaningful for one chip at one setting. Treat it as **reported**.
+
+## Nanite, item by item
+
+"Nanite-like" is fair in spirit and wrong in several details. Here is what is
+in the source against the Nanite design as publicly described.
+
+| Nanite idea | In this PR? | What the code shows |
+|---|---|---|
+| Triangle clusters as the unit of culling | Yes | 64-triangle meshlets, culled by sphere, cone, and optional HZB |
+| GPU-driven, no per-object CPU draw calls | Yes | compute culling, queues, `setIndirect` draws |
+| Two-pass occlusion with a previous-frame depth pyramid | Yes, optional | first phase draws last frame's visible clusters, second tests the rest against HZB |
+| Software rasterization of small triangles | Yes, in the other pipeline | `VisibilityBufferDrawingPipeline`: a compute shader rasterizes triangles up to `maxRasterSize` pixels (the demo uses 16), larger ones go to the hardware |
+| Visibility buffer, shade once per pixel | Yes, in the other pipeline | `atomicMax` on packed depth + triangle id and depth + instance id, then a resolve draw |
+| Cluster-level LOD from a hierarchy (DAG) | **No** | LOD is a flat chain of up to six whole-mesh levels, chosen per object |
+| Seamless LOD across cluster boundaries | **No** | one level per object, so neighbours never mix levels |
+| Streaming of virtual geometry | **No** | all levels live in GPU buffers; no paging in the code I read |
+| Material binning / full deferred material system | Partial | batches by geometry and material, many node-material properties unsupported (`UNSUPPORTED_NODES` lists vertex, fragment, depth, alpha test and others) |
+| Millions of instances of unique detail | Limited | 17-bit instance index, 16-bit triangle index per visibility buffer |
+
+The correction to the common summary is the software rasterizer: it exists,
+in the visibility-buffer variant, and it is the part most closely modelled on
+Nanite. The software path packs depth into the high bits of a 32-bit word so
+`atomicMax` resolves both the depth test and the payload in one operation. The
+`MeshletDrawingPipeline` I walked through above uses only hardware
+rasterization; the visibility-buffer pipeline extends it.
+
+What is missing is what makes Nanite *virtualized*. With a per-object LOD
+chain, the choice is per object: the silhouette of a mountain is as detailed as
+its foot. A DAG with per-cluster error would let the near part use fine
+clusters and the far part use coarse ones within one mesh. And nothing here
+streams: the whole chain is resident, so the scene is bounded by GPU memory.
+For the teapot chain, nominally 195 clusters at 800 bytes each (768 of
+indices plus 32 of bounds), that is about 150 KB per mesh, which is tiny. For a
+scanned statue with millions of triangles, the chain is the budget.
+
+## What it costs, and where it breaks
+
+Reading the guards tells you where the author hit walls:
+
+- Materials with `vertexNode`, `fragmentNode`, `depthNode`, `alphaTestNode`
+  and similar are not supported by the meshlet draw. The visibility buffer's
+  software path additionally skips alpha-tested materials and MRT render
+  calls, which go through the hardware path.
+- Cone culling needs uniform positive scale, and is off in shadow passes and
+  for materials that move vertices.
+- The cluster budget is fixed (`CLUSTERS_PER_OBJECT = 8` with a
+  minimum of 4M); clusters over the budget **are not drawn**. The code
+  grows budgets after reading counters back, so I expect overflow to show up as missing clusters for a few frames, not a crash (reasoned; I did not provoke it).
+- LOD pops, as I read it: per-object selection by projected error has no blending in the code I saw.
+
+None of these is a flaw; they are the shape of the first version of a big
+feature. They are why I would not read "Nanite-like" as "drop-in Nanite".
+
+## What to take from it
+
+If you ship three.js, the useful questions are narrower than the headline:
+
+1. Is your scene many instances of few geometries? Batches are keyed by
+   geometry and material, and that is where the indirect draw pays.
+2. Does your material fit the allowed node set? Check `UNSUPPORTED_NODES`.
+3. Are your meshes smooth enough for cones to cull? A sphere gave me 48 to 73
+   percent cluster culls by cone alone; a knot gave 30. Faceted CAD will do
+   differently again, and you can measure it on your own meshes with the
+   twenty lines of numpy that matter: bounds, cone, one dot product.
+4. Reproduce the headline on your own hardware. The example is public, the
+   `Rasterizer` dropdown switches between `Basic`, `Meshlet` and `Visibility
+   Buffer`, and that comparison on your GPU is worth more than any quoted FPS.
+
+What I did not do: run any WebGPU code, measure a frame time, run
+meshoptimizer's builder, read the PR discussion (my GitHub access to the
+repository was limited to search results), or check the post's claims beyond
+the code. The 150 FPS and the 1B are the post's; the 819,072,000 and the
+architecture are what I can stand behind.
