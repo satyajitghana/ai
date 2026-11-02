@@ -1,0 +1,414 @@
+// Everything here is read from LiquidAI/LFM3-1.7B (config.json, the safetensors header, the model card)
+// or measured by the scripts in public/articles/lfm3/. Nothing is typed by hand except the labels.
+
+export type LayerKind = "conv" | "full" | "slide"
+
+export const LAYERS: LayerKind[] = ["conv", "conv", "full", "conv", "slide", "conv", "full", "conv", "slide", "conv", "full", "conv", "slide", "conv", "full", "conv", "slide", "conv", "full", "conv", "slide", "conv", "full", "conv"] // config.json layer_types
+
+export const HIDDEN = 2048
+export const MLP = 7680
+export const KV_HEADS = 4
+export const HEAD_DIM = 128
+export const WINDOW = 256
+export const CONV_WIDTH = 7
+// bytes of key plus value per token per attention layer, bf16: 2 x 4 x 128 x 2
+export const KV_BYTES_PER_TOKEN = 2048
+// the conv layers keep the last 6 inputs of each channel, bf16
+export const CONV_STATE_BYTES = 2048 * 6 * 2
+
+// parameter counts per layer, summed from the tensor shapes in the safetensors header
+export const PARAMS: Record<LayerKind, { mixer: number; mlp: number; norms: number }> = {
+  conv: { mixer: 16791552, mlp: 47185920, norms: 8192 },
+  full: { mixer: 10518784, mlp: 47185920, norms: 8192 },
+  slide: { mixer: 10518784, mlp: 47185920, norms: 8192 },
+}
+export const EMBED_PARAMS = 262144000
+export const TOTAL_PARAMS = 1728801536
+
+export const KIND_LABEL: Record<LayerKind, string> = {
+  conv: "gated short convolution",
+  full: "full attention",
+  slide: "sliding-window attention",
+}
+
+export const BENCH = [
+  {
+    "context": 256,
+    "attn_core_ms": 0.12,
+    "full_layer_ms": 15.1,
+    "sliding_layer_ms": 15.1,
+    "lfm3_step_ms": 456,
+    "all_full_24_step_ms": 414,
+    "ratio": 0.91
+  },
+  {
+    "context": 1024,
+    "attn_core_ms": 0.35,
+    "full_layer_ms": 15.3,
+    "sliding_layer_ms": 15.1,
+    "lfm3_step_ms": 458,
+    "all_full_24_step_ms": 419,
+    "ratio": 0.92
+  },
+  {
+    "context": 4096,
+    "attn_core_ms": 3.41,
+    "full_layer_ms": 18.4,
+    "sliding_layer_ms": 15.1,
+    "lfm3_step_ms": 476,
+    "all_full_24_step_ms": 493,
+    "ratio": 1.03
+  },
+  {
+    "context": 16384,
+    "attn_core_ms": 55.88,
+    "full_layer_ms": 70.8,
+    "sliding_layer_ms": 15.1,
+    "lfm3_step_ms": 791,
+    "all_full_24_step_ms": 1752,
+    "ratio": 2.21
+  },
+  {
+    "context": 65536,
+    "attn_core_ms": 205.41,
+    "full_layer_ms": 220.4,
+    "sliding_layer_ms": 15.1,
+    "lfm3_step_ms": 1688,
+    "all_full_24_step_ms": 5341,
+    "ratio": 3.16
+  },
+  {
+    "context": 131072,
+    "attn_core_ms": 377.97,
+    "full_layer_ms": 392.9,
+    "sliding_layer_ms": 15.1,
+    "lfm3_step_ms": 2724,
+    "all_full_24_step_ms": 9482,
+    "ratio": 3.48
+  }
+] as const
+
+export const BENCH_FIXED = { conv: 18.4, attn: 15.0, head: 51.9 }
+
+export const CARD_COLS = ["LFM3-1.7B", "LFM2.5-2.6B", "MiniCPM5-2B", "Gemma4-E4B", "Qwen3.5-4B", "Qwen3.5-9B"] as const
+export const CARD_ROWS: { name: string; v: number[] }[] = [
+ {
+  "name": "LiveClaw",
+  "v": [
+   45.6,
+   14.7,
+   30.37,
+   20.36,
+   19.94,
+   35.77
+  ]
+ },
+ {
+  "name": "Claw-Eval General (EN), average",
+  "v": [
+   68.64,
+   62.63,
+   60.74,
+   56.14,
+   61.96,
+   66.53
+  ]
+ },
+ {
+  "name": "Claw-Eval General (EN), pass^3",
+  "v": [
+   51.4,
+   37.52,
+   34.58,
+   22.43,
+   42.99,
+   51.87
+  ]
+ },
+ {
+  "name": "BrowseComp-Plus (OpenClaw subset)",
+  "v": [
+   37.0,
+   26.33,
+   16.83,
+   21.0,
+   24.67,
+   38.0
+  ]
+ },
+ {
+  "name": "WebArena-Verified",
+  "v": [
+   38.42,
+   3.02,
+   9.11,
+   17.06,
+   21.92,
+   28.94
+  ]
+ },
+ {
+  "name": "EnterpriseOps-Gym",
+  "v": [
+   28.2,
+   7.94,
+   13.41,
+   9.86,
+   25.96,
+   28.97
+  ]
+ },
+ {
+  "name": "AutomationBench (public)",
+  "v": [
+   41.29,
+   0.94,
+   4.71,
+   1.92,
+   8.67,
+   15.1
+  ]
+ },
+ {
+  "name": "BFCL V4",
+  "v": [
+   71.39,
+   55.89,
+   62.65,
+   48.25,
+   55.12,
+   62.83
+  ]
+ },
+ {
+  "name": "ToolSandbox",
+  "v": [
+   80.36,
+   78.04,
+   68.16,
+   69.27,
+   75.4,
+   76.41
+  ]
+ },
+ {
+  "name": "MCP-Atlas",
+  "v": [
+   32.57,
+   16.45,
+   26.38,
+   6.19,
+   41.37,
+   42.67
+  ]
+ },
+ {
+  "name": "\u03c4\u00b3-bench (4 domains), average",
+  "v": [
+   68.01,
+   56.77,
+   69.44,
+   33.53,
+   65.98,
+   67.11
+  ]
+ },
+ {
+  "name": "SWE-bench Verified (OpenCode)",
+  "v": [
+   43.4,
+   18.0,
+   34.8,
+   0.5,
+   41.2,
+   51.2
+  ]
+ },
+ {
+  "name": "SWE-bench Multilingual (OpenCode)",
+  "v": [
+   23.0,
+   8.0,
+   15.67,
+   0.67,
+   23.33,
+   35.0
+  ]
+ },
+ {
+  "name": "Terminal-Bench 2.1 (OpenCode)",
+  "v": [
+   12.92,
+   0.0,
+   5.62,
+   0.0,
+   13.48,
+   17.98
+  ]
+ },
+ {
+  "name": "LiveCodeBench v6",
+  "v": [
+   73.46,
+   60.57,
+   70.52,
+   71.0,
+   61.99,
+   69.86
+  ]
+ },
+ {
+  "name": "LiveCodeBench Pro 25Q2",
+  "v": [
+   31.74,
+   19.16,
+   29.34,
+   29.94,
+   24.25,
+   34.43
+  ]
+ },
+ {
+  "name": "SciCode",
+  "v": [
+   28.47,
+   16.32,
+   27.78,
+   25.0,
+   23.02,
+   31.6
+  ]
+ },
+ {
+  "name": "IFEval",
+  "v": [
+   96.66,
+   95.39,
+   87.83,
+   90.02,
+   92.52,
+   92.08
+  ]
+ },
+ {
+  "name": "IFBench",
+  "v": [
+   73.03,
+   60.48,
+   62.08,
+   44.56,
+   38.16,
+   48.84
+  ]
+ },
+ {
+  "name": "IFStruct",
+  "v": [
+   93.72,
+   82.18,
+   72.65,
+   78.45,
+   87.05,
+   89.2
+  ]
+ },
+ {
+  "name": "Multi-IF",
+  "v": [
+   89.1,
+   84.8,
+   73.19,
+   81.03,
+   80.32,
+   84.44
+  ]
+ },
+ {
+  "name": "GPQA Diamond",
+  "v": [
+   63.37,
+   57.78,
+   65.15,
+   57.88,
+   75.76,
+   80.4
+  ]
+ },
+ {
+  "name": "Humanity's Last Exam (no tools)",
+  "v": [
+   7.17,
+   5.88,
+   8.2,
+   4.77,
+   12.84,
+   16.41
+  ]
+ },
+ {
+  "name": "Humanity's Last Exam (with tools)",
+  "v": [
+   13.9,
+   9.6,
+   11.5,
+   6.0,
+   11.6,
+   17.5
+  ]
+ },
+ {
+  "name": "AA-Omniscience (public)",
+  "v": [
+   0.5,
+   -33.17,
+   -5.0,
+   -15.33,
+   -57.17,
+   -28.0
+  ]
+ },
+ {
+  "name": "AA-Omniscience accuracy (public)",
+  "v": [
+   7.07,
+   8.75,
+   9.13,
+   9.83,
+   15.67,
+   13.17
+  ]
+ },
+ {
+  "name": "AA-Omniscience non-hallucination (public)",
+  "v": [
+   92.93,
+   53.69,
+   84.44,
+   72.09,
+   13.64,
+   52.59
+  ]
+ },
+ {
+  "name": "AA-LCR",
+  "v": [
+   52.83,
+   6.0,
+   49.34,
+   39.33,
+   52.67,
+   62.0
+  ]
+ },
+ {
+  "name": "RULER 128K",
+  "v": [
+   65.56,
+   1.15,
+   37.96,
+   18.82,
+   84.63,
+   87.11
+  ]
+ }
+]
