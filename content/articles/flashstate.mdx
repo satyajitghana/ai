@@ -1,0 +1,284 @@
+---
+title: "FlashState: where a hybrid model's next turn resumes"
+description: "Hybrid models such as GLM-5.3-Flash can only resume a cached prefix from a recurrent checkpoint taken at that exact token, and vLLM takes those only at 4,352-token block boundaries. FlashState checkpoints the exact end of every agent turn and evicts each checkpoint together with the KV it depends on, by the prefill it saves per block. I read the paper and the code, checked how 'provider profit' and 'user cost' are computed, derived GLM-5.3-Flash's state sizes from its config, and replayed the paper's 98,827-request Claude Code trace through a cache simulator of my own to see which half of the design does the work."
+date: 2026-11-09
+tags:
+  - inference
+  - kv-cache
+  - linear-attention
+  - agents
+  - vllm
+  - glm
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 3
+  why: "Derives GLM-5.3-Flash's checkpoint cost from config, reconstructs the profit and user-cost math, and replays the paper's trace through a cache simulator."
+topic: inference-serving
+kind: paper
+level: research
+runsOn: datacenter
+licence: Apache-2.0
+---
+
+import { ResumeGap } from "@/components/articles/flashstate/resume-gap"
+import { StateLedger } from "@/components/articles/flashstate/state-ledger"
+import { PolicySweep } from "@/components/articles/flashstate/policy-sweep"
+
+The announcement for FlashState was one sentence of numbers. "On GLM 5.3 Flash, FlashState more than doubles vLLM's throughput and provider profit, while cutting latency by 3.7× and user cost by 2.5×," wrote [Weili Xu](https://x.com/_weilix/status/2119837671946400165), the project lead (UIUC, previously Together AI).
+
+Those four numbers come from three different places. Only one of them is the paper. The other two are a 30-minute demo replay and a pricing overlay drawn on top of it. So this piece has two jobs. The first is to explain the mechanism, because it is a clean idea about a real problem every hybrid-attention model has. The second is to trace each headline number back to its definition, and then to rerun the core of the argument myself on a CPU.
+
+Every number below carries a label. **Measured** means I ran it. **Reported** means the paper, the repository, the project page or the demo says it, and I did not reproduce it. **Reasoned** means I derived it from reported or published numbers by arithmetic you can check.
+
+| | |
+|---|---|
+| Paper | *FlashState: Unlocking Flexible Hybrid State Management for Agentic LLM Serving*, Chenxi Li, Weili Xu et al. (Together AI, UIUC, UT Austin) · [alphaXiv 2611.flashstate](https://www.alphaxiv.org/abs/2611.flashstate) · 32 pages · not on arXiv |
+| Code | [FutureMLS-Lab/FlashStates](https://github.com/FutureMLS-Lab/FlashStates) · **Apache-2.0** · a vLLM v0.33.0 fork and a Mooncake 0.3.13.post1 fork as submodules, B200 and GB300 images, the replay harness |
+| Name | the post and the alphaXiv PDF say *FlashState*; the README, the release PDF and `flashstates.ai` say *FlashStates*. Same system |
+| Models | GLM-5.3-Flash NVFP4 (KDA + DeepSeek sparse attention), Qwen3.8-Flash-Next FP8 (Gated DeltaNet + QSA), Nemotron 3 Super FP8 (Mamba-2 + GQA); Kimi-K3.1-Pro on GB300 in the README |
+| Hardware | two B200s per engine, tensor parallel 2 |
+| Workload | SemiAnalysis Claude Code traces: 393 trajectories, 98,827 requests, mean prompt 219K tokens |
+| Baseline | vLLM at commit `ec8a372` (0.32.0rc1.dev105), same cache budget, batch size and chunk size; SGLang v0.5.22 in the motivation study |
+| Headline (paper) | up to **3.14×** vLLM's prefill throughput and **3.02×** its decode throughput on GLM-5.3-Flash at 48 sessions; p90 TTFT down **88.4%** |
+
+<RepoCard repo="FutureMLS-Lab/FlashStates" />
+
+## Prefix caching, and why a KV cache makes it easy
+
+An agent resends its whole context on every turn. Turn 40 of a coding session is turn 39's prompt, plus turn 39's output, plus a tool result. The engine should compute only the tool result. Everything before it was computed a minute ago.
+
+For a plain transformer this is close to free. Attention keeps one key and one value per token per layer, and a token's KV depends only on the tokens before it. So the KV of any prefix is just the first *k* rows of the KV of a longer sequence. vLLM hashes the cache in fixed-size blocks, chains the hashes so a block's identity includes everything before it, and a new request walks the chain until the first block it has not seen. Truncation is free: a prefix that ends anywhere inside a cached sequence is already cached.
+
+## Why a recurrent state makes it hard
+
+A linear-attention or state-space layer does not keep a row per token. It keeps one fixed-size state and overwrites it as it reads:
+
+$$
+S_t = F(S_{t-1}, x_t)
+$$
+
+For Kimi Delta Attention, the layer GLM-5.3-Flash uses, $S_t$ is a 128 × 128 matrix per head, updated by a gated delta rule. The state after token 140,000 summarises all 140,000 tokens. It cannot be truncated to give you the state after token 139,000. The update is not invertible in practice, and nothing in the state says which part came from which token. The paper calls this out directly: a recurrent checkpoint at a later position cannot be rolled back to recover one at an earlier position.
+
+So to resume a prefix of length *p* on a hybrid model, the engine needs two things: the attention KV of all *p* tokens, and a snapshot of every recurrent layer's state taken **at exactly *p***. The paper calls the pair a **hybrid state**. The KV half truncates. The checkpoint half does not. That asymmetry is the whole problem.
+
+It forces three decisions a KV-only cache never had to make:
+
+- **Placement.** Where to take checkpoints. You can only resume where you took one.
+- **Admission.** Whether a newly taken checkpoint is worth keeping.
+- **Eviction.** What to throw out under pressure, knowing that a checkpoint without its KV, or KV without a checkpoint at its end, is useless.
+
+## What a checkpoint costs on GLM-5.3-Flash
+
+The reason you cannot simply checkpoint everywhere is size. [GLM-5.3-Flash](/articles/glm-5-3-flash) has 45 layers: 34 are KDA linear attention and 11 are sparse attention with a KV cache. Its `config.json` gives everything needed to size the recurrent half.
+
+**Reasoned, from `config.json`.** Each KDA layer has `linear_num_heads: 64` and `linear_head_dim: 128`, so its state is 64 × 128 × 128 numbers. The paper says checkpoints are written in fp32 (Appendix H: "one $4d_S$-byte fp32 output"), which makes 4,194,304 bytes per layer. The 4-tap short convolution over the query, key and value channels adds three cached positions of 3 × 64 × 128 bf16 values, 147,456 bytes. Across 34 layers that is 147.6 MB per sequence. Tensor parallelism splits the heads across the two GPUs, so each B200 holds **73.8 MB** of raw recurrent state per checkpoint.
+
+**Reported, Table 2 and Appendix C.** vLLM serves GLM-5.3-Flash NVFP4 with **4,352-token** KV blocks, a cache of **62.45 GiB per GPU** in **2,531** blocks, and a checkpoint with its auxiliary state occupies **five blocks**. vLLM enlarges the attention block until an attention page is as large as a recurrent-state page. That is why the block is 4,352 tokens and not 16.
+
+**Reasoned.** 62.45 GiB over 2,531 blocks is 26.49 MB per block, so one block holds 4,352 tokens of attention KV for all 11 sparse layers, about 6.1 KB per token per GPU. Five blocks is 132.5 MB, and in token terms **one checkpoint costs as much cache as 21,760 tokens of KV**. The engine's five blocks hold more than the 73.8 MB of raw state I derived. The rest is auxiliary state (convolution buffers, indexer history) and page rounding, and I could not attribute the gap from the files I read.
+
+<StateLedger />
+
+At the trace's median prompt of 142K tokens, one conversation needs 33 blocks of KV. One checkpoint per turn adds 5, about 13% of its cache. Checkpointing every 256 tokens, SGLang's grid spacing, would add 2,770 blocks, more than the entire 2,531-block cache. Even every 4,352 tokens, vLLM's block boundary, a cold 142K prefill would leave checkpoints worth five times its KV if all were kept. This is the constraint the rest of the design lives inside: positions you can resume from cost memory you would otherwise spend on KV.
+
+## Three ways a turn falls short of where it should resume
+
+The paper's motivation study instruments vLLM and SGLang serving GLM-5.3-Flash on the coding traces, 8 to 64 concurrent sessions, and assigns every recomputed prompt token to one cause. Each request has an **ideal resume position** $\ell^\star$, the end of the longest prefix already computed by any earlier request. Agents nearly always extend their previous turn, so $\ell^\star$ is usually the exact end of the previous request, its prompt plus its output. Anything the engine recomputes before $\ell^\star$ is **redundant prefill**, and it splits three ways (Equation 5):
+
+$$
+C(\ell^\pi_r, \ell^\star_r) = \underbrace{C(\ell^{mat}_r, \ell^\star_r)}_{\text{placement}} + \underbrace{C(\ell^{kv}_r, \ell^{mat}_r)}_{\text{capacity}} + \underbrace{C(\ell^\pi_r, \ell^{kv}_r)}_{\text{dependency}}
+$$
+
+$\ell^{mat}$ is the nearest position where a checkpoint was ever taken, $\ell^{kv}$ the nearest such position whose KV is still resident, and $\ell^\pi$ where the engine actually resumed. $C(a, b)$ is the prefill time from position *a* to *b*.
+
+<Figure
+  src="/articles/flashstate/fig1.png"
+  alt="Left: three timelines of an agent's growing context, with blue prompt and yellow output segments. For vLLM, black state dots sit only at block boundaries, so each turn's actual resume arrow sits before the ideal triangle and a red recomputed bar spans the gap. SGLang has many dots and small gaps, but under memory pressure one turn falls back far. FlashState has a dot exactly at each ideal position and no red bars. Right: bar charts for GLM-5.3-Flash at 1M context and 48 sessions. Prefill tokens per minute per GPU: vLLM 1.48M, SGLang 1.20M, FlashState 4.66M. Median uncached tokens: 24.7K, 74.4K, 1.03K. p90 time to first token: 20.4 s, 69.7 s, 2.36 s."
+  caption="Checkpoint placement for vLLM, SGLang and FlashState, and their serving results on GLM-5.3-Flash at 48 sessions. The right-hand numbers are the paper's measurements on two B200s (paper, Figure 1)."
+/>
+
+**Reported, Section 2.** The three causes behave differently:
+
+- **Placement misses.** vLLM saves checkpoints only at 4,352-token block boundaries inside the prompt, never during decode and never at the end of a request. The next turn falls back to the last boundary of the previous prompt and recomputes the rest of that prompt plus the whole previous output. At 8 to 16 sessions vLLM evicts almost nothing, and placement is up to **43%** of its uncached prompt tokens.
+- **Dependency misses.** SGLang checkpoints on a 256-token grid, so its placement misses fall to about 0.2K tokens per request. But it keeps about **430** checkpoints in a separate pool beside 5.9M tokens of KV, and evicts each pool by its own LRU. At 32 sessions it saves **4.2×** as many checkpoints per request as vLLM, the state pool fills, and it evicts checkpoints whose KV is still cached. At 24 to 32 sessions that causes **33–43%** of its uncached tokens. An affected request recomputes a median of **66K–68K** tokens, nearly the whole prefix, while that prefix's KV sits in GPU memory.
+- **Capacity misses.** Both the checkpoint and part of its KV are gone. These stay small until about 40 sessions, where the working set reaches the cache and both engines start to thrash. vLLM's hit rate falls to **62.4%** at 64 sessions.
+
+The finer grid traded placement misses for dependency misses. Neither grid fixes both, because both engines tie where a checkpoint can go to the KV block layout, and both evict the two halves of a hybrid state independently.
+
+## Placement: Arbitrary State Checkpointing
+
+ASC takes a checkpoint at any token position, without changing the KV block size or splitting a prefill chunk. It has two parts.
+
+**Exact capture at request end.** When a request finishes, its live recurrent state *is* the checkpoint for the exact end of its prompt plus output. Before cleanup frees it, FlashState hands that state and the request's KV blocks to admission as one hybrid state. If the end lies inside a KV block, the whole terminal block is retained and only the tokens before the end are marked valid. Nothing is copied. On reuse, the next request gets private copies of the recurrent state and a copy-on-write terminal block (Appendix G).
+
+**In-chunk export.** Sometimes the position to checkpoint lies inside a prefill chunk: the end of the prompt, or a shared-prefix junction. Fused linear-attention kernels keep only the advancing state on chip and write the final one, so the interior state exists mathematically but never reaches memory. FlashState passes the kernel an offset *c* and gets one extra output:
+
+$$
+\text{PrefillExport}(X, S_0, c) \rightarrow (O, S_{final}, R_c)
+$$
+
+$O$ and $S_{final}$ are unchanged, and $R_c$ is bit-identical to the checkpoint a call truncated at *c* would produce. For KDA, whose export grid lines up with its 16-token compute tiles, the kernel serializes the live state when the tile at *c* begins. Gated DeltaNet uses 64-token tiles, so for an interior offset the kernel spends one extra bounded update on intermediates it already has. One checkpoint per sequence per call, one fp32 write (Algorithm 1).
+
+<ResumeGap />
+
+**Reasoned.** Averaged over where a prompt happens to end inside its last block, block-aligned placement recomputes half a block plus the previous output. On GLM-5.3-Flash that is 2,176 tokens plus the output, about 2.6K at the trace's median output of 444. The paper's Figure 7 is consistent: at 24 sessions, where the working set still fits, FlashState cuts median uncached tokens by **72%, 81% and 87%** on Qwen3.8-Flash-Next, GLM-5.3-Flash and Nemotron 3 Super, whose blocks are 3,136, 4,352 and 8,320 tokens. The paper puts the saving at "about 70% of a block" on every model. The bigger the block, the bigger the win.
+
+Placement matters most for decode-heavy agents. On the math workload, mini-SWE-agent on PutnamBench with outputs averaging 2,292 tokens and reaching 32,769, vLLM recomputes the entire previous output every turn because it never checkpoints during decode. FlashState recomputes at most about 1% of it. That buys **2.0–9.6%** more decode throughput (reported, Section 5.4). Modest, because those trajectories are short and never fill the cache.
+
+A detail worth knowing: in the main experiments in-chunk export is enabled only for the KDA kernel, so only GLM-5.3-Flash. Qwen3.8-Flash-Next and Nemotron 3 Super use exact request-end capture without it (Appendix H).
+
+## Admission and eviction: pricing a hybrid state
+
+ASC creates more resumable positions. The ablation shows that alone can make things worse. With ASC but vLLM's LRU eviction, Qwen3.8-Flash-Next at 32 sessions drops from 30.1K to **26.0K** decode tokens per minute per GPU, a 14% loss (reported, Table 3). LRU keeps every checkpoint ASC saves, although a conversation almost always resumes from its latest one. The old checkpoints push out the contexts of conversations that are waiting on long tool calls.
+
+So the second half of FlashState decides which hybrid states to keep. It treats each one as a single recovery unit and prices it.
+
+<Figure
+  src="/articles/flashstate/fig4.png"
+  alt="A tree of cache blocks. Shared KV blocks P1 and P2 lead to hybrid state uS with checkpoint RS. Two branches extend it: uA with blocks P3, P4, a partial block and checkpoint RA, outlined in a red dashed box labelled F(uA); and uB with blocks P5 to P8, a partial block and checkpoint RB. A legend marks shared KV, uA-only KV, uB-only KV and recurrent checkpoints."
+  caption="What evicting one hybrid state actually frees: only its checkpoint and the KV blocks no other cached state needs, here P3, P4 and the partial terminal block (paper, Figure 4)."
+/>
+
+For a cached hybrid state *u* at position $p(u)$:
+
+- $F(u)$ is the set of blocks that evicting it would free: its checkpoint and the KV that no other intact state or live request needs. $s(u) = |F(u)|$. A state that sits under a deeper one frees only its checkpoint.
+- $f(u)$ is its **fallback**, the nearest earlier position that would still be resumable if *u* went.
+- $g(u) = C(f(u), p(u))$ is the **restore cost**, the prefill a request that wanted *u* would repeat.
+- $\rho(u) = g(u)/s(u)$ is the **cost density**: prefill seconds saved per block held.
+
+FlashState adapts GreedyDual-Size, a 1997 web-proxy caching algorithm, and uses one priority for both admission and eviction:
+
+$$
+H(u) = \text{stamp}(u) + \rho(u)
+$$
+
+$\Lambda$ is a watermark, the highest priority evicted so far. $\text{stamp}(u)$ is the watermark at the last *use* of *u*: when it was cached, when a request resumed from it, or when the last live request holding it ended. Eviction takes the lowest $H$ among states no live request holds and frees exactly $F(u)$. Admission compares a new state, stamped at the current watermark, against that minimum: if no block is free and GDS would evict the newcomer next, it is not kept.
+
+Both terms are in seconds of prefill per block, so they add without a weight. That is the design's selling point against its predecessors. Marconi scores prefixes by recency plus $\alpha$ × FLOPs saved per byte, and HiState by last access plus $\tau$ × recomputation per byte. In the paper's port of Marconi into the same vLLM build, Qwen3.8-Flash-Next at 40 sessions serves 59.6K to 71.2K output tokens per minute depending on α, Marconi's own online tuner picks α = 0 (66.0K), and FlashState serves **73.4K** with the fewest recomputed tokens: 2.06× the ideal against 2.41–3.87× (reported, Table 7).
+
+The cost model $C(a, b) = d(b - a) + e(b^2 - a^2)/(2 \cdot 10^5)$ is fitted once per model from measured prefill times. For GLM-5.3-Flash the paper gives $(d, e) = (1.862, 0.333) \times 10^{-5}$ seconds, and the README's serve command passes exactly `--prefill-cost-coefficients 1.862e-5 3.33e-6`. Only the ratio $e/d$ changes the eviction order.
+
+The theory section (Appendix I) argues why this shape is right, under four stated simplifications: exact continuation, independent tool-call durations, separate conversations and fluid capacity. Checkpointing every request end removes the placement term. Evicting exactly $F(u)$ removes the dependency term. And under a time-to-live model of tool waits, an optimal policy keeps each state for a time that depends only on its cost density and grows with it, which GDS approximates without knowing the tool-time distribution. The paper itself calls this design rationale, not a proof of optimality.
+
+## What the release code does that the paper does not say
+
+I read the `hybrid_checkpoint` package of the fork (`FutureMLS-Lab/vllm`, branch `flashstate`, commit `3cfd432`, about 2,700 lines). Everything is behind flags that are off by default. With every flag off, the README says the fork behaves as vLLM v0.33.0 except for three always-on fixes.
+
+| Flag | What it turns on |
+|---|---|
+| `--mamba-frontier-checkpoint` | keep a finished request's state at its exact end (ASC capture) |
+| `--mamba-prefill-export` | let a chunk run past a must-cache position and have the kernel write the state there |
+| `--prefix-cache-eviction gds` + `--prefill-cost-coefficients D E` | the GreedyDual-Size eviction over recovery units |
+| `--prefix-cache-leaf-last`, `--prefix-cache-leaf-idle-seconds 60` | evict every inner state before any leaf; a leaf idle for 60 s counts as inner |
+
+`cost.py` is the paper's cost model line for line. `eviction.py` implements the priority as `stamp + gain / size` with a lazy heap, frees a unit's state blocks and then its exclusive pages deepest first, and parks units that a waiting request is about to resume from.
+
+**The last row is not in the paper.** `grep` finds neither "leaf" nor "idle" in either PDF. Every benchmark configuration in `benchmarks/configs/common.sh` passes both flags. The config docstring explains what they do: a state with a deeper cached state on its path (the block-boundary state under a frontier, an earlier turn's state) "is inner unless it is a branch point; GreedyDual-Size orders each tier, and `L` rises only when a leaf goes." In other words, the released policy is GDS inside two tiers, and superseded states always go before the newest state of each conversation. That is a sensible fix. It is also the piece of the policy my simulation below says matters most, so it deserves a sentence in the paper.
+
+The fork also has unit tests for exactly this logic (`tests/v1/core/hybrid_checkpoint/test_gds_eviction.py`, e.g. `test_eviction_keeps_the_states_that_save_the_most_prefill_per_block` and `test_leaf_last_ranks_inner_states_below_every_leaf`). **I did not run them.** They import the vLLM engine core, which needs PyTorch and a vLLM install, and building a third-party fork is outside what this sandbox allows. The kernels need a B200. What I could run is my own re-implementation of the policy, below.
+
+## The headline numbers, traced to their definitions
+
+### The post: 2×, 3.7×, 2.5×
+
+The post's video is a replay of **48 Claude Code agents** on GLM-5.3-Flash, two B200s per engine, three engines side by side, shown at 100× speed. Its fine print reads "minutes 15–45 of a 45-min replay" and "prices: Z.ai list (\$0.15 / \$0.03 / \$0.50 per 1M input / cached / output); GPU \$8.60 / B200-hour (CoreWeave)". The final frames give (reported, from the video and the project page):
+
+| at 30 min | FlashState | vLLM | SGLang |
+|---|---|---|---|
+| output tokens per minute | **61.7K** | 22.0K | 15.4K |
+| cache hit rate | **87%** | 30% | 6% |
+| p50 end-to-end latency | **12.4 s** | 46.1 s | |
+| mean end-to-end latency | **27.8 s** | 88.6 s | 129.6 s |
+| p50 / p90 time to first token | **0.2 / 2.1 s** | 3.3 / 24.5 s | 56.3 / 69.3 s |
+| provider profit per GPU-hour | **\$5.30** | \$2.27 | \$2.67 |
+| user cost per 1M input tokens | **\$0.046** | \$0.114 | \$0.143 |
+| agents finished | 20 | 7 | 8 |
+
+So "more than doubles throughput" is 61.7K against 22.0K output tokens per minute, **2.8×**. "3.7× latency" is the **p50 end-to-end** request latency, 46.1 s to 12.4 s. The mean improves 3.2×. The video's ratio labels compare FlashState with the *better* of vLLM and SGLang, so its "2.0× higher" profit is against SGLang. Against vLLM it is 2.33×.
+
+**Provider profit** is revenue at Z.ai's list prices minus GPU rental at \$8.60 per B200-hour. **User cost** is what a user pays per million input tokens at those prices, given the cache hit rate. Neither term appears in either PDF; they live only in the demo.
+
+**Reasoned: user cost is a function of hit rate alone.** With uncached input at \$0.15 and cached at \$0.03 per million, a hit rate *h* costs $0.15 - 0.12h$. At 87% that is \$0.0456, at 30% \$0.114, at 6% \$0.1428. All three match the video. The "2.5× lower user cost" is therefore exactly the hit-rate gap: $0.114 / 0.0456 = 2.5$. It is not a separate measurement, and it would be the same on any hardware that reached the same hit rates.
+
+**Reasoned: profit reproduces from the paper's throughput.** Solving the profit figure for the input tokens it implies gives about 4.74M prompt tokens per minute per GPU for FlashState, 1.54M for vLLM and 1.29M for SGLang. The paper's Figure 1 reports 4.66M, 1.48M and 1.20M for the same model at the same 48 sessions. That is within 2–8%, so the demo and the paper describe the same operating point. The profit is mostly input revenue, about \$25.95 of FlashState's \$27.80 per engine-hour, because a provider charges for cached tokens it barely has to compute, so a higher hit rate raises throughput faster than it lowers the price. That dependence is worth stating plainly. At a different GPU price or a different cached-token discount the profit ratio moves, while the hit rates do not.
+
+The thread's later claim of "1.54× to 3.14× prefill throughput (up to 2.40× profit)" across the three models matches the paper on throughput. The 2.40× profit figure is not in the paper or the repository, and I could not reproduce it.
+
+### The paper: where the ratios come from
+
+<Figure
+  src="/articles/flashstate/fig5.png"
+  alt="A grid of twelve small line charts, three model columns by four metric rows, each comparing vLLM in orange with FlashState in blue at 24, 32, 40 and 48 concurrent sessions. For GLM-5.3-Flash NVFP4 at 1M context, FlashState's decode and prefill throughput stay near their peak while vLLM's fall at 48 sessions, annotated 3.02× and 3.14×; median uncached tokens fall 96% and p90 TTFT 88%. For Nemotron 3 Super the annotations are 2.32×, 2.27×, −97% and −77%. For Qwen3.8-Flash-Next at 512K they are 1.54×, 1.54×, −66% and −79%."
+  caption="Decode and prefill throughput per GPU, median uncached tokens and p90 time to first token as concurrency grows, vLLM against FlashState with the same cache budget. The annotated ratios are at 48 sessions (paper, Figure 5)."
+/>
+
+**Reported, Section 5.** Metrics are per GPU. Prefill throughput counts the prompt tokens of requests whose first token arrives in the window, cached and computed alike, so a system that recomputes less serves more prompts. Each point measures the final 30 minutes of a 45-minute run for GLM-5.3-Flash, or the final 60 of 75 minutes for the others, and a difference counts as significant at two standard errors.
+
+Read Figure 5 closely and the shape of the win is clear. At 24 and 32 sessions the two systems are close. **FlashState's peak decode throughput is 1.14–1.28× vLLM's**, and it arrives about eight sessions later. The 3.02× and 3.14× are measured at 48 sessions, after vLLM's cache hit rate has collapsed and FlashState's has not. The paper's Figure 6 shows the collapse directly: vLLM's hit rate falls off a cliff as the working set approaches capacity, and FlashState's holds past it. For GLM-5.3-Flash the working set reaches the cache at only 32 to 49 sessions, because agent contexts are long.
+
+That is an honest result, and an important one, because an operator sizing a fleet runs near capacity. But it is a statement about behaviour under pressure. "3× throughput" is the gap between a cache that thrashes and one that does not.
+
+The rest of the evidence (reported):
+
+| Setting | Result |
+|---|---|
+| Ablation, Qwen3.8-Flash-Next 512K, 48 sessions (Table 3) | vLLM 24.1K → +ASC 34.2K → +admission 36.8K → +dependency-aware eviction **38.8K** decode tokens/min/GPU. ASC alone is about 70% of the gain |
+| Same ablation, 32 sessions | vLLM 30.1K → +ASC **26.0K** → 28.2K → **30.4K**, level with vLLM |
+| 512 GiB host cache, MTP, GLM-5.3-Flash (Table 4) | output throughput +2.1–41.4% over vLLM + Mooncake across 49 loads; at 80 sessions 172.8K against 122.2K (vLLM) and 126.9K (SGLang + HiCache), p90 TTFT 7.18 s against 21.88 s and 22.97 s. SGLang + HiCache has the lower p90 TTFT at 32–48 sessions |
+| Nemotron 3 Super with a 60 GiB cache per GPU (Appendix C) | 1.2–11.1% at 32–64 sessions, **1.59–2.67×** at 84–96 sessions |
+| Kimi-K3.1-Pro, 8 GB300s, 640 GiB Mooncake (README) | peak output per GPU **+36%**: 8,683 against 6,377 tokens per minute, both at 52 sessions; p90 TTFT 2.0 s against 9.1 s |
+| Context edits (Appendix E) | 3.85% of trace requests change an earlier prefix; keeping superseded states two turns longer cuts their extra prefill from 55.1% to 16.2% of shortened requests |
+
+**The baselines.** The main comparison is vLLM only, at the same commit FlashState is built on, with the same cache budget, batch size and prefill chunk size, "so their differences stem only from hybrid state management." SGLang appears in the motivation study (default config, 256-token grid) and in the host-memory comparison as SGLang + HiCache, a different stack with a different memory layout. Marconi is ported into the same vLLM build for the eviction comparison. HiState, concurrent work that tiers checkpoints to SSD, is compared by design only.
+
+Two things about the replay are worth knowing. The client rewrites each later prompt to contain the tokens the served model actually generated, so cache hits are real and not an artifact of replaying Claude's outputs into GLM. And each session waits the recorded tool time between turns, capped at 300 s, which is what makes eviction matter: a context that sits idle for a five-minute test run is the first thing an LRU throws away.
+
+## My simulation: which half does the work?
+
+The paper's claims that I can check on a CPU are about cache behaviour, not GPU speed: how often a turn resumes at its ideal position, how much it recomputes, and what fills the cache. So I wrote a simulator and fed it the same traces.
+
+**What I ran (measured).** I streamed the 1.85 GB `traces.jsonl` of `semianalysisai/cc-traces-weka-062126` at the revision the benchmarks pin, keeping only lengths, timings and prefix relations, never the hash ids themselves. It has the paper's numbers: 393 trajectories, **98,827 requests**, mean prompt **218,922** tokens, median **142,016**, median output **444**. 84.6% of later requests start with their conversation's previous prompt at 64-token hash granularity. The paper's 96.9–98.1% is measured on live outputs at 32 sessions, which I cannot replicate offline.
+
+The simulator copies the paper's replay rules where they are cheap: N sessions, each starting a trajectory at a random point between 25% and 75%, recorded tool gaps capped at 300 s, the next trajectory starting when one ends, and minutes 15–45 of a 45-minute run measured. Memory is GLM-5.3-Flash per GPU in the paper's units: 2,531 blocks, 4,352 tokens of KV per block, five blocks per checkpoint, and the terminal partial block counted in full. Costs use the paper's fitted $C(a, b)$. Placement follows vLLM's scheduler code in the fork, which ends prefill chunks on block boundaries and writes a state at each chunk end; with the benchmark's `--long-prefill-token-threshold 8704`, that is a checkpoint every two blocks plus the last boundary of the prompt.
+
+It does not model the GPU. A request holds its blocks for its *recorded* duration, and prefill is instantaneous. So it says nothing about throughput or TTFT, only about hits, recomputation and occupancy. Its working set, measured the paper's way, reaches the cache at about 38 sessions: 0.84 of capacity at 32 sessions and 1.28 at 48. The paper's estimate for GLM-5.3-Flash is 32 to 49 sessions, so the pressure regime lines up.
+
+The policies:
+
+- **vLLM-like.** Block-boundary checkpoints, every block and checkpoint evicted on its own by LRU.
+- **Dense.** A checkpoint every 1,088 tokens of prefill, LRU per allocation. The naive "every N tokens" answer.
+- **+ASC.** vLLM's placement plus checkpoints at every prompt end and request end, still LRU per allocation. The paper's first ablation stage.
+- **ASC + whole-state LRU.** Each checkpoint with the KV only it needs, evicted as one unit, oldest use first. The paper's second stage.
+- **FlashState, Eq. 7.** Whole units by $H = \text{stamp} + g/s$ with admission, as the paper writes it.
+- **FlashState, leaf-last.** The same priority inside the release code's two tiers, inner states first.
+
+SIMTABLE
+
+<PolicySweep />
+
+SIMFINDINGS
+
+The simulator is about 450 lines of Python and runs a 45-minute replay in seconds to a couple of minutes on one core. It is my re-implementation from the paper and the code, not the authors' engine, and every number in this section is a property of that model.
+
+## Where it breaks, and what to take away
+
+The idea is right, and it is narrow in a good way. A recurrent checkpoint is only useful at a position someone will resume from, and in an agent loop that position is known: it is where the last turn ended. Tying checkpoints to KV block boundaries was an accident of building hybrid support on a KV-centric cache, and the bigger vLLM's blocks get to match recurrent pages, the more that accident costs. 4,352 tokens on GLM-5.3-Flash, 8,320 on Nemotron 3 Super.
+
+The things I would want a reader to carry away:
+
+- **The win is under pressure.** Below the working-set cliff, FlashState's gain over vLLM is 14–28% at peak and sometimes nothing. The 3× figures are at 48 sessions, where vLLM's hit rate has collapsed. If your fleet runs well below capacity, placement alone buys you roughly half a block plus one output per turn.
+- **ASC without a policy can lose.** The paper's own ablation shows it at 32 sessions, and my simulator shows it at every load. Exact-end checkpoints add states; somebody has to throw the superseded ones away first.
+- **"User cost" is a hit rate in disguise.** $0.15 - 0.12h$ at Z.ai's prices. Profit additionally depends on the GPU's rental price and the cached-token discount, so the 2× is a property of one pricing scenario.
+- **Read the flags, not just the equation.** The released policy is GreedyDual-Size inside leaf-last tiers with a 60-second idle demotion. Only the first half is in the paper.
+
+What I did not verify: any GPU number, the bit-identical claim for in-chunk export, and the fork's own unit tests, which I read but could not run. The paper is on alphaXiv rather than arXiv, has no peer review yet, and evaluates on one trace family.
+
+For the other side of the hybrid trade, how much a model gains by keeping most of its layers stateful in the first place, see the [linear-attention state roundup](/articles/linear-attention-state-roundup) and [Rigel's hybrid Mamba design](/articles/rigel-hybrid-mamba). For shrinking the KV half instead of managing it, [NVFP4 KV cache](/articles/nvfp4-kv-cache) and [TurboQuant](/articles/turboquant-kv-cache) are the relevant pieces.
+
+<ModelCard repo="zai-org/GLM-5.3-Flash" />
