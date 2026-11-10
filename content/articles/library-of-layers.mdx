@@ -61,6 +61,56 @@ $L$ counts blocks stored; $D$ counts blocks executed. With $L = 3$ and $D = 3$, 
 
 This is not mixture of experts in the usual sense. A standard [MoE layer](/articles/mixture-of-experts-from-scratch) routes each token to a few of *that layer's* MLPs, and layer 7 always runs before layer 8. In LoL, every depth draws whole blocks (attention and MLP) from one global pool. So routing decides **which** computation runs and **in what order**. Looping, as in [Huginn and Ouro](/articles/looped-models-done-right), is the special case where the path is fixed and repeats one block.
 
+## The forward pass, term by term
+
+The paper's Algorithm 1 is short enough to write out whole. Take a sequence of $n$ tokens and width $d$. The prelude runs first, with full causal attention:
+
+$$
+\mathbf{s}^{(0)} = P(\mathbf{x}) \in \mathbb{R}^{n \times d}
+$$
+
+Then, for each routed depth $\ell = 1, \dots, D$, five steps.
+
+**1. Cut the sequence into windows.** With window size $W$ and stride $S$, the boundaries shift by $\delta_\ell = (\ell-1)S \bmod W$, and window $k$ is $I_k = \{\, i : \lfloor (i+\delta_\ell)/W \rfloor = k \,\}$. With the natural-language settings ($n = 1{,}024$, $W = 128$, $S = 64$), odd depths have 8 windows of 128 tokens. Even depths have 9: a half window of 64 at each end and seven full ones between (reasoned from the formula).
+
+**2. Summarise what came before.** Each window's mean hidden state is $\boldsymbol{\mu}_k = \operatorname{mean}(\mathbf{s}^{(\ell-1)}_{I_k}) \in \mathbb{R}^d$. The router's input for window $k$ is the mean of the earlier windows' means:
+
+$$
+\mathbf{r}_0 = \tfrac12\left(\mathbf{e}^{(\ell)} + \mathbf{s}^{(\ell-1)}_0\right), \qquad \mathbf{r}_k = \frac{1}{k}\sum_{j=0}^{k-1} \boldsymbol{\mu}_j \quad (k > 0)
+$$
+
+$\mathbf{e}^{(\ell)}$ is a learned vector per depth, and $\mathbf{s}_0$ is the window's first token. The code computes $\mathbf{r}_k$ with a cumulative sum over windows that restarts at each document boundary (`RouterInputEncoder.build_features`). Note what $\mathbf{r}_k$ is not: it never looks at window $k$ itself. The block that runs on a window is chosen from its past. That is what keeps generation causal, and it is why the route for a window is fixed before its first token is generated.
+
+**3. Score the library.** The router is one linear layer, $\mathbf{z}_k = W_r \mathbf{r}_k + \mathbf{b}_r \in \mathbb{R}^{L}$. In training, the code adds noise whose scale is itself a function of the logits:
+
+$$
+\tilde{\mathbf{z}}_k = \mathbf{z}_k + \boldsymbol{\epsilon} \odot \min\!\big(\operatorname{softplus}(W_n \mathbf{z}_k + \mathbf{b}_n),\ 10\big), \quad \boldsymbol{\epsilon} \sim \mathcal{N}(0, I), \qquad \mathbf{a}_k = \operatorname{softmax}(\tilde{\mathbf{z}}_k)
+$$
+
+$W_n$ and $\mathbf{b}_n$ start at zero, so the noise starts at a standard deviation of $\operatorname{softplus}(0) \approx 0.69$ on every logit. The whole router is $d \cdot L + L^2 + 2L$ parameters: about 16k for the 1B math model ($d = 2{,}048$, $L = 8$), against 51.4M in one of its blocks (reasoned from the code's layer definitions).
+
+**4. Pick one block.** The balancing bias $\mathbf{b}$ enters the choice and nothing else:
+
+$$
+\rho_k = \arg\max_m \left(a_{k,m} + b_m\right), \qquad \alpha_k = a_{k,\rho_k}
+$$
+
+**5. Run it on the window and blend.** Attention inside $E_{\rho_k}$ is causal and confined to $I_k$:
+
+$$
+\mathbf{s}^{(\ell)}_{I_k} = \mathbf{s}^{(\ell-1)}_{I_k} + \alpha_k\left(E_{\rho_k}\!\big(\mathbf{s}^{(\ell-1)}_{I_k}\big) - \mathbf{s}^{(\ell-1)}_{I_k}\right)
+$$
+
+$E$ is a full pre-norm residual block, so $E(\mathbf{s}) - \mathbf{s}$ is its attention-plus-MLP update, and $\alpha_k$ is a step size on it. Early in training, when the router is unsure, $\alpha_k$ sits near $1/L$: with 24 experts, each depth applies about 4% of its block's update (reasoned). After the last depth, the coda runs with full attention again and produces $\mathbf{p} = \operatorname{softmax}(C(\mathbf{s}^{(D)}))$.
+
+<Figure
+  src="/articles/library-of-layers/fig2.png"
+  alt="Three panels. Top left: the prelude feeds a windowing step that splits tokens 1 to 8 into Window 1 and Window 2; a per-window top-1 router turns each into a probability bar chart and selects Expert 2 and Expert 4 from a library of Experts 1 to L; the result loops back D times with windows shifted by S, then goes to the coda. Top right: attention masks for layers 1 to 3 with window 4 and stride 2; layer 2's blocks are offset so token 5 shares a window with tokens 3 and 4. Bottom: the first window's router input is the first token plus a learned per-depth vector; later windows use the mean of prior hidden states; each feeds a mean-plus-router step that outputs probabilities and a top-1 expert."
+  caption="The routed core in detail: per-window top-1 routing from a shared library (top left), strided window attention with W = 4, S = 2 (top right), and the router's two input rules for the first and later windows (bottom) (paper, Figure 2)."
+/>
+
+The cost of the core's attention follows from step 1 (reasoned). Each window computes a causal $W \times W$ score block, so a depth costs about $n W / 2$ query-key products against $n^2/2$ for full attention: one eighth at $n = 1{,}024$, $W = 128$. The MLP cost is unchanged, and at this context length the MLP dominates, so the saving matters less than the locality it buys.
+
 ## Why it routes windows, not tokens
 
 The obvious design is to route each token on its own, as MoE does. The paper says this fails (reported): if neighbouring tokens use different blocks, a query from block $E_2$'s attention gets compared with keys produced by block $E_4$'s attention, which live in a different space. Training was unstable.
@@ -107,14 +157,20 @@ x = x + weight * (expert(x) - x)
 So, per window and per depth:
 
 1. A linear layer scores all $L$ blocks. In training, noise is added to the logits. The paper says "Gaussian noise"; the code's noise scale is itself learned, input-dependent and capped at 10, with its weights initialised to zero (so it starts at softplus(0), about 0.69).
-2. **Top-1** selection, with a per-expert balancing bias added only for the choice. This is DeepSeek's loss-free load balancing: after each optimizer step, every expert's bias moves by 0.001 against the sign of its load relative to the mean (`router.py`, `bias_update_speed`), clamped to ±16. There is one bias vector for the whole core, not one per depth.
-3. The chosen block's residual update is scaled by its **unbiased** router probability $\alpha$. That scaling is the only path by which the loss reaches the router. No gradient flows through the discrete choice.
+2. **Top-1** selection, with a per-expert balancing bias added only for the choice. This is DeepSeek's loss-free load balancing: after each optimizer step, every expert's bias moves by 0.001 against the sign of its load relative to the mean (`router.py`, `bias_update_speed`), clamped to ±16. The updates stop at 96.6% of training (`bias_update_stop_fraction`), so the last few hundred steps run on frozen biases.
+3. The chosen block's residual update is scaled by its **unbiased** router probability $\alpha$. That scaling is the only path by which the language-modelling loss reaches the router. No gradient flows through the discrete choice.
+
+Two details in that list are easy to miss and matter later.
+
+**The balancing is global across depths.** `finish_aux_step` in `router.py` sums each expert's load over every routed depth (`per_depth_load.sum(dim=0)`) before comparing it with the mean, and `_router_bias` ignores its depth argument and returns the one `expert_bias` buffer. So the balancer is satisfied when each block is used equally *in total*. A router that sends everything at depth 2 to block 2 and everything at depth 3 to block 1 is perfectly balanced. Nothing in the objective pushes a depth to use more than one block.
+
+**There is a second, small gradient into the router.** "Loss-free" is not quite loss-free in the code. With the default `strategy: loss_free`, the training loss is `ce_loss + sequence_aux_coeff * sequence_aux`, where `sequence_aux` is DeepSeek-V3's per-sequence balance term: $L \sum_m f_m \bar{a}_m$, with $f_m$ the share of a document's windows that picked block $m$ and $\bar{a}_m$ its mean router probability. The coefficient is $10^{-4}$ by default and $10^{-2}$ in the Huginn comparison runs. It pushes routing towards balance within each document, again summed over depths. The paper's appendix describes loss-free balancing only. The alternative strategy, `aux_loss`, uses a global auxiliary loss with coefficient 0.02, and Figure 8 reports that it ends at a slightly higher loss than the loss-free run.
 
 That answers the first question. There is no search over orders, no RL, no straight-through estimator. The order is learned the way an MoE gate is learned, and the router is tied across depths by default (`weight_tie_router: true`). With a tied router, the only things that tell depth 3 apart from depth 7 are the hidden state itself and the first window's depth vector. The paper's Figure 9 reports that untying it changes the loss very little.
 
 Two training details matter for cost:
 
-- **Growing.** Training starts with a shallow core and deepens it on a $1-\sqrt{t}$ schedule over the first 75% of training (math runs; `model/recurrence_curriculum.py`). Early steps are cheap, and the routers get to explore while the model is shallow. Figure 7 reports a small loss penalty for the saved FLOPs.
+- **Growing.** Training starts with a shallow core and deepens it over the first 75% of training (math runs; `model/recurrence_curriculum.py`). The mean depth at step $t$ is $D_0 + (D - D_0)\big(1 - \sqrt{1 - t/T}\big)$, rounded up, where $T$ is the growth period. That curve rises slowly at first and fastest at the end, so most early steps run a very shallow core: the math run starts at depth 1 and reaches its mean of 8 only at the end of growth. (An earlier version of this article wrote the schedule as $1 - \sqrt{t}$; the code's form is $1 - \sqrt{1 - t/T}$.) Early steps are cheap, and the routers get to explore while the model is shallow. Figure 7 reports a small loss penalty for the saved FLOPs.
 - **Truncated backprop through depth.** The main math run sets `backprop_depth=4`: only the last four routed depths get gradients on a step, except in each document's first window (`first_window_full_backprop=true`). The paper describes growing; the truncation shows up in the shell scripts and in the backprop-depth ablation script.
 
 ## One knob from looped to sparse
@@ -138,7 +194,7 @@ A check on the arithmetic (reasoned): one block at width 1,024 is 12.8M paramete
 All of these are reported, from the paper:
 
 - **Against looped models** (Figure 5): at each matched size, LoL's evaluation loss is a little below Huginn's, by about 0.01-0.02 nats. LoL's seed-to-seed spread is wider, which the authors attribute to different paths being explored under different router initialisations.
-- **Against MoE** (Figure 6): at a 3:2 sparsity ratio (MoE with three experts per layer and two active; LoL with 24 experts over 16 depths), the MoE ends slightly lower, 2.75 against 2.8.
+- **Against MoE** (Figure 6): at a 3:2 sparsity ratio (MoE with three experts per layer and two active; LoL with 24 experts over 16 depths), the MoE ends slightly lower, 2.75 against 2.8. To match compute, the LoL model's own prelude and coda are MoE layers too (paper, Section 4.3).
 - **At 1B on math** (Figure 4, Table 1): LoL with $L = D = 8$ against a dense model and a sliding-window dense model at matched FLOPs, about 90 ExaFLOPs.
 
 | Model | ARC-E | ARC-C | HellaSwag | PIQA | GSM8K |
@@ -147,7 +203,26 @@ All of these are reported, from the paper:
 | Vanilla (sliding window) | 49.5 ± 1.0 | 28.5 ± 1.3 | 31.3 ± 0.5 | 58.8 ± 1.1 | 27.5 ± 1.2 |
 | LoL | 50.3 ± 1.0 | 29.1 ± 1.3 | 31.2 ± 0.5 | 59.7 ± 1.1 | 27.9 ± 1.2 |
 
+<Figure
+  src="/articles/library-of-layers/fig4.png"
+  alt="Left: cross-entropy training loss on a log scale against ExaFLOPs from 0 to about 90 for Vanilla, Vanilla with sliding window, and LoL. LoL drops faster in the first 20 ExaFLOPs and all three end near 0.7. Right: a heatmap of expert utilisation, core layers L0 to L7 against experts E0 to E7, with each cell the percentage of windows. Most rows are dominated by one or two experts: L1 uses E4 for 50 percent, L5 uses E3 for 55 percent, L6 uses E5 for 68 percent and L7 uses E6 for 66 percent."
+  caption="The 1B math runs: LoL's training loss falls faster early, which the paper credits to growing, and all three end close together (left). Expert utilisation by routed depth in one LoL model: most depths lean on one or two experts (right) (paper, Figure 4)."
+/>
+
 The fair reading is the paper's own: competitive, within about two standard errors, with the full-attention baseline's ARC-Easy score as the outlier. HellaSwag at 31% and ARC-Challenge at 28-29% sit a few points above chance (25%), so at this scale these benchmarks separate the three models very little. Nothing in the paper claims LoL is better per FLOP. It claims parity plus a property dense models lack.
+
+### Checking the MoE match from the scripts
+
+The MoE comparison is the one where "matched" carries the most weight, so I recomputed it from `shells/lol_vs_moe.sh` and the layer definitions (reasoned from the code, not run). Width 1,024; attention is 4.19M parameters per layer; a dense SwiGLU block with hidden width 2,816 is 12.85M.
+
+| | MoE baseline | LoL |
+|---|---|---|
+| Layout | 24 MoE layers, 3 experts of hidden 1,408, top-2 | 4 + 4 MoE prelude/coda layers (same MoE) + 24 dense blocks, 16 routed depths |
+| Stored parameters (non-embedding) | 412.1M | 445.6M |
+| Active per token | 308.3M | 308.3M |
+| Step cap at batch 26 × 5 × 8 GPUs × 1,024 | 7,269 steps, about 7.7B tokens | 9,393 steps, about 10.0B tokens |
+
+Two observations. The active counts match exactly, because two experts of hidden 1,408 are exactly one dense MLP of 2,816. And at the same 17.3 ExaFLOP budget, LoL's step cap allows about 29% more tokens, because growing makes its early steps cheap. Training stops at the FLOP budget, so the token figures are upper bounds; the paper's own phrase is "approximately 10B tokens for the most efficient model". Read that way, the 0.05-nat gap in the MoE's favour comes with LoL holding 8% more stored parameters and seeing more data. That is not a contradiction of the paper, which claims competitiveness, but it is the honest size of the comparison.
 
 ## What the paths encode, and forcing them
 
