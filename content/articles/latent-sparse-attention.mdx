@@ -1,0 +1,283 @@
+---
+title: "Latent Sparse Attention: stop scoring every key, score the clusters"
+description: "At 10M tokens, the indexer that picks which keys a sparse-attention query reads takes 98% of the layer's prefill time. Prefrontal AI's Latent Sparse Attention (LSA) clusters keys by meaning with Ward's method, in cluster blocks of 512, and lets each query score one centroid per bucket of about 8 keys instead of every key. The paper reports one layer 22.7x faster in prefill than GLM-5.3-Flash's own sparse attention and 72.4x faster than Qwen3.8-27B's full attention at 10M tokens, and 9.21x on time to first token for the whole Qwen model. I ported the reference flat design to numpy and ran it against exact top-k and block-sparse selection on synthetic keys from 16k to 1M: at equal index work it matches or beats blocks of 8 in every cell, it loses to blocks of 4, and the 4-key pooling before clustering is what costs it most when related keys are scattered."
+date: 2026-11-09
+tags:
+  - attention
+  - long-context
+  - sparse-attention
+  - inference
+  - kv-cache
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "How LSA's Ward buckets replace the key scan, where its 72.4x comes from, and a CPU port that finds the 4-key pooling is its weak spot."
+topic: llm-architecture
+kind: paper
+level: research
+runsOn: datacenter
+licence: Apache-2.0
+---
+
+import { IndexerBill } from "@/components/articles/latent-sparse-attention/indexer-bill"
+import { BucketLab } from "@/components/articles/latent-sparse-attention/bucket-lab"
+import { RecallBench } from "@/components/articles/latent-sparse-attention/recall-bench"
+
+Sparse attention has a dirty secret, and the [Latent Sparse Attention paper](https://arxiv.org/abs/2610.42147)
+puts it in its second figure. A sparse-attention layer reads only a few thousand keys per query, which makes the
+attention cheap. Something has to choose those keys, though. That something is the **indexer**, and in every
+production design I know of it still scores every preceding key, or every block of four keys, for every query. At
+10M tokens, that scan is 98% of the layer's prefill time.
+
+LSA, from Prefrontal AI and ETH Zurich (code at
+[Prefrontal-AI/latent-sparse-attention](https://github.com/Prefrontal-AI/latent-sparse-attention), Apache-2.0),
+replaces the scan with a search. Keys are clustered by meaning into buckets of about eight. A query scores one
+centroid per bucket, keeps the best buckets, and attends to their keys. The attention kernel is unchanged; only the
+list of keys it reads is different.
+
+I read the paper and the code, and I ported the reference flat design to numpy to see how well bucket search finds
+the keys that exact scoring would have found. Every number below is labelled: **measured** (I ran it), **reported**
+(the paper or a post says so), or **reasoned** (my arithmetic or inference).
+
+## Where the time goes
+
+Sparse attention splits a layer into two jobs. The indexer picks, for each query, a set $J_i$ of key positions. The
+attention then runs over $J_i$ only. With a fixed budget of $k$ keys, the attention costs $O(Tk)$ to prefill a
+context of $T$ tokens and $O(k)$ per decoded token. The indexer is the catch: if it scores every key, it is still
+$O(T^2)$ in prefill and $O(T)$ in decode, only with a smaller constant.
+
+<Figure
+  src="/articles/latent-sparse-attention/fig2.png"
+  alt="Two bar charts, prefill and decode, at 512k, 1M and 10M tokens. Full attention against sparse attention for one GLM-5.3-Flash layer; insets show the indexer's share of sparse attention rising from 67% to 98% in prefill and from 41% to 89% in decode, with 58x and 8.9x marked as the speedup a free indexer would give."
+  caption="Traditional sparse attention at ultra-long context: one global attention layer of GLM-5.3-Flash on one H200. The indexer's share of the sparse layer's time climbs to 98% in prefill at 10M tokens (paper, Figure 2)."
+/>
+
+The paper's own numbers (**reported**): on GLM-5.3-Flash at 10M tokens, a free indexer would make its sparse
+attention a further 58x faster in prefill and 8.9x in decode. The constant the indexer already saves is not small.
+GLM-5.3-Flash's `config.json` (**measured**, read from the Hub) gives its indexer 32 heads of 128 dims, scoring keys
+pooled four at a time: $32 \times 128 \times T/4 = 1{,}024\,T$ multiply-adds per query. Even that is a quadratic
+bill at 10M tokens.
+
+<IndexerBill />
+
+Two things in that widget matter more than the headline. First, the speedup is a long-context phenomenon: on
+GLM-5.3-Flash, D-LSA is 2.1x faster per layer in prefill at 512k and 22.7x at 10M (**reported**). Second, a layer
+is not a model. Qwen3.8-27B has 16 full-attention layers out of 64; the other 48 are linear attention
+(**measured**, `layer_types` in its `config.json`). GLM-5.3-Flash has 11 sparse-attention layers out of 45
+([its own article](/articles/glm-5-3-flash) walks those). So a 72.4x layer becomes a 9.21x time to first token on
+Qwen at 10M, and the 22.7x layer becomes 2.24x on GLM with context parallelism (**reported**, Table 3).
+
+## How LSA finds the keys
+
+The method has two halves: build buckets once per block of keys, then search them for every query.
+
+<Figure
+  src="/articles/latent-sparse-attention/fig3.png"
+  alt="Diagram of D-LSA. Left: the attention keys and summed queries are projected to 64-dim index vectors and normalised; index keys are pooled four to one and clustered into buckets whose centroids form a bucket cache; a query scores the centroids, picks top buckets, expands them to sink, long-range and window indices, and attention runs over those. Right: the tree variant groups buckets into nested clusters and a query descends them with beam search."
+  caption="D-LSA design. Left, the flat search: (1) projection and L2 norm of the keys, (2) pooling 4 to 1, (3) Ward clustering, (4) the bucket cache; (A) the query side, (B) scoring centroids, (C) expansion into sink, long-range and window indices, (D) attention. Right, the tree search (paper, Figure 3)."
+/>
+
+**Clustering** (steps 1 to 4). Each index key is projected to 64 dims and L2-normalised. Every 4 consecutive index
+keys are summed into one pool key. Keys are processed in cluster blocks of 512: once a block is complete, its 128
+pool keys are merged bottom-up with Ward's method into 64 buckets, about 8 keys each and never more than 16. A
+bucket stores the normalised sum of its keys as its centroid, plus the positions of its keys. Once a block is
+clustered, its buckets never change.
+
+The merge rule is worth a line of algebra, because the code's version looks nothing like the textbook one. In
+`src/lsa/core/ward.py` the cost of merging buckets $b$ and $b'$ is
+
+$$
+\Delta(b, b') = a_b + a_{b'} - a_{b \cup b'}, \qquad a_b = \Big\lVert \sum_{j \in b} k_j \Big\rVert .
+$$
+
+For unit keys, the spread of a bucket around its unit centroid $c_b$ is
+$\sum_{j \in b} \lVert k_j - c_b \rVert^2 = 2\,(|b| - a_b)$. Merging two buckets adds their sizes, so the spread grows
+by exactly $2\,\Delta(b, b')$ (**reasoned**, from the code). It is Ward's criterion on the sphere: merge whatever
+adds the least scatter. The rounds are parallel: every bucket finds its cheapest allowed partner, and every pair
+that is each other's cheapest merges at once.
+
+**Search** (steps A to D). The index query is the sum of all query heads, projected and normalised, so one list
+$J_i$ serves every head. It scores the centroid of every bucket in the blocks before its own, keeps the top
+1,024 buckets ($p$), and expands them best-first until it holds 4,096 long-range keys ($k$). It also reads 4 sink keys and
+a 512-key window, the window being exactly the current, not-yet-clustered block. Those are the paper's settings
+and the shipped defaults in `src/lsa/sglang/settings/design.py` (**measured**).
+
+Here is the same algorithm at a scale you can see. The index space is two-dimensional, so every unit key is a point
+on a circle. Ward and the search are the reference steps, ported line for line.
+
+<BucketLab />
+
+Switch to "topic changes every token" and leave pooling at 4. The buckets fall apart, and so does recall. A pool
+sums four consecutive keys before Ward ever sees them; if those four mean different things, the pool is a blend and
+no clustering can unblend it. With pooling off, the same keys cluster cleanly. Pooling is there for cost: Ward runs
+over 128 pool keys per block instead of 512, and every bucket is guaranteed at least 4 keys, which is what makes
+$p \cdot 4 \ge k$ always fill the budget. Hold that thought for the experiment.
+
+**Flat and tree.** Flat scores every centroid: $T/8$ dot products of 64 dims per query, against GLM's $1{,}024\,T$
+multiply-adds, so 128x fewer (**reasoned**, from the two configs). It is still linear per query. The tree variant
+groups 4 buckets into a node bucket, repeatedly, and beam-searches down the levels, which makes prefill
+$O(T \log T)$. On the paper's own measurements, the tree only overtakes flat in decode from about 5M tokens with
+one request, and in prefill it is predicted to overtake beyond 10M (**reported**). Below that, flat wins.
+
+**Two ways to get the index space.** D-LSA bolts onto a trained model. It freezes the model and trains only the two
+small index projections and a temperature per layer, minimising the KL divergence between the frozen layer's
+head-averaged attention and the softmax of the index scores. That distillation ran on 352M tokens for 48k steps,
+against the 2.1B tokens of DeepSeek's DSA warm-up (**reported**). There is also a training-free variant that uses the
+leading principal directions of the layer's keys for both projections. N-LSA trains from scratch: it clusters the
+attention's own keys with a single KV head, scores a bucket by the best head, and adds no parameters and no
+auxiliary loss.
+
+## What I ran
+
+The repository's reference is plain PyTorch on a CPU (`src/lsa/core/reference.py` and `ward.py`), written as the
+oracle its GPU kernels are tested against. This sandbox has no torch, so I ported those two files to numpy, about
+60 lines, and kept their semantics: pools of 4, blocks of 512, buckets of about 8 with a cap of 16, mutual-cheapest
+Ward rounds, centroids from the normalised key sums, best-first expansion that skips the sink and the window.
+
+The setup (**measured**, numpy 2.5.3, 2 threads on a shared 4-vCPU box, one seed):
+
+- 64-dim unit index keys at 16k, 64k, 256k and 1M tokens; 64 queries at the last position.
+- Every method reads 2,048 long-range keys besides a 4-key sink and a 512-key window. LSA uses top-p 512 and
+  top-k 2,048, the GLM setting below 1M.
+- Baselines: exact top-k by dot product; block sparse with blocks of 4 (scores $T/4$ block keys, twice LSA's index
+  work); block sparse with blocks of 8 (scores $T/8$, the same as LSA).
+- Four kinds of keys. **Topical**: 64 topics times 8 subtopics, each 256-token document on one topic. **Scattered**:
+  the same topics, but each token draws its own, so related keys sit far apart in the cache. **Random**: uniform on
+  the sphere. **Needle**: random keys plus one near-copy of each query planted somewhere in the cache.
+- Scores: the share of the exact top-64 keys found, and the attention mass captured at softmax temperature 0.1 as a
+  share of what the exact top-2,048 captures.
+
+<RecallBench />
+
+What the numbers say (all **measured**):
+
+1. **At equal index work, LSA matches or beats block sparse in every cell.** Against blocks of 8, which score the
+   same $T/8$ vectors, shipped LSA is ahead or tied on all 16 cells. On the needle test at 1M it finds 38 of 64
+   planted keys where blocks of 8 find 23.
+2. **Against blocks of 4, shipped LSA loses.** Blocks of 4 score twice as many vectors and win everywhere except
+   topical at 64k, a tie. On scattered keys the gap is wide: at 64k, blocks of 4 find 74.2% of the top-64 and LSA
+   52.3%. This lines up with the paper's own design comparison only loosely, because its baselines use their own
+   learned index spaces. It lines up closely with an independent run on real models, below.
+3. **The pooling is the weak spot.** Turn it off and LSA wins outright: on scattered keys at 64k it finds 99.4% of the
+   top-64 against 52.3% with pools of 4 and 74.2% for blocks of 4; at 1M it is 43.8% against 14.6% and 27.4%. On
+   the needle test it finds 62 to 64 of 64 needles up to 256k and 59 at 1M, where shipped LSA finds 38 and blocks
+   of 4 find 54. The price is clustering: Ward over 512 keys per block instead of 128 took 12 to 26 merge rounds
+   instead of 5 to 9, and 20 to 45 times longer in numpy (207 seconds instead of 8.7 for the 1M scattered cache).
+4. **No structure, no free lunch.** On random keys every method collapses with length, because the top-64 of 1M random
+   keys are not near each other or near anything a summary can capture. LSA's bet is that real keys are clustered.
+   The paper's accuracy results say that, for these two models, they are clustered enough.
+
+The CPU timings are not GPU timings, but the shape carries over. At 1M keys, scoring every key for 64 queries took
+766 ms, the blocks of 4 took 112 ms, and LSA's centroid scoring took 67 ms (**measured**). The whole-cache clustering
+was 8.0 seconds, paid once per block as the cache fills.
+
+Why does pooling hurt so much here, when the paper's models hold their accuracy? Because the synthetic scattered
+case is the worst case for it: neighbouring tokens unrelated in the index space. Real keys are locally coherent;
+that is why block-sparse indexers work at all. My reading (**reasoned**) is that LSA's buckets bring scattered
+related keys together at the bucket scale, while the 4-key pool assumes locality at the token scale. The paper's
+appendix does not report a run without pooling, and the code keeps it as an option (`pool_size: None`).
+
+## What the paper reports
+
+<Figure
+  src="/articles/latent-sparse-attention/fig6.png"
+  alt="Grid of bar charts of per-layer speedups for Qwen3.8-27B and GLM-5.3-Flash, prefill and decode, on H200 and B300, at 512k, 1M and 10M tokens, with D-LSA (Flat) speedups printed above each group; a memory panel at 10M; and a log-log prefill scaling plot to 100M tokens, extrapolated beyond 10M."
+  caption="D-LSA speedup of one global attention layer over each model's baseline attention, H200 and B300, with the index memory at 10M and prefill scaling extrapolated to 100M (paper, Figure 6)."
+/>
+
+Speed (**reported**). On H200, one layer at 10M: 72.4x prefill and 42.5x decode over Qwen3.8-27B's full attention,
+22.7x and 4.6x over GLM-5.3-Flash's sparse attention. On B300 the Qwen numbers are 42.9x and 18.4x. The index is also
+smaller: 246 MiB per layer at 10M against 331 MiB for GLM-5.3-Flash's indexer and 642 MiB for QSA.
+
+The end-to-end table is where to look before getting excited. With one request at a time on H200:
+
+| Model, parallelism | Context | Time to first token, baseline | D-LSA (Flat) | Block sparse (Flat) |
+|---|---|---|---|---|
+| Qwen3.8-27B, TP8 + DCP8 | 512k | 21.7 s | 1.03x | 1.61x |
+| Qwen3.8-27B, TP8 + DCP8 | 1M | 65.3 s | 1.51x | 2.30x |
+| Qwen3.8-27B, TP8 + DCP8 | 10M | 4582.2 s | 9.21x | 8.02x |
+| GLM-5.3-Flash, CP8 | 1M | 18.1 s | 1.09x | baseline |
+| GLM-5.3-Flash, CP8 | 10M | 451.5 s | 2.24x | baseline |
+
+On Qwen, the block-sparse baseline the authors built is faster end to end than D-LSA at 512k and 1M; D-LSA wins at
+10M. On B300 at 512k, D-LSA (Flat) is 0.68x on Qwen, slower than full attention (**reported**, Table 3). Time per
+output token on Qwen at 10M improves 2.87x. None of this is a criticism of the method. It is a statement of where it
+belongs: past 1M tokens.
+
+<Figure
+  src="/articles/latent-sparse-attention/fig5.png"
+  alt="Accuracy tables and curves. Left: knowledge, reasoning and LongBench v2 scores for each method relative to the baseline, mostly within a few points. Right: RULER and PaperTrail accuracy against context from 4k to 10M tokens for Qwen3.8-27B and GLM-5.3-Flash, with D-LSA (Flat) at plus 4.0 and plus 9.2 points on Qwen at 10M, and minus 3.7 and minus 7.4 on GLM."
+  caption="D-LSA accuracy against full attention (Qwen3.8-27B) and the model's own sparse attention (GLM-5.3-Flash) on knowledge, reasoning and long-context tasks up to 10M tokens (paper, Figure 5)."
+/>
+
+Accuracy (**reported**). On knowledge, reasoning and LongBench v2, D-LSA stays inside the baselines' 95% confidence
+intervals. On Qwen3.8-27B, D-LSA (Flat) is within 5 points of full attention on RULER up to 1M and ahead at 10M,
+63.9 against 59.9, and 29.1 against 19.8 on PaperTrail, a benchmark the authors built from recent papers with
+planted fact trails. On GLM-5.3-Flash it trails the baseline by up to 8 points at 2M to 5M tokens and is within 4 at
+10M. The tree variant is weaker there: 55.8 on RULER at 10M, against 66.8 for flat. Beyond 1M tokens, RULER runs 20 prompts per task,
+so single-point differences there are noise. Qwen3.8-27B ships with a native context of 262,144 tokens
+(**measured**, `max_position_embeddings`), so its 10M runs use YaRN at factor 40: every method is out of
+distribution there, and "better than full attention" partly means "less hurt by it".
+
+N-LSA (**reported**). A 0.5B hybrid, one attention layer in four, trained on 100B tokens of FineWeb-Edu at 4k and a
+12B-token decay at 128k. N-LSA reaches the same validation loss as full attention, 1.085 against 1.085, where PISA,
+NSA and SWA end at 1.100, 1.117 and 1.154. On RULER at 128k it scores 32.2 against full attention's 34.7, with NSA at
+19.2. One layer trains 1.6x faster than FlashAttention-3 at 128k, the model 1.24x faster end to end, with peak memory
+6.8 GiB against 5.8 GiB per layer. It is small, flat-only and stops at 128k; the authors say so.
+
+<RepoCard repo="Prefrontal-AI/latent-sparse-attention" />
+
+## The posts around it
+
+The announcement thread from James Whittington is accurate to the paper: 98% indexing time at 10M, "up to 22.7x"
+faster sparse attention and 72.4x faster full attention, both per layer. A widely shared Chinese summary rounded it
+to "decode about 42x, first-token latency cut to about one ninth", added that these are single-layer H200 numbers
+and that the whole model gains less. That is a fair reading of Table 3's 9.21x.
+
+A post from the Rapid-MLX account reports LSA running end to end on Apple Silicon: Qwen3.8-27B on an M3 Ultra at
+128k, time to first token 640 s to 440 s and peak memory 40.7 GB to 28.8 GB, using LSA for prefill only and handing
+decode back to dense attention because per-token routing overhead slowed decode (**reported**, unverified). I found
+no code linked from the post. The repository I was pointed at for it, `boxwrench/lsa-rocm`, is something else: an
+independent lab notebook on AMD ROCm, with no licence yet. It tests the training-free variant on the full-attention
+layers of a 9B hybrid and a 33B dense model, and its findings (**reported**) match mine closely. Flat search
+captures 43% to 56% of the ideal attention mass at a budget of 2,048 keys on prose and code from 32k to 917k tokens;
+block sparse with blocks of 4 is as good on one model and clearly better on the other; and tree and flat agree to two
+decimals. That is the training-free index, not the distilled one the paper's accuracy rests on.
+
+## What I could not run
+
+- **The GPU kernels and the served models.** The CuTe DSL and Triton kernels need an H200, B300 or other CUDA GPU,
+  and the 10M-token runs need eight of them. Nothing here checks the 72.4x.
+- **The repository's own Python.** The reference needs torch, which this sandbox does not have; I ported it rather
+  than installing a CUDA stack. My port matches the reference's steps but is not the reference.
+- **The distilled maps.** They are release assets on GitHub (`d-lsa-weights-v1`), which this sandbox cannot download.
+  My experiment uses synthetic index keys, not the learned 64-dim space.
+- **The Apple Silicon numbers.** No code, no configuration, one screenshot.
+
+## What to take from it
+
+- **The cost of sparse attention at long context is the search, not the attention.** Any design whose indexer
+  touches every key, even compressed four to one with a small head, is quadratic in prefill, and at 10M tokens that
+  is nearly all of the layer.
+- **LSA's speedup is real only past about 1M tokens.** Below that, on the paper's own end-to-end table, a well-built
+  block-sparse indexer is as fast or faster. If your contexts are 128k, this is not your bottleneck.
+- **Semantic buckets beat positional blocks at equal index cost.** That held in every cell I measured. They do not
+  beat a positional index that does twice the work, unless the pooling goes.
+- **Check the 4-key pooling against your own keys.** If neighbouring tokens are coherent in your index space, it is
+  nearly free. If they are not, it throws away what the clustering was supposed to find.
+
+It sits between two other answers to the same problem on this site: [MiniMax Sparse
+Attention](/articles/minimax-sparse-attention), which keeps the per-block scan but makes it cheap and per-group, and
+the [linear-attention roundup](/articles/linear-attention-state-roundup), which gives up exact recall for a fixed
+state. LSA keeps exact attention over a chosen set, and makes the choosing sublinear in the number of keys scored.
+
+<ModelCard repo="Qwen/Qwen3.8-27B" />
+
+<ModelCard repo="zai-org/GLM-5.3-Flash" />
