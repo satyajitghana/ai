@@ -4,14 +4,11 @@ import Link from "next/link"
 
 import { SCORING_PATH } from "@/components/site/article-rating"
 import { PageShell } from "@/components/site/page-shell"
-import { displayTags } from "@/data/taxonomy"
-import { getArticles } from "@/lib/content"
-import { highlights } from "@/lib/content/rating"
-import { articleScores, compareByLens } from "@/lib/content/signals"
-import { snippet } from "@/lib/seo"
-import { getThumb } from "@/lib/thumbs"
+import type { TopicId } from "@/data/taxonomy"
 
-import { type ArticleCard, ArticlesList } from "./articles-list"
+import { ArticlesList } from "./articles-list"
+import { articleCards } from "./cards"
+import { PAGE } from "./page-size"
 
 const LEDE =
   "Long-form explainers on AI, organised by what you want from them: the must-reads, what you can run yourself, ideas worth learning, and what's new."
@@ -23,40 +20,15 @@ export const metadata: Metadata = {
 }
 
 export default function Page() {
-  // The full corpus, server-rendered in the default lens (Newest) order so
-  // the whole list is in the HTML for crawlers and no-JS readers. The client
-  // list re-orders and filters a copy; it never fetches.
-  const scores = articleScores()
-  const articles: ArticleCard[] = getArticles()
-    .sort(compareByLens("newest", scores))
-    .map((a) => {
-      const s = scores.get(a.slug)!
-      const thumb = getThumb(a.slug)
-      return {
-        slug: a.slug,
-        title: a.title,
-        // Only the search box reads it (every rated card shows `why`), and the
-        // whole corpus of descriptions was a third of this page's payload. Its
-        // opening sentences are what a search for the subject needs.
-        description: snippet(a.description, 320),
-        why: a.rating?.why ?? null,
-        date: a.date,
-        updated: a.updated ?? null,
-        lastUpdated: a.lastUpdated,
-        tags: displayTags(a.tags),
-        featured: a.featured,
-        topic: a.topic ?? null,
-        kind: a.articleKind ?? null,
-        level: a.level ?? null,
-        runsOn: a.runsOn ?? null,
-        highlights: a.rating ? highlights(a.rating, a.runsOn, 2).map(({ key, text }) => ({ key, text })) : [],
-        score: s.score,
-        tier: s.tier,
-        lenses: s.lenses,
-        readingTimeMins: s.facts.readingTimeMins,
-        thumb: thumb?.src ?? null,
-      }
-    })
+  // The first page of cards in the default lens (Newest), plus every other
+  // article as a title link, so the whole corpus is still in the HTML for
+  // crawlers and no-JS readers. Rendering every card in full made this page
+  // 3.4 MB, and every crawl of it was read from Vercel's ISR store in 8 KB
+  // units. The client fetches the full card data (/articles/cards.json) for
+  // search, filters, lenses and "Show more".
+  const cards = articleCards()
+  const topicCounts: Partial<Record<TopicId, number>> = {}
+  for (const a of cards) if (a.topic) topicCounts[a.topic] = (topicCounts[a.topic] ?? 0) + 1
 
   return (
     <PageShell
@@ -74,7 +46,12 @@ export default function Page() {
       }
       agentPath={{ json: "/api/articles" }}
     >
-      <ArticlesList articles={articles} />
+      <ArticlesList
+        first={cards.slice(0, PAGE)}
+        rest={cards.slice(PAGE).map(({ slug, title }) => ({ slug, title }))}
+        topicCounts={topicCounts}
+        rated={cards.filter((a) => a.tier).length}
+      />
     </PageShell>
   )
 }

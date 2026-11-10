@@ -1,6 +1,6 @@
 "use client"
 
-import { useId, useMemo, useRef, useState } from "react"
+import { useEffect, useId, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import {
   FadersHorizontalIcon,
@@ -33,12 +33,17 @@ import { useHydrated } from "@/lib/use-hydrated"
 import { useUrlState } from "@/lib/use-url-state"
 import { cn } from "@/lib/utils"
 
+import { PAGE } from "./page-size"
+
 // The /articles list: lenses (sort orders that each answer a reader's
 // question), topic chips, kind / level / hardware / featured filters and a
 // search box, all persisted to the query string so a view is shareable.
 //
-// The server renders every article in the default lens so the whole corpus is
-// in the HTML; once hydrated, the list shows a page at a time with "Show more".
+// The server renders the first page of cards in the default lens, and every
+// other article as a plain title link, so the whole corpus is in the HTML
+// without shipping every card (that made the page 3.4 MB). Once hydrated, the
+// list fetches the full card data from /articles/cards.json and shows a page
+// at a time with "Show more"; search, filters and lenses wait for it.
 // Scores, tiers, lens keys and highlights arrive precomputed
 // (lib/content/signals.ts, lib/content/rating.ts) — nothing here does
 // arithmetic that reaches the DOM. A card shows the tier as one mark and the
@@ -68,7 +73,7 @@ export type ArticleCard = {
 }
 
 const STAR = "oklch(0.79 0.15 82)" // warm gold
-const PAGE = 24
+const CARDS_URL = "/articles/cards.json"
 const TOPICS_SHOWN = 6
 
 type State = {
@@ -122,9 +127,37 @@ function fitsHardware(runsOn: RunsOnId | null, hw: RunsOnId | null): boolean {
   return got.rank !== null && got.rank <= want.rank
 }
 
-export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
+const DEFAULT_KEY = JSON.stringify(parseUrlState(new URLSearchParams()))
+
+export function ArticlesList({
+  first,
+  rest,
+  topicCounts: counts,
+  rated,
+}: {
+  /** The first page of cards, newest first: what the server renders in full. */
+  first: ArticleCard[]
+  /** Every other article, title only, for crawlers and no-JS readers. */
+  rest: { slug: string; title: string }[]
+  topicCounts: Partial<Record<TopicId, number>>
+  rated: number
+}) {
   const [state, setParams] = useUrlState(parseUrlState)
   const hydrated = useHydrated()
+  const [all, setAll] = useState<ArticleCard[] | null>(null)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let live = true
+    fetch(CARDS_URL)
+      .then((r) => (r.ok ? (r.json() as Promise<ArticleCard[]>) : Promise.reject(new Error(String(r.status)))))
+      .then((d) => { if (live) setAll(d) })
+      .catch(() => { if (live) setFailed(true) })
+    return () => { live = false }
+  }, [])
+  // Until the full list arrives, only the default view (newest, no filters)
+  // can be shown, and it is exactly `first`.
+  const articles = all ?? first
+  const total = first.length + rest.length
   const [shown, setShown] = useState({ key: "", n: PAGE })
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [allTopics, setAllTopics] = useState(false)
@@ -148,12 +181,7 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
     [articles],
   )
 
-  const topicCounts = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const a of articles) if (a.topic) m.set(a.topic, (m.get(a.topic) ?? 0) + 1)
-    return m
-  }, [articles])
-  const rated = articles.filter((a) => a.tier).length
+  const topicCounts = useMemo(() => new Map(Object.entries(counts) as [TopicId, number][]), [counts])
   // Most-populated first; from sm up only the first TOPICS_SHOWN wrap into
   // view (plus the selected one) until "more" is pressed. A phone scrolls the
   // whole row instead.
@@ -175,8 +203,8 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
     .sort(compareLens(state.lens))
 
   // "Start here": the three clearest rated pages in the chosen topic.
-  const startHere = state.topic
-    ? articles
+  const startHere = state.topic && all
+    ? all
         .filter((a) => a.topic === state.topic && a.lenses)
         .sort(compareLens("learn"))
         .slice(0, 3)
@@ -184,8 +212,11 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
 
   const viewKey = JSON.stringify(state)
   const limit = shown.key === viewKey ? shown.n : PAGE
-  // Before hydration (and with JS off) every match is rendered.
-  const visible = hydrated ? filtered.slice(0, limit) : filtered
+  const visible = filtered.slice(0, limit)
+  // A filtered, searched or re-sorted view needs every card; the default one
+  // is `first` until then.
+  const waiting = !all && viewKey !== DEFAULT_KEY
+  const count = all ? filtered.length : total
 
   const activeFilters = [state.kind, state.level, state.hw, state.featured || null].filter(Boolean).length
   const anyFilter = activeFilters > 0 || !!state.topic || !!state.q
@@ -218,7 +249,7 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
           type="search"
           value={state.q}
           onChange={(e) => set({ q: e.target.value })}
-          placeholder={`Search ${articles.length} articles`}
+          placeholder={`Search ${total} articles`}
           aria-label="Search articles by title, description, tag or topic"
           className="h-11 w-full rounded-lg border bg-background pr-10 pl-9 text-base placeholder:text-muted-foreground/70 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm [&::-webkit-search-cancel-button]:hidden"
         />
@@ -390,12 +421,12 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
         <p className="text-sm text-muted-foreground">
           <span className="font-medium text-foreground">{lensInfo.label}.</span>{" "}
           {lensInfo.blurb}
-          {state.lens !== "newest" && rated < articles.length ? (
+          {state.lens !== "newest" && rated < total ? (
             <span className="text-muted-foreground/80"> Unrated articles follow, newest first.</span>
           ) : null}
         </p>
         <p className="font-mono text-xs text-muted-foreground tabular-nums" aria-live="polite">
-          {filtered.length === articles.length ? `${articles.length} articles` : `${filtered.length} of ${articles.length}`}
+          {count === total ? `${total} articles` : `${count} of ${total}`}
           {anyFilter ? (
             <button type="button" onClick={clearAll} className="ml-2 hidden cursor-pointer underline underline-offset-4 hover:text-foreground sm:inline">
               clear
@@ -404,7 +435,11 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
         </p>
       </div>
 
-      {filtered.length === 0 ? (
+      {waiting ? (
+        <p className="py-8 text-center font-mono text-xs text-muted-foreground" aria-live="polite">
+          {failed ? "Could not load the article list. Reload to try again." : "Loading articles…"}
+        </p>
+      ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-dashed p-8 text-center">
           <p className="text-muted-foreground">Nothing matches that combination.</p>
           <button type="button" onClick={clearAll} className={cn(pill(false), "mt-4")}>
@@ -419,15 +454,34 @@ export function ArticlesList({ articles }: { articles: ArticleCard[] }) {
         </ul>
       )}
 
-      {hydrated && filtered.length > visible.length ? (
+      {/* Before hydration (and with JS off): every other article as a link. */}
+      {!hydrated && rest.length ? (
+        <section aria-labelledby="all-articles" className="mt-10">
+          <h2 id="all-articles" className="mb-3 font-mono text-xs tracking-wide text-muted-foreground">
+            all {total} articles, newest first
+          </h2>
+          <ul className="columns-1 gap-8 text-sm leading-7 sm:columns-2">
+            {rest.map((a) => (
+              <li key={a.slug} className="break-inside-avoid">
+                <Link href={`/articles/${a.slug}`} prefetch={false} className="underline-offset-4 hover:underline">
+                  {a.title}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {hydrated && !waiting && count > visible.length ? (
         <div className="mt-8 flex justify-center">
           <button
             type="button"
+            disabled={!all}
             onClick={() => setShown({ key: viewKey, n: limit + PAGE })}
-            className={cn(pill(false), "px-5")}
+            className={cn(pill(false), "px-5 disabled:cursor-wait disabled:opacity-60")}
           >
-            Show {Math.min(PAGE, filtered.length - visible.length)} more
-            <span className="tabular-nums opacity-60">{` · ${filtered.length - visible.length} left`}</span>
+            Show {Math.min(PAGE, count - visible.length)} more
+            <span className="tabular-nums opacity-60">{` · ${count - visible.length} left`}</span>
           </button>
         </div>
       ) : null}
