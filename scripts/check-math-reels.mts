@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { MANIFEST, OUT, ROOT, SKILL_DIR, loadSpec, readManifest, reelSha, specIds } from "../brand-crew/skills/math-reels/hash.mjs"
 import { checkTable, loadTable, uncovered } from "../brand-crew/skills/math-reels/pronounce.mjs"
+import { mediaExists } from "./media-files"
 
 let failed = false
 const fail = (msg: string) => { failed = true; console.log(`FAIL ${msg}`) }
@@ -56,7 +57,8 @@ for (const id of ids) {
   const want = reelSha(loadSpec(id))
   if (m.sha !== want) { fail(`${id}: stale reel (manifest ${m.sha}, spec+engine+pronunciation ${want}): node brand-crew/skills/math-reels/render.mjs --stale --out=public/films/math on the farm`); continue }
   const files = [`${id}.mp4`, `${id}-poster.webp`, ...(m.hasVoice ? [`${id}.vtt`] : [])]
-  const gone = files.filter(f => !existsSync(join(OUT, f)))
+  // the mp4 and poster live in R2 (lib/media-map.json); captions are committed
+  const gone = files.filter(f => f.endsWith(".vtt") ? !existsSync(join(OUT, f)) : !mediaExists(`/films/math/${f}`))
   if (gone.length) { fail(`${id}: the manifest lists a reel, but public/films/math has no ${gone.join(", ")}`); continue }
   fresh++
 }

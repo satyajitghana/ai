@@ -7,6 +7,7 @@ import { PageShell } from "@/components/site/page-shell"
 import { ShareButtons } from "@/components/site/share-buttons"
 import { getProject, getProjects } from "@/lib/content"
 import { JsonLd, softwareSourceCodeJsonLd } from "@/lib/jsonld"
+import { mediaUrl } from "@/lib/media"
 import { seo } from "@/lib/seo"
 
 // Paired with the template-literal `await import()` below, per the Next.js MDX
@@ -81,7 +82,8 @@ export default async function Page({
         {project.cover ? (
           <div className="relative mb-10 aspect-[16/9] overflow-hidden rounded-md border bg-muted">
             <Image
-              src={project.cover}
+              src={mediaUrl(project.cover)}
+              unoptimized
               alt={`${project.title} screenshot`}
               fill
               priority

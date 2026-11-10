@@ -39,10 +39,15 @@ function header(title: string, canonical: string, meta: string[] = []): string {
 // served from the media CDN instead), so an agent reading the .md twin gets
 // the absolute URL the page itself uses.
 function absoluteMedia(body: string): string {
-  return body.replace(
-    /\b(src|poster)="(\/(?:articles|films|thumbs|projects)\/[^"]+)"/g,
-    (_, attr: string, path: string) => `${attr}="${absoluteMediaUrl(path)}"`
-  )
+  return body
+    .replace(
+      /\b(src|poster)="(\/(?:articles|films|thumbs|projects)\/[^"]+)"/g,
+      (_, attr: string, path: string) => `${attr}="${absoluteMediaUrl(path)}"`
+    )
+    .replace(
+      /\]\((\/(?:articles|films|thumbs|projects)\/[^)\s]+\.[a-z0-9]+)\)/gi,
+      (_, path: string) => `](${absoluteMediaUrl(path)})`
+    )
 }
 
 // <Receipts src="…"> renders a dataset that lives in a separate JSON file, so an

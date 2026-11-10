@@ -1,35 +1,36 @@
 // Where the heavy public assets are served from: films and their posters,
-// thumbnails, and the images and clips articles embed with <Figure> and <Video>.
+// thumbnails, and the images, clips and audio articles embed with <Figure>,
+// <Video> and the sample players.
 //
-// Every file stays committed under public/, and that is what `pnpm validate`,
-// `pnpm dev` and local builds use. On Vercel, NEXT_PUBLIC_MEDIA_BASE
-// (https://media.thesatyajit.com/ai) points at Cloudflare R2, where
-// .github/workflows/media-sync.yml mirrors them under ai/ and publishes
-// ai/index.json: every uploaded path with the first 16 hex digits of its
-// SHA-256. Before `next build`, scripts/media-map.mts fetches that index and
-// keeps only the entries whose hash matches the file in this checkout, writing
-// them to lib/media-map.json. So:
+// Cloudflare R2 is the source of truth, not git. The bucket serves them at
+// https://media.thesatyajit.com/ai (NEXT_PUBLIC_MEDIA_BASE overrides it), and
+// lib/media-map.json, which is committed, lists every uploaded path with the
+// first 16 hex digits of its SHA-256. `pnpm media:push` (scripts/media-push.mts)
+// is the only writer of both: it uploads what is new or changed under public/
+// and records it in the map, in the same commit as the content that uses it.
+// The files themselves are gitignored (.gitignore lists which), so a clone has
+// none of them and every build, local or Vercel, links them from R2.
+// Thumbnails are the exception: they are pushed and also committed, because
+// the OG routes read them at build.
 //
-//   - a file R2 already holds, byte for byte, is served from R2 at
-//     `${base}${path}?v=${hash}`. The URL changes when the content does, which
-//     is what makes the bucket's year of immutable caching safe;
-//   - anything else (a figure a pull request adds or changes, or everything if
-//     the index cannot be fetched) stays same-origin, so a preview is never
-//     broken by media that has not reached the bucket yet.
+//   - a mapped file is served at `${base}${path}?v=${hash}`. The URL changes
+//     when the content does, which is what makes a year of immutable caching
+//     at the edge safe;
+//   - anything else is same-origin: captions (a cross-origin <track> needs
+//     CORS), the JSON <Receipts> reads, and the data files interactives fetch.
 //
-// The committed lib/media-map.json is empty: a local build is always
-// same-origin. Captions stay same-origin too (a cross-origin <track> needs CORS),
-// and so do the data files interactives fetch.
+// `pnpm validate:media` fails a checkout with media on disk that the map does
+// not list, or lists with another hash: a file that was never pushed.
 import map from "@/lib/media-map.json"
 
 import { absoluteUrl } from "@/lib/site"
 
-const MEDIA_BASE = (process.env.NEXT_PUBLIC_MEDIA_BASE ?? "").replace(/\/+$/, "")
+const MEDIA_BASE = (process.env.NEXT_PUBLIC_MEDIA_BASE || "https://media.thesatyajit.com/ai").replace(/\/+$/, "")
 const MAP = map as Record<string, string>
 
 /** The URL a page should use for a file under public/ (path starts with "/"). */
 export const mediaUrl = (path: string): string => {
-  const v = MEDIA_BASE ? MAP[path] : undefined
+  const v = MAP[path]
   return v ? `${MEDIA_BASE}${path}?v=${v}` : path
 }
 

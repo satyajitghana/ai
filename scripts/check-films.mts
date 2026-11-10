@@ -38,6 +38,8 @@
 // and SKILL.md says how.
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
+
+import { MEDIA_MAP, mediaExists } from "./media-files"
 import { z } from "zod"
 import { NAMESPACES, articleDate, filmSha, fontsSha, sourceOf, splitKey, storyboardKeys } from "../brand-crew/skills/explainer-films/hash.mjs"
 
@@ -367,8 +369,8 @@ for (const slug of files) {
     if (sc.type === "figure") {
       // the article's own picture or clip: committed, and shown by the article itself
       const video = !/\.(png|jpe?g|webp|gif|avif)$/i.test(sc.src), base = sc.src.replace(/\.(mp4|webm|mov)$/i, "")
-      const file = join(ROOT, "public", sc.src), exists = video && base === sc.src ? [".mp4", ".webm"].some((e) => existsSync(file + e)) : existsSync(file)
-      if (!exists) fail(slug, `${at}: ${sc.src} is not a committed file under public/`)
+      const exists = video && base === sc.src ? [".mp4", ".webm"].some((e) => mediaExists(sc.src + e)) : mediaExists(sc.src)
+      if (!exists) fail(slug, `${at}: ${sc.src} is neither pushed to R2 nor on disk (pnpm media:push)`)
       const shows = [sc.src, base].some((p) => src.includes(`"${p}"`))
       if (!shows) fail(slug, `${at}: the article does not show ${sc.src}; a film uses only the article's own figures and clips`)
       if (sc.clip && (!video || sc.clip[1] <= sc.clip[0])) fail(slug, `${at}: clip is [from, to] seconds of a video`)
@@ -437,10 +439,11 @@ for (const slug of files) {
   // Films ship for a chosen set; only a film that exists is held to its storyboard.
   if (!m) { unrendered++; continue }
   if (m.sha !== want) fail(slug, `stale render (manifest ${m.sha}, storyboard+date+engine ${want}): re-run build.mjs ${slug}`)
+  // the mp4 and poster live in R2 (a fresh clone has neither); the captions are committed
   for (const f of [`${slug}.mp4`, `${slug}-poster.webp`, `${slug}.vtt`]) {
     const p = join(FILMS, f)
-    if (!existsSync(p)) fail(slug, `missing public/films/${f}`)
-    else if (f.endsWith(".mp4") && statSync(p).size !== m.mp4Bytes) fail(slug, `public/films/${f} is not the file the manifest describes`)
+    if (f.endsWith(".vtt") ? !existsSync(p) : !mediaExists(`/films/${f}`)) fail(slug, `missing public/films/${f}${f.endsWith(".vtt") ? "" : " (in R2 or on disk)"}`)
+    else if (f.endsWith(".mp4") && existsSync(p) && statSync(p).size !== m.mp4Bytes) fail(slug, `public/films/${f} is not the file the manifest describes`)
   }
 }
 
@@ -461,6 +464,12 @@ if (!only && !sbOnly) {
   }
   if (existsSync(FILMS))
     for (const f of listed(FILMS)) { const slug = f.replace(/(-poster)?\.(mp4|webp|vtt)$/, ""); if (!manifest.films[slug]) fail(slug, `public/films/${f} is not in the manifest`) }
+  // and the same for what was pushed to R2, which a fresh clone does not have on disk
+  for (const path of Object.keys(MEDIA_MAP)) {
+    if (!path.startsWith("/films/") || path.startsWith("/films/math/")) continue
+    const slug = path.slice("/films/".length).replace(/(-poster)?\.(mp4|webp)$/, "")
+    if (!manifest.films[slug]) fail(slug, `${path} is in R2 (lib/media-map.json) but not in the film manifest`)
+  }
   if (existsSync(THUMBS))
     for (const f of listed(THUMBS)) { const slug = f.replace(/\.jpg$/, ""); if (!thumbs.thumbs[slug]) fail(slug, `public/thumbs/${f} is not in the thumbnail manifest`) }
   const arts = readdirSync(join(ROOT, "content", "articles")).filter((f) => f.endsWith(".mdx")).map((f) => f.slice(0, -4))

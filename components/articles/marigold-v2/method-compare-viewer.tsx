@@ -9,6 +9,8 @@
 // This is *our* framing of the comparison, not a redraw of the paper's own
 // grid (Fig. 6/8) — those are embedded separately as real paper figures.
 
+import { mediaUrl } from "@/lib/media"
+
 const SCENES = [
   { slug: "dogs", label: "Dogs", note: "wet fur, thin legs, water spray" },
   { slug: "laundry", label: "Laundry lines", note: "wires against open sky" },
@@ -119,7 +121,7 @@ export function MethodCompareViewer() {
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src={`/articles/marigold-v2/depth/${s.slug}/${m.slug}.webp`}
+                  src={mediaUrl(`/articles/marigold-v2/depth/${s.slug}/${m.slug}.webp`)}
                   alt={`${s.label} scene (${s.note}) — ${m.label} output`}
                   className="aspect-square w-full object-cover"
                 />

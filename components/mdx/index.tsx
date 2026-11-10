@@ -94,9 +94,12 @@ export const mdxComponents: MDXComponents = {
   p: (props: ComponentPropsWithoutRef<"p">) => (
     <p className="my-4 leading-7" {...props} />
   ),
-  a: (props: ComponentPropsWithoutRef<"a">) => (
+  // A markdown link to a media file ("[webm](/articles/x/take.webm)") goes
+  // through mediaUrl like <Figure> and <Video>: the file lives in R2, not here.
+  a: ({ href, ...props }: ComponentPropsWithoutRef<"a">) => (
     <a
       className="underline decoration-foreground/30 underline-offset-4 transition-colors hover:decoration-foreground"
+      href={href?.startsWith("/") ? mediaUrl(href) : href}
       {...props}
     />
   ),

@@ -1,5 +1,6 @@
 // Every <Figure>, <Video>, poster and caption track must point at a file that
-// exists in public/.
+// exists: pushed to R2 (lib/media-map.json) or, for captions, committed under
+// public/.
 //
 // A broken `src` is invisible to the rest of `pnpm validate`: the frontmatter is
 // fine, the MDX compiles, the build succeeds, and the page ships with an empty
@@ -13,6 +14,8 @@
 // than guessing one.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
+
+import { mediaExists } from "./media-files"
 
 // `[^>]` already spans newlines, so the pattern needs no dotAll flag — which is
 // as well, since this tsconfig targets below ES2018 and `s` would not compile.
@@ -48,13 +51,13 @@ function main() {
       const [, kind, path] = m
       const ok =
         kind === "Video"
-          ? VIDEO_EXT.some((e) => existsSync(join("public", path + e)))
-          : existsSync(join("public", path))
+          ? VIDEO_EXT.some((e) => mediaExists(path + e))
+          : mediaExists(path)
       if (!ok) note(kind === "Video" ? "Video src (no .webm/.mp4)" : "Figure src", path)
     }
     for (const m of src.matchAll(POSTER)) {
       checked++
-      if (!existsSync(join("public", m[1]))) note("poster", m[1])
+      if (!mediaExists(m[1])) note("poster", m[1])
     }
     for (const m of src.matchAll(CAPTIONS)) {
       checked++
@@ -64,8 +67,8 @@ function main() {
 
   if (missing.length) {
     console.error(
-      `\n✖ ${missing.length} asset reference(s) point at a file that is not in public/.\n` +
-        `  Commit the asset, or fix the path. Figures are served locally and never hotlinked.\n`,
+      `\n✖ ${missing.length} asset reference(s) point at a file that is neither in R2 nor in public/.\n` +
+        `  Push the media (pnpm media:push), commit the caption, or fix the path. Never hotlink.\n`,
     )
     for (const m of missing) console.error(`  ${m}`)
     console.error("")

@@ -4,6 +4,7 @@ import Link from "next/link"
 
 import { PageShell } from "@/components/site/page-shell"
 import { getProjects } from "@/lib/content"
+import { mediaUrl } from "@/lib/media"
 
 export const metadata: Metadata = {
   title: "Projects",
@@ -47,7 +48,8 @@ export default function Page() {
               {p.cover ? (
                 <div className="relative w-24 shrink-0 overflow-hidden rounded border bg-muted aspect-[16/10] sm:w-32">
                   <Image
-                    src={p.cover}
+                    src={mediaUrl(p.cover)}
+                    unoptimized
                     alt={`${p.title} screenshot`}
                     fill
                     sizes="112px"

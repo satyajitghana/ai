@@ -22,6 +22,8 @@ import { spawnSync } from "node:child_process"
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 
+import { mediaExists } from "./media-files"
+
 // ---------------------------------------------------------------------------
 // Proxy / TLS bootstrap
 //
@@ -379,10 +381,10 @@ function checkInternal(docs: Parsed[]): { problems: Problem[]; counted: number }
         }
         continue
       }
-      // a file served straight out of public/
-      if (existsSync(join("public", path))) continue
+      // a file served out of public/, or media pushed to R2
+      if (mediaExists(path)) continue
 
-      problems.push({ ...ref, why: "no route under app/ and no file in public/" })
+      problems.push({ ...ref, why: "no route under app/, no file in public/ and not in R2" })
     }
 
     for (const ref of doc.wiki) {
