@@ -130,3 +130,102 @@ export const TABLE1 = {
   ours: { dists: [0.184, 0.195, 0.221, 0.252, 0.233, 0.147, 0.229], lpips: [0.207, 0.183, 0.156, 0.299, 0.463, 0.049, 0.483] },
   mirror2: { dists: [0.193, 0.235, 0.246, 0.306, 0.283, 0.205, 0.347], lpips: [0.222, 0.237, 0.188, 0.351, 0.528, 0.07, 0.617] },
 }
+
+// ---------------------------------------------------------------------------
+// Second round of toy runs (deep-dive, 10 November). Same numpy port, new
+// ray caster (toy.py / sky.py / sweep.py), numpy 2.5.3, Python 3.13, CPU.
+//
+// SKY: eight 756 px, 60-degree views per capture, every 4th ray. Sky pixels get
+// a large finite depth (any value past the median gives the same median). For
+// each camera pitch: the sky share of pixels, the GSNorm factor with sky masked
+// out of the statistic (--sky_seg) over the factor with sky inside it (the
+// release default), and the median spacing of the non-sky pixels after the
+// default normalization, as a multiple of the target 1/756.
+
+export type SkyRow = { pitch: number; sky: number; ratio: number; nonsky: number }
+
+export const SKY: Record<"street" | "aerial", SkyRow[]> = {
+  street: [
+    { pitch: -20, sky: 0.0134, ratio: 1.017, nonsky: 0.983 },
+    { pitch: -10, sky: 0.0457, ratio: 1.14, nonsky: 0.877 },
+    { pitch: -5, sky: 0.0681, ratio: 1.061, nonsky: 0.943 },
+    { pitch: 0, sky: 0.0946, ratio: 1.08, nonsky: 0.926 },
+    { pitch: 5, sky: 0.1244, ratio: 1.107, nonsky: 0.903 },
+    { pitch: 10, sky: 0.1578, ratio: 1.142, nonsky: 0.876 },
+    { pitch: 15, sky: 0.1943, ratio: 1.179, nonsky: 0.848 },
+    { pitch: 20, sky: 0.234, ratio: 1.218, nonsky: 0.821 },
+    { pitch: 25, sky: 0.2772, ratio: 1.29, nonsky: 0.775 },
+  ],
+  aerial: [
+    { pitch: -60, sky: 0, ratio: 1, nonsky: 1 },
+    { pitch: -45, sky: 0, ratio: 1, nonsky: 1 },
+    { pitch: -30, sky: 0.0428, ratio: 1.043, nonsky: 0.959 },
+    { pitch: -20, sky: 0.2228, ratio: 1.212, nonsky: 0.825 },
+    { pitch: -15, sky: 0.303, ratio: 1.475, nonsky: 0.678 },
+    { pitch: -10, sky: 0.3822, ratio: 2.044, nonsky: 0.489 },
+    { pitch: -5, sky: 0.4571, ratio: 3.508, nonsky: 0.285 },
+  ],
+}
+
+/** The Space's voxel, 0.0018, in units of the target spacing 1/756. */
+export const VOXEL_IN_SPACINGS = 1.36
+
+// MERGE: full-resolution captures (every ray), port of merge_voxels at the
+// Space's voxel 0.0018 in GSNorm space. `raw` = Gaussians before the merge,
+// `gs` = after. For the resolution sweep (4 views, 60 degrees) `fixed` is the
+// count with a voxel fixed in metres at its 756 px size, which is what a
+// constant voxel in RDNorm space amounts to for one scene. The view sweep
+// keeps the camera span fixed and adds views inside it (756 px, 60 degrees).
+
+export type MergeRow = { x: number; raw: number; gs: number; fixed?: number }
+
+export const MERGE: Record<"object" | "room" | "street", { res: MergeRow[]; views: MergeRow[] }> = {
+  object: {
+    res: [
+      { x: 504, raw: 735358, gs: 362958, fixed: 499742 },
+      { x: 630, raw: 1148980, gs: 567038, fixed: 659576 },
+      { x: 756, raw: 1654532, gs: 815822, fixed: 815822 },
+      { x: 896, raw: 2324060, gs: 1146794, fixed: 995830 },
+      { x: 1022, raw: 3023666, gs: 1491112, fixed: 1166490 },
+    ],
+    views: [
+      { x: 1, raw: 413883, gs: 305959 },
+      { x: 2, raw: 827766, gs: 550608 },
+      { x: 4, raw: 1654532, gs: 815822 },
+      { x: 8, raw: 3307780, gs: 1228218 },
+      { x: 16, raw: 6615436, gs: 1893602 },
+    ],
+  },
+  room: {
+    res: [
+      { x: 504, raw: 1016064, gs: 750148, fixed: 1013024 },
+      { x: 630, raw: 1587600, gs: 1171612, fixed: 1354904 },
+      { x: 756, raw: 2286144, gs: 1687588, fixed: 1687588 },
+      { x: 896, raw: 3211264, gs: 2370068, fixed: 2092060 },
+      { x: 1022, raw: 4177936, gs: 3084140, fixed: 2476816 },
+    ],
+    views: [
+      { x: 1, raw: 571536, gs: 311526 },
+      { x: 2, raw: 1143072, gs: 623052 },
+      { x: 4, raw: 2286144, gs: 1687588 },
+      { x: 8, raw: 4572288, gs: 2501076 },
+      { x: 16, raw: 9144576, gs: 3486138 },
+    ],
+  },
+  street: {
+    res: [
+      { x: 504, raw: 947435, gs: 446400, fixed: 581371 },
+      { x: 630, raw: 1480356, gs: 700020, fixed: 799742 },
+      { x: 756, raw: 2131732, gs: 1004665, fixed: 1004665 },
+      { x: 896, raw: 2994358, gs: 1415711, fixed: 1231165 },
+      { x: 1022, raw: 3895702, gs: 1842980, fixed: 1427960 },
+    ],
+    views: [
+      { x: 1, raw: 532939, gs: 330512 },
+      { x: 2, raw: 1065903, gs: 581646 },
+      { x: 4, raw: 2131732, gs: 1004665 },
+      { x: 8, raw: 4263285, gs: 1733361 },
+      { x: 16, raw: 8526043, gs: 3035969 },
+    ],
+  },
+}
