@@ -4,6 +4,8 @@
 // more legible than hiding six of them behind a click. Zero JS, degrades to
 // a normal image grid for the .md/no-JS/agent path.
 
+import { mediaUrl } from "@/lib/media"
+
 type Method = { slug: string; label: string; ours?: boolean }
 type Scene = { slug: string; label: string; note: string }
 
@@ -33,7 +35,7 @@ export function CompareGrid({
               <figure key={m.slug} className="m-0 bg-background">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src={`${basePath}/${s.slug}/${m.slug}.${ext}`}
+                  src={mediaUrl(`${basePath}/${s.slug}/${m.slug}.${ext}`)}
                   alt={`${s.label} (${s.note}) — ${m.label}`}
                   className="aspect-square w-full object-cover"
                 />

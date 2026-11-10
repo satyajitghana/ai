@@ -46,8 +46,9 @@ digest. The skill still ships with the plugin and still works locally.
 ## Using it here
 
 Films for this site are built outside the Next.js tree and only their rendered
-output is committed, which is why `public/articles/<slug>/` holds an `.mp4`, a
-`.webm` and a poster but no `.html`. Render with:
+output ships, which is why `public/articles/<slug>/` holds an `.mp4`, a
+`.webm` and a poster but no `.html`. Those files are gitignored: `pnpm media:push`
+uploads them to R2 and records them in `lib/media-map.json`. Render with:
 
 ```bash
 SKILL=brand-crew/skills/hand-drawn-canvas-animation

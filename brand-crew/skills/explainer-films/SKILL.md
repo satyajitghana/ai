@@ -129,7 +129,9 @@ A `figure` scene puts the article's own evidence on screen: the paper's
 architecture diagram, the tool's interface, a clip of the thing running. The
 checker refuses anything the article does not itself show: `src` is the same
 path as the article's `<Figure src>` or `<Video src>` (a video's may omit the
-extension, as the article's does), committed under `public/`.
+extension, as the article's does), pushed to R2 (`lib/media-map.json`) or on
+disk under `public/`. A fresh clone has no media on disk: `pnpm media:pull
+/articles/<slug>` fetches the article's figures before a render.
 
 - **Pick what explains.** The method or architecture figure, the interface, a
   clip of output. A results chart only when it *is* the point, and then say so.

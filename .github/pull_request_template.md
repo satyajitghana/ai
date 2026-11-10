@@ -29,7 +29,7 @@
 
 - [ ] Frontmatter valid; slug is kebab-case; **date is correct**
 - [ ] Article pairs original interactive components **and** real figures from the source
-- [ ] Figures served locally under `public/…` (no hotlinking), with real alt text + attribution
+- [ ] Figures pushed to R2 with `pnpm media:push` and `lib/media-map.json` committed (no hotlinking), with real alt text + attribution
 - [ ] Dual-native: prose / static content carries every idea an interactive conveys
 - [ ] Voice checked against `brand-crew/brand/voice.md` (no hype, no banned phrases)
 

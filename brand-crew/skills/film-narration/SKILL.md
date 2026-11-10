@@ -126,6 +126,8 @@ Say in the `alt` that the film is narrated and captioned.
 
 ## Before committing
 
+- `pnpm media:push` — the `.mp4`, `.webm` and poster are gitignored and live in
+  R2; commit the `lib/media-map.json` it updates. The `.vtt` is committed.
 - `pnpm validate`, then **`pnpm build`** — validate does not do static
   generation and cannot catch a deploy failure.
 - Serve the build and check the `.vtt` returns `text/vtt`, and that the

@@ -34,7 +34,7 @@ TODAY is <TODAY>. Use `date: <TODAY>`.
    - Dual-native: the prose must carry every idea the widget shows.
    - Run `nice -n 19 npx eslint components/articles/<slug>`.
 3. **Real figures from the source**: at least the method diagram and the headline result, where they exist.
-   - Commit to `public/articles/<slug>/figN.png` (or `.jpg` for photos).
+   - Save to `public/articles/<slug>/figN.png` (or `.jpg` for photos), then `pnpm media:push` and commit `lib/media-map.json` (the image itself is gitignored; it lives in R2).
    - Flatten transparent images onto white and cap width at 1600px.
    - Embed with `<Figure src alt caption />`. Each caption ends with an attribution such as `(… paper, Figure N).` or `(… model card).`
    - Never hotlink.
@@ -73,6 +73,7 @@ All of these must pass:
 - `pnpm validate:placeholders`
 - `pnpm validate:links`
 - `pnpm validate:assets`
+- `pnpm validate:media`
 - `pnpm validate:films --storyboards --only=<slug>`
 - eslint on your component folder
 - `pnpm check:links:external --internal-only`
