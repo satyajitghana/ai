@@ -2,6 +2,7 @@
 title: "SplatAnything: one scale factor, chosen so neighbouring Gaussians sit one unit apart"
 description: "ZJU3DV's SplatAnything (InfiniSplat v3) is a feed-forward 3D Gaussian Splatting model on a frozen WorldMirror 2.0. Its one new idea is the coordinate scale its Gaussian head works in: instead of dividing the scene by its mean distance to the first camera, it divides by the median of depth over focal length, the gap between neighbouring per-pixel Gaussians. I read the paper, ported the release's normalization to numpy and ran it on six synthetic captures: under the usual radial normalization the median spacing varies 3.41x across them (the paper measures 4.5x on real data), doubling the image width halves it, and a 95-degree cubemap leaves a fixed scale predictor 38% of pixels with gaps. Under the new normalization all of that is pinned by construction. The paper's controlled ablation backs a 3-13% perceptual gain; the release is inference-only, its code ships under Tencent's territory-limited licence, and the 11.33 GB checkpoint carries optimizer state."
 date: 2026-11-09
+updated: 2026-11-10
 tags:
   - 3d
   - gaussian-splatting
@@ -18,7 +19,7 @@ rating:
   durability: 2
   reach: 1
   unique: 2
-  why: "Ports the release's spacing normalization to numpy and measures what it fixes and what it cannot; rechecks the ablation, the checkpoint and a split licence."
+  why: "Ports the release's normalization and merge to numpy, measures sky drift and output growth, and recomputes all 182 cells of the paper's main table."
 topic: spatial-3d
 kind: paper
 level: research
@@ -29,6 +30,8 @@ licence: mixed
 import { SpacingSpread } from "@/components/articles/splatanything/spacing-spread"
 import { SplatCoverage } from "@/components/articles/splatanything/splat-coverage"
 import { NormAblation } from "@/components/articles/splatanything/norm-ablation"
+import { SkyShift } from "@/components/articles/splatanything/sky-shift"
+import { MergeBudget } from "@/components/articles/splatanything/merge-budget"
 
 Ritian Yu's post on 9 November introduced SplatAnything as a model that turns
 "everyday objects and human subjects to expansive aerial scenes" into 3D
@@ -56,6 +59,17 @@ ran it on six synthetic captures. I did not run the model: it needs 16.4 GB of
 weights and, in practice, an NVIDIA GPU. Numbers are **measured** (I computed
 or read them myself), **reported** (the authors' figure) or **reasoned** (my
 arithmetic or argument on the other two).
+
+A day later I went back for a second pass, because the first left three
+questions open. What does the release do on a frame that is part sky, given
+that sky masking is off by default? What does the voxel merge do to the size
+of the output as resolution and view count change? And is the strange ETH3D
+column in the main table a typo? For that pass I wrote a second ray caster
+with four scene types, ported the rest of the inference-side code
+(`merge_voxels` in full, the pose-alignment factor, the filters) to numpy,
+and parsed every table in the arXiv HTML so that each comparison below could
+be recomputed rather than read off by eye. All of it ran on four shared CPU
+cores in under three minutes.
 
 ## Why Gaussian size depends on pixels, not metres
 
@@ -159,6 +173,141 @@ camera translations, using the median ratio of pairwise camera-centre
 distances. In RGB-only mode the cameras *are* the geometry model's, so that
 ratio is 1 (**reasoned** from the code path), and only the spacing factor acts.
 
+## The inference path, shape by shape
+
+The paper describes the model in two paragraphs and an equation. The release
+is short enough to read in full, and reading it answers several questions the
+paper leaves open. Here is one forward pass at the default 756 by 756 input,
+with shapes from the code (**measured** unless marked).
+
+**Preprocessing.** Each image is cropped symmetrically around its principal
+point, rescaled, and cropped again to the target size, with the intrinsics
+updated at each step. Sizes must be multiples of 14, the patch size, so 756
+gives a 54 by 54 grid of patches. Images go in as a tensor of shape
+$[B, S, 3, H, W]$ with values in 0 to 1.
+
+**Geometry.** The frozen WorldMirror 2.0 returns, per view, a depth map
+$[B, S, H, W]$, a 3 by 3 intrinsic matrix and a 4 by 4 camera-to-world pose,
+in its own radial-normalized frame. Its encoder also returns a list of token
+tensors that the Gaussian side reuses.
+
+**Alignment, then GSNorm.** When you supply camera poses, the predicted depth
+has to be brought into the scale of your cameras first. The release does this
+with the median, over every pair of cameras $i, j$, of
+
+$$
+a = \operatorname*{median}_{i<j} \frac{\lVert \mathbf{C}^{\text{given}}_i - \mathbf{C}^{\text{given}}_j \rVert}{\lVert \mathbf{C}^{\text{pred}}_i - \mathbf{C}^{\text{pred}}_j \rVert}
+$$
+
+where $\mathbf{C}$ are camera centres; depth is multiplied by $a$. Pairs with
+a zero baseline in either frame are skipped, and if none are left (one view,
+or a cubemap whose faces share a centre) $a$ is 1. That guard is the code's
+answer to the CDNorm failure in Table 12: it never divides by a baseline that
+does not exist. The paper says the same alignment is used in training to
+render against ground-truth target cameras. Then comes GSNorm, as above: one
+factor $s$ per scene, depths and camera translations multiplied by it.
+
+**Features.** The Gaussian backbone (a fine-tuned copy of the geometry
+transformer) yields four token layers of 2,048 channels on the 54 by 54 grid.
+`GSFeatHead` is a DPT-style decoder: four 1 by 1 projections to 256, 512,
+1,024 and 1,024 channels, resized to 216, 108, 54 and 27 cells a side (a 4x
+and a 2x transposed convolution, an identity, a stride-2 convolution), fused
+coarse to fine by four refinement blocks at 256 channels, reduced to 128
+channels and upsampled bilinearly to the full 756 by 756. A 7 by 7
+convolution from the RGB image to 128 channels is added on top, so every
+pixel's feature carries its own colour at full resolution, not only what the
+14-pixel patches saw.
+
+**Decoding.** `DPTDecoder` turns that $[B \cdot S, 128, H, W]$ map into 12
+channels with a 3 by 3 convolution to 256, a ReLU and a 1 by 1 convolution,
+eight views at a time to bound memory. The channels split 4, 3, 1, 3, 1:
+
+- rotation, a quaternion divided by its norm;
+- scale, $\min(e^{\hat{s}}, 0.3)$ per axis, in GSNorm units;
+- opacity, $\sigma(\hat{o})$;
+- colour, as a residual on the input pixel's own colour, stored as the
+  degree-0 spherical-harmonic coefficient $(c - 0.5)/0.2821 + \Delta$;
+- merge weight, $\sigma(\hat{w})$.
+
+Centres are not predicted: each is the pixel back-projected with its
+normalized depth. At 756 by 756 that is 571,536 Gaussians per view
+(**reasoned**, $756^2$) before anything is filtered.
+
+**Filtering.** With the shipped config, every scene loses the 0.5% of
+Gaussians whose largest scale axis is biggest (`max_scale_pct: 99.5`, applied
+as a rank cut, so it removes 0.5% of every scene whether or not anything is
+wrong with them). Sky masking is off unless you pass `--sky_seg`, which runs a
+separate 320 by 320 ONNX segmenter and drops sky pixels both from the GSNorm
+statistic and from the output; a view it calls more than 95% sky is left
+unmasked on the theory that the segmenter is wrong.
+
+**Merging and export.** The survivors are averaged per voxel, as described
+below, and written as a PLY with Gaussians under opacity 0.05 removed.
+
+One thing in that path disagrees with the paper. The paper says "the network
+predicts opacity" and that opacity "is activated using the sigmoid function"
+(**reported**). The release computes that sigmoid and then never uses it. In
+`merge_voxels`, the value written to the opacity field is the merge weight:
+for a voxel holding Gaussians with weights $w_k$, opacity is
+$\sum_k w_k^2 / \sum_k w_k$, and for a voxel with a single Gaussian that is
+just its own $w$ (**measured**, the line is
+`values = weights if name == 'opacities' else scene[name]`). The 0.05 export
+threshold is therefore a threshold on merge weights. A code comment calls this
+"the trained configuration's rule", so the checkpoint was presumably trained
+with it and the head has learned to put opacity into $w$; the fifth output
+channel group is dead weight at inference (**reasoned**). The rule has a
+consequence worth knowing if you edit the merge: it averages opacity instead
+of compositing it. Four Gaussians of opacity 0.5 in one voxel export as one
+Gaussian of opacity 0.5, where rendering the four unmerged would have
+accumulated about 0.94 along a ray through all of them (**reasoned**,
+$1 - 0.5^4$). Swap in a compositing rule and the model's surfaces will come
+out denser than it was trained for.
+
+## How it is trained
+
+<Figure
+  src="/articles/splatanything/fig9.jpg"
+  alt="Three columns of 3D camera plots with strips of input and target frames under each. Interpolation Views: blue input cameras along a trajectory with red target cameras between them. Extrapolation Views (Off-Trajectory): red target cameras placed beyond the ends of the blue trajectory. Extrapolation Views (Zoom-In): red targets far from the blue cluster, looking closer at the scene. Top row is an outdoor street-art scene, bottom row a small bathroom."
+  caption="The three target-view modes mixed during training: targets between the inputs, off the end of the trajectory, and zoomed in. The benchmark tests the second kind. (paper, Figure 9)."
+/>
+
+None of the training code is released, so this section is the paper's
+account (**reported** throughout, my arithmetic marked).
+
+- **Schedule.** 20,000 iterations on 64 NVIDIA H20 GPUs, a 500-step warm-up,
+  learning rate $5 \times 10^{-6}$ for the Gaussian backbone and
+  $2 \times 10^{-5}$ for the head, which is trained from scratch. The
+  geometry model is frozen throughout.
+- **Inputs.** 4 to 32 source views per sample, with the input resolution
+  varied from 504 to 1024. That resolution range is exactly why GSNorm's
+  focal-length term matters during training, not only at test time: under
+  RDNorm the same scene at the two ends of that range asks for scale targets
+  about two times apart (**reasoned**, $1024/504 = 2.03$).
+- **Loss.** $\mathcal{L} = \lambda_{\text{MSE}}\,\mathcal{L}_{\text{MSE}} + \lambda_{\text{LPIPS}}\,\mathcal{L}_{\text{LPIPS}}$
+  with both weights 1, on target views rendered from ground-truth cameras
+  after the baseline alignment above. There is no depth loss, which is
+  consistent with the centres being fixed to the frozen geometry.
+- **Data.** 14 datasets, 22,659 scenes in all (**reasoned**, summed from
+  Table 4), dominated by OmniWorld (10,464) and OmniObject3D (5,914), with
+  MatrixCity contributing 8 city scenes and UnrealStereo4K 18.
+- **View sampling.** Source views come from a mix of trajectory patterns
+  (Figure 8 in the paper), and targets from the three modes in Figure 9. The
+  ablation without this mix, sampling views at random and splitting them,
+  costs 1.3% to 9.0% LPIPS depending on view count (**reasoned**, from
+  Table 13).
+
+Table 13 makes a comparison possible that the paper does not draw. At four
+input views, training on Hypersim alone, 364 of the 22,659 scenes or 1.6%,
+costs 2.0% LPIPS (0.2499 against 0.2450); predicting centre offsets instead
+of fixing them costs 5.4%; freezing the Gaussian backbone costs 2.1%
+(**reasoned**, from the reported values). Swapping GSNorm for RDNorm, in
+Table 12, costs 11.9% (0.278 against 0.245). The paper calls fixed centres
+"the largest and most consistent gain" among its Table 13 choices, which is
+true of that table. Across both tables, the normalization is the largest
+effect the paper measures, about six times the effect of 62 times more
+training scenes. Those numbers come from two tables run separately, so read
+the ratio as an order of magnitude.
+
 ## What the normalization does on six scenes
 
 To see how much RDNorm actually leaves on the table, I wrote a ray caster in
@@ -239,6 +388,51 @@ remainder is within-scene, and a scale head still has to learn it from
 content. GSNorm makes that problem the same problem everywhere. It does not
 solve it.
 
+## Sky inside the median
+
+GSNorm's statistic is a median over "valid" pixels, and at inference the
+release decides validity with one test: depth above zero and a finite
+spacing (**measured**). A geometry model gives sky a large, finite depth, so
+unless you pass `--sky_seg`, every sky pixel is a valid sample. The training
+code is not released, so I cannot say what the statistic saw in training; the
+datasets in Table 4 come with depth maps in which sky is usually invalid, and
+the paper's Eq. 10 is written over valid pixels only (**reasoned**). The
+question is how far the default drifts from the masked version, and the toy
+answers it directly.
+
+I built a street canyon (15 to 22 m walls, a 300 m street, sky above and
+beyond) filmed from 1.6 m, and an aerial pass at 120 m over a 5 km plain
+with 160 box buildings, then tilted the cameras up step by step. Eight views
+of 756 px at 60 degrees each, every fourth ray. For each tilt I computed the
+GSNorm factor twice, once with sky masked out of the median as `--sky_seg`
+does, once with it left in as the default does. The depth I give the sky does
+not matter as long as it is beyond the median, which is the point of a
+median.
+
+<SkyShift />
+
+The street, looking straight down the road, is 9.5% sky and the default
+factor is off by 1.08x; tilted up 25 degrees it is 27.7% sky and off by 1.29x
+(**measured**). The aerial pass is worse because its horizon carries more of
+the frame: at 30 degrees down it is 4.3% sky and off by 1.04x, at 15 degrees
+30.3% and 1.48x, at 10 degrees 38.2% and 2.04x, at 5 degrees 45.7% and 3.51x
+(**measured**). Past half the frame the median is itself a sky value and the
+whole scene's scale is whatever the geometry model decided the sky's depth
+was. The curve is not smooth everywhere: the street at 10 degrees down is
+only 4.6% sky but off by 1.14x, because that tilt puts the median in a sparse
+stretch of the depth histogram between ground and walls, where a small
+shift in rank is a large shift in value (**reasoned**, from the toy's depth
+distribution).
+
+What a 2x error does downstream is the problem GSNorm exists to remove. The
+real surfaces of the 10-degree aerial pass reach the Gaussian head at 0.49
+of the spacing it is used to, and the voxel merge, set at 1.36 target
+spacings, now spans 2.78 of their spacings and averages away more detail
+(**measured** and **reasoned** from it). The fix is one flag, and the
+release's README offers it; the default leaves it off. For aerial and street
+captures with a visible horizon I would turn it on, for indoor scenes it
+makes no difference (**reasoned**).
+
 ## The architecture around it
 
 <Figure
@@ -292,9 +486,47 @@ The two voxel sizes are a small loose end. The GitHub repository's
 fine-tuned at that voxel; the Space's config says `0.0018` (**measured**). The
 Space is what the post links to.
 
-Training is reported as 20,000 iterations on 64 NVIDIA H20 GPUs, 4 to 32
-input views, MSE plus LPIPS loss with equal weights, on 14 datasets from
-Hypersim and OmniObject3D to MatrixCity and ARKitScenes (**reported**).
+## What the merge keeps, by resolution and by view count
+
+I ran the full merge port at full resolution on three of the new toy scenes
+(an object on a ground plane, a 6 by 8 m room filmed from a circle, a street
+canyon), sweeping input width from 504 to 1022 px at four views, and then
+view count from 1 to 16 at 756 px with the cameras spread over the same span,
+as the paper's benchmark does. For the resolution sweep I also counted what a
+voxel fixed in metres would keep, sized to match at 756 px: that is what a
+constant voxel in a radial-normalized space amounts to for one scene, and
+roughly what a merge in RDNorm space would do.
+
+<MergeBudget />
+
+Three results (all **measured**):
+
+- **The merge keeps a fixed share at any resolution.** The room keeps 73.8%
+  of its Gaussians at 504 px and 73.8% at 1022 px; the object 49.4% and
+  49.3%; the street 47.1% and 47.3%. The output therefore grows with pixel
+  count: 4.11 times more Gaussians for the room at 1022 than at 504 px, the
+  same 4.11 as the pixel ratio. A fixed-metre voxel caps that growth at 2.44
+  times for the room.
+- **Extra views are mostly redundant, as intended.** Going from 1 to 16 views
+  in a fixed span multiplies the raw count by 16 and the merged count by 6.2
+  (object), 9.2 (street) and 11.2 (room). The room grows most because its
+  views look in different directions and overlap least.
+- **The factor depends on which views go in.** The room keeps 54.5% with two
+  views and 73.8% with four. The four-view set sees farther walls, which
+  raises its median spacing, lowers the factor, and makes each fixed voxel
+  hold fewer neighbours. Normalizing each of 16 room views on its own gives
+  factors from 0.57 to 1.37 times the factor of all 16 together, a 2.4x
+  spread; for the object and the street it is 1.02x. GSNorm normalizes the
+  input set, not the scene, so the same room comes out at different scales
+  depending on what was photographed.
+
+The practical reading is about file size. Because GSNorm ties the voxel to
+pixel spacing, raising the input resolution does not buy you a coarser merge
+for free: at 1022 by 1022 and 32 views the release can emit tens of millions
+of Gaussians before the merge removes its share (**reasoned**, $32 \times 1022^2 = 33.4$
+million raw). If you need a smaller PLY, the knob is `gs_voxel_size` in the
+config, at the price of running the checkpoint off the voxel it was
+fine-tuned at.
 
 ## Checking the numbers
 
@@ -322,13 +554,18 @@ more than the winner:
   consistent with the toy's 3.56x spread being no smaller than RDNorm's.
 
 Against other methods, Table 1 averages each method over 4 to 64 input
-views on seven datasets with extrapolated target views. In the RGB-only
+views on seven datasets with extrapolated target views. I parsed all fourteen
+tables in the arXiv HTML and recomputed Table 1 from the per-view-count
+Tables 5 to 9: all 182 cells (13 methods, 7 datasets, 2 metrics) match the
+mean of the per-view values to the third decimal (**measured**). One detail
+the caption leaves out: Table 9 has no ETH3D or DTU numbers at 64 views, so
+those two columns of Table 1 are averages over 4 to 32 views, not 4 to 64. In the RGB-only
 group, SplatAnything has the best number in 13 of 14 dataset-metric cells;
 with poses supplied, 12 of 14 (**reasoned**, counted from the table). The
 fairest comparison is Mirror2-GS, the same WorldMirror 2.0 with its own
 Gaussian head in its native radial-normalized space: SplatAnything's LPIPS is lower on all seven
 datasets, by 6.8% on ScanNet to 30.0% on ETH3D, 17.9% on average
-(**reasoned**). That gap mixes GSNorm with a fine-tuned backbone, 16 training
+(**reasoned**). That gap mixes GSNorm with a fine-tuned backbone, 14 training
 datasets and a new view-sampling scheme, so only the ablation isolates the
 normalization.
 
@@ -340,16 +577,39 @@ Three caveats from the tables themselves:
   LPIPS and DISTS, following SHARP, on the argument that PSNR rewards blur.
   That is a fair argument and also the one every method that loses on PSNR
   makes.
-- **The ETH3D LPIPS column looks wrong.** Every method's ETH3D LPIPS in Table
-  1 is between 0.027 and 0.154 while its ETH3D DISTS is between 0.133 and
-  0.445, up to eight times apart; on every other dataset the two metrics stay
-  within a factor of two of each other (**reported**). It may be a different scale or a column slip. I cannot tell
-  from the paper, and the 30.0% gain above should be read with that in mind.
+- **The ETH3D LPIPS column is not a typo, but it does not measure what its
+  neighbours do.** Every method's ETH3D LPIPS in Table 1 is between 0.027 and
+  0.154 while its ETH3D DISTS is between 0.133 and 0.445 (**reported**). My
+  first guess was a column slip in Table 1. It is not: the same low values
+  appear in each per-view table (SplatAnything's ETH3D LPIPS is 0.047, 0.040,
+  0.037 and 0.071 at 4, 8, 16 and 32 views, **reported**), and Table 1
+  reproduces from them. What does stand out is agreement between the two
+  metrics. Across the 13 methods, the Spearman rank correlation between DISTS
+  and LPIPS is 0.62 to 0.98 on the other six datasets and 0.04 on ETH3D
+  (**measured**, from Table 1). On ETH3D the two perceptual metrics rank the
+  methods essentially independently. The ratio LPIPS over DISTS has a median
+  of 0.69 to 1.59 elsewhere and 0.28 on ETH3D. Whatever the cause (image
+  size, the high-resolution DSLR frames, a preprocessing step in the
+  evaluation), the ETH3D LPIPS column carries little ranking signal, and the
+  30.0% gain above is the number I would trust least. On that column
+  SplatAnything is third among pose-free methods, behind QuerySplat (0.031)
+  and YoNoSplat (0.033); it is the one cell of fourteen it does not win.
+- **Training on LPIPS does not explain the margin.** The model is trained
+  with an LPIPS loss and then scored on LPIPS, which could flatter it against
+  methods trained otherwise. DISTS is not in its loss. Against Mirror2-GS, the
+  average gain is 18.5% on DISTS and 17.9% on LPIPS (**reasoned**, from Table
+  1), so the held-out metric shows the same gap.
 - **It is slower than its own base.** On one H20 at 448 by 896, the median
   forward pass is 411 ms at 4 views and 11,037 ms at 64, against Mirror2-GS's
   246 ms and 6,060 ms (**reported**, Table 11), about 1.7-1.8 times slower
   (**reasoned**). The second backbone is the likely cost. "Few seconds" holds
   up to about 32 views (3,991 ms).
+
+<Figure
+  src="/articles/splatanything/fig5.jpg"
+  alt="A grid of novel-view renders, eight rows and six columns labelled Ours, Mirror2-GS, DA3-GS, ReSplat, tttLRM and QuerySplat. Rows show a yellow parking-garage sign reading A 70, a stack of timber over drain covers, the front of a white van with red lettering, two suburban streets with parked cars, a yellow toy bulldozer and a close-up of fruit. The first column is sharpest; the others show increasing blur, smearing and ghosting, with tttLRM and QuerySplat the most degraded."
+  caption="The paper's qualitative comparison on extrapolated views with multi-view input. Mirror2-GS is the closest, as the tables say; the others smear text and fine texture. These are the authors' chosen examples. (paper, Figure 5)."
+/>
 
 <Figure
   src="/articles/splatanything/fig7.jpg"
@@ -397,6 +657,43 @@ most of my disk budget, so I did not run them. My numpy port reproduces
 `normalize_gaussian_spacing` for RGB-only mode and the voxel-count part of
 `merge_voxels`; on every toy scene the median spacing after normalization
 comes out at 0.0013227513, the target, to the tenth digit (**measured**).
+
+## What I could not check
+
+The list of things the second pass did not settle is as long as the list of
+things it did.
+
+- **Nothing here ran the model.** Every measurement above is either the
+  paper's own number or my port of the release's inference code run on
+  ray-cast depth. The ports are faithful line by line for the RGB-only path
+  (the spacing statistic reproduces the target to ten digits, the merge uses
+  the same flattened voxel key and the same weighted means), but a ray caster
+  gives perfect depth, and WorldMirror 2.0 does not.
+- **The training-time statistic.** Whether training computed the GSNorm
+  median over sky pixels or not decides whether the default inference setting
+  matches training. The code that would answer it is not released.
+- **What the sky depth is.** My sky sweep only needs sky to be beyond the
+  median. Past 50% sky the result depends on the depth the geometry model
+  actually assigns, which needs the model.
+- **The voxel key.** The merge flattens 3D voxel indices into one 64-bit
+  integer. I checked whether far points could overflow it: the product of the
+  grid's three side lengths passes $2^{63}$ once points sit about 2,000 to
+  2,500 times the median depth from the scene, and the key then wraps. In
+  400,000 points with a shell out to 10,000 times the median depth, the
+  wrapped keys produced zero collisions (**measured**), so the wrap behaves
+  like a hash and is harmless in practice.
+- **The ablation's variance.** Tables 12 and 13 are single runs with no
+  error bars. Gains of 2% (data scaling) are within what a second seed could
+  move; the 12% of GSNorm over RDNorm at four views is much less likely to be.
+- **The benchmark.** The view selection and evaluation split are described,
+  not shipped, so no number in Tables 1 to 13 can be rerun from the release.
+
+Where it sits against prior work: InfiniSplat v2 on this site
+([InfiniSplat 2](/articles/infinisplat-2)) is the direct predecessor and
+shares the per-pixel design; AnySplat, whose voxel merge this release
+inherits, normalizes in the geometry model's radial space, which is the
+RDNorm row of the ablation. The paper's contribution relative to both is the
+normalization and the training mix around it, not a new architecture.
 
 ## Where it fits
 
