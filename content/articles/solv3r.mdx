@@ -1,0 +1,438 @@
+---
+title: "Solv3R: a looped Transformer that keeps solving a 3D scene"
+description: "Solv3R (UBC, SFU, Wayve, Sony; arXiv 2611.02857) fine-tunes DéjàView's looped geometry Transformer so its one shared block has no step index: a solved reconstruction stays solved under more calls, a perturbed one comes back, and new views join a running solve instead of restarting it. I read the paper, the released code and the 469 MB checkpoint header. The checkpoint holds 117.36M fp32 parameters of which 14.78M were trained; its fixed state RMS is 0.8523, the paper's 0.85. The paper's 2.86, 45.8 and 97.6 MB-per-view cache sizes rebuild exactly from token counts and layer counts, which is where the 16x over DéjàView comes from. The permission layer refused to run the released model, so I timed a shape-matched block on CPU instead (1.94 s for an 8-view call, 68.7 s for 64) and built a linear toy for the solver properties. The 8-views-at-a-time mode from the authors' posts is not in the release yet."
+date: 2026-11-09
+tags:
+  - 3d
+  - slam
+  - looped-transformers
+  - vision-transformers
+  - point-cloud
+  - benchmarks
+draft: false
+cover: /articles/solv3r/fig4.png
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Solv3R's stationary looped block explained, its checkpoint and cache sizes checked from shapes, and its CPU cost timed on a shape-matched block."
+topic: spatial-3d
+kind: paper
+level: research
+runsOn: consumer-gpu
+licence: mixed
+---
+
+import { SolverRing } from "@/components/articles/solv3r/solver-ring"
+import { BlockCost } from "@/components/articles/solv3r/block-cost"
+import { KvLedger } from "@/components/articles/solv3r/kv-ledger"
+
+Every feed-forward reconstruction model I use at work has the same awkward
+moment. You reconstruct 40 photos, someone walks back in with 12 more, and the
+only honest option is to run all 52 again. Classical structure-from-motion
+never had that problem: it registers the new images against the map it already
+has and runs a few more rounds of bundle adjustment. The map is a *state*, and
+the optimiser picks up from it.
+
+[Solv3R](https://arxiv.org/abs/2611.02857) (Jeong-gi Kwak, Andrea
+Tagliasacchi, Sho Kagami, Yuki Ono, Kwang Moo Yi; UBC, SFU, Wayve, Toronto,
+Sony) asks whether a geometric foundation model can behave like that
+optimiser. Its answer is a looped Transformer whose one shared block is trained
+to act as the iteration of a solver: the same update every call, no idea which
+call it is on, and a solved state that further calls leave alone. Tagliasacchi
+announced it as turning "a looped Transformer into a reusable learned geometric
+solver"; Kwang Moo Yi followed with the line that made me look closer: "Reconstruct
+full scenes by just solving 8 views at a time. &lt;1.5GB VRAM is required to solve
+128 photos. Basically, block coordinate descent." Code and weights landed on
+5 November.
+
+<Callout type="note">
+**Labels.** *Reported* is the authors' number, copied, not re-run.
+*Measured* is something I computed from the released code, the checkpoint
+file or my own runs. *Reasoned* is my arithmetic on their numbers. **What I
+ran:** range requests against the 469 MB checkpoint (header, gate vectors and
+the RMS target), a shape-matched re-implementation of one solver call on CPU
+(my code, random weights), and the linear toy in this article. **What I did
+not run:** the released model. The sandbox's permission layer refused to
+execute the cloned repository's code, so no image of mine has been
+reconstructed by Solv3R, and every accuracy number below is reported.
+</Callout>
+
+## Why a feed-forward model cannot just continue
+
+VGGT, π³ and Depth Anything 3 push a set of image tokens through a stack of
+different layers. Layer 7's output is only meaningful as layer 8's input. The
+tokens at depth 12 are "a scene, twelve layers into being solved", and there
+is no layer that accepts a mix of tokens at depth 24 (the old views, finished)
+and depth 0 (the new views, just encoded). So adding views means restarting.
+
+Streaming models such as CUT3R dodge this with a recurrent memory, but they
+only take frames in order. A pile of extra photos from the other side of the
+building is not a video.
+
+DéjàView, the model Solv3R starts from, already shares one Transformer block
+across 16 refinement steps. Sharing weights looks like it should fix the depth
+problem. The paper's point is that it does not, because DéjàView conditions
+each update on the step index:
+
+$$
+\mathbf{z}^{k+1} = F_\theta(\mathbf{z}^{k}; \tau_k)
+$$
+
+The block applies a different transformation at step 3 than at step 14, so a
+state is still tied to the step that produced it. Run it past step 16 and
+it is outside anything it was trained on; hand it views at mixed steps and no
+single $\tau_k$ fits them all. Figure 8 shows what that costs: DéjàView's
+error on the original views climbs again once new views join, while Solv3R's
+keeps falling.
+
+## The solver it imitates: Jacobi
+
+The paper's running example is the oldest iterative solver there is. To solve
+$A\mathbf{x} = \mathbf{b}$, Jacobi applies the same update every iteration,
+$\mathbf{x}^{k+1} = \Phi(\mathbf{x}^{k}; A, \mathbf{b})$, and $\Phi$ does not
+know $k$. When it converges you get three properties for free:
+
+- **P1, stability.** The solution is a fixed point. More calls leave it alone.
+- **P2, correction.** Knock the state off the solution and the same calls bring
+  it back.
+- **P3, continuation.** Add unknowns and equations, start the old unknowns at
+  their solved values and the new ones at a guess, and keep iterating. Values
+  that have had different numbers of iterations are updated together, because
+  $\Phi$ never asks how a value got there.
+
+Map that onto reconstruction: the images are the constraints, each view's token
+state is the current estimate, the decoded cameras and depths are the solution.
+A learned multi-view solver should have all three properties. DéjàView has none
+of them by construction.
+
+## What Solv3R changes
+
+The update becomes
+
+$$
+\mathbf{z}^{k+1} = \mathcal{T}_\theta(\mathbf{z}^{k}; \mathbf{z}^{0})
+$$
+
+with one Transformer block (frame attention within each view, then global
+attention across all of them) shared by every call. Three changes to DéjàView
+make it stationary and keep it from drifting:
+
+1. **Constant gates.** DéjàView scales each sub-block's channels with gates
+   computed from $\tau_k$. Solv3R replaces them with learned constant vectors,
+   initialised to the average of DéjàView's gates over its 16 steps.
+2. **Initial-state injection.** The encoded images $\mathbf{z}^0$ are added
+   back at every call through a zero-initialised projection, the way Jacobi
+   reads $A$ and $\mathbf{b}$ every iteration. Without it, an error in the state
+   has nothing to be corrected against.
+3. **One RMS rescale.** After each call the whole state is scaled by a single
+   factor to a fixed root-mean-square norm $\rho$, so its magnitude cannot
+   creep over 64 calls. One factor for all views keeps their relative scale.
+
+<Figure
+  src="/articles/solv3r/fig4.png"
+  alt="Left, a single transformer block of frame attention, global attention and state normalisation updates the state z^k to z^(k+1), with the initial state z^0 from the encoded images fed into every call. Right, the same operator applied across solver calls, with new views joining at any stage and cameras, depth maps and ray maps decoded from the state."
+  caption="One stationary block, looped. New views join the state at any call and are updated with the old ones; cameras, depths and ray maps can be decoded after any call (paper, Figure 4)."
+/>
+
+The released `solv3r/network/block.py` is short enough to read in one sitting,
+and it is exactly this:
+
+```python
+# solv3r/network/block.py (abridged)
+def _frame(self, z, x0, pos):
+    return self.frame_attn(z + self.inj(self.inj_norm(x0)), self.g_frame, pos)
+
+def forward(self, z, x0, pos):
+    S, P, C = z.shape
+    y = self._frame(z, x0, pos)                                   # within each view
+    y = self.global_attn(y.reshape(1, S * P, C), self.g_global)   # across all views
+    rms = y.float().pow(2).mean((1, 2), keepdim=True).clamp_min(1e-12).sqrt()
+    return self._rescale(y, rms).reshape(S, P, C)                 # one scale for the whole state
+```
+
+No argument carries a step. `model.solve(ctx, calls=16)` is a plain `for`
+loop over that call, and `model.add_views(z, ctx, images)` concatenates the
+new views' encodings onto the solved state, which is P3 as an API.
+
+### What the checkpoint says
+
+I read the safetensors header of `jgkwak/solv3r` with HTTP range requests and
+pulled the few small tensors that pin the design down (measured):
+
+| Part | Parameters | Trained in Solv3R? |
+|---|---:|---|
+| DINOv2 ViT-B/14 encoder | 86.58M | frozen, from DéjàView |
+| Solver block (frame + global) | 14.18M | yes |
+| Injection projection $W$ | 0.59M | yes |
+| Depth, ray and camera heads | 16.00M | frozen |
+| Gates, tokens, RMS target | 0.01M | gates yes |
+| **Total** | **117.36M** | **14.78M trained (12.6%)** |
+
+All 117,360,839 values are fp32, which is the 469,484,684-byte file and the
+"only 500mb weights" one early user on X was pleased about. The stored RMS
+target is 0.8523, the paper's $\rho \approx 0.85$. The constant gates are not
+near-identity: their per-sub-block means sit between 0.68 and 0.87 with
+individual channels from -1.08 to 2.48, so averaging DéjàView's schedule was a
+starting point that training moved a long way from. The paper is explicit that
+only the shared block, the gates and $W$ are trained; the header agrees, with
+the encoder and heads carrying DéjàView's names (`base.patch_embed_encoder`,
+`base.depth_decoder`) unchanged.
+
+## How you train an operator to be a solver
+
+Stationarity is a property of the architecture. Convergence is not; it has to
+be trained. The recipe (reported) is built to put the block in front of states
+it would meet in use:
+
+- Each training window has 4 to 64 views. From $\mathbf{z}^0$ the block runs a
+  random 16 to 40 calls **without gradients**, then 8 calls with gradients,
+  supervised only at the last one. Varying where supervision lands trains the
+  block to give good geometry anywhere from call 24 to call 48, and to keep it
+  there (P1).
+- With probability 0.15 the state is perturbed before the gradient calls:
+  Gaussian noise of up to half the state's RMS, or a reset of up to half the
+  views back to $\mathbf{z}^0$. Noise teaches correction (P2); partial resets
+  are what adding views looks like (P3).
+- A distillation term pulls predictions towards DéjàView's 16-step output to
+  keep its priors, with weight 0.5.
+
+About 90k iterations in two stages, a week on 8 H100s. The paper compares it
+to denoising training and to Diffusion Forcing, and the comparison fits: the
+block learns from corrupted states it would otherwise never visit.
+
+## A solver you can poke
+
+To see what P1 to P3 buy without a GPU, here is the paper's Jacobi analogy made
+concrete. Forty cameras sit on a ring; any two within eight places of each
+other share a noisy relative-offset measurement; camera 0 is the reference and
+fixes the world frame, as Solv3R's reference camera token does for view 0. One
+call is one Jacobi sweep. The stopping line is the paper's rule: stop when the
+relative state update $r^k = \lVert \mathbf{z}^{k+1} - \mathbf{z}^k \rVert / \lVert \mathbf{z}^k \rVert$
+falls below $\gamma = 0.02$.
+
+<SolverRing />
+
+Running the same code under Node gives the numbers (measured, on the toy):
+
+- **P1.** With 20 views, error falls from 0.524 to 0.0145 by call 16 and
+  0.0047 by call 200, and it never climbs back. Calling a solved ring changes
+  nothing.
+- **P2.** A perturbation that puts the error at 0.282 is undone by the same
+  calls. The relative update drops under $\gamma$ after 3 calls.
+- **P3.** Solve 20 views, add 20 more from their starting guesses, and the 40
+  reach 1.1x their error floor in 14 calls; restarting all 40 from scratch takes
+  18.
+- **The stopping rule is a heuristic.** In the toy, $r^k < 0.02$ fires at call
+  4, when the error is still more than four times the floor: a slow, smooth
+  error mode moves the state very little per call. The paper chose $\gamma$ by
+  measuring it on real windows (below), which is the only way to choose it.
+
+The toy is linear and its properties are guaranteed by algebra. Solv3R's are
+trained into a nonlinear block, so they hold where training put them, and the
+paper's evidence is empirical.
+
+## The evidence that the block behaves like a solver
+
+All reported, from the paper's Section 4 and appendix:
+
+- **Stopping.** Over 148 reconstruction windows, 144 meet $r^k < 0.02$ within
+  64 calls, after 13 to 32 calls (17.5 on average), and 143 of those 144 have
+  camera rotation error under 5°. Harder windows take more calls.
+- **Stability past the schedule.** DéjàView, trained for 16 steps, loses
+  accuracy when run longer. Solv3R's accuracy holds to call 64. The appendix
+  checks the inside too: the three global-attention heads that best find
+  cross-view correspondences at call 16 still do at call 64, with an attention
+  map similarity above 0.96; DéjàView's same heads fall below 3% correspondence
+  accuracy by call 64.
+- **Mixed progress.** Initialise each view from a random stage between 0 and 16
+  calls and independent trials agree on camera rotations to 0.08° on average.
+- **Continuation beats restarting.** Inserting 64 views 8 at a time, continuing
+  with 8 calls per insertion reaches an AUC@10 of 92.2; re-solving from scratch
+  with 8 calls reaches 84.8 and needs 16 calls per insertion to reach 91.8.
+  Insertion order (capture, reverse, random) moves the result by at most about
+  two points.
+
+<Figure
+  src="/articles/solv3r/fig8.png"
+  alt="Panel a shows a building reconstructed from four views, then from four plus twelve views, by DéjàView (with inconsistent red cameras) and by Solv3R (consistent green cameras). Panels b and c plot median rotation error on a log axis against calls since the first view for the original and the new views; Solv3R's curves fall below one degree and stay, DéjàView's rise after the new views arrive."
+  caption="Four views solved for eight calls, then twelve more join. Solv3R keeps improving the original views and brings the new ones in; DéjàView, continued or restarted, does not hold a consistent reconstruction. Median over 96 windows (paper, Figure 8)."
+/>
+
+## Does accuracy suffer?
+
+Not measurably against its own parent, which is the bar that matters for a
+fine-tune. The offline benchmark (reported, camera pose AUC@3, higher is better;
+TFLOPs for 24 views):
+
+| Model | Params | TFLOPs | DTU | ETH3D | 7-Scenes | ScanNet++ | nuScenes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| VGGT | 1.26B | 190.0 | 96.5 | 35.4 | 11.1 | 15.1 | 39.2 |
+| VGGT-Ω | 1.14B | 99.8 | 77.4 | 64.1 | 21.3 | 29.9 | 42.4 |
+| π³ | 959M | 153.8 | 70.2 | 43.2 | 11.3 | 76.5 | 24.8 |
+| DA3-L | 411M | 71.4 | 79.4 | 42.0 | 11.4 | 7.0 | 10.9 |
+| DéjàView, 16 steps | 117M | 75.9 | 83.3 | 66.0 | 13.9 | 79.5 | 43.4 |
+| Solv3R, 16 calls | 117M | 76.5 | 84.5 | 65.4 | 13.8 | 80.7 | 41.5 |
+| Solv3R, adaptive | 117M | 91.3 | 85.5 | 70.4 | 14.2 | 81.2 | 41.5 |
+
+Read it plainly. At 16 calls Solv3R is DéjàView within a point or two either
+way, which is what a fine-tune that adds properties without losing accuracy
+looks like. The adaptive stop costs 3 to 4 extra calls on average and buys
+the best ETH3D and ScanNet++ numbers in the table. It does not win everywhere: VGGT owns
+DTU at AUC@3 and VGGT-Ω owns 7-Scenes. For a model a tenth of VGGT's size,
+that is a strong showing, but "state of the art" would overstate it. On two
+large aerial scenes from Mill19, with 96 images in one window, Solv3R has the
+best AUC@3 of the six methods (48.9 on Rubble, 22.5 on Building).
+
+## One cache, every call
+
+The property I find most useful is a side effect of P1. If a map view is
+solved and held fixed, its keys and values in the global attention depend only
+on its own state. In a stationary block that state does not change, and
+neither does the block, so one cache is valid at every call. DéjàView needs a
+cache per step, and a stacked model like VGGT needs one per global layer.
+
+That claim can be checked with nothing but shapes. A view's tokens are its
+patches plus a camera token and four registers; 7-Scenes frames are 640 x 480,
+which Solv3R resizes to 504 x 378 (36 x 27 patches) and VGGT to 518 x 392
+(37 x 28):
+
+<KvLedger />
+
+977 tokens x 768 wide x 2 (K and V) x 2 bytes x 1 layer is 2.86 MiB. Sixteen
+step-specific copies make DéjàView's 45.8. VGGT's 24 global layers at width
+1024 make 97.6. All three match the paper's Table 2 to the digit (measured
+arithmetic). The 16x saving is a counting fact about stationarity, not a
+compression trick.
+
+What the small cache buys, in map-based relocalization (reported; queries
+attend to cached map views and only the query is refined):
+
+| Model | Cache MB/view | ms/query | 7-Scenes within 5 cm, 5° | Cambridge within 25 cm, 2° |
+|---|---:|---:|---:|---:|
+| VGGT | 97.6 | 186 | 45.5% | 16.4% |
+| π³ | 89.7 | 161 | 66.9% | 14.7% |
+| DéjàView, one step's cache | 2.86 | 50 | 0.0% | 0.0% |
+| Solv3R | 2.86 | 51 | 72.8% | 24.9% |
+
+The DéjàView row is the control that makes the argument: give a step-conditioned
+model only one step's cache and it localises nothing. One caveat from reading
+`model.py`: the cached path is exact for keys and values, but a held view's
+contribution to the single RMS scale is computed among the held views only. The
+docstring says this is "close to the full call when the reference view (view 0)
+is held", which is the streaming setup, so treat other uses of the cache as an
+approximation.
+
+## Eight views at a time
+
+Now Kwang Moo Yi's claim: solve 128 photos 8 at a time, under 1.5 GB of VRAM.
+Three things to say about it.
+
+**It is not in the release yet.** The README lists "Release solver property
+examples" as still to do, and the ballroom image of 128 photos solved 8 random
+photos at a time links to a video, not to code. The pieces exist in the API
+(`Context.subset`, `model.step`), so a reader can write the loop, but the
+authors' version, including how blocks are chosen and whether the reference
+view rides along in every block, is unpublished. I could not run it.
+
+**The memory claim is plausible from the sizes (reasoned).** For 128 photos at
+504 x 336 (869 tokens a view) the state and the encodings are 2 x 128 x 869 x
+768 fp32 values, 652 MB. The weights are 469 MB in fp32. Together that is about
+1.12 GB, leaving a few hundred MB for one 8-view call's activations in bf16. Under
+1.5 GB is believable; a joint call on all 128 would not be close.
+
+**The compute side is what makes blocks attractive, and I measured that.** I
+re-implemented one call with Solv3R's shapes (a 768-wide frame-attention block,
+a global-attention block, the injection and the rescale; random weights) and
+timed it on 2 CPU threads in fp32:
+
+<BlockCost />
+
+One 8-view call takes 1.94 s; one 64-view call takes 68.67 s, 35 times longer
+for 8 times the views, because global attention grows as the square of the
+tokens in the call. A sweep that gives each of 128 views one call in blocks of
+8 is 16 calls of 1.94 s, about 31 s, against an extrapolated 4.3 minutes for a
+single joint call (measured below 64 views, extrapolated above). Peak memory
+above baseline grew about 33 MB per view in the call, so the joint call wants
+gigabytes where the block wants about 250 MB.
+
+The toy adds a warning that the cost table cannot. Block updates that only read
+the measurements inside the block are not the joint solve: in the widget's "8
+per call" mode the error falls fast, then jitters at about twice the floor,
+because the joint solution is not a fixed point of any one block's update. How
+close Solv3R's blocks get to its joint answer is exactly what the unreleased
+examples should show. I would want that number before trusting the mode for
+anything metric.
+
+## Streaming falls out, too
+
+The same weights stream without streaming-specific training (reported). The
+default L8 setup keeps 8 anchor frames, 6 recent frames that keep refining, and
+up to 64 memory frames taken every 16th frame; anchors and memory are held
+fixed and enter every call through that one-layer cache. Memory stops growing
+once the memory bank fills, after about 1,030 frames. On the long 2,000-frame
+TUM office sequence, offline VGGT runs out of an 80 GB H100 at 320 frames. The
+README's expected camera ATE for L8 is 0.157 on Sintel, 0.015 on TUM-dynamics
+and 0.077 on ScanNet. Pipelining also works because views at different stages
+are fine: the window can advance after every call, so a new frame's latency
+stays the same while throughput is 16x DéjàView's re-solve-per-frame (10x end
+to end). The [DA3 streaming piece](/articles/da3-streaming-reconstruction)
+covers the other way to bound memory, with a keyframe bank around a frozen
+backbone.
+
+## Where it breaks, and what it costs
+
+- **Low overlap.** The paper's one failure window has views 5 to 8 sharing
+  little with views 1 to 4; Solv3R places the second group wrong within 16
+  calls and keeps it there to call 64. A solver converges to *a* fixed point.
+  Nothing makes it the right one when the constraints are weak, which is true of
+  bundle adjustment too.
+- **Density.** Inputs are resized so the long side is 504 px, and depth comes
+  out at that resolution. "The density/quality is hurting" was the same early
+  user's verdict. That is the price of a 117M model, not of the solver idea.
+- **Licences.** The code is Apache-2.0. The weights are built on NVIDIA's DVLT
+  and ship under the NVIDIA License: non-commercial, research and evaluation
+  only. I would not build a product on them.
+- **CPU.** It runs on CPU in principle: `autocast()` is a no-op without CUDA,
+  so everything is fp32. But `from_pretrained` defaults to `device="cuda"`,
+  so pass `device="cpu"`, and expect seconds per call (above).
+
+## Running it
+
+From the README, on a machine that will run it (mine would not):
+
+```bash
+git clone https://github.com/ubc-vision/solv3r.git && cd solv3r
+pip install -e .
+python examples/offline.py     --images examples/data/park --out outputs/offline --sky-mask
+python examples/incremental.py --images examples/data/park --out outputs/incremental --initial 8 --group 4
+python examples/streaming.py   --frames examples/data/desk --out outputs/streaming
+```
+
+`--adaptive 0.02` turns on the stopping rule for offline solves, and
+`--config L4` or `S4` picks a lighter streaming setting. The park sample is 39
+drone photos at 504 x 336, the size I timed above.
+
+<RepoCard repo="ubc-vision/solv3r" />
+
+<ModelCard repo="jgkwak/solv3r" />
+
+## What to take from it
+
+The idea is not "loop a Transformer"; DéjàView did that, and the looped language
+models before it ([what separates Ouro from Huginn](/articles/looped-models-done-right),
+[looped versus deep at matched compute](/articles/looped-transformers-matched-compute)).
+The idea is to make the loop **stationary** and then train it to have a solver's
+properties. Everything practical follows from that one constraint: continuing a
+solve, adding views in any order, a 2.86 MB cache that is valid at every call,
+and streaming without a streaming model. My two roundups of this year's
+feed-forward reconstruction work, [the first](/articles/3d-reconstruction-roundup)
+and [the second](/articles/3d-reconstruction-roundup-2), were mostly about
+bolting classical machinery onto networks that cannot iterate. Solv3R puts the
+iteration inside the network. What I want next is the released block-solving
+example, run against the joint solve on the same 128 photos.
