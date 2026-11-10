@@ -983,6 +983,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "neuron-steering/residual-write": () => import("@/components/articles/neuron-steering/residual-write"),
   "neuron-steering/sink-and-passages": () => import("@/components/articles/neuron-steering/sink-and-passages"),
   "neuron-steering/steer-vs-lens": () => import("@/components/articles/neuron-steering/steer-vs-lens"),
+  "neuron-tuning/layer-floor": () => import("@/components/articles/neuron-tuning/layer-floor"),
+  "neuron-tuning/neuron-count": () => import("@/components/articles/neuron-tuning/neuron-count"),
   "neuron-tuning/predictor-scatter": () => import("@/components/articles/neuron-tuning/predictor-scatter"),
   "neuron-tuning/sweep-curves": () => import("@/components/articles/neuron-tuning/sweep-curves"),
   "neuron-tuning/where-it-writes": () => import("@/components/articles/neuron-tuning/where-it-writes"),
