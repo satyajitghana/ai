@@ -1,0 +1,313 @@
+---
+title: "ABot-Recon: streaming 3D over thousands of frames with a 12-frame memory"
+description: "Alibaba AMAP's ABot-Recon (arXiv 2608.27529) reconstructs camera paths and point maps from long video while attending to only the current frame and the 11 before it. Its trick is the prediction target, not the cache: a point map in the current camera and one relative pose to the previous frame, chained into a trajectory. I read the code and the checkpoint header: the window is hard-wired at 12, older keys are evicted, the cross-frame cache is 50.98 MiB a frame (232 GiB for KITTI-02 if nothing were evicted), and the model has 1,000,934,176 parameters, 4,754,435 of them in the rotation refiner. The sandbox would not run the repository, so I re-implemented the mechanism on CPU: a windowed cache stays at 12 frames and about 0.2 ms a frame while a full one reaches 113 ms by frame 3,000, and in a pose-chain toy a 0.05-degree heading error per step costs 13.3 m of ATE where 5% translation noise costs 2.03 m. The paper's numbers hold up as stated, with two catches: on Oxford Spires three optimisation methods with known intrinsics do better, and the weights are CC BY-NC 4.0."
+date: 2026-11-09
+tags:
+  - 3d
+  - slam
+  - streaming
+  - feed-forward-reconstruction
+  - long-video
+  - visual-odometry
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Reads the window, cache and refiner in ABot-Recon's code, sizes the cache from tensor shapes, and shows on CPU why heading error dominates a pose chain."
+topic: spatial-3d
+kind: paper
+level: research
+runsOn: datacenter
+licence: mixed
+---
+
+import { WindowBand } from "@/components/articles/abot-recon/window-band"
+import { MemoryLedger } from "@/components/articles/abot-recon/memory-ledger"
+import { DriftChain } from "@/components/articles/abot-recon/drift-chain"
+
+A [post on X](https://x.com/cutetoxicguy/status/2119151400470880396) pointed at ABot-Recon, a streaming 3D
+reconstruction model from Alibaba's AMAP CV Lab that "doesn't need to keep the entire video history inside a growing
+attention window". The paper is [arXiv 2608.27529](https://arxiv.org/abs/2608.27529), "Revisiting Local Context for
+Long-Horizon Streaming 3D Reconstruction". The code is at
+[amap-cvlab/ABot-Recon](https://github.com/amap-cvlab/ABot-Recon) and the checkpoint at
+[acvlab/ABot-Recon](https://huggingface.co/acvlab/ABot-Recon) on Hugging Face. There is a
+[project page](https://amap-cvlab.github.io/ABot-Recon-html/) too. It is the same lab as
+[ABot-World-0](/articles/abot-world), which this site took apart in August.
+
+The claim is easy to state. The model reads each new frame once, attends to the 11 frames before it and nothing older,
+and still tracks the camera over 18,846-frame drives. This site has covered the other way to get there. [R³ and
+AMB3R-SLAM](/articles/da3-streaming-reconstruction) keep keyframe banks and pose graphs, and [HiP3R](/articles/hip3r)
+stitches chunks with two graphs after the fact. ABot-Recon's answer is that most of that state is unnecessary if you
+change what the network is asked to predict.
+
+What I did, and how each claim below is labelled:
+
+- **Reported**: a number from the paper or the README that I did not re-run.
+- **Read**: something I saw in the released source at commit `6e3b2e1` (15 October 2026) or in the checkpoint's
+  safetensors header, which I fetched with an HTTP range request. I did not execute the authors' code: the sandbox
+  refused to import the repository's modules, even its torch-only cache and mask files.
+- **Measured**: output of my own script, [`toy.py`](/articles/abot-recon/toy.py), run on this box's CPU with 2 threads.
+  It re-implements three pieces of the mechanism from what I read. It is not the model and never sees an image.
+- **Reasoned**: arithmetic on the other three.
+
+## The problem: long video breaks streaming models in two ways
+
+Feed-forward geometry models (DUSt3R, VGGT, π³) predict cameras and point maps for a set of images in one pass. To
+run one on a video you make it causal: frame $i$ attends to frames before it, and you keep their keys and values in a
+cache so they are not recomputed. That is StreamVGGT's design. It has two costs that grow with the stream.
+
+The first is memory. Every frame's keys and values stay in the cache, so a video twice as long needs a cache twice as
+big and attention twice as wide.
+
+The second is the prediction target. If every pose is expressed in the first frame's coordinates, then the network at
+frame 4,000 is asked to say where it is relative to a view it saw minutes ago. The paper's framing is that the target's
+"estimation range grows with the sequence" (**reported**). A model trained on 32-frame clips has never seen that range.
+
+The field's recent answers add memory back in a managed form. LingBot-Map keeps anchor frames, a pose-reference window
+and a trajectory memory; HorizonStream couples local attention with persistent linear attention; CUT3R and TTT3R carry a
+recurrent state (**reported**, the paper's related work). ABot-Recon removes the long-range state instead.
+
+## The idea: predict only local things, then chain them
+
+For each incoming frame $I_i$ the model outputs three things (**reported**, Section 3.1):
+
+1. a point map $P_i$ in the **current** camera's coordinates,
+2. a confidence map $S_i$,
+3. one relative pose $T_{i-1\leftarrow i}$ from the current camera to the previous one.
+
+None of those depends on how long the stream has been running. A point map in the current camera is the same task at
+frame 10 and at frame 10,000. So is the motion between two adjacent frames. The global trajectory is never predicted;
+it is computed, by multiplying the relative poses together:
+
+$$
+T_{0\leftarrow j} = T_{0\leftarrow 1}\,T_{1\leftarrow 2}\cdots T_{j-1\leftarrow j}
+$$
+
+and each local point map is moved into the world with its frame's composed pose. That is ordinary visual odometry. The
+new part is doing it with a learned feed-forward model whose own context is fixed, and training it so the chain does
+not fall apart.
+
+<Figure
+  src="/articles/abot-recon/fig3.png"
+  alt="Pipeline diagram: an input stream of frames I(i-K+1) to I(i) passes through alternating frame-attention and causal-attention blocks; camera tokens feed a camera head and rotation refiner that output the relative pose to frame i-1, frame tokens feed a geometry head that outputs a point map; poses are chained into an incremental reconstruction."
+  caption="ABot-Recon's pipeline: alternating per-frame and windowed causal attention over K frames, a geometry head for the local point map, and a camera head plus rotation refiner for the adjacent pose, chained into the trajectory. (paper, Figure 3)."
+/>
+
+The backbone is π³'s. The released network is built on its code (`abot_recon/modeling/pi3/`), and training starts from
+π³'s public weights (**read** and **reported**). The decoder has 36 blocks of width 1,024 with 16 heads; even blocks
+attend within one frame, odd blocks attend across frames (**read**, `pi3.py` and `network.py`, which test `i % 2`).
+Only those 18 odd blocks see the window.
+
+## How memory stays bounded: a 12-frame band, enforced in code
+
+The post's heading is "Only 12 frames of local context". That is literal. `InferenceConfig` raises
+`ValueError("The released model requires a 12-frame local window")` for any other value, and the attention mask in
+`core/window_mask.py` blocks key frame $T_k$ for query frame $T_q$ when $T_k > T_q$ or when $T_q - T_k$ is more than
+11 (**read**). The cache that feeds it, `StreamingKVState.append_committed_frame`, keeps at most 11 past frames: once
+full, it shifts the buffer left and writes the new frame into the last slot. The comment above that shift records a bug
+they hit: an overlapping in-place `copy_` "silently corrupts older window entries on CUDA" (**read**).
+
+<WindowBand />
+
+Two things in the code are more interesting than the band itself.
+
+**The hooks for long-range memory are there, and switched off.** The cache classes take `num_reference_frames` (frames
+pinned forever, like LingBot-Map's anchors) and `num_summary_tokens` (a few tokens of every evicted frame, kept as a
+compressed history). The released constructor passes neither, so both default to 0 (**read**, `model.py` and
+`network.py`). The paper's claim of "no persistent learned long-range state" is a configuration of a codebase that
+could carry one. My guess is that the authors tried the anchors and summaries and found them unnecessary; the paper
+does not report that experiment (**reasoned**).
+
+**Positions are absolute, attention is not.** The rotary embedding on the frame axis uses each frame's absolute index,
+"kept for 3D rotary positions even after older frames leave the window" (**read**, `kv_state.py`). Rotary embeddings
+make a query-key score depend only on the difference of positions, so frame 20,000 attending to frame 19,995 should see
+exactly what frame 11 sees attending to frame 6. The angle table is built in float64 and has `max_seq_len` rows, set to
+`max_frames`, 22,000 by default (**read**). I rebuilt the frame-axis rotation (20 of the 64 head dimensions, θ = 10,000)
+and compared scores at frame 11 and frame 20,000 for the same offsets (**measured**): in fp32 the largest difference
+over 725 × 725 scores was 7.6e-6, against a mean score magnitude of 3.5; in bf16 it was 0.15, the same size as bf16's
+own error at frame 11 (0.11 to 0.15 against a float64 reference). The window's attention loses nothing to a late position. The one
+practical consequence is a cap: a stream longer than `--max-frames` would index past the table, so a 30,000-frame drive
+needs the flag raised (**reasoned**; I did not run past it).
+
+## How big the cache is, and what 6.71 GiB buys
+
+The paper reports 24.45 FPS and 6.71 GiB of peak GPU memory on KITTI-02 at 504 × 280 on an H100, "input storage
+excluded" (**reported**, Table 6). I wanted to know how much of that is the window.
+
+At 504 × 280 with 14-pixel patches a frame is 36 × 20 = 720 patch tokens plus 5 register tokens, 725 in all. Each of the
+18 cross-frame layers stores a key and a value for each, 16 heads of 64, in bf16 (**read**: the paged path casts to
+bf16 because FlashInfer will not take fp32). That is 18 × 2 × 725 × 1,024 × 2 bytes = 53,452,800 bytes, 50.98 MiB per
+frame (**reasoned**).
+
+<MemoryLedger />
+
+So the 11-frame window holds 0.548 GiB. The paged allocator reserves 28 frame pages (the window of 12 plus 16 spare),
+1.394 GiB, once, at the start (**read** and **reasoned**). The checkpoint is 1,000,934,176 parameters, all float32 in
+the file, 4.0 GB, which I read from its header without downloading it; nothing in the loader casts them, and inference runs
+under bf16 autocast (**read**). Weights at 3.73 GiB plus the 1.394 GiB pool is 5.12 GiB; the remaining 1.6 GiB of the reported
+peak is activations and FlashInfer's 128 MiB workspace (**reasoned**, not profiled). The window is about a fifth of the
+memory.
+
+Had the cache kept everything, KITTI-02's 4,661 frames would need 232 GiB of keys and values, and VBR's 18,846-frame
+Ciampino-1 drive 938 GiB (**reasoned**). A plain full-history cache is not an option at these lengths on any single GPU.
+
+My toy shows the shape on a CPU (**measured**, one attention head, 64 tokens of width 64 per frame). With a 12-frame
+window, a frame costs 0.31 ms at frame 12 and 0.18 ms at frame 3,000. With a cache that keeps everything it costs 1.3 ms
+at frame 100, 21 ms at frame 1,000 and 113 ms at frame 3,000. The toy says nothing about H100 throughput; it says the
+window's per-frame cost is flat and the full cache's is not.
+
+### What is not bounded
+
+The post is right that "storing the resulting point cloud still requires space proportional to the amount of
+reconstructed geometry". The code makes that concrete. `inference_stream_iter` appends each frame's outputs to a Python
+list and concatenates them at the end, with no move to the CPU inside the loop (**read**). A local point map at
+504 × 280 is 1,693,440 bytes in fp32 and its confidence map 564,480 bytes, so dense outputs for all of KITTI-02 come to
+about 10.5 GB (**reasoned**). The README's `--dense-stride N` and the API's `dense_output_indices` are the escape hatch:
+poses for every frame, dense geometry for a subset. Use them on long runs.
+
+The optional loop closure is not bounded either, by design. It retrieves revisited frames with DINOv2-SALAD descriptors
+and FAISS, then re-runs ABot-Recon on windows centred on both frames to get a relative pose, so it needs the old images
+and a descriptor per keyframe (**read**, `loop_closure.py`, and **reported**, Section 4.1).
+
+## The price of a short memory: drift, and why rotation gets the fix
+
+A chain of relative poses drifts. Every small error stays in the product forever. The paper's two additions are aimed
+at exactly this, and the toy below shows why they aim at rotation.
+
+I composed 4,661 noisy relative poses along a synthetic drive the size of KITTI-02 (1.094 m a step, 12 random 90-degree
+turns), aligned the result to ground truth with a Sim(3) fit as the paper does, and averaged eight seeds
+(**measured**).
+
+<DriftChain />
+
+Translation noise of 5% of every step gives an ATE of 2.03 m. A heading error of 0.05° per step, with no translation
+noise at all, gives 13.3 m; at 0.1° it is 26.57 m (**measured**). A wrong step length is one wrong step. A wrong heading
+turns every step after it, so the error grows with distance travelled. Over a gap of 11 frames the 0.05° chain is off by
+0.534 m; over 1,000 frames by 26.6 m (**measured**). The toy's noise levels are mine, chosen to show the shape, not
+estimates of the model's errors.
+
+The paper's two fixes are the same diagnosis in network form.
+
+**A rotation refiner.** It takes the pairwise camera descriptor, adds visual evidence by cross-attending from a pooled
+frame-pair query into both frames' dense tokens, then runs a gated temporal convolution over the recent pair features to
+predict a small axis-angle correction to the relative rotation. Translation is left as predicted (**reported**,
+Section 3.3). In the code, the convolution's kernel is 10 pair features, not the 12 the paper's notation suggests, the
+correction's three components are each squashed by `tanh` to at most 2.0 degrees, and `age_embed` tells it how old each feature in the buffer is
+(**read**, `RELATIVE_CAMERA_HEAD` in `model.py` and `adjacent_pose_head.py`). It is 4,754,435 parameters in the
+checkpoint (**read**), matching the paper's "4.75M". Its state is one more fixed buffer, so it does not break the memory
+bound.
+
+**A composition-aware loss.** Training does not only supervise each adjacent pair. It composes the predicted poses over
+every gap up to 11 frames and compares each product with ground truth, with rotation weighted by the gap raised to a
+power γ between 0 and 1 (**reported**, Equations 12 to 14). The network is graded on chains, not single steps.
+
+The ablation in the third tab says the loss did the most work: on KITTI, adding it alone took average ATE from 56.60 m
+to 27.66 m, training on 128-frame clips instead of 32 took it to 22.31 m, and the refiner to 18.25 m (**reported**,
+Table 8). Every row keeps the 12-frame window. Clip length during training mattered even though the window did not
+change, which fits the loss story: longer clips contain more and longer chains to grade.
+
+The paper's own diagnostic shows the result: adjacent-frame error that stays flat across a 4,661-frame sequence, and
+multi-gap error that grows more slowly than the other streaming models'.
+
+<Figure
+  src="/articles/abot-recon/fig6a.png"
+  alt="Two line charts of running RMSE over processed frames on KITTI-02: rotational (degrees) and translational (metres) adjacent-frame error for LongStream, LingBot-Map, HorizonStream without loop closure and ABot-Recon without loop closure. ABot-Recon's lines stay lowest and flat; LingBot-Map's translation error climbs to about 5.7 m."
+  caption="Running adjacent-frame RPE on KITTI-02 as frames are processed, no loop closure. ABot-Recon's error does not grow with the stream. (paper, Figure 6)."
+/>
+
+<Figure
+  src="/articles/abot-recon/fig6b.png"
+  alt="Two line charts of rotational and translational relative pose error against temporal gap, averaged over all KITTI sequences, for the same four methods. ABot-Recon is lowest at every gap."
+  caption="Multi-gap RPE averaged over KITTI: error as a function of how many frames apart the two poses are. (paper, Figure 6)."
+/>
+
+## The results, read against their own tables
+
+All of this section is **reported** (Tables 3 to 7) unless marked.
+
+**KITTI** (11 sequences, 271 to 4,661 frames): average ATE 18.25 m without loop closure, the lowest in the table; the
+next streaming model is HorizonStream at 22.51 m, and the best optimisation-based entry is SLAMFormer-∞ at 23.01 m, quoted from its own paper. With loop
+closure, 13.49 m against HorizonStream's 17.98 m. Per sequence it is not a sweep: on 02, the longest, 69.87 m against
+HorizonStream's 97.24 m, but on 06 it is 12.04 m against HorizonStream's 5.46 m.
+
+**Oxford Spires** (10 sequences of about 3,840 frames): ATE 4.35 m and RPE-R 0.12°, the abstract's "approximately 40%"
+better than the best prior results. That is against streaming methods: LingBot-Map's 7.32 m and HorizonStream's 0.20°
+(**reasoned**: 4.35 / 7.32 is 40.6% lower, 0.12 / 0.20 is 40% lower). It is not the best number in Table 4. DPVO
+reaches 1.56 m, Droid-W 2.27 m and DPV-SLAM 2.95 m, and Droid-W's RPE-R is 0.08°. The paper says so and points out that those three need camera
+intrinsics while ABot-Recon reads only RGB. That is a fair distinction, and it is also the honest headline: on this
+benchmark a classical-style optimiser that knows its camera still wins.
+
+**VBR** (7 sequences, 8,815 to 18,846 frames): without loop closure, 30.14 m, behind HorizonStream (29.02 m) and
+LingBot-Map (29.45 m). The paper calls that "competitive", which is accurate. With loop closure it drops to 9.99 m,
+the lowest in the table, against HorizonStream's 17.64 m with its own loop closure.
+
+**Dense reconstruction**: on Oxford Spires, Chamfer distance 1.37 m and F1 91.81% at a 4 m threshold, the best of the
+nine streaming methods (LingBot-Map 1.68 m and 90.58%). On 7Scenes, F1 94.88% against HorizonStream's 98.22% and
+LingBot-Map's 96.01%; on TUM-Dynamic, 92.19% against LingBot-Map's 95.97%. The paper's discussion concedes the indoor
+gap and suggests compact scenes, with lots of revisiting, are where persistent memory still pays.
+
+**Speed**: 24.45 FPS and 6.71 GiB, frame by frame on one H100. CUT3R (29.62 FPS, 3.16 GiB) and TTT3R (25.53 FPS,
+4.65 GiB) are faster and smaller, and drift far more: CUT3R's KITTI ATE is 209.04 m. LingBot-Map takes 18.87 GiB and
+HorizonStream 13.04 GiB in the same mode.
+
+Two protocol notes. Every trajectory is aligned to ground truth with a Sim(3) Umeyama fit before ATE, so scale is free;
+a monocular model's metric-scale error is not in these numbers. And the training mixture includes KITTI-360 and Waymo
+(**reported**, Table 1), which are driving data close to KITTI's domain but not its test sequences.
+
+## Training cost, licence and running it
+
+Training is two stages from π³'s weights: 32-frame clips for 32K iterations on 48 NVIDIA H20s, then 128-frame clips for
+38K iterations on 32 AMD MI308s, then 4K iterations training only the confidence branch (**reported**). Fine-tuning
+code is on the repository's `train` branch (**read**, README).
+
+The licences need care. The source code is Apache-2.0. The weights are not: `MODEL_LICENSE.md` puts them under CC BY-NC
+4.0, non-commercial research and education only, because they are derived from π³'s weights, and says commercial use
+"requires separate written authorization from all relevant rights holders" (**read**). The Hugging Face model card's
+metadata says `license: apache-2.0`, which contradicts the repository's own file; I would go by the more specific
+statement and treat the weights as non-commercial.
+
+The released setup targets Linux, Python 3.10 or later, PyTorch 2.5.1 and CUDA 12.1, with FlashInfer for the paged
+cache and an SDPA fallback without it (**read**). The network has a CPU branch, but it would load 4.0 GB of fp32 weights
+and run a 1B-parameter model per frame, so I did not try. There is a hosted demo on Hugging Face Spaces and ModelScope,
+and a community port to the Axera AX650N NPU (**read**, README).
+
+```bash
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+pip install -e .            # inside a clone of amap-cvlab/ABot-Recon
+pip install flashinfer-python   # optional: paged KV cache
+python demo.py --image-dir frames/ --output-dir out/ --no-loop-closure --dense-stride 10
+```
+
+<RepoCard repo="amap-cvlab/ABot-Recon" />
+
+<ModelCard repo="acvlab/ABot-Recon" />
+
+## What I did not check
+
+- I did not run the model. The sandbox refused to execute the repository's code, and the model is 4.0 GB of fp32
+  weights with a CUDA-first runtime. Every benchmark number above is the paper's.
+- The 50.98 MiB per frame and the 1.6 GiB of activations are arithmetic from tensor shapes and the reported peak, not a
+  profile.
+- My drift toy uses Gaussian noise that is independent from step to step. A real model's errors are correlated (a
+  textureless stretch gives several bad steps in a row), which drifts faster; the refiner's temporal convolution is a
+  bet on exactly that correlation.
+- I did not verify that the released checkpoint is the one behind Tables 3 to 8. The checkpoint's parameter counts match
+  the paper's (1B in total, 4.75M in the refiner).
+
+## Verdict
+
+ABot-Recon is a clean result: a feed-forward model with a fixed 12-frame view, no anchors, no compressed history and no
+recurrent state, which beats the long-memory streaming models on KITTI and Oxford Spires and ties them on VBR. The
+memory bound is real and enforced in code, at about half a gibibyte of window on top of the weights. The insight that
+makes it work is about targets, not caches: ask only for things that look the same at frame 10 and frame 10,000, then
+spend the training budget on making their product hold together, mostly the rotation.
+
+What it does not do is beat geometry that knows its camera, or keep the indoor reconstruction edge that persistent
+memory buys. For a long drive with a GPU and no intrinsics, and a non-commercial use, it is the one I would try first.
+For anything you ship, the weights' licence decides before the benchmarks do.
