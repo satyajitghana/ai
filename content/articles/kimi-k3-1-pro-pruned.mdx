@@ -1,7 +1,8 @@
 ---
 title: "Kimi K3.1 Pro pruned75: three quarters of the experts, chosen without data"
-description: "vLLM's Kimi-K3.1-Pro-pruned75 keeps 224 of the 896 routed experts in each of Kimi K3.1 Pro's 92 MoE layers. I read both checkpoints' safetensors headers and streamed every router from both repos: the config changes in one field, the parameter count falls from 2,780,110,363,392 to 737,611,524,480, and the payload from 1,561.2 GB to 475.5 GB (442.8 GiB, which is the card's '~443 GB'). In all 92 layers the kept router rows are byte-identical to the source's top 224 by signed row sum, the calibration-free score the card names. The converter's default L1 score would have kept a different set, sharing about 69 of 224 experts per layer where chance gives 56. Active parameters per token barely move, 104.37B to 103.92B, so this buys memory, not speed: one 8-GPU B300 node becomes two GPUs for the weights. The only quality number is GSM8K, 43.67%, with no unpruned baseline on the same harness; the K3 sibling's card measures 95.53% to 34.42% on its own. A numpy toy shows when a signed row sum can stand in for router frequency, and why a load-balanced MoE leaves little for any ranking to find."
+description: "vLLM's Kimi-K3.1-Pro-pruned75 keeps 224 of the 896 routed experts in each of Kimi K3.1 Pro's 92 MoE layers, chosen without data. I read both checkpoints' safetensors headers and streamed every router from both repos: the parameter count falls from 2,780,110,363,392 to 737,611,524,480 and the payload from 1,561.2 GB to 475.5 GB, and in all 92 layers the kept rows are byte-identical to the source's top 224 by signed row sum. Active parameters barely move, 104.37B to 103.92B, so this buys memory, not speed. The REAP paper it stands in for is walked through term by term, with Kimi-K2's numbers and what its released code computes differently. Then the same question on real weights: Moonlight-16B-A3B, the DeepSeek-V3 design Kimi inherits, streamed layer by layer on a CPU and pruned by eight scores. Its mean router input is orthogonal to all-ones (cosine 0.011), the signed sum ranks experts slightly backwards against real usage, and pruning half the experts by it takes WikiText-2 perplexity from 8.29 to 880, worse than random at 59, while REAP gives 22. At 75% even the best score leaves 63."
 date: 2026-11-09
+updated: 2026-11-10
 tags:
   - kimi
   - mixture-of-experts
@@ -13,12 +14,12 @@ rating:
   novelty: 1
   verification: 3
   runnable: 1
-  explains: 2
+  explains: 3
   takeaway: 2
   durability: 1
   reach: 1
   unique: 2
-  why: "Streams all 92 routers from both repos to confirm which 224 experts survived and why, prices the memory, and runs a toy of when the ranking can work."
+  why: "Confirms all 92 routers byte for byte, walks REAP's math, and prunes a real 16B relative eight ways on CPU: the shipped score loses to random."
 topic: quantization
 kind: model
 level: practitioner
@@ -29,6 +30,8 @@ licence: custom
 import { RouterGrid } from "@/components/articles/kimi-k3-1-pro-pruned/router-grid"
 import { MemoryPlanner } from "@/components/articles/kimi-k3-1-pro-pruned/memory-planner"
 import { PruneToy } from "@/components/articles/kimi-k3-1-pro-pruned/prune-toy"
+import { MoonlightDrift } from "@/components/articles/kimi-k3-1-pro-pruned/moonlight-drift"
+import { MoonlightScores } from "@/components/articles/kimi-k3-1-pro-pruned/moonlight-scores"
 
 On 5 November, three days after Moonshot put the [Kimi K3.1 Pro](/articles/kimi-k3-1-pro) weights on Hugging Face, a
 repository called `vllm-project/Kimi-K3.1-Pro-pruned75` appeared beside it. A post that went round the same evening
@@ -207,24 +210,161 @@ There are three families of answers to "which experts can go?", and they differ 
 drop the least used. It is the obvious baseline. It needs real forward passes, and it says nothing about how much an
 expert contributes when it is picked.
 
-**REAP.** Cerebras' Router-weighted Expert Activation Pruning ([arXiv 2510.13999](https://arxiv.org/abs/2510.13999))
-scores each expert by the average, over the calibration tokens routed to it, of its gate value times the norm of its
-output (reported, from the paper; the [Comet 60B article](/articles/comet-60b) covers a model pruned with it). It
-also needs forward passes, and adds the output norm, so a rarely picked expert that matters a great deal when it is
-picked can survive.
-[Runtime dynamic compression](/articles/runtime-dynamic-compression) goes a step further and swaps the resident set
-every 256 tokens.
+**REAP.** Cerebras' Router-weighted Expert Activation Pruning ([arXiv 2510.13999](https://arxiv.org/abs/2510.13999),
+Lasby and colleagues) scores each expert by the average, over the calibration tokens routed to it, of its gate value
+times the norm of its output (reported; the [Comet 60B article](/articles/comet-60b) covers a model pruned with it).
+It also needs forward passes, and adds the output norm, so a rarely picked expert that matters a great deal when it
+is picked can survive. [Runtime dynamic compression](/articles/runtime-dynamic-compression) goes a step further and
+swaps the resident set every 256 tokens.
 
 **Weight-only scores.** Look at the router rows alone. L1 magnitude is the converter's default; the signed sum is what
 shipped. They need no data at all, which is the only reason to use them.
 
-Why would the signed sum of a router row mean anything? The router's logit for expert i on hidden state x is
-$w_i \cdot x$. Write x as a shared mean $\mu$ plus a token-specific part. Averaged over tokens, the logit is
+The vLLM card names REAP as the thing this checkpoint stands in for, so it is worth reading what REAP actually argues,
+term by term, before asking how far a data-free score can get.
+
+### The layer, written out
+
+An MoE layer with $K$ experts $f_1, \dots, f_K$ sends token $x$ to the set $\mathcal{T}(x)$ of its top-k router
+scores and mixes their outputs with gates $g_k(x)$ that are zero outside that set and sum to one inside it (the
+paper's Equation 1, reported):
+
+$$
+h(x) = \sum_{k \in \mathcal{T}(x)} g_k(x)\, f_k(x)
+$$
+
+For Kimi K3.1 Pro the pieces have these shapes (measured from the config and headers above): $x$ is the 7,168-wide
+residual, projected to a 3,584-wide latent before the experts; each $f_k$ is a SwiGLU block with `w1` and `w3` of
+3,072 by 3,584 and `w2` back; $K$ is 896 before pruning and 224 after; $|\mathcal{T}(x)| = 16$. The gate is a sigmoid
+of the router logit $w_k \cdot x$, chosen on sigmoid plus the balance bias, then renormalised over the 16 without it.
+
+**Pruning** expert $j$ removes one term. If the router simply dropped it and renormalised, the output would be the
+paper's Equation 2:
+
+$$
+\bar h(x) = \sum_{k \neq j} \frac{g_k(x)}{1 - g_j(x)}\, f_k(x)
+$$
+
+A real top-k router does not leave the slot empty: the next expert in line, call it $i$, is promoted with some new
+gate $g'_i(x)$. The paper splits the resulting error (Equation 7, reported) into a **substitution error**,
+$g_j f_j - g'_i f_i$, the output of a different function in the old one's place, and a **renormalisation error** that
+only rescales the surviving experts. The first dominates, and since a promoted expert never scores higher than the one
+it replaced, $g'_i \le g_j$, it is bounded by Equation 8:
+
+$$
+\lVert g_j(x) f_j(x) - g'_i(x) f_i(x) \rVert \le g_j(x) \bigl( \lVert f_j(x) \rVert + \lVert f_i(x) \rVert \bigr)
+$$
+
+**REAP** minimises the part of that bound it can know in advance. Which expert $i$ gets promoted changes token to
+token, but $g_j \lVert f_j \rVert$ is a property of the expert being removed. So the score is its average over the
+tokens $\mathcal{X}_j$ that actually route to $j$ (Equation 9):
+
+$$
+S_j = \frac{1}{|\mathcal{X}_j|} \sum_{x \in \mathcal{X}_j} g_j(x)\, \lVert f_j(x) \rVert_2
+$$
+
+The two baselines it is tested against are the same sum with pieces missing. Frequency pruning keeps
+$S_j = |\mathcal{X}_j|$: it counts, and treats every pick as equally important. EAN (Jaiswal and colleagues) keeps
+$S_j = \sum_{x \in \mathcal{X}_j} \lVert f_j(x) \rVert_2$: output norm without the gate, summed rather than averaged, so
+it is still dominated by how often an expert is picked. REAP divides by $|\mathcal{X}_j|$ on purpose. A specialist
+that fires on 0.1% of tokens with a large, confidently gated output scores as high as a generalist with the same
+per-token contribution (reasoned from the definitions).
+
+**Merging** is the alternative the paper argues against. Collapse experts $i$ and $j$ into one $\tilde f$ with the
+summed gate $g_i + g_j$, and the router can no longer mix them in an input-dependent ratio
+$r(x) = g_i / (g_i + g_j)$. Under the paper's simplifying assumptions, the best constant merge still pays (Equation 6):
+
+$$
+\mathcal{E}_{\text{merge}} \approx \mathbb{E}\bigl[(g_i + g_j)^2\bigr] \cdot \operatorname{Var}[r(x)] \cdot \mathbb{E}\bigl[\lVert f_i(x) - f_j(x) \rVert^2\bigr]
+$$
+
+That is zero only if the router always mixes the pair in the same ratio or the two experts compute the same thing.
+Fine-grained MoEs, many small experts and a variable router, are where neither holds. The pruned75 checkpoint does not
+merge anything, so it keeps what the paper calls "independent control" over every surviving expert. What it gives up is
+the choice of which 224.
+
+<Figure
+  src="/articles/kimi-k3-1-pro-pruned/fig1.png"
+  alt="Three scatter plots of expert outputs projected onto their first two principal components for Qwen3-30B layer 47: 128 original experts in red spread over a wide area, the surviving experts after pruning in blue still spread across it, and merged experts in green collapsed into a small cluster near the centre."
+  caption="Expert outputs of Qwen3-30B's layer 47 in their first two principal components: originals, the experts that survive pruning, and the experts merging produces. Pruning thins the cloud; merging shrinks it toward the middle (paper, Figure 1)."
+/>
+
+### What the paper measured
+
+The calibration is not small. For models up to 110B the paper packs 1,024 samples into sequences of 2,048 tokens; for
+larger ones it uses 12,228 samples of up to 16,384 tokens, without packing, and it prunes 25% or 50% of the experts in
+each layer, one shot, no fine-tuning (reported).
+
+<Figure
+  src="/articles/kimi-k3-1-pro-pruned/fig3.png"
+  alt="Grouped bar chart of mean accuracy on coding, math, creative writing and multiple choice for GLM-4.5-Air and Qwen3-30B-A3B, comparing REAP, EAN and frequency pruning with HC-SMoE and M-SMoE merging at 25% and 50% compression against a dashed unpruned baseline. REAP's bars sit closest to the baseline on the generative tasks at 50%."
+  caption="Accuracy by task type for GLM-4.5-Air and Qwen3-30B-A3B at 25% (light) and 50% (hatched) compression. Merging holds up on multiple choice and falls away on generation; REAP stays closest to the dashed baseline (paper, Figure 3)."
+/>
+
+The row that matters most here is Kimi-K2, Moonshot's earlier 1T-parameter model with 384 experts a layer, pruned in its
+INT4 form. From the paper's Table 3 (reported):
+
+| Kimi-K2-Instruct W4A16 | EvalPlus | LiveCodeBench | SWE-bench Verified | BFCLv3 overall | MC average |
+|---|---:|---:|---:|---:|---:|
+| unpruned | 0.828 | 0.434 | 0.554 | 0.666 | 0.780 |
+| 25%, frequency | 0.486 | 0.082 | 0.000 | 0.431 | 0.604 |
+| 25%, EAN | 0.779 | 0.379 | 0.562 | 0.652 | 0.703 |
+| 25%, REAP | 0.840 | 0.440 | 0.580 | 0.635 | 0.773 |
+| 50%, frequency | 0.112 | 0.000 | 0.000 | 0.218 | 0.439 |
+| 50%, EAN | 0.722 | 0.253 | 0.576 | 0.573 | 0.587 |
+| 50%, REAP | 0.819 | 0.429 | 0.576 | 0.564 | 0.643 |
+
+Two things in that table bear on pruned75. First, on a Kimi model the choice of score is not a detail: frequency
+pruning at 25% already takes SWE-bench from 55.4% to zero, while REAP at 50% keeps it at 57.6%. Second, the paper
+stops at 50%. Nobody has published what REAP does to a Kimi model at 75%, so "REAP would have done much better" is a
+reasonable expectation, not a measured fact (reasoned).
+
+<Figure
+  src="/articles/kimi-k3-1-pro-pruned/fig-a6.png"
+  alt="Two scatter plots of non-agentic coding accuracy and multiple-choice accuracy against total parameters on a log scale for six models. Each model has its baseline marked in black and dashed lines for REAP, EAN, frequency, HC-SMoE and M-SMoE at 25% and 50% compression; for Kimi-K2 and Qwen3-Coder-480B the frequency lines fall far below the others."
+  caption="Coding and multiple-choice accuracy against model size for every compressed model. At the trillion-parameter end, Kimi-K2's frequency-pruned points drop toward zero while REAP's stay near the baseline (paper, Figure A6)."
+/>
+
+The calibration set matters as much as the score. Calibrated on C4 web text instead of code, the same methods lose
+most of their coding accuracy, and on Qwen3-30B several produce no usable code at all (reported, Figure A8). A
+calibration-free checkpoint skips this question rather than answering it.
+
+<Figure
+  src="/articles/kimi-k3-1-pro-pruned/fig-a8.png"
+  alt="Three bar charts of coding accuracy for ERNIE-4.5-21B, Qwen3-30B-A3B and Mixtral-8x7B, comparing calibration on C4 (blue) with CodeAlpaca (red) for REAP, EAN, frequency, HC-SMoE and M-SMoE at 25% and 50% compression. The C4-calibrated bars are far lower, several near zero."
+  caption="Coding accuracy after compression calibrated on general web text (C4) or on code (CodeAlpaca). The calibration domain moves accuracy more than the choice among good scores (paper, Figure A8)."
+/>
+
+### What the released REAP code does that the paper does not say
+
+The paper writes $g_j(x)$ as the model's gate. The public repository,
+[CerebrasResearch/reap](https://github.com/CerebrasResearch/reap) at commit `1970473` (17 April 2026), computes
+something close to it but not always the same (measured, from `src/reap/observer.py` and
+`src/reap/pruning_metrics.py`):
+
+- The observer picks each token's experts with `torch.topk(router_logits, top_k)`, on the raw logits. A
+  DeepSeek-V3-style router, which is what Kimi uses, picks on sigmoid score **plus the balance bias**, so the
+  observer's $\mathcal{X}_j$ is not the set of tokens the model actually sent to $j$.
+- The gate is `F.softmax(router_logits, dim=1)` over all experts, renormalised over the chosen top-k when the config
+  sets `norm_topk_prob` (the default `renormalize_router_weights=True`). For a softmax router that is the real gate.
+  For a sigmoid router the real gate is $\sigma(w_j \cdot x)$ renormalised, a much flatter weighting.
+- The model registry covers Qwen3-MoE, Llama 4, Mixtral, DeepSeek-V2, ERNIE 4.5 and GLM-4.5. It has no
+  `DeepseekV3ForCausalLM` entry, the class Kimi-K2 and K3 load as, so the Kimi-K2 results above came from code that is
+  not in this snapshot (reasoned from the registry).
+
+None of that makes REAP wrong; it makes "REAP" a family of slightly different scores. I measured how much the
+difference matters on a real sigmoid-routed model below.
+
+### Why a signed row sum could mean anything
+
+Why would the signed sum of a router row mean anything? The router's logit for expert $i$ on hidden state $x$ is
+$w_i \cdot x$. Write $x$ as a shared mean $\mu$ plus a token-specific part. Averaged over tokens, the logit is
 $w_i \cdot \mu$. The signed sum is $w_i \cdot \mathbf{1}$, the same dot product against the all-ones vector. So the
 signed sum ranks experts by their expected logit exactly when the mean hidden state points along all-ones, and in
 proportion to how much of $\mu$ does (reasoned). L1 magnitude, by contrast, ranks rows by how large they are in any
 direction, which says little about whether the hidden states ever point their way. I cannot measure $\mu$ for K3
-without running it, so I cannot say why the signed sum did better here. The card does not say either.
+without running it. I can measure it for a smaller model built the same way, which is what the Moonlight section
+below does.
 
 ## A toy: when can a weight-only score stand in for frequency?
 
@@ -278,12 +418,164 @@ Three things fall out of it.
 Above 1.0 is not a bug. When a token's chosen experts are gone, the renormalized gates put full weight on whichever
 survivors it scores highest, which can be further from the right answer than nothing.
 
-The toy's experts are independent random networks, so none is redundant with another. Real experts are not like that,
-and REAP's argument is that redundancy is what makes pruning work; I left REAP out of the toy because a model with no
-redundancy cannot test it fairly. What the toy does say about K3 is narrower (reasoned). K3 was trained with
-`noaux_tc` balancing, so its natural load should be close to the balanced rows. On such a model a 75% cut costs a lot
-whatever the score, and the gap between two weight-only scores comes from how they interact with K3's own geometry,
-not from either of them finding the important experts.
+The toy's experts are independent random networks with similar output sizes, so none is a specialist and none is
+redundant with another. That leaves out exactly what REAP's score is built to see, an expert that is rarely picked but
+large when it is, so I left REAP out of the toy. An earlier version of this article also read the balanced rows as a
+forecast for K3: K3 is trained with `noaux_tc` balancing, so its load "should be" flat. The next section measured that
+on a real model of the same design, and it is not.
+
+## The same question on real weights: Moonlight
+
+The toy settles what a signed row sum can mean. It cannot say whether a real model's hidden states lean along all-ones,
+whether a balance-biased router leaves any skew to find, or what each score costs once the damage compounds through
+the layers. Those need a real MoE with K3's routing. The smallest public one I know is Moonshot's own
+[Moonlight-16B-A3B](https://huggingface.co/moonshotai/Moonlight-16B-A3B): the DeepSeek-V3 architecture that Kimi K2
+and K3 inherit, with `scoring_func: sigmoid`, `topk_method: noaux_tc` and an `e_score_correction_bias` in every MoE
+layer, 64 routed experts and two shared ones, the top 6 per token, `routed_scaling_factor` 2.446, 27 layers of which
+the first is dense (measured, from its `config.json`). Each expert is a SwiGLU of 2,048 to 1,408 and back, 8,650,752
+parameters.
+
+<ModelCard repo="moonshotai/Moonlight-16B-A3B" />
+
+### How I ran a 16B model on two CPU threads
+
+The checkpoint is 27 shards, one per layer. The script streams a layer's tensors by HTTP range into memory, runs every
+token through it, drops it and fetches the next, so the 32 GB of BF16 weights pass through about 3 GB of RAM and never
+touch the disk (measured, peak RSS 2,993 MB during the layers, 4,024 MB while scoring the output head). The attention,
+norms and rotary embedding are the stock `DeepseekV3Attention` and friends from transformers 5.20.2 with PyTorch
+2.14.1, loaded with Moonlight's weights; the repository's own `modeling_deepseek.py` and tokenizer are custom code I
+did not execute. I re-implemented the two pieces that mattered instead: byte-level BPE over the published
+`tiktoken.model` ranks with the tokenizer's split pattern, and the MoE layer itself, so that each pruned variant could
+route over its own surviving experts:
+
+```python
+# prune_moonlight.py (core). Wr: router (64, 2048); bias: e_score_correction_bias; keep: surviving ids
+def route(x, keep):
+    s = torch.sigmoid(x @ Wr[keep].T)                     # gate scores
+    idx = torch.topk(s + bias[keep], 6, dim=-1).indices   # chosen with the bias...
+    g = s.gather(-1, idx)                                 # ...weighted without it
+    g = g / (g.sum(-1, keepdim=True) + 1e-20) * 2.446     # renormalise, routed_scaling_factor
+    return keep[idx], g
+```
+
+The text is small but real. Calibration: two 512-token sequences of *Pride and Prejudice* from Project Gutenberg and
+two of Python's standard library (`json/decoder.py`, `argparse.py`), 2,048 tokens. Held out: two sequences from the
+WikiText-2 test split and two from `textwrap.py` and `heapq.py`, another 2,048. Every hidden state in the calibration
+pass and 17 held-out streams (the full model plus eight scores at two keep counts) is carried layer to layer together,
+so each layer's weights are fetched once. The full run took 2,630 seconds (measured).
+
+The sanity check is the unpruned model's perplexity: 8.29 on the WikiText-2 sequences and 4.31 on the Python (measured).
+A broken rotary embedding or a wrong expert order gives numbers in the hundreds; these are in the range a healthy 16B
+model scores on encyclopaedia text in 512-token windows (reasoned).
+
+Eight scores, each computed per layer from the full model's own calibration pass:
+
+- **frequency**: how often each expert is in a token's top 6;
+- **REAP**: Equation 9 with the model's real gate, sigmoid renormalised, over the tokens the model really sent there;
+- **REAP, code's gate**: the released observer's version, top 6 on raw logits and a softmax gate;
+- **w · mean input**: the router row dotted with the mean router input, the expected-logit score from the theory above,
+  which needs one 2,048-wide vector of data rather than any expert outputs;
+- **balance bias**: experts with the lowest `e_score_correction_bias`, the ones training pushed down for being busy;
+- **signed sum** and **row L1**: the two data-free scores from the card;
+- **random**, seeded per layer.
+
+### Result 1: the signed sum does not see usage, because the hidden states do not lean along all-ones
+
+The theory says the signed sum is the expected router logit when the mean input points along all-ones. On Moonlight,
+the cosine between the mean router input and the all-ones vector is 0.011 averaged over the 26 MoE layers, and never
+above 0.040 in magnitude (measured). The mean input is, for this purpose, orthogonal to all-ones. The signed sum and the
+expected logit are then unrelated, a correlation of −0.075 across experts (measured), and the signed sum's rank
+correlation with how often experts are actually picked is −0.118 on average, slightly backwards, never above 0.003 in
+any layer (measured).
+
+<MoonlightScores />
+
+The expected logit itself, $w_i \cdot \mu$, is a good proxy: a mean rank correlation of 0.748 with real frequency and
+11.2 of the 16 most-used experts recovered per layer, against 3.7 for random (measured). So the mechanism in the toy is
+right, a data-light score can see usage, and the vector it needs is the real mean, not all-ones. Computing $\mu$ takes
+one forward pass on any text. The card's own description, "calibration-free", is the one property it buys by skipping
+that pass.
+
+Two more readings from the same pass (measured):
+
+- **The load is not flat.** The 16 most-used experts of 64 take 63.8% of routing decisions on average, between 54.9%
+  and 72.7% by layer, where an even split gives 25%. A balance bias evens out load over training batches; on any one
+  text the router still prefers some experts strongly. So the toy's balanced rows were the wrong model of K3, and there
+  is more for a good score to find than this article first said.
+- **The bias does not rank experts the intuitive way.** Taking "lowest bias = was busiest in training" as a score gives
+  a rank correlation of −0.253 with frequency: on this text the experts the bias favours are the ones being used, which
+  is the bias doing its job inside the selection rather than recording history.
+
+### Result 2: what each score costs, layer by layer
+
+For the layer-local cost, each pruned variant routes the full model's own inputs to its surviving experts, and the
+error is the squared distance from the full layer's routed output, relative to that output's size. Averaged over the
+26 MoE layers, using each token's own relative error and taking the median token (measured):
+
+| keep | frequency | REAP | REAP, code's gate | w · mean | bias | signed sum | L1 | random |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 of 64 | 0.235 | 0.201 | 0.202 | 0.287 | 0.472 | 0.758 | 0.666 | 0.705 |
+| 16 of 64 | 0.966 | 0.963 | 0.872 | 0.869 | 1.137 | 1.201 | 1.249 | 1.198 |
+
+At half, the data-driven scores leave an error about a fifth the size of the routed signal; the signed sum leaves three
+quarters, the same as random. At a quarter, every score is near or past 1.0, which means the typical token's routed output is about
+as wrong as if it had been deleted. That is the regime pruned75 lives in.
+
+<MoonlightDrift />
+
+The "all tokens" view in the chart turned up something I did not expect. In layers 3 and 6, 97% and 96% of the routed
+output's squared size on the held-out text sits at position 0, the first token of each sequence (measured). In layer 3
+one expert, number 6, is picked 18 times in 12,288 routing decisions on the calibration set, 56th of 64 by frequency,
+and its REAP score is 14.96 against 0.58 for the next highest. Frequency pruning removes it at both keep counts and the
+layer's all-token error goes to 0.98; REAP keeps it and the error is 0.014 at half (measured). That is REAP's argument
+in one expert: a rarely chosen expert that carries a very large output when chosen. The likely job, writing the huge
+first-position activation that later attention layers use as a sink, is my inference from where the energy sits, not
+something I traced (reasoned).
+
+### Result 3: the whole model, every layer pruned at once
+
+Per-layer errors compound. Pruning all 26 MoE layers by the same score and running the held-out text end to end gives
+these perplexities, 1,022 scored tokens per text (measured):
+
+| keep | score | WikiText-2 | Python |
+|---|---|---:|---:|
+| 64 of 64 | unpruned | 8.29 | 4.31 |
+| 32 of 64 | REAP, code's gate | 19.12 | 6.06 |
+| | REAP | 22.35 | 6.51 |
+| | w · mean input | 25.30 | 7.26 |
+| | frequency | 27.29 | 6.45 |
+| | balance bias | 41.21 | 21.39 |
+| | row L1 | 41.50 | 22.18 |
+| | random | 58.75 | 44.53 |
+| | signed sum | 879.93 | 378.91 |
+| 16 of 64 | REAP, code's gate | 63.18 | 16.00 |
+| | row L1 | 129.33 | 160.09 |
+| | REAP | 141.77 | 25.61 |
+| | balance bias | 259.42 | 241.41 |
+| | w · mean input | 327.28 | 28.24 |
+| | signed sum | 681.75 | 2,867.56 |
+| | frequency | 1,701.76 | 164.01 |
+| | random | 2,050.36 | 1,963.73 |
+
+What I take from it (reasoned, from the tables):
+
+1. **At 50%, calibration buys almost everything.** Frequency and both REAP variants keep Python perplexity between
+   6.06 and 6.51, against 4.31 unpruned; every data-free score is at 21.39 or worse. REAP's two variants lead on prose
+   too.
+2. **On Moonlight the signed sum is worse than random**, 880 against 59 on prose at half. Whatever made it beat L1 on
+   K3.1 Pro's GSM8K, it is not a property of the DeepSeek-V3 design in general.
+3. **At 75% nothing is safe.** The best variant leaves prose perplexity 7.6 times the original, and frequency, which
+   was competitive at half, collapses to 1,702 once it starts removing specialists like layer 3's expert 6. That is
+   the same shape as Kimi-K2's frequency rows in the REAP paper.
+4. **The two REAP variants disagree more than the gate formula suggests.** Taking the top 6 with or without the bias
+   picks the same set for only 31% of calibration tokens, and the two scores share 27.0 of 32 kept experts and 11.7
+   of 16 (measured). The code's version did better here at 75%, 63 against 142 on prose; with one calibration set
+   of 2,048 tokens and one seed, I would not call that a ranking of the two.
+
+Moonlight is not K3.1 Pro. It has 64 experts where K3 has 896, top 6 where K3 has 16, no latent projection, and a
+different training run, so none of these numbers transfers. What transfers is the shape: on a real model of this
+design the mean hidden state does not point along all-ones, the load is skewed enough for a usage-aware score to
+matter, and at a 75% cut the choice of score is the difference between a damaged model and a broken one.
 
 ## The quality numbers
 
@@ -315,11 +607,37 @@ Ran (measured):
   streamed into memory and reduced to per-row statistics and hashes; nothing was stored.
 - The signed, L1 and bias rankings in float64, and the row-hash match, for every layer.
 - The toy, `toy3.py`, at 64 experts, four keep counts, four conditions and eight seeds.
+- `prune_moonlight.py`: Moonlight-16B-A3B streamed layer by layer, eight scores, two keep counts, 26 MoE layers,
+  2,048 calibration and 2,048 held-out tokens, transformers 5.20.2 and PyTorch 2.14.1 on two CPU threads, 2,630
+  seconds.
+- A read of the REAP repository at commit `1970473`: the observer, the saliency accumulator and the model registry.
 
-Read but did not run: the card's conversion script and `MagnitudeExpertPruner` itself. The sandbox has no PyTorch,
-and the conversion reads 1.5 TB; my numpy ranking reproduces its output in every layer, which is the part that can be
-checked. Did not run: the model. No GSM8K of my own, no tokens per second, no check of how much of a hidden state
-lies along all-ones. Those need the GPUs the model is for.
+Read but did not run: the card's conversion script and `MagnitudeExpertPruner` itself, and the REAP code. The
+conversion reads 1.5 TB; my numpy ranking reproduces its output in every layer, which is the part that can be checked.
+For REAP I re-implemented both its published score and its code's variant rather than running the repository.
+
+Did not run: Kimi K3.1 Pro or the pruned checkpoint. No GSM8K of my own, no tokens per second, and no measurement of
+K3's own mean hidden state, so the Moonlight finding that it is orthogonal to all-ones is evidence about the design,
+not about K3.
+
+## Limits, and where this sits
+
+The Moonlight experiment is small in three ways that matter. The calibration set is 2,048 tokens where the REAP paper
+uses about two million for a model this size, and one seed; scores that depend on rare experts, REAP above all, are
+the ones most sensitive to that. The held-out sets are 1,022 tokens each, enough to separate 19 from 880 but not 19
+from 22. And perplexity on text the model has probably seen is a weak proxy for the generative tasks where the paper
+shows the methods diverge most; I have no coding or maths scores for the pruned variants.
+
+Two things here I could not explain. The signed sum beat L1 by three to one on K3.1 Pro's GSM8K, per the card, and
+lost to L1 by twenty to one on Moonlight's prose at half. Either K3's geometry differs from Moonlight's in a way that
+favours it, or a 1,319-question benchmark on one checkpoint each is a noisier comparison than it looks. And the REAP
+variant with the "wrong" gate did better at 75% than the one matching the model; that could be the softmax gate's
+sharper weighting suiting this model, or noise from one small calibration set.
+
+On the site, [the Comet 60B teardown](/articles/comet-60b) looks at a model compressed with REAP-style pruning, and
+[runtime dynamic compression](/articles/runtime-dynamic-compression) at swapping the resident expert set while
+decoding. [Mixture of experts from scratch](/articles/mixture-of-experts-from-scratch) covers the routing that all of
+this assumes, and the [Kimi K3 article](/articles/kimi-k3) the architecture being cut.
 
 ## The take
 
@@ -331,6 +649,9 @@ each token still runs the same 104B parameters.
 The choice of score is the part to take away. Two data-free rankings of the same router rows agree on about 69 of
 224 experts, barely above chance, and one does three times as well as the other on the only benchmark measured. The
 toy shows why that is possible: a signed row sum is the expected router logit when the hidden states lean along
-all-ones, and it is noise otherwise. On a load-balanced MoE neither score can find much. That is why the vLLM team
-calls this a smoke test and is building calibration-based REAP for the real thing. Use it to test your serving stack
-on four GPUs. Do not use it to judge Kimi K3.1 Pro.
+all-ones, and noise otherwise. On Moonlight, the closest model of the same design I could run, they do not lean that
+way at all, the signed sum is worse than random, and one forward pass to get the real mean input would have turned
+the same arithmetic into a score that tracks usage with a 0.75 rank correlation. At 75% even the best calibrated score
+leaves a model 7.6 times as perplexed, and REAP's own authors stopped at 50%. That is why the vLLM team calls this a
+smoke test and is building calibration-based REAP for the real thing. Use it to test your serving stack on four GPUs.
+Do not use it to judge Kimi K3.1 Pro.
