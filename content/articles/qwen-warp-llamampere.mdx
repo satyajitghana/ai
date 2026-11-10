@@ -1,0 +1,184 @@
+---
+title: "qwen-warp and llamAmpere: two RTX 3090 engines for Qwen3.8, and what each one calls the same answer"
+description: "Two one-person engines claim big single-3090 numbers for Qwen3.8. qwen-warp is a hand-written CUDA engine for the dense 27B: W4A16 weights fed to bf16 tensor cores through a lop3 magic-number dequant, one CUDA graph per cycle, the checkpoint's MTP head or the DFlash2 drafter, and exact acceptance. Its 276.7 tok/s needs about six tokens committed per weight pass, which its own logs report. llamAmpere is a llama.cpp fork that runs the 125B Flash-Next at 121-125 tok/s with experts split between the card and RAM, through int8 tensor cores and a QTIP-style trellis code decoded with dp4a. Its launcher's speed comes with two switches that change the output: mb-MTP keeps drafts exact sampling would reject, and --moe-skip drops low-weight experts that are off the card. On a real draft and target pair, mb-MTP's extra acceptance and the distance it opens from the target distribution are the same number, about 6% a token. A third claim, 1,220 tok/s on an RTX 5090, has no code."
+date: 2026-11-09
+tags:
+  - inference
+  - speculative-decoding
+  - quantization
+  - cuda
+  - mixture-of-experts
+  - qwen
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 3
+  why: "Counts bytes per weight pass from the checkpoint headers, reads both engines' kernels, and measures what llamAmpere's default lossy acceptance costs."
+topic: inference-serving
+kind: roundup
+level: practitioner
+runsOn: consumer-gpu
+licence: MIT
+---
+
+import { DecodeCeiling } from "@/components/articles/qwen-warp-llamampere/decode-ceiling"
+import { MbMtp } from "@/components/articles/qwen-warp-llamampere/mb-mtp"
+import { TrellisCodes } from "@/components/articles/qwen-warp-llamampere/trellis-codes"
+
+Three posts from the same aggregator account went past this week, all about running Qwen3.8 on one consumer card.
+
+[@QwenAIFans](https://x.com/QwenAIFans/status/2119139629203071135) on 7 November: *"DFlash2 just took Qwen3.8-27B on one 3090 from 201 to 296 tok/s. Same INT4 prompt, greedy. Four users at once still hit ~401 tok/s total."* The engine is [`tuan3w/qwen-warp`](https://github.com/tuan3w/qwen-warp), and the post adds that it is 3090-only so far.
+
+The day before, [the same account](https://x.com/QwenAIFans/status/2118804942760853866): *"llamAmpere v0.6.3: 120+ tok/s, >3K/s prompt. 12% faster than Strata, 27% lower error than Unsloth Dynamic v3.1 3XXS."* That one is [`JakeATX/llamAmpere`](https://github.com/JakeATX/llamAmpere), running the 125B Qwen3.8-Flash-Next on a 3090 with 64 GB of RAM.
+
+And on 3 November, a Japanese developer's claim of **1,220 tok/s** for Qwen3.8-27B on one RTX 5090, single stream. The post itself notes, in Chinese, that the numbers are the author's own and that neither a third-party reproduction nor the source has arrived yet.
+
+The site has already covered the drafter ([DFlash 2](/articles/dflash2)), two other solo engines ([TensorFold and Strata](/articles/tensorfold-strata-engines)) and the RAM-offload pattern ([a 200 GB MoE on one 3090](/articles/big-moe-one-3090)). This piece is about the two engines with code. I cloned both, read the kernels and the benchmark notes, counted bytes from the checkpoint headers, and ran what the sandbox let me run: a re-implementation of each engine's weight decode and of llamAmpere's acceptance rule. There is no GPU here, so every speed below is **reported**, and the arithmetic around it is **reasoned** or **measured** on a CPU, labelled as such.
+
+| | qwen-warp | llamAmpere |
+|---|---|---|
+| What | a CUDA engine written for one checkpoint | a fork of llama.cpp (via TheTom's TurboQuant fork) |
+| Model | Swift-1.5-Qwen3.8-27B INT4 (W4A16, group 128) | Swift 1.5 27B (IQ4_XS-M, AI+ files) and Qwen3.8-Flash-Next (AI3, 74.61 GiB) |
+| Weights to tensor cores | 4-bit to bf16, `mma.sync m16n8k16` bf16 | 4-bit or trellis to int8, `mma.sync m16n8k32` s8, activations quantized to int8 |
+| Drafter | the checkpoint's MTP head (k up to 3), or DFlash2 (7 drafts) | the MTP head (depth 3-4 adaptive), DFlash2 optional |
+| Acceptance | exact | **mb-MTP by default: lossy**; `--no-spec-mb-mtp` for exact |
+| Licence | MIT; weights under their own licence | MIT (ggml authors) |
+| Read at | commit `36f699c`, v0.9.1, 10 November | commit `24577d2`, v0.6.3.10, 9 November |
+
+<RepoCard repo="tuan3w/qwen-warp" />
+
+<RepoCard repo="JakeATX/llamAmpere" />
+
+## The arithmetic every claim answers to
+
+On a single stream, decode is a weight read. One cycle reads every weight the model uses once, verifies a handful of drafted tokens in the same pass, and commits however many the model agrees with. So a cycle can never run faster than its bytes over the card's bandwidth, and the speed is bounded by
+
+$$
+\text{tok/s} \;\le\; L \times \frac{B \cdot e}{D}
+$$
+
+where $D$ is the gigabytes read per cycle, $B$ the peak bandwidth (936 GB/s on an RTX 3090), $e$ the share of that peak the kernels reach, and $L$ the tokens committed per cycle.
+
+I counted $D$ for qwen-warp's checkpoint from its safetensors headers, read with HTTP range requests (**measured**, 2,031 tensors, 19.45 GB on disk):
+
+| What one cycle reads from VRAM | GB |
+|---|---|
+| 64 decoder layers: W4 weights plus bf16 group scales | 12.596 |
+| int4 lm_head, 248,320 rows of 5,120 (the engine rescores its top 16 to 64 candidates with the bf16 head) | 0.656 |
+| gated-DeltaNet state: 48 layers of 48 heads of 128 by 128 in fp32, read and written | 0.302 |
+| **one verify pass** | **13.554** |
+| MTP drafting, three times the MTP layer at int4 plus the 65,536-row draft head | +1.17 |
+| or the DFlash2 drafter's W4 weights, 1.0 GiB | +1.07 |
+
+The vision tower (0.92 GB) and the bf16 embedding (2.54 GB) are not read by a text decode step; the embedding reads one row a token.
+
+The repo's own profile lines up with that count. At one row and no drafts a cycle takes 17.3 ms and decodes 57.8 tok/s (**reported**), which is 13.55 GB in 17.3 ms, or 783 GB/s: 84% of the 936 GB/s peak (**reasoned**). The nsys line in its performance notes says the W4 GEMVs run at *"820 to 855 GB/s, 92% to 96% of the 891 GB/s read peak of this card"* and take 17.65 ms of a 21.8 ms cycle; 17.65 ms at those rates is 14.5 to 15.1 GB, which is my 14.72 GB MTP cycle to within the rounding of where the boundaries sit.
+
+<DecodeCeiling />
+
+Now the claims. With DFlash2, qwen-warp's docs report **276.7 tok/s** through the server on the README code prompt, with 5.8 to 6.0 tokens accepted per cycle and a 21.0 ms cycle. At 84% of the bus and 14.63 GB a cycle, the ceiling is 53.7 tok/s per committed token, so 276.7 needs $L \ge 5.2$; the logged 5.9 clears it (**reasoned**). The post's 296 needs $L \ge 5.5$ on the same line, or 6.2 at the measured 21.0 ms cycle. That is within the range the docs show for code-like prompts (code-from-spec decoded at 319.1). I could not find the post's exact pair, 201 to 296, anywhere in the repository's docs at the commit I read; the nearest are 183.9 to 276.7 through the server and 185.3 to 276.4 engine-direct. Same shape, different prompt or day.
+
+Four users at ~401 tok/s is also below what the repo reports: 424.9 tok/s aggregate at four clients on `--profile multiuser` (**reported**). That number rests on a kernel change: the W4 GEMV takes up to **16 rows** per weight read (two n8 token tiles sharing each dequantised fragment), so four sequences with three drafts each fit in one pass. At 4 users the per-request speed is 114.8 tok/s.
+
+The 5090 claim is the one without code. Its own post says the fast model file is 11.7 GB and the card's peak is 1,792 GB/s. If a cycle reads most of that file, the bus allows about 153 cycles a second, and 1,220 tok/s needs about eight tokens committed per cycle even at 100% of the peak; if it reads 10 GB, about seven (**reasoned**). The same post lists 424 tok/s on an English mystery story; the 1,220 is a 160-line JSONL task, and the 1,241 is a code edit that returns a 4,711-token file with one change. Those are copying tasks. qwen-warp's own prompt-lookup path accepts 6.6 tokens a cycle on a "rewrite this snippet" prompt. So 1,220 is not ruled out by the bus on a task that copies its input. It is not checked by anything either.
+
+## What makes each one a 3090 engine
+
+"3090-only" in both READMEs means tuned and tested on one card, not instructions the card alone has. The bf16 and int8 `mma.sync` shapes both engines use run on every NVIDIA GPU from sm_80 on. The specificity is in what each engine assumes about the chip and in how it gets 4-bit weights into tensor cores, and here they take opposite routes.
+
+### qwen-warp: keep the activations in bf16
+
+The build line is `ARCH ?= -arch=sm_86`, and the architecture doc's table of design choices lists *"One GPU generation (sm_86)"*, because the *"kernels use its instruction set directly (mma.sync, cp.async, lop3)"*, with *"no PDL, no TMA"* earlier on the page (Hopper's launch and copy engines, which the 3090 lacks).
+
+Weights are `uint32` words of eight nibbles with a bf16 scale per 128 columns. The GEMV in `engine/src/gemv.cu` streams them with `ld.global.nc.L1::no_allocate` (read once, do not pollute L1), turns each word into bf16 pairs, and feeds them to `mma.sync.aligned.m16n8k16` with the weights as the 16-row A operand and up to eight tokens as the n8 B tile. The conversion is one `lop3` and one `fma` per register pair, from `engine/src/common.cuh`:
+
+```cpp
+// (w >> 4j) & 0x000F000F | 0x43004300  ->  bf16x2 (128 + n_j, 128 + n_{j+4})
+uint32_t q = lop_and_or(j ? (w >> (4 * j)) : w, 0x000F000Fu, 0x43004300u);
+asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(q), "r"(0x3F803F80u), "r"(0xC308C308u));  // q*1.0 - 136.0
+```
+
+`0x4300` is 128.0 in bf16, and at 128 the bf16 spacing is exactly 1, so OR-ing a nibble into the low mantissa bits produces 128 plus the nibble. Subtracting 136 gives the signed level, nibble minus 8. I checked all sixteen nibbles in Python: every one lands on its integer exactly, −8 through 7 (**measured**). The int-to-float conversion, the zero point and the sign all cost one instruction each pair. The group scale is applied in fp32 after each 128-column group's accumulate.
+
+Around that GEMV, a decode cycle is one CUDA graph of fused kernels with device-side scalars for position and length, so the host launches graphs and reads an output ring; the doc notes a persistent kernel was within 2.5% when the choice was made and kept the graph for maintainability. The rest is about fitting 24 GB: a 4-bit KV cache rotated by a Walsh-Hadamard transform with exact fp16 sink and recent-window rows, and the bf16 embedding and rescoring head moved to pinned host memory (`--host-tables`, 4.7 GiB), which the docs measure as bit-identical and 0 to 2% slower. That is how 262,144 tokens fit, with 23,227 MiB in use after a 262,080-token prompt (**reported**).
+
+### llamAmpere: quantize the activations to int8
+
+llamAmpere goes the other way. Its verify kernels quantize the activations to int8 (one scale per 32 elements for IQ4_XS, per 128 or 256 for AI+ files) and decode the weights into int8 A fragments for `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`. Two files show the dense-27B part. `mmvq-iq4xs-wide.cuh` moves verify widths of 9 to 32 columns onto int8 tensor cores; its header comment says those shapes went to llama.cpp's MMQ, *"whose tiles cost ~1.5x (w9-16) to ~1.8x (w17-24) of a w1 weight pass"*, and the new kernel reads the weights once for all columns. `mmvq-iq4xs-k4.cuh` does the same for widths 5 to 8, the depth-4 verify, and is on by default. The v0.4 notes put the width 5-8 verify kernels at +6.70% ± 0.42% (**reported**).
+
+The Ampere assumptions are written into the code. `mmq-config-ampere.cuh` is a separate tile table for sm_86. `ai4-kern.cuh` has a 3-stage `cp.async` pipeline into shared memory and a static assert that its launch bounds fit sm_86's 1,536 threads per SM (48 warps; the A100's sm_80 has 2,048), with the comment *"8 warps with min blocks 8 does not fit sm_86 launch_bounds"*.
+
+The most interesting kernel is the AI+ decode. AI+ is the author's own weight format, and reading `ggml/src/ggml-ai4.h` it is a QTIP-style bitshift trellis: the weights of a 16 by 8 tile are a circular bit stream, each weight's level is computed from the 16-bit window ending at its bits, and the level is a "1MAD" code, a multiply and a sum of bytes:
+
+```c
+static inline int aik_level_c(uint32_t state, uint32_t C) {
+    const uint32_t x = state * C;
+    const int b = (int)(x & 255) + (int)((x >> 8) & 255) + (int)((x >> 16) & 255) + (int)(x >> 24);
+    return ((b + 2) >> 2) - 128;
+}
+```
+
+Four bytes of a hashed state summed is close to Gaussian, which is what the weights look like after the Hadamard rotation the format also applies. On the card the byte sum is one `dp4a` against `0x40404040` (64 in every byte), so byte 1 of the result is the level. The kernel comment counts *"17 instructions per 4 weights (8 IMAD/DP4A, 9 ALU)"*.
+
+I re-implemented the level function in numpy for the three multipliers in `lay_mul()` and enumerated all 65,536 states (**measured**). The dp4a form matches the C form on every state for every rate. The levels have a standard deviation of 35.5 to 37.0 on the s8 scale and an excess kurtosis of −0.28 to −0.30, which is the Irwin-Hall value for a sum of four uniform bytes, −0.3: a slightly flattened Gaussian. Then I ran a Viterbi search with that trellis on i.i.d. Gaussian data to see what the code buys over a plain grid:
+
+<TrellisCodes />
+
+At 2 bits per weight the trellis reaches a mean squared error of 0.0669 on unit Gaussians, against 0.1142 for the best-clipped four-level grid and 0.1175 for the Lloyd-Max optimum, the best any scalar quantizer can do. At 3 bits it is 0.0170 against 0.0361, at 4 bits 0.00434 against 0.0112 (**measured**, four sequences of 1,024 samples, best of a few global scales). Each is within 9% to 14% of the Shannon bound for its rate. That is the point of the format: the code spends its bits on sequences of weights rather than on each weight, so it gets below what any per-weight grid can reach at the same size.
+
+Two cautions on reading that. Real weights are not i.i.d. Gaussian, though the Hadamard rotation is there to push them towards it, and the per-row scales the format stores are not in my search. And the price is arithmetic: qwen-warp spends two instructions to turn a pair of nibbles into bf16, the AI+ path seventeen for four weights. On a bandwidth-bound decode that trade can pay, since fewer bytes is the only thing that moves the ceiling; it is also why llamAmpere's expert kernels are written so carefully around `cp.async` and register budgets. The quality side is the KL divergences the release notes report for the files (below), which I could not reproduce without the weights and a GPU.
+
+## What each one calls the same answer
+
+Both engines say speculative decoding does not change the output. Only one of them does that by default.
+
+qwen-warp's acceptance is exact. Greedy acceptance is an argmax equality over the verify rows; sampled requests use exact speculative sampling; logit processors run on every verify row with the earlier drafts counted as generated. Its rescoring head reads the quantized lm_head's top 16 candidates and rescores them with the bf16 head, so the ids are the bf16 head's. It is also candid about the limit of "exact": two batch shapes can resolve a bf16 near-tie differently, and over 20 prompts the first divergent token was always one whose two best logits were 0.011 to 0.14 apart (**reported**).
+
+llamAmpere's default is not exact, and its docs say so. The flag help: *"mb-MTP (mode-biased MTP) on by default with MTP; --no-spec-mb-mtp for exact sampling. Keep a rejected draft if p(draft) >= p(residual replacement)"*. The code is `common_sampler_verify_pq_impl` in `common/sampling.cpp`. Standard speculative sampling accepts a draft $d \sim q$ with probability $\min(1, p(d)/q(d))$ and, on rejection, draws a replacement $y$ from the residual $(p - q)^+$. That is what makes the output distributed exactly as $p$. mb-MTP then keeps $d$ anyway whenever the target ranked it at least as high as $y$.
+
+That rule has a clean consequence. A rejection only happens on a token the drafter over-weights ($q > p$), and the residual only has mass on tokens it under-weights ($p > q$). So every extra acceptance moves probability from an under-drafted token onto an over-drafted one, and the extra acceptance rate is exactly the total-variation distance the rule opens between the output and the target. Speed and drift are one number.
+
+<MbMtp />
+
+To put a size on it I measured the rule on a real pair: SmolLM2-360M as target and SmolLM2-135M as drafter (same tokenizer), teacher-forced over 511 positions of each of three texts with the sampler llamAmpere's commands use, top-k 20 and top-p 0.95, at temperature 1.0 and 0.7 (**measured**, CPU, weights streamed into RAM). Exact acceptance per position averaged 68.8% to 74.3%; mb-MTP raised it by 5.8 to 7.5 points, and the output moved from the target by the same 5.8% to 7.5% in total variation, with the 90th percentile position at 16% to 20%. A Qwen MTP head agrees with its own model more than a separate 135M model does, so the 27B's drift is probably smaller; I could not run that pair here, and llamAmpere's notes do not report its rescue rate. The engine does log it (`stats.n_lossy`), so it is one flag away for anyone with the card.
+
+The Flash-Next launcher adds a second switch. `scripts/flash-next-server.sh` ends with `--moe-skip`, which the v0.6.2 notes define plainly: *"skip low-weight experts that are off the card within a 15% cumulative router-weight budget, protecting the first five routes. This changes the model's answers."* The v0.6.3 notes measured their 121-125 tok/s with *"the release-candidate engine, public Q2S-B drafter and product settings"*; I read "product settings" as the launcher's defaults, which are mb-MTP and `--moe-skip`, two output-changing settings, each documented (**reasoned**). The launcher's `--exact` option turns both off, and I found no published Flash-Next speed for it. The nearest controlled number is older: v0.6.1 wrote 113.15 tok/s on a 3090 Ti with mode-biased MTP off, before `--moe-skip` existed (**reported**; a different card, file and release, so not a like-for-like gap).
+
+None of this is hidden; the docs say it more carefully than the post does. But "120+ tok/s" and "lower error" sit next to each other in the post, and the error is measured on the weights while the speed is measured with the acceptance rule and the expert skip on.
+
+## Flash-Next on 24 GB: where the bytes go
+
+I parsed both shards of the AI3 file's GGUF headers the same way (**measured**, 1,224 tensors, 80.10 GB). Routed experts are 46.18 GB, which over 48 layers of 512 experts is 1.88 MB an expert. A token routes to 10 per layer, so it reads 0.90 GB of experts. The N-gram embedding table is 28.80 GB and reads a few rows a token. Everything else a pass touches, attention, DeltaNet, routers, shared experts and the head, is about 4.6 GB.
+
+A 24 GB card holds 10,026 complete experts in v0.6.1's census, 41% of the 24,576, and the device-route hit rate was 91.1% to 93.0% (**reported**). The rest run on the CPU from RAM. At depth 3-4 a verify pass is four or five rows, so a pass reads up to 4.5 GB of expert bytes if no two rows share an expert. With 92% of routes on the card, about 0.36 GB of that comes from RAM per pass, and the card reads about 8.7 GB (**reasoned**: 4.6 + 0.92 × 4.5). That is about 9 ms on the card at the 3090's peak, against a reported 26.64 ms per draft round, and 124 tok/s at that round time is 3.3 tokens a round. The CPU side and the gaps between them are most of the time, which is the same conclusion [the RAM-offload piece](/articles/big-moe-one-3090) reached for a different build. `--moe-skip` helps exactly there, by not computing some of the off-card experts at all.
+
+The Strata comparison in the post is not in the repository as a 12% figure. What the v0.6.3.6 notes say is that the 84.97 GiB AI4 file, on one RTX 3090, *"single-seed screens at a 100K prompt wrote 15-22% faster than Strata v0.2.12 with UD-IQ4_XS, with 5-16% slower prompt reading"*. The "27% lower error" does reproduce from the v0.6.3 notes: AI3's KL divergence against the Q8 teacher is 0.086541, against 0.118003 for *"a Swift IQ3_XXS file made with another published quantization map"*, and 1 − 0.086541 / 0.118003 is 26.7%. The same paragraph calls that pair *"historical cross-build comparisons, not paired release-build quality gates"*.
+
+## What the posts say, against the repositories
+
+| Claim | Where it lands | Status |
+|---|---|---|
+| qwen-warp, DFlash2: 201 to 296 tok/s | docs: 183.9 to 276.7 (server, code prompt), 156.8 to 210.5 over 8 chat prompts; 319.1 on code-from-spec | same shape; the exact pair is not in the docs |
+| qwen-warp, 4 users ~401 tok/s | 424.9 aggregate at 4 clients, 114.8 per request | the repo reports more |
+| qwen-warp, 3090-only | `-arch=sm_86`, tested on one card | holds |
+| qwen-warp, where DFlash2 loses (not in the post) | DFlash2 is 4% slower than MTP on the README prose prompt, 31% slower on copy-heavy agent turns | the docs say it |
+| llamAmpere, 120+ tok/s on Flash-Next | 121.32 / 124.89 / 124.26 coding / agentic / RAG, 100K prompt, temperature 1.0, with mb-MTP and `--moe-skip` | holds as reported, not with exact output |
+| llamAmpere, >3K/s prompt | 2,878.55 to 2,944.23 on the 3090; 3,023 on a 3090 Ti | about 3K |
+| llamAmpere, 12% faster than Strata | 15-22% faster, single-seed, the AI4 file, prompt 5-16% slower | not the repo's number |
+| llamAmpere, 27% lower error | 0.086541 against 0.118003 KLD, cross-build | the arithmetic holds |
+| 5090, 1,220 tok/s | no code; needs about seven to eight tokens a cycle at the full bus | unchecked |
+
+## What I ran, and what I could not
+
+- **Ran.** Safetensors and GGUF header parsing over range requests for `ukisai/Swift-1.5-Qwen3.8-27b-INT4` and `jakeatx/qwen3.8-flash-next-Swift1.5-ATX-AI3` (no weights downloaded). An exhaustive check of qwen-warp's bf16 dequant constant. A numpy re-implementation of llamAmpere's 1MAD level function and dp4a form over all 65,536 states, and a Viterbi quantizer over its trellis. The mb-MTP rule, computed exactly per position over SmolLM2-360M and SmolLM2-135M logits (PyTorch 2.14 on CPU, two threads).
+- **Refused.** I tried to compile a ten-line C harness against llamAmpere's own `ggml-ai4.h`, to check my re-implementation against its code, and to run qwen-warp's GPU-free `tests/test_prefill_plan.py`. The sandbox's permission layer refused both as code from an external repository, so the cross-check is against my reading of the source, not its execution.
+- **Could not.** Anything on a GPU: no tok/s here is mine, no KV-cache quality number, no expert hit rate.
+
+## What to take from it
+
+The two engines agree on the physics and disagree on the bookkeeping. For the dense 27B, qwen-warp reads about 14.7 GB a cycle and llamAmpere's 15.6 GB IQ4_XS-M file implies a similar bill; both get their headline from committing several tokens per read: qwen-warp's 276.7 is the bus times six tokens, and the docs log the six. Where they part is what counts as the same answer. qwen-warp's default output is the model's, near-ties aside. llamAmpere's default trades a measurable slice of the distribution for acceptance, says so in its flag help, and ships the switch to turn it off. If you benchmark it against anything exact, pass `--no-spec-mb-mtp`, or `--exact` to the Flash-Next launcher, and compare like with like.
