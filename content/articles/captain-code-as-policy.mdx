@@ -1,0 +1,402 @@
+---
+title: "CaPtain: a 4B model that drives a robot arm by writing Python against IK"
+description: "CaPtain post-trains Qwen3.5-4B into a code-as-policy agent that controls a Panda arm through 22 low-level primitives, with no grasp skill and no VLA, and takes held-out LIBERO from 0.0% to 55.4% with SFT and 73.8% with RL. The RL credits each request by how much it moves a simulator critic's predicted chance of success. I read the paper, the MIT code and the 45,198-line execution environment, re-implemented its IK solver and ran it on 2,000 targets, rebuilt the critic's credit rule on a toy task to see where credit lands, and found one place where the paper and the released config disagree."
+date: 2026-11-09
+tags:
+  - robotics
+  - agents
+  - reinforcement-learning
+  - code-as-policy
+  - libero
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Re-implements CaPtain's IK and critic credit on CPU to show where credit lands, and checks the 4B claims against the code, config and weights."
+topic: robotics
+kind: paper
+level: practitioner
+runsOn: workstation
+licence: mixed
+---
+
+import { IkReachMap } from "@/components/articles/captain-code-as-policy/ik-reach-map"
+import { CreditLedger } from "@/components/articles/captain-code-as-policy/credit-ledger"
+import { EpisodeCost } from "@/components/articles/captain-code-as-policy/episode-cost"
+
+A post from [@robotsdigest](https://x.com/robotsdigest/status/2117304336313463172) asked a good
+question: "Can a 4B model write code that drives a robot arm using only low-level IK?" The answer it
+pointed to is **CaPtain**, from MMLab at CUHK and NovaXBot: a paper
+([arXiv 2610.40799](https://arxiv.org/abs/2610.40799), 29 October 2026), MIT-licensed code in
+[`waltstephen/CaPtain`](https://github.com/waltstephen/CaPtain) with the execution environment in
+[`waltstephen/CaPtain-Harness`](https://github.com/waltstephen/CaPtain-Harness), and Apache-2.0
+weights at [`YijiaFan/CaPtain-4B`](https://huggingface.co/YijiaFan/CaPtain-4B). The headline:
+held-out LIBERO success goes from 0.0% for base Qwen3.5-4B to 55.4% after supervised fine-tuning and
+73.8% after multi-turn RL.
+
+I wanted to know three things. What exactly does the model get to call, and how low is "low-level"?
+How does the RL decide which of forty requests in an episode deserved the credit? And do the paper,
+the code and the weights agree with each other? I read all three, ran what I could on a CPU, and
+re-implemented two pieces where the sandbox would not let me execute the repository's own code.
+
+Every claim below is labelled **measured** (I ran it), **reported** (the paper, README or a config
+says so) or **reasoned** (my inference).
+
+<RepoCard repo="waltstephen/CaPtain" />
+
+## What code-as-policy means here
+
+A vision-language-action model (VLA) maps pixels to motor commands with one network. A
+**code-as-policy** agent does something else: a language model looks at camera images, writes a
+program against a robot API, runs it, reads what happened and writes the next program. The idea goes
+back to Code as Policies and VoxPoser. What changed in 2026 is that frontier models got good at it.
+The paper cites GPT-6 Astra solving 94.0% of LIBERO-PRO episodes with a coding setup, and this site
+has watched [MiMo-V2.6 drive a Panda in LIBERO-Spatial](/articles/mimo-v2-6) one delta-pose action
+per turn.
+
+The catch is that most of these agents either prompt a closed frontier model at every episode, or
+give the code a `grasp()` or `place()` skill backed by a VLA trained on the benchmark's own
+demonstrations. In the second case the code chooses *which* skill to call, but the skill decides how
+to grasp. RL on the code can then only learn to sequence the skill (reported, Section 1).
+
+CaPtain removes both crutches. The policy is a 4B open model. The API has no grasp skill. The model
+must choose where the jaws go, from which direction they approach, and when they close.
+
+<Figure
+  src="/articles/captain-code-as-policy/fig1.png"
+  alt="Two-row diagram. Top row, inference: a task card with an instruction and head and wrist camera images feeds a Qwen3.5-4B policy, which writes a Python cell calling observe, segment, measure_object_geometry and move_to. The cell runs against a low-level API panel (perceive, measure, act, finish, SAM3 and Molmo, marked low-level only, no skills), the robot executes reach, grasp and place, and a receipt lists segment, move_to and gripper results that feed the next request, up to 60 per episode. Bottom row: Stage 1 SFT on synthetic agent episodes; Stage 2 reinforcement learning with four rollouts per start, a MuJoCo simulator whose exact state feeds a critic, and per-request credit bars; Test on a real robot, LIBERO, RoboTwin 2.0 and RoboDojo with the critic removed."
+  caption="The loop and the recipe: the policy writes a Python cell, CaPtain-Harness executes it and returns receipts and images; SFT teaches the format, RL with a simulator critic teaches manipulation, and the critic is gone at test time (paper, Figure 1)."
+/>
+
+## The loop: one request, one Python cell
+
+An episode is a sequence of at most 60 **requests**. Each request is one chat completion of up to
+4,096 tokens: the model thinks, then emits one or more calls to its only tool, `python`. That tool is
+a persistent, sandboxed Python 3.11 session with numpy, scipy, Pillow and a pre-imported `robot`
+module. Variables survive between requests, so a detection found in request 3 can be reused in
+request 9 (reported, Appendix A.1; the client is `server/robot.py`, which I read).
+
+Two design choices make this workable for a small model:
+
+- **Robot calls never raise.** Every capability returns a plain dict,
+  `{success, executed, failure_category, message, value, diagnostics, budget}`. The model writes
+  ordinary `if`/`for`/retry logic around calls instead of crashing a cell (reported, and that is
+  what the client's docstring says).
+- **Every call leaves a receipt.** The client appends one line of at most 300 characters per robot
+  call to the cell's output, capped at 20 lines per cell (measured: `_CELL_LIMIT = 20` and
+  `str(line)[:300]` in `robot.py`). A motion receipt reports the stop reason, the distance actually
+  travelled, the peak force and the jaw opening before and after. The model learns from text what
+  happened, not only from pixels.
+
+The episode budget is 60 requests, 150 physical actions and 1,080 s of wall time. The context window
+is 65,536 tokens; past 60k the history is compacted turn by turn, but the Python variables are not
+in the prompt, so they survive compaction (reported, Appendix A.1).
+
+One detail I did not expect. The request template the policy is trained and evaluated with,
+`react/prompts/captain.request.json`, opens with a 21,261-character developer message that begins
+"You are Codex, an agent based on GPT-6" (measured). The 4B model is wearing the system prompt of
+the coding agent whose trajectories it was distilled from. That is consistent with the paper's
+point that SFT, RL and test share one input format, and it is a reminder of where the behaviour came
+from (reasoned).
+
+## How low is "low-level"?
+
+The API is 22 capabilities plus `finish()` (paper, Table 4): perception (`observe`, `segment` with
+SAM 3, `point` with Molmo2-8B, `mark_point` that back-projects a pixel the model chose,
+`track_target`), measurement (`measure_object_geometry`, contact and release geometry checks),
+motion (`move_to`, `hold`, `recover`, `release`), read-only planning checks, and pose arithmetic.
+Only motions count against the action budget.
+
+`move_to` takes an absolute end-effector pose or a single jaw command. Under it, the environment
+turns the request into a straight Cartesian sweep, solves inverse kinematics, checks self-collision,
+and monitors force at every control substep, stopping at first contact unless the model asks for a
+manipulation mode that tolerates load (reported, Section 3.1).
+
+So "only low-level IK" is accurate about the *interface* and generous about the *machinery*. There
+is no `grasp()`, but `measure_object_geometry` hands back a symmetry-completed centre, extents, yaw
+and the offset to the destination, and guarded motion protects the model from crashing into the
+table. The policy-facing surface is small; what sits under it is not. The environment's `src/` is
+45,198 lines of Python across 182 files; the shared tool layer every backend imports, `adapters/capx/backend.py`, is 10,033 lines on its own
+(measured with `wc -l` at commit `de38d6d`, which is the commit the main repo pins). That is not a
+criticism. It is where the engineering went, and it is why the same API runs on LIBERO, RoboTwin
+2.0, RoboDojo, SimplerEnv, CaP-Bench and a real arm.
+
+<RepoCard repo="waltstephen/CaPtain-Harness" />
+
+### The IK under `move_to`, re-run on a CPU
+
+The IK lives in `RobotCollisionModel.solve_ik` (`adapters/robotics/model.py`). It is damped least
+squares:
+
+$$
+\Delta q = J^\top \left(J J^\top + 0.0025\, I\right)^{-1} e,
+\qquad e = \begin{bmatrix} p^{\star} - p \\ \operatorname{rotvec}(R^{\star} R^\top) \end{bmatrix}
+$$
+
+where $J$ is the $6 \times 7$ Jacobian, $p^{\star}, R^{\star}$ the target position and rotation, and $e$
+stacks the position error with the rotation error as a rotation vector. Each step is scaled so no
+joint moves more than 0.12 rad, joints are clipped to their limits, and a solve succeeds when the
+error is under 2 mm and 0.02 rad within 180 iterations. If the measured configuration fails as a
+seed, it restarts from four more: the centre of the joint ranges and three offsets from it.
+
+The sandbox refused to execute the repository's code, so I re-implemented exactly that loop in
+numpy (same constants, same five seeds) on a Panda built from Franka's published DH table, and ran
+it (measured, numpy 2.5.4 and scipy 1.18.1, one CPU thread):
+
+| Variant | Solved from the first seed | Solved within 5 seeds | Mean iterations |
+|---|---|---|---|
+| As released: damping 0.0025, step cap 0.12 rad | 86.7% | 99.25% | 72.7 |
+| Damping removed | 86.75% | 99.2% | 71.7 |
+| Step cap removed | 79.65% | 98.4% | 81.0 |
+
+That is 2,000 random reachable poses, each the forward kinematics of a random configuration inside
+the middle 80% of every joint's range, solved starting from the Panda's home configuration. Two
+things fall out. The restarts are what take success from about 87% to over 99%. And on targets that
+are reachable, the damping term changes nothing; the step cap does the work. Damping matters near
+singularities, which random reachable targets rarely hit (reasoned). Each solve took about 16 ms in
+my unoptimised numpy.
+
+Then the question a LIBERO task actually asks: can the gripper point straight down at this spot on
+the table? The map below sweeps a 5 cm grid, half the table, at two heights, with the redundant
+joint free or locked at zero to imitate a 6-DoF arm.
+
+<IkReachMap />
+
+At gripper height 5 cm above the base, the 7-joint Panda finds a top-down pose in 279 of 513 cells,
+11 of them only after a restart. Locking joint 3 drops that to 242, and the cells it loses are the
+ones close to the base, not the far edge: the outer reach is about 0.80 m either way (measured; no
+collision check, so this is an upper bound). That is the kinematic face of a failure the paper
+reports in transfer: on RoboDojo, 21 of 46 first blocking failures were IK or reach failures on the
+6-DoF ARX X5, whose top-down workspace extends only about 0.5 m from its base (reported, Appendix J).
+A code-as-policy agent trained on one arm learns where things are reachable for that arm. Its code
+does not carry that knowledge across (reasoned).
+
+## Stage 1: teach the format
+
+Base Qwen3.5-4B solves essentially nothing in this environment: at most 0.3% on any suite. It
+"exhausts its request budget misusing the interface" (reported, Section 4.1). So the first stage is
+SFT on agent trajectories generated *inside the same environment* by frontier coding agents: 25,961
+rows and 861M tokens, 654M of them from GPT-6 Astra (reported, Table 5).
+
+Three details from Appendix C and D are worth stealing for any agent SFT:
+
+1. **Normalise the teacher's helpers.** The raw episodes contained 226 distinct variants of the same
+   "preview, then move" helper. The authors rewrote every trajectory onto one four-function library
+   (`val`, `need`, `downq`, `go`) and checked each rewrite against a mock robot; replaying six
+   rewritten episodes changed robot commands by under 1 cm (reported).
+2. **Mask the coordinates so the model has to look.** With probability 0.2, earlier `mark_point`
+   pixel coordinates in the history are replaced with a mask token, so the model cannot copy a
+   click from a previous turn (reported, Section 3.2).
+3. **Diverse layouts or the model stops looking.** On LIBERO's official initial states each object
+   sits in nearly the same spot (standard deviation about 1.4 cm). Models fine-tuned on those
+   learned object positions from the task name: swapping the input image left the likelihood of the
+   predicted pixel unchanged. Wide-layout starts with about 15 cm spread fixed it (reported,
+   Appendix D).
+
+Only the agent's own tokens are supervised, reasoning included, with the vision tower frozen.
+Result: 55.4% held-out LIBERO host success (reported).
+
+## Stage 2: RL that knows which request mattered
+
+An episode is tens of requests; most of them only look (observe, segment, measure, verify) and a
+handful change the world (approach, close the jaw, carry, release). The outcome arrives once, at the
+end. Outcome-only RL such as GRPO gives every request in an episode the same advantage, so a request
+that looked at the table and a request that dropped the bowl share the blame.
+
+CaPtain's answer is an asymmetric critic. Training runs in MuJoCo, so before each request the
+simulator records a hidden snapshot the policy never sees. From it come 36 features: end-effector and
+jaw state, goal bookkeeping, distances between end-effector, target and destination, target lift and
+displacement, articulated-joint positions, and held and ever-held flags. The critic is five small MLPs
+(three hidden layers of 256) whose logits are averaged into a probability of host success
+(reported, Eq. 3; `physics_critic.py`'s `mlp()` builds exactly that, which I read). Each request's
+credit is how much it moved that probability:
+
+$$
+\delta_t = c_t + V_\phi(s_{t+1}, t) - V_\phi(s_t, t), \qquad \delta_T = c_T + R - V_\phi(s_T, T)
+$$
+
+with $c_t \le 0$ small per-request costs and $R$ the terminal return. Note the index: both values
+are read at the same request index $t$. That is the subtle part. If the next state were scored at
+$t+1$, a critic that has learned "late in an episode usually means failing" would charge every
+request a little just for taking time, including the ones that only look. Credit then goes through
+GAE with $\lambda = 0.9$ and no discount, plus a group-relative outcome term over the four rollouts
+from each start state (reported, Eq. 5 and 6; `request_advantages()` implements the same-index read
+through `next_values`, which I read).
+
+The terminal return orders outcomes by what deployment needs (reported, Eq. 7):
+
+| Outcome | Return |
+|---|---|
+| Success, and the agent called `finish()` | 1 |
+| Success without `finish()` (missed finish) | 0.25 |
+| Other failure | 0 |
+| Budget exhausted | -0.1 |
+| `finish()` on a failed state (false finish) | -0.3 |
+
+### Where the credit lands, on a toy
+
+I could not run their critic or their rollouts. So I built the smallest thing that has the same
+shape and measured it (measured, my code, PyTorch 2.14.1 on two CPU threads): a 2-D pick-and-place
+task made of typed requests (perceive, move, grasp, lift, carry, release, verify, finish) over a
+hidden physical state, with perception that sharpens position estimates and grasps that fail when the
+estimate is off. A critic shaped like Eq. 3 is trained on 6,000 episodes, and credit is computed on
+1,600 fresh ones (400 starts, four rollouts each). Host success in the toy is 77.4%, strict success
+68.2%.
+
+<CreditLedger />
+
+The numbers that matter, over all 1,600 toy episodes:
+
+- With the same-index rule, the median one-step credit of a perception request is exactly 0.000, a
+  successful grasp gets +0.076, and perception holds 3.3% of all one-step credit even though 45.3%
+  of requests are perception. The paper reports the same pattern on its real rollouts: successful
+  grasps at a median of +0.058, perception-only requests at -0.0002, and 1.3% of credit mass on
+  perception (reported, Section 4.5).
+- Read the next value at $t+1$ instead, and perception's share of one-step credit rises to 19.4%,
+  with a median of -0.013 per look. Time leaks in exactly as the paper says it would.
+- Add a counter of the policy's own perception calls to the critic's inputs and the share is 20.3%.
+  The paper found the same with real counters and with the language model's hidden state, which
+  decodes the request index with $R^2 = 0.80$ and shifts 35% of credit mass onto perception
+  (reported).
+
+One thing the toy shows that the paper's prose blurs. After GAE with $\lambda = 0.9$ and the group
+term, perception requests hold 43.4% of the absolute advantage in my toy, almost the 45.6% that
+outcome-only credit gives them. That is by design: the paper says perception requests "still receive
+credit through generalized advantage estimation", from the physical actions they enable. So read the
+paper's "1.3% of the total |A| mass" as a statement about the one-step differences, not about the
+advantage the update finally uses (reasoned, from the toy and the paper's own Eq. 6). The critic's
+contribution is not to starve perception of credit; it is to stop perception from being *charged*
+for the passage of time, and to rank requests within a rollout by what they did to the scene.
+
+The paper's measured payoff is variance. The gradient-noise scale on 9B rollouts falls from 9.0k
+episodes for outcome-only GRPO to 6.7k with the critic at $\lambda = 0.9$ (reported, Table 7). Even
+6.7k is huge, which is why every optimizer step accumulates 1,024 episodes. With two start states per
+step, "consecutive updates were nearly orthogonal: the policy performed a random walk" (reported,
+Appendix G).
+
+### What the released config says
+
+The RL config `rl/configs/captain-4b.json` matches the paper on every training constant I checked
+(measured, by reading it): learning rate 4.24e-6, GAE $\lambda$ 0.9, KL $\beta$ 0.002, false finish
+-0.3, budget exhausted -0.1, action cost 0.008, failure cost 0.02, groups of four, four rounds per
+update, 300 rounds. The ratio mask reads `ratio_mask_low: 0.8, ratio_mask_high: 3.0`, which looks
+wrong until you see that the trainer treats them as epsilons: keep a token if
+$1 - 0.8 < r < 1 + 3.0$, which is the paper's $0.2 < r < 4$.
+
+One thing does not match. Appendix F says FlashAttention-3 "moved log-probabilities beyond this
+floor ... we kept FlashAttention-2 / SDPA in the trainer". The released config sets
+`"attn_backend": "fa3"`, the docstring of `rl/attn_backends.py` says "CaPtain-4B used FA3", and the RL
+README lists "FA3 for the language model's full-attention layers" (measured). One of the two is
+stale. If the config is right, the numerical gate the paper describes was not what the final run
+used; if the paper is right, re-running the released config is not the run that produced
+CaPtain-4B (reasoned).
+
+## The results
+
+<Figure
+  src="/articles/captain-code-as-policy/fig2.png"
+  alt="Two grouped bar charts, host success on the left and strict success on the right, comparing CaPtain-4B-SFT in grey with CaPtain-4B in orange on seven benchmarks: LIBERO 55.4 to 73.8 host and 52.1 to 67.5 strict; LIBERO-PRO 6-cell 59.5 to 78.5 and 56.7 to 71.5; PRO 8-cell 49.2 to 68.6 and 45.1 to 58.9; LIBERO-Plus 48.6 to 66.1 and 44.6 to 59.0; PRO-4 48.8 to 68.8 and 48.1 to 60.6; LIBERO-MAX dynamic 40.0 to 61.2 and 40.0 to 50.0; MAX base 51.2 to 70.0 and 45.0 to 63.8."
+  caption="SFT against RL on held-out LIBERO and four perturbation suites. Host success is the benchmark's goal predicate; strict success also requires that the agent called finish() itself (paper, Figure 2; this rendering is the copy in the project repository)."
+/>
+
+**Host** success asks whether the scene ends in the goal state. **Strict** success also requires that
+the agent declared it was done. The paper argues strict is the deployable number, since a robot that
+never says it has finished cannot be used, and I agree. On held-out LIBERO (240 episodes, initial
+states 11-16 of all 40 tasks), RL moves host from 55.4% to 73.8% and strict from 52.1% to 67.5%.
+RL gained 55 episodes and lost 11. False finishes fall from 7.1% to 2.1% of episodes and mean
+requests per episode from 39.1 to 32.6 (reported, Section 4.1, paired McNemar $p = 4 \times 10^{-8}$).
+
+The gains hold under perturbation, +17.6 to +21.2 host points across LIBERO-PRO, LIBERO-Plus and
+LIBERO-MAX, which is the more interesting result: end-to-end policies trained on LIBERO are known to
+collapse under the same suites. The paper quotes π0.5 falling from 97% on LIBERO to 12.8% under
+LIBERO-PRO's position and task perturbations (reported, from the LIBERO-PRO paper). A policy that
+reads object positions from the image at test time has less to memorise.
+
+Three caveats from the paper's own appendices:
+
+- **The checkpoint was chosen for strict success.** After about round 340, host success holds at
+  about 65% while strict success falls from about 60% to 44%: the policy keeps re-measuring solved
+  scenes instead of calling `finish()`. The critic, trained on host success, values every solved
+  state near 1 and so gives the decision to stop no credit. CaPtain-4B is the round-300 checkpoint
+  (reported, Appendix I). The authors say finishing needs its own target. That is the most useful
+  lesson in the paper for anyone doing multi-turn RL on agents.
+- **One LIBERO task cannot be passed.** The `libero_10` task 5 predicate has a 3.5 mm offset that
+  rejects correct flat placements; every model scores 0/6 on it (reported, Appendix K).
+- **The comparison table mixes protocols.** CaPtain-4B's 78.5% on LIBERO-PRO (3 suites) sits above
+  K1 (77.2%), WAA (75.6%) and ASPIRE (71.7%), all frontier-model agents. But the protocol notes say
+  some baselines use test-time oracle signals, memory from other seeds, privileged geometry or
+  latched success with 100-500 turns. Read the table as "a 4B model is in the same range", not as a
+  ranking (reasoned, from Appendix K).
+
+### Transfer and the real arm
+
+Trained only on LIBERO, CaPtain-4B reaches 83.3% on SimplerEnv WidowX and 75.0 on CaP-Bench without
+further training. It does poorly where the embodiment changes: 22.6% on RoboTwin 2.0 (50 tasks,
+many of them bimanual; tasks that need two arms moving at once succeed in 0 of 35 instances) and 0.8%
+on RoboDojo's dual 6-DoF arms (reported, Section 4.3 and Appendix J). The transfer backends add
+inputs the benchmarks' official policies do not get, such as simulated depth, camera calibration and
+a wrist force estimate; the README lists them per benchmark (reported).
+
+<Figure
+  src="/articles/captain-code-as-policy/fig4.png"
+  alt="Two rows of ten video frames from a real robot arm with a wrist camera above a white table. Row a, instruction put the yellow cube in the wooden tray: the gripper descends on a yellow cube, lifts it and lowers it into a wooden tray over about 98 seconds. Row b, instruction put the cube that has the color of the sky into the container that is not round: the gripper picks a light-blue cube and places it in a rectangular tray over about 82 seconds."
+  caption="Two real-robot episodes on an Astrabot XR1 arm with new objects and layouts; the second requires resolving 'the color of the sky' and 'not round' before acting (paper, Figure 4)."
+/>
+
+The real robot is an Astrabot XR1 arm. The policy is a checkpoint further fine-tuned on episodes from
+a coarse simulated twin of the XR1, with primitive objects and no real-world data (reported, Section
+4.4). The paper shows two successful episodes with step-by-step traces; the first takes 23 requests and
+ends with `finish()` at 157.2 s (reported, Appendix O). There is no real-robot success rate, so this
+shows the pipeline runs on hardware, not how often it works (reasoned).
+
+## What it costs
+
+<EpisodeCost />
+
+A CaPtain-4B LIBERO episode averages 32.6 requests, 16.6 physical actions and 7.3k output tokens,
+and takes 417 s on a GPU shared by eight episodes, about 52 GPU-seconds of policy compute: \$0.03-0.06
+at \$2-4 per GPU-hour. Published code agents report \$0.18-0.24 (SPARK, WAA, RACaP) to \$8-22
+(OpenRUA) per episode (reported, Section 4.2). The figure excludes the perception services, and
+those are not small: every `point` call goes to Molmo2-8B, a model about twice the policy's size
+(reasoned). Training is the other half of the bill: about 120 H100-hours for SFT and about 1,290
+H100-hours for RL to round 300, on 16 GPUs with eight serving vLLM, SAM 3, Molmo and 64-80
+concurrent MuJoCo episodes (reported, Appendix M).
+
+## The weights
+
+<ModelCard repo="YijiaFan/CaPtain-4B" />
+
+The Hugging Face API reports 5,174,964,736 BF16 parameters for CaPtain-4B against 4,659,865,088 for
+base Qwen3.5-4B (measured). The difference is accounted for in `sft/scripts/untie_base.py`, which
+copies the 248,320 × 2,560 embedding into a separate `lm_head` (635,699,200 parameters) and drops
+the multi-token-prediction weights, about 120.6M by subtraction (measured). The language model is 32
+layers, 24 of them Gated DeltaNet linear attention and 8 full attention, with a 24-layer vision tower
+(measured, from `config.json`). It is a "4B" in the way Qwen3.5-4B is.
+
+## What I ran and what I did not
+
+**Ran (measured):** the IK re-implementation, the toy critic, line counts, and reads of the configs,
+the request template and the Hugging Face metadata. **Could not run:** the repository's own code; the
+sandbox's permission layer refused to execute the clone, its reward and critic unit tests included,
+so both experiments are re-implementations of the code, not the code. The model (5.17B BF16
+parameters) plus SAM 3 and Molmo2-8B does not fit this CPU box, so I have not reproduced a single
+LIBERO episode.
+
+## Takeaway
+
+CaPtain is the clearest open recipe I have seen for training a small model to be the whole robot
+policy rather than the dispatcher in front of one. The parts that transfer beyond robotics are the
+credit rule and its warnings: score the next state at the *same* index so time cannot leak into
+credit, keep the policy's own behaviour out of the critic, and give "I am done" its own signal,
+because a value function trained on success will never reward stopping. The part that does not
+transfer, yet, is the arm: the code a 4B model learns to write still carries the reach of the robot it
+learned on.
+
+Related on this site: [FLUX 3 Action](/articles/flux-3-action) and [Flex-π](/articles/flex-pi) take
+the other road, one network from pixels to actions.
