@@ -1,0 +1,176 @@
+---
+title: "Time-bomb loss spikes: Adam drifts the LM head, BF16 pulls the trigger"
+description: "Chen, Somasundaram, Li, McLeish, Kirchenbauer, Goldstein and Goldblum (arXiv 2610.38277) trace slow, unrecoverable loss divergences late in training to the LM head: Adam breaks the zero-sum structure of its gradient, the mean logit drifts, and BF16 rounding of large logits erases the differences the softmax needs. Their fix is SGD with momentum on the LM head only. I rebuilt the mechanism as a NumPy toy on a CPU: with Adam the mean logit drifted to -1,002 and the loss stayed flat in FP32, while the same run in simulated BF16 climbed from 5.006 to 5.958. SGD-M and mu-centering held the mean at zero and the error near 0.01."
+date: 2026-11-09
+tags:
+  - training
+  - optimization
+  - low-precision
+  - numerics
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "The drift, the rounding and the fix reproduced in a CPU toy of the LM head alone; the paper's 28M to 1.4B training runs are reported, not re-run."
+topic: training-rl
+kind: paper
+level: practitioner
+runsOn: datacenter
+licence: MIT
+---
+
+import { ZeroSumLedger } from "@/components/articles/lm-head-loss-spikes/zero-sum-ledger"
+import { RoundingLab } from "@/components/articles/lm-head-loss-spikes/rounding-lab"
+import { TimeBombRuns } from "@/components/articles/lm-head-loss-spikes/time-bomb-runs"
+
+A pretraining run that goes wrong in the first thousand steps is cheap. One that looks healthy for most of its budget and then starts climbing, and never comes back down, is the expensive kind. [The Role of Quantization in Loss Spikes](https://arxiv.org/abs/2610.38277) (Zaiqian Chen, Aditya Somasundaram, Sophie Li, Sean McLeish, John Kirchenbauer, Tom Goldstein and Micah Goldblum; Columbia, MBZUAI, Maryland and the Vector Institute; arXiv, v2 of 2 November 2026) calls these **time-bomb spikes** and gives them a cause in two parts. Adam makes the mean logit of the LM head drift. BF16 then cannot represent the differences between large logits.
+
+Goldblum's thread on X put the puzzle in one line: "Adding the same constant to every logit changes neither the softmax distribution nor the cross entropy gradients in exact arithmetic. So why should this mean logit drift cause training to fail?" The answer the paper gives is finite precision, and the fix it proposes is small: "swap AdamW for momentum SGD only on the LM head, and keep AdamW everywhere else."
+
+The code is public under MIT, a JAX and Flax training stack forked from Martin Marek's:
+
+<RepoCard repo="tingtang2/quantization-loss-spikes" />
+
+The paper trains on TPUs and B200s, which I don't have. What I can do on a CPU is isolate the LM head, make it drift, round it the way a BF16 GEMM does, and swap the optimizer. So the evidence here comes in three labels. **Measured**: I ran it, in NumPy 2.5.3 on a shared 4-core cloud VM, with BF16 simulated by rounding fp32 bits to nearest even. **Reported**: the paper's figures and the repository's configs, read and not re-run. **Reasoned**: my arithmetic on the other two.
+
+## Two kinds of spike
+
+The paper separates two failure shapes (reported). **Fast spikes** jump and recover within a few hundred steps. In their runs these mostly come from RMSNorm layers without a learnable gain: across five matched seed pairs at 162M parameters, adding the gain suppresses them along with the logit swings that come with them. Skipping the batch that triggered one only postpones the next, and masking as little as 0.2% of the highest-loss tokens hides them but slows convergence.
+
+**Time-bomb spikes** survive the learnable gains. Two 404M-parameter models trained for 96B tokens, about 240 tokens per parameter or roughly 12 times the Chinchilla budget, follow the same loss curve for most of training. Then the higher-learning-rate run stops improving and its evaluation loss rises monotonically while its output logit norm accelerates (reported, Figure 3). Longer horizons make it worse: at 28M parameters, runs of 4B, 8B, 12B and 16B tokens show progressively larger late logit growth (reported, Figure 17). That matters because training far past compute-optimal is now the normal case.
+
+The experiments use QK-Norm everywhere, so attention-logit growth is ruled out as a cause. What is left is the LM head.
+
+## The gradient that sums to zero
+
+Write the LM head as an output embedding matrix $E \in \mathbb{R}^{V \times d}$ acting on the final hidden state $h$, so the logits are $z = Eh$ and $p = \operatorname{softmax}(z)$. The cross-entropy gradient with respect to $E$ is an outer product:
+
+$$
+\frac{\partial \mathcal{L}}{\partial E} = (p - y)\,h^\top,
+\qquad
+\sum_{i=1}^{V} \frac{\partial \mathcal{L}}{\partial E_{ij}} = h_j \sum_{i=1}^{V} (p_i - y_i) = 0 .
+$$
+
+Both $p$ and the one-hot $y$ sum to one, so every column of the gradient sums to zero over the vocabulary. Any optimizer that applies a fixed linear map to that gradient, the same for every row, keeps the zero sum. Plain SGD does. So does SGD with momentum, whose buffer is a running sum of zero-sum gradients. Under either, the mean output embedding $\mu = \frac{1}{V}\sum_i e_i$ never moves.
+
+Adam does not. Its first moment is still zero-sum, but it divides each coordinate by its own $\sqrt{v}$. Rows for rare tokens see small, mostly one-signed gradients (they are pushed down a little every time they are not the target) and so have a small $v$. Dividing by it turns that trickle into a full-size step. Frequent tokens get large, two-signed gradients and a large $v$. The weighted rows no longer cancel, so the mean embedding drifts, and with it the mean logit $\mu^\top h$. This part is not new: the paper credits Biś et al. (2021) and Stollenwerk and Stollenwerk (2025) for it.
+
+I wanted to see the size of that imbalance in a real step, so I built a toy (measured). The trunk is frozen: 1,024 contexts, each a 64-wide RMS-normalised hidden state that shares one mean direction with the others, which is the anisotropy real final hidden states have. Targets come from a 2,048-token vocabulary with Zipfian frequencies and a context-dependent tilt. Only $E$ trains, at batch 128 with gradient clipping at 1, like the paper's runs. The widget below is one Adam step at step 2,000, split by token-frequency rank. Each bar is how far that bin of rows moves its logits for an average context.
+
+<ZeroSumLedger />
+
+The momentum buffer sums to $-5 \times 10^{-8}$ over the vocabulary, which is fp32 noise. The Adam direction sums to 5,373 against an absolute sum of 9,595, so 56% of it is net push in one direction, and 87% of that net push comes from the 1,792 rows ranked past 256 (measured). At a learning rate of 0.01 that is a change of $-0.026$ in the mean logit per step. Over 40,000 steps the FP32 run below drifted to $-1{,}002$, which is the same rate (measured).
+
+## Why the drift should not matter
+
+Here is the puzzle. Subtract the mean embedding from every row, $E' = E - \mathbf{1}\mu^\top$. Every logit drops by the same scalar $\mu^\top h$, so $p$ is unchanged, so the gradient with respect to $E$ is unchanged. The gradient into the hidden state is unchanged too:
+
+$$
+\frac{\partial \mathcal{L}}{\partial h} = E'^\top (p - y) = E^\top (p - y) - \mu \sum_{i} (p_i - y_i) = E^\top (p - y).
+$$
+
+In exact arithmetic, without weight decay, the mean component is invisible to both passes (reasoned, following the paper's Section 3.4). A run with a drifting mean and a run without one should follow the same trajectory. My FP32 toy agrees: the Adam run drifted to a mean logit of $-1{,}002$, and its final loss of 5.038 matches, to within 0.001, the 5.037 of a run that removes the mean after every step, which never drifts at all (measured; that run is the μ-centering one below). So whatever breaks, it is not the drift itself.
+
+## BF16 has no room for differences between big numbers
+
+BF16 keeps 8 bits of significand. Between $2^e$ and $2^{e+1}$ the gap between neighbouring values is $2^{e-7}$: about 0.008 between 1 and 2, and 8 between 1,024 and 2,048. The paper's worked example (reported, Appendix C.1): logits $(0, 1)$ give probabilities of about $(0.27, 0.73)$. Shift both by $-1025$ and both round to $-1024$, so the softmax returns $(0.5, 0.5)$. I checked it in NumPy and got exactly that (measured). Subtracting the maximum before the exponential, which every framework does, can't help: the difference was lost when the GEMM wrote its output.
+
+The relevant quantity is therefore the mean relative to the spread, $r = |\mu_z| / \sigma_z$. While $r$ is small, rounding is small next to the differences that set the probabilities. Once the mean dominates, it isn't. Try it:
+
+<RoundingLab />
+
+To get numbers at a realistic vocabulary size I shifted 64 rows of 50,257 Gaussian logits with standard deviation 2 and measured the KL divergence from the exact softmax after rounding (measured):
+
+| mean shift | BF16 RMS error | BF16 KL | FP16 KL |
+|---:|---:|---:|---:|
+| 0 | 0.0033 | 2.67e-5 | 4.12e-7 |
+| 64 | 0.114 | 2.78e-3 | 4.35e-5 |
+| 256 | 0.456 | 4.38e-2 | 6.99e-4 |
+| 512 | 0.910 | 0.167 | 2.78e-3 |
+| 1,024 | 1.545 | 0.597 | 1.11e-2 |
+| 2,048 | 1.930 | 2.23 | 4.38e-2 |
+
+FP16 at a shift of 512 has the same KL as BF16 at 64: three more significand bits buy a factor of eight in headroom, and the table shows it to three digits. By a shift of 1,024 the BF16 RMS error is 1.5 logits on a spread of 2, and the distribution is mostly noise (measured).
+
+## The paper's evidence
+
+The cleanest test of the precision story is to hold everything fixed and change only the LM head's precision. The paper does that at 28M parameters, training 16B tokens (about 570 tokens per parameter, roughly 28 times Chinchilla) at peak learning rate 0.1, in three settings: **FP32** (head weights and GEMM in fp32), **BF16 mixed** (fp32 master weights, BF16 GEMM) and **BF16 true** (head weights and optimizer state also stored in BF16). The rest of the network stays in BF16 mixed throughout.
+
+<Figure src="/articles/lm-head-loss-spikes/fig1.png" alt="Three panels over 120k steps. Left, eval loss: BF16 true diverges first, near 50k steps; BF16 mixed diverges near 100k; FP32 and BF16 mixed with SGD-M stay near 4.05. Middle, output logit norm on a log scale: every AdamW baseline grows, BF16 true fastest to above 1e8, FP32 to about 4e6; SGD-M stays flat near 2e5. Right, RMS of the BF16 minus FP32 logits on a log scale: the baselines rise from about 1e-2 to above 1, while SGD-M stays flat near 6e-3." caption="Lower LM-head precision brings the time bomb earlier; FP32 survives although its logits grow too, and SGD-M on the head keeps both the logit norm and the quantization error flat. 28M-parameter models at peak learning rate 0.1 (paper, Figure 1)." />
+
+The ordering is the one the precision story predicts. BF16 true fails first, BF16 mixed later, FP32 not at all over the horizon, even though its logit norm grows too (reported). The error metric on the right is the one I copied for the toy: recompute the head in FP32 from the same hidden states and take $\mathrm{RMS}(z_{\mathrm{bf16}} - z_{\mathrm{fp32}})$. In the failing runs it grows by orders of magnitude before the loss turns. In the repository that is `diagnostics/quantization.py`, which builds an FP32 shadow copy of the head's input and weights and runs the GEMM at `Precision.HIGHEST`.
+
+<Figure src="/articles/lm-head-loss-spikes/fig6.png" alt="Three panels over 120k steps with five seeds per precision. Left, eval loss: BF16 true runs fail earliest, BF16 mixed later, FP32 stays stable. Middle, RMS logit quantization error on a log scale rising to about 1 for both BF16 settings. Right, KL divergence between FP32 and BF16 predictive distributions rising by several orders of magnitude for BF16 runs." caption="Across five seeds, the order of failure matches the order of quantization error in both the logits and the predictive distribution. 28M-parameter models at peak learning rate 0.1 (paper, Figure 6)." />
+
+Appendix C.2 extends it to the learning-rate sweep: lower precision triggers time bombs at smaller learning rates, and at the largest rate tested every BF16 run fails while FP32 stays stable (reported, Figure 19).
+
+## I reproduced it in a toy
+
+Same toy as above, 40,000 steps per run, one seed, a constant learning rate after a 200-step warmup. "Mixed" rounds the GEMM's inputs and its output logits to BF16 and keeps fp32 master weights; "true" also stores $E$ and the optimizer state in BF16. The softmax and the backward run in float64 on the rounded logits, so the only precision loss is where the paper locates it. The irreducible loss of the task is 4.403 nats.
+
+<TimeBombRuns />
+
+What the runs show (all measured):
+
+- **FP32, Adam.** Mean logit $-1{,}002$ at the end, best loss 4.992, final 5.038. A large drift and no damage.
+- **BF16 mixed, Adam.** The same drift, $-983$, and a loss that climbs from its best of 5.006 at step 2,000 to 5.958. The RMS error between the BF16 and FP32 logits grows from 0.0005 to 1.72, and the KL from $10^{-7}$ to 0.90. Evaluated through an FP32 head, the same weights score 5.121. Most of the damage is in the forward pass, and some of it has leaked into the weights through gradients computed from wrong probabilities.
+- **Lower learning rate.** At 0.003 instead of 0.01, the drift is $-425$ by the end and the loss rises from 4.820 to 4.987. Slower drift, later and smaller damage, as the paper's sweep has it.
+- **SGD-M on the head, BF16 mixed.** Momentum 0.99, head learning rate 0.03 from a short sweep. Mean logit zero to the printed precision, RMS error flat at 0.004 to 0.006, final loss 4.752.
+- **μ-centering, BF16 mixed.** Adam, with the mean embedding subtracted after every step. Error flat at 0.011, final loss 5.037, which is the FP32 run's loss.
+- **z-loss, BF16 mixed**, $\lambda = 10^{-4}$ as in the paper. It slows the drift to $-584$ but does not stop it in 40,000 steps, and the loss still climbs to 5.574.
+
+Two things in the toy disagree with the paper, and I'd rather say so than tune them away. First, z-loss: at the paper's $\lambda$ it only delays the failure here. At ten times that, $\lambda = 10^{-3}$, the drift stops near $-97$ and the RMS error holds at about 0.16, but the loss settles at 5.214, worse than the FP32 run's 5.038 (measured). The right strength is presumably set by how fast the drift is, which in my toy is fast. Second, BF16 true fails differently. Its drift stalls at $-120$ because, once a head weight is large, BF16 storage rounds away most of each Adam update; the loss rises early, to 5.314 by step 8,000, from lost updates rather than from logit rounding. The paper's BF16 true runs fail first too, but its figures show the quantization error leading. An SGD-M head under BF16 true is not perfectly zero-sum either, since rounding each stored weight is not: its mean logit crept to $+10$ and its error to 0.018, with the loss unchanged at 4.752 (measured).
+
+The toy's SGD-M runs also reach a lower loss than any Adam run (4.752 against 4.992 for FP32 Adam). I would not read anything into that. My trunk is frozen and the head is a linear softmax regression, where SGD is well suited; the paper finds SGD-M "competitive", not better, on real models.
+
+And one finding about my own set-up. I first gave the toy a learnable RMSNorm gain, trained with Adam. The gain absorbed the drift. In a full 40,000-step BF16 mixed run at learning rate 0.01, its norm shrank from 8.0 to about 1.6 while the mean embedding's norm grew to 393, and the mean logit stayed between $-6$ and $-11$. The RMS error reached only 0.027 and the loss ended at 5.107, with no climb (measured). That is why the runs above freeze the trunk. In a real network the hidden-state scale is set by much more than one gain vector, and the paper's runs, which do have learnable gains, still drift.
+
+## The fix: SGD with momentum on the head only
+
+The proposal is to train $E$ with SGD with momentum and everything else with AdamW. Momentum keeps the zero sum, so the mean never drifts, and no explicit centering is needed. In the repository it is one config, `configs/method/sgdm.yaml`:
+
+```yaml
+opt:
+  lm_head_optimizer:
+    type: sgd_momentum
+    peak_lr: 0.3
+    momentum: 0.99
+    nesterov: false
+```
+
+`training/optimizers.py` builds it as `optax.sgd` masked onto the output embedding, chained with the AdamW for the rest of the model. The head's learning rate follows the trunk's schedule, scaled to its own peak. The paper tunes that peak separately and raises momentum from 0.9 to 0.99 (reported). For a fair comparison it gives the AdamW head the same tuning budget: tuning the head learning rate alone helps a little, raising the head's $\beta_1$ to 0.99 closes much of the gap, but every AdamW variant, with or without μ-centering or z-loss, still diverges or time-bombs at the largest trunk learning rate, where SGD-M stays stable (reported, Figure 5).
+
+<Figure src="/articles/lm-head-loss-spikes/fig7.png" alt="Three panels over 120k steps with five seeds per method, all in BF16 mixed. Left, eval loss: the baseline median rises late, with individual seeds spiking; mu-centering, z-loss and SGD-M stay near 4.05. Middle, RMS logit quantization error: the baseline rises to about 1, z-loss to about 1e-1, mu-centering to about 4e-2, SGD-M stays flat near 6e-3. Right, KL divergence: the baseline climbs to about 1e-1 while the mitigations stay near 1e-4 to 1e-3." caption="Three mitigations that act on different things, the loss, the embeddings and the optimizer, all keep the quantization error bounded, and all prevent the time bomb. 28M-parameter models in BF16 mixed at peak learning rate 0.1, five seeds (paper, Figure 7)." />
+
+That figure carries the paper's broader claim: z-loss, μ-centering and SGD-M work for the same reason, because each keeps the head in a range where BF16 can still tell logits apart. Their Figure 7 also shows the ordering my toy shows, with SGD-M's error lowest and flattest. At 1.4B parameters, single seed, SGD-M on the head reaches a lower final training loss than AdamW, μ-centering and z-loss, and a Muon trunk with an SGD-M head reaches the lowest of all (reported, Figure 15).
+
+The paper is also careful about a neighbouring explanation. [Barron, Gnanapragasam and Tschannen's fixed cross-entropy](/articles/softmax-fix) repairs a different rounding bug, in the loss rather than in the head's GEMM. Swapped in here, it delays but does not prevent time bombs under BF16 true; under BF16 mixed no fixed-softmax run fails within 16B tokens, but its logit norm and quantization error keep growing well above the z-loss runs (reported, Appendix C.4). It treats a symptom of large logits; it doesn't stop them getting large.
+
+## What each fix costs
+
+The paper's practical comparison (reported, Section 3.4), with my notes on scale (reasoned):
+
+- **FP32 LM head.** The most direct fix and the most expensive. The head is one of the largest GEMMs in the model, with an output dimension equal to the vocabulary, and FP32 runs at a fraction of BF16 throughput. FP32 logits also double the size of what is often the largest activation tensor.
+- **SGD-M on the head.** Cheaper than AdamW: one moment buffer instead of two for a $V \times d$ matrix. It needs its own learning rate, and under BF16 true the paper sees it converge to a noticeably higher loss than the other mitigations from early in training (reported, Appendix C.3).
+- **z-loss.** One auxiliary term, already in many recipes. It penalises $\log^2 Z$, which acts on the logits, not on the optimizer's drift.
+- **μ-centering.** A reduction over the vocabulary rows after each step. In my toy it was the cleanest: same loss as FP32, error flat.
+
+Gemma 2's logit soft-capping is mentioned in the related work and not tested.
+
+## What I could not check
+
+- **The paper's training runs.** 28M to 1.4B parameters on FineWeb, on TPUs, B200s, H100s and A100s. Every loss curve on this page that is not in a "measured" widget is reported. I did not run the JAX repository; it needs an accelerator and a FineWeb shard I don't have room for.
+- **Fast spikes.** The RMSNorm-gain result, the token masking and the batch skipping are all reported.
+- **Whether this transfers.** The paper's own future-work paragraph says the spikes are induced by "higher than normal learning rates" and "may not fully transfer to spikes that arise in more natural settings in larger models". It does not test FP8. My toy says nothing about either.
+- **The trigger.** Neither the paper nor my toy shows exactly when a growing error turns into a self-reinforcing climb. In my BF16 mixed run the gap between the native and FP32-evaluated loss grows steadily, with no single step where it snaps.
+
+## What I would do with this
+
+If you train past compute-optimal in BF16, log two numbers you probably don't log today: the mean output logit and $\mathrm{RMS}(z_{\mathrm{bf16}} - z_{\mathrm{fp32}})$ on a held-out batch. The second costs one extra FP32 GEMM per logging step, and in both the paper's runs and mine it starts to climb long before the loss does. If the mean is drifting, remove it: μ-centering is one subtraction per step, and SGD-M on the head stops the drift at its source. Raising the head's precision to FP32 also works, at a throughput cost.
+
+For the optimizer side of the same story, see [Muon](/articles/muon-optimizer), which the paper pairs with an SGD-M head at 1.4B. For another rounding error that breaks a sum-to-zero invariant, see [Delta-Matching](/articles/delta-matching), where the softmax backward's row sum goes wrong in FP8 attention.
