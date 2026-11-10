@@ -1,7 +1,8 @@
 ---
 title: "ABot-Recon: streaming 3D over thousands of frames with a 12-frame memory"
-description: "Alibaba AMAP's ABot-Recon (arXiv 2608.27529) reconstructs camera paths and point maps from long video while attending to only the current frame and the 11 before it. Its trick is the prediction target, not the cache: a point map in the current camera and one relative pose to the previous frame, chained into a trajectory. I read the code and the checkpoint header: the window is hard-wired at 12, older keys are evicted, the cross-frame cache is 50.98 MiB a frame (232 GiB for KITTI-02 if nothing were evicted), and the model has 1,000,934,176 parameters, 4,754,435 of them in the rotation refiner. The sandbox would not run the repository, so I re-implemented the mechanism on CPU: a windowed cache stays at 12 frames and about 0.2 ms a frame while a full one reaches 113 ms by frame 3,000, and in a pose-chain toy a 0.05-degree heading error per step costs 13.3 m of ATE where 5% translation noise costs 2.03 m. The paper's numbers hold up as stated, with two catches: on Oxford Spires three optimisation methods with known intrinsics do better, and the weights are CC BY-NC 4.0."
+description: "Alibaba AMAP's ABot-Recon (arXiv 2608.27529) reconstructs camera paths and point maps from long video while attending to only the current frame and the 11 before it. Its trick is the prediction target, not the cache: a point map in the current camera and one relative pose to the previous frame, chained into a trajectory. I read the code and the checkpoint header: the window is hard-wired at 12, the cross-frame cache is 50.98 MiB a frame, and the rotation refiner's 4,754,435 parameters decompose exactly from its source, of which the temporal convolution is 11,264. The sandbox would not run the repository, so I re-implemented four mechanisms on CPU. A windowed cache stays flat while a full one reaches 113 ms a frame by frame 3,000; heading error dominates a pose chain; the paper's composition loss sees correlated rotation error that an adjacent-pair loss cannot (ATE 7.1 m to 120.7 m at the same per-step error) but is blind past its 11-frame horizon; and the released loop-closure back end cuts a toy drive's ATE from 15.7 m to 5.1 m, then to 58.7 m with one false loop. The paper's numbers hold up as stated, with two catches: on Oxford Spires three optimisation methods with known intrinsics do better, and the weights are CC BY-NC 4.0."
 date: 2026-11-09
+updated: 2026-11-10
 tags:
   - 3d
   - slam
@@ -14,12 +15,12 @@ rating:
   novelty: 1
   verification: 2
   runnable: 1
-  explains: 2
+  explains: 3
   takeaway: 2
   durability: 1
   reach: 1
   unique: 2
-  why: "Reads the window, cache and refiner in ABot-Recon's code, sizes the cache from tensor shapes, and shows on CPU why heading error dominates a pose chain."
+  why: "Reads ABot-Recon's window, refiner and loop closure in code, and re-implements the cache, the pose chain, the composition loss and the pose graph on CPU."
 topic: spatial-3d
 kind: paper
 level: research
@@ -30,6 +31,8 @@ licence: mixed
 import { WindowBand } from "@/components/articles/abot-recon/window-band"
 import { MemoryLedger } from "@/components/articles/abot-recon/memory-ledger"
 import { DriftChain } from "@/components/articles/abot-recon/drift-chain"
+import { CompositionLens } from "@/components/articles/abot-recon/composition-lens"
+import { LoopLab } from "@/components/articles/abot-recon/loop-lab"
 
 A [post on X](https://x.com/cutetoxicguy/status/2119151400470880396) pointed at ABot-Recon, a streaming 3D
 reconstruction model from Alibaba's AMAP CV Lab that "doesn't need to keep the entire video history inside a growing
@@ -52,8 +55,12 @@ What I did, and how each claim below is labelled:
 - **Read**: something I saw in the released source at commit `6e3b2e1` (15 October 2026) or in the checkpoint's
   safetensors header, which I fetched with an HTTP range request. I did not execute the authors' code: the sandbox
   refused to import the repository's modules, even its torch-only cache and mask files.
-- **Measured**: output of my own script, [`toy.py`](/articles/abot-recon/toy.py), run on this box's CPU with 2 threads.
-  It re-implements three pieces of the mechanism from what I read. It is not the model and never sees an image.
+- **Measured**: output of my own scripts, run on this box's CPU with 2 threads. [`toy.py`](/articles/abot-recon/toy.py)
+  (torch 2.14.1) covers the cache, the rotary positions and the pose chain;
+  [`composition.py`](/articles/abot-recon/composition.py) the composition-aware loss; and
+  [`loop_closure_toy.py`](/articles/abot-recon/loop_closure_toy.py) the loop-closure back end. The last two are numpy
+  2.5.4 only and share [`lie.py`](/articles/abot-recon/lie.py). Each re-implements a piece of the mechanism from what I
+  read. None of them is the model, and none ever sees an image.
 - **Reasoned**: arithmetic on the other three.
 
 ## The problem: long video breaks streaming models in two ways
@@ -99,10 +106,46 @@ not fall apart.
   caption="ABot-Recon's pipeline: alternating per-frame and windowed causal attention over K frames, a geometry head for the local point map, and a camera head plus rotation refiner for the adjacent pose, chained into the trajectory. (paper, Figure 3)."
 />
 
+## The network, with shapes
+
 The backbone is π³'s. The released network is built on its code (`abot_recon/modeling/pi3/`), and training starts from
-π³'s public weights (**read** and **reported**). The decoder has 36 blocks of width 1,024 with 16 heads; even blocks
-attend within one frame, odd blocks attend across frames (**read**, `pi3.py` and `network.py`, which test `i % 2`).
-Only those 18 odd blocks see the window.
+π³'s public weights (**read** and **reported**). Here is one frame's path through it at the paper's 504 × 280 input, with
+every shape taken from the source (**read**, `pi3.py`, `network.py`, `adjacent_pose_head.py`, commit `6e3b2e1`).
+
+1. **Encoder.** DINOv2 ViT-L/14 with registers (`dinov2_vitl14_reg`). 14-pixel patches make 36 × 20 = 720 patch tokens
+   of width 1,024. The encoder sees one frame at a time, so it has no memory at all.
+2. **Decoder.** Five learned register tokens are prepended, making 725 tokens a frame. Then 36 blocks of width 1,024
+   with 16 heads of 64. Even blocks attend within the frame. Odd blocks attend across frames, through the 12-frame
+   window below. Only those 18 odd blocks keep a cache.
+3. **Fork.** The outputs of the last two decoder blocks are concatenated, 2,048 wide, and handed to three small
+   decoders: points, confidence and camera.
+4. **Geometry head.** A linear head per 14-pixel patch unfolds each token into a 14 × 14 patch of three numbers,
+   $(x, y, \log z)$. The point is $(x z,\; y z,\; z)$ in the current camera, so depth is predicted in log space and
+   the ray direction is scaled by it. That is $P_i \in \mathbb{R}^{280 \times 504 \times 3}$, and the confidence head
+   gives $S_i \in \mathbb{R}^{280 \times 504}$ the same way.
+5. **Camera head.** The five register tokens double as camera tokens; the camera decoder leaves them 512 wide. Each
+   goes through a two-layer MLP and the five are averaged: that is $z_i$ in the paper's Equation 2. The pair descriptor of Equation 3 is
+
+$$
+q_i = \mathcal{R}(z_{i-1}, z_i) = [\,z_{i-1},\; z_i,\; z_i - z_{i-1},\; z_i \odot z_{i-1}\,] \in \mathbb{R}^{2048}
+$$
+
+The four blocks let a two-layer MLP see both frames, their difference (what moved) and their product (what agrees)
+without having to learn subtraction. That MLP returns 512 numbers, and two linear layers turn them into a translation
+$t \in \mathbb{R}^3$ and a scalar-last quaternion, normalised into a rotation $\tilde R$. The quaternion format is
+enforced: the head raises an error for any other (**read**).
+
+The relative pose for frame $i$ is then
+
+$$
+T_{i-1\leftarrow i} = \begin{bmatrix} \tilde R_{i-1\leftarrow i}\,\mathrm{Exp}(\delta\omega_i) & t_{i-1\leftarrow i} \\ 0 & 1 \end{bmatrix}
+$$
+
+where $\delta\omega_i \in \mathbb{R}^3$ is the rotation refiner's axis-angle correction (Equation 11), applied on the
+right, inside the step, before anything is chained. In the code the running pose is one matrix product per frame:
+`current_pose = previous_pose @ corrected_delta` (**read**). The only state the camera head carries from frame to frame
+is the previous descriptor, the previous frame's tokens, that running pose and the refiner's buffer of 10 pair
+features. All of it is fixed-size.
 
 ## How memory stays bounded: a 12-frame band, enforced in code
 
@@ -137,8 +180,11 @@ needs the flag raised (**reasoned**; I did not run past it).
 
 ## How big the cache is, and what 6.71 GiB buys
 
-The paper reports 24.45 FPS and 6.71 GiB of peak GPU memory on KITTI-02 at 504 × 280 on an H100, "input storage
-excluded" (**reported**, Table 6). I wanted to know how much of that is the window.
+The paper reports 24.45 FPS and 6.71 of peak GPU memory on KITTI-02 at 504 × 280 on an H100, "input storage
+excluded" (**reported**, Table 6). The table does not give the unit and the text says "6.71 GB". PyTorch's peak-memory
+counters are usually divided by $2^{30}$ and printed as "GB", so I read it as GiB below; if it is decimal gigabytes it is
+6.25 GiB, and the unexplained remainder further down shrinks from 1.6 to 1.1 GiB (**reasoned**). I wanted to know how
+much of it is the window.
 
 At 504 × 280 with 14-pixel patches a frame is 36 × 20 = 720 patch tokens plus 5 register tokens, 725 in all. Each of the
 18 cross-frame layers stores a key and a value for each, 16 heads of 64, in bf16 (**read**: the paged path casts to
@@ -194,23 +240,142 @@ estimates of the model's errors.
 
 The paper's two fixes are the same diagnosis in network form.
 
-**A rotation refiner.** It takes the pairwise camera descriptor, adds visual evidence by cross-attending from a pooled
-frame-pair query into both frames' dense tokens, then runs a gated temporal convolution over the recent pair features to
-predict a small axis-angle correction to the relative rotation. Translation is left as predicted (**reported**,
-Section 3.3). In the code, the convolution's kernel is 10 pair features, not the 12 the paper's notation suggests, the
-correction's three components are each squashed by `tanh` to at most 2.0 degrees, and `age_embed` tells it how old each feature in the buffer is
-(**read**, `RELATIVE_CAMERA_HEAD` in `model.py` and `adjacent_pose_head.py`). It is 4,754,435 parameters in the
-checkpoint (**read**), matching the paper's "4.75M". Its state is one more fixed buffer, so it does not break the memory
-bound.
+<Figure
+  src="/articles/abot-recon/fig4.png"
+  alt="Two-panel diagram. Left: the rotation refiner. Adjacent camera tokens become a motion descriptor and motion evidence; adjacent frame tokens are pooled into a visual descriptor that cross-attends into the frame tokens to give visual evidence; the two are fused and stacked over a window of K pair features, and a gated TCN outputs a rotation residual delta-omega-i. Right: the composed relative pose loss, with dashed arcs from frame i back to frames i-1, i-2 and i-K+1, each composed transform compared against ground truth."
+  caption="The rotation refiner (left) and the composition-aware loss (right): composed relative poses over every gap up to K-1 frames are compared with ground truth. (paper, Figure 4)."
+/>
 
-**A composition-aware loss.** Training does not only supervise each adjacent pair. It composes the predicted poses over
-every gap up to 11 frames and compares each product with ground truth, with rotation weighted by the gap raised to a
-power γ between 0 and 1 (**reported**, Equations 12 to 14). The network is graded on chains, not single steps.
+### The rotation refiner, read line by line
 
-The ablation in the third tab says the loss did the most work: on KITTI, adding it alone took average ATE from 56.60 m
-to 27.66 m, training on 128-frame clips instead of 32 took it to 22.31 m, and the refiner to 18.25 m (**reported**,
-Table 8). Every row keeps the 12-frame window. Clip length during training mattered even though the window did not
-change, which fits the loss story: longer clips contain more and longer chains to grade.
+The paper describes a module that takes the pairwise camera descriptor, adds visual evidence by cross-attending from a
+pooled frame-pair query into both frames' dense tokens, then runs a gated temporal convolution over recent pair features
+to predict a small axis-angle correction to the relative rotation. Translation is left as predicted (**reported**,
+Section 3.3). In symbols, with $f_i$ the fused pair feature:
+
+$$
+\delta\omega_i = \phi_o\big(T_h(W_i) \odot \sigma(T_g(W_i))\big), \qquad W_i = [f_{i-K+1}, \dots, f_i]
+$$
+
+$T_h$ proposes a hidden vector from the window, $T_g$ proposes a gate in $(0, 1)$ for each channel, and $\phi_o$ maps the
+gated result to three numbers. The source is more specific than the notation, in three ways (**read**,
+`TemporalRotationRefiner` in `adjacent_pose_head.py` and `RELATIVE_CAMERA_HEAD` in `model.py`).
+
+- **The window is 10, not 12.** The feature buffer keeps the last 10 pair features, padded with zeros at the start of a
+  stream, and a learned `age_embed` is added to each slot so the network knows how old a feature is.
+- **The "TCN" is one depthwise convolution.** `conv` and `gate` are `Conv1d` layers with `groups=512` and kernel 10,
+  run over a 10-long buffer with no padding. Each produces exactly one output step. So $T_h(W_i)$ is, per channel, a
+  learned weighted sum of that channel's last 10 values; $T_g$ is another, through a sigmoid. It is a gated linear
+  filter over time, one per channel, not a stack of dilated layers.
+- **The correction is clamped.** $\phi_o$ is a single linear layer to three numbers, then
+  `max_rad * tanh(...)` with `max_rad` = 2.0°. Each axis-angle component is at most 2.0 degrees, so the refiner can
+  trim a step but never rewrite one.
+
+I wanted to know where the 4.75 million parameters sit, so I rebuilt the module's layer list from the source with
+hidden width 512, a 512-wide camera token and 8 attention heads, and counted (**reasoned** from the code, then checked
+against the checkpoint):
+
+| Piece | What it does | Parameters |
+|---|---|---|
+| `desc_proj` | LayerNorm(2,048) and a two-layer MLP on the motion descriptor $q_i$ | 1,315,840 |
+| `frame_query_proj` | the same shape, on the pooled frame pair $\mathcal{R}(\bar G_{i-1}, \bar G_i)$ | 1,315,840 |
+| `frame_proj` + role embedding | projects both frames' tokens into the attention's key space, tags which frame | 263,680 |
+| `frame_attn` + `frame_norm` | one 8-head cross-attention from the pair query into both frames' 1,440 patch tokens | 1,051,648 |
+| `fuse_proj` | LayerNorm(1,024) and a two-layer MLP: motion plus visual evidence into $f_i$ | 789,504 |
+| `age_embed` | one 512-vector for each of the 10 slots | 5,120 |
+| `conv` + `gate` | the two depthwise temporal filters | 11,264 |
+| `out` | linear to the three-number residual | 1,539 |
+| **total** | | **4,754,435** |
+
+The total matches the checkpoint's 4,754,435 to the parameter (**read**, safetensors header), so this is the released
+module and not a near relative. The part the paper names, the temporal convolution, is 11,264 parameters, 0.24% of the
+refiner. Almost all of the refiner is evidence-building: two pair MLPs and one cross-attention, so that each step gets a
+compact feature that already says how much the camera turned and what the pixels say about it. The temporal part is
+small because its job is small: weigh the last 10 of those features. Its state is a 10 × 512 buffer, so it does not
+break the memory bound.
+
+One thing the refiner never sees is its own past output. The buffer holds fused features, not past corrections or past
+composed rotations. It can learn that a run of features looks like a turn, but not that the last five corrections all
+leaned left (**read** and **reasoned**).
+
+### The composition-aware loss, term by term
+
+Training does not only supervise each adjacent pair. For a clip of $N$ frames the supervised set is every pair at most
+$K-1 = 11$ frames apart (**reported**, Equations 12 to 14):
+
+$$
+\mathcal{P} = \{(i, j) \mid 0 \le i < j < N,\; j - i \le K-1\}
+$$
+
+For each pair the predicted adjacent poses between $i$ and $j$ are multiplied out (Equation 5) and compared with the true
+$T_{i\leftarrow j}$. Rotation is weighted by the gap:
+
+$$
+\alpha_{ij} = \frac{(j-i)^{\gamma}}{\frac{1}{|\mathcal{P}|}\sum_{(m,n)\in\mathcal{P}} (n-m)^{\gamma}}, \quad 0 < \gamma < 1,
+\qquad
+\mathcal{L}_{pose} = \frac{1}{|\mathcal{P}|}\sum_{(i,j)\in\mathcal{P}} \big(\lambda_{trans}\,\ell^{(i,j)}_{trans} + \alpha_{ij}\,\lambda_{rot}\,\ell^{(i,j)}_{rot}\big)
+$$
+
+Reading it term by term. $\ell_{trans}$ and $\ell_{rot}$ are π³'s translation and rotation losses, applied to the
+composed transform. The denominator of $\alpha_{ij}$ makes the weights average to 1, so $\gamma$ moves weight between
+gaps without changing the loss's scale. $\gamma < 1$ makes the weight grow slower than the gap. Translation is not
+weighted at all. A separate term, $\mathcal{L}_{smooth}$, penalises the size and the frame-to-frame change of the
+refiner's residuals (**reported**, Equation 15). The paper does not give $\gamma$, the $\lambda$s, or the exact forms of
+$\ell$; the `train` branch has the training code and I did not read it.
+
+Two consequences fall out of the definition (**reasoned**, checked in the second tab of the widget below). First, most
+of the rotation weight is on long gaps: at $\gamma = 0.5$ in a 128-frame clip, adjacent pairs are 9.5% of the pairs but
+carry 4.1% of the rotation weight. Second, and this corrects my first version of this article, **a longer clip does not
+contain longer chains to grade.** $\mathcal{P}$ caps the gap at 11 whatever $N$ is. A 128-frame clip has 1,342
+supervised pairs and a 32-frame clip 286, with nearly the same mix of gaps. What 128 frames add is more pairs per clip
+and fewer clip boundaries, which is the paper's own explanation of its ablation.
+
+### Experiment: what the composition loss can see
+
+The point of grading chains is that some errors only show up in a chain. An adjacent-pair loss scores each step on its
+own. If two predictors make the same size of error per step, it cannot tell them apart, even when one predictor's errors
+all lean the same way and the other's cancel. Their trajectories are very different.
+
+I tested exactly that (**measured**, `composition.py`). Each step's rotation error is an AR(1) process,
+$e_i = \rho\, e_{i-1} + \sqrt{1-\rho^2}\,\eta_i$, scaled so the per-step spread is 0.05° per axis for every $\rho$. Only
+the step-to-step correlation changes. For each $\rho$ I computed the adjacent-pair rotation loss (geodesic angle), the
+rotation term of $\mathcal{L}_{pose}$ above on random 128-frame clips with $K = 12$ and $\gamma = 0.5$, and the
+Sim(3)-aligned ATE of the whole 4,661-frame drive, over six seeds.
+
+<CompositionLens />
+
+| ρ | adjacent loss | composed loss | ATE |
+|---|---|---|---|
+| −0.5 | 0.080° | 0.130° | 7.06 m |
+| 0 | 0.080° | 0.203° | 12.25 m |
+| 0.5 | 0.080° | 0.313° | 21.32 m |
+| 0.9 | 0.080° | 0.479° | 54.37 m |
+| 0.98 | 0.078° | 0.523° | 120.65 m |
+
+The adjacent loss is flat at 0.08° across a 17-fold range of ATE. A model trained only on it has no gradient toward the
+better trajectory. The composed loss tracks the ATE from $\rho = -0.5$ to $\rho = 0.9$, so a model trained on it is
+pushed toward errors that cancel. That is the paper's ablation in miniature: the composition loss alone took KITTI's
+ATE from 56.60 m to 27.66 m.
+
+The last row is the catch. From $\rho = 0.9$ to $\rho = 0.98$ the ATE more than doubles while the composed loss moves
+from 0.479° to 0.523°. An AR(1) error with $\rho = 0.98$ stays correlated for about 50 frames, and the loss looks at
+most 11 frames back. Error that leans the same way for longer than the window, such as a slow calibration bias or a
+long gentle curve the model consistently under-turns, is invisible to the loss that is supposed to catch drift. Nothing
+in the 12-frame model sees it either; that is what loop closure is for (**reasoned**).
+
+Negative correlation is the other lesson. At $\rho = -0.5$ the ATE is 7.06 m against 12.25 m for independent errors at
+the same per-step size. A refiner that looks at the last 10 pair features can learn to lean against a recent run of
+errors, and the composed loss rewards that. Whether the trained refiner does so I cannot say without running it.
+
+### What the ablation says
+
+The ablation in the third tab of the drift widget says the loss did the most work: on KITTI, adding it alone took
+average ATE from 56.60 m to 27.66 m, training on 128-frame clips instead of 32 took it to 22.31 m, and the refiner to
+18.25 m (**reported**, Table 8). Every row keeps the 12-frame window. Clip length during training mattered even though
+neither the window nor the longest supervised chain changed. The paper's reading is more data per clip and fewer
+artificial clip boundaries; I agree, with one caveat: the paper does not say whether the
+ablation rows were trained for the same number of steps, and its main recipe's 128-frame stage is a second stage
+started from the first, so the row may mix clip length with extra training.
 
 The paper's own diagnostic shows the result: adjacent-frame error that stays flat across a 4,661-frame sequence, and
 multi-gap error that grows more slowly than the other streaming models'.
@@ -260,11 +425,135 @@ Two protocol notes. Every trajectory is aligned to ground truth with a Sim(3) Um
 a monocular model's metric-scale error is not in these numbers. And the training mixture includes KITTI-360 and Waymo
 (**reported**, Table 1), which are driving data close to KITTI's domain but not its test sequences.
 
+## Loop closure, read and re-implemented
+
+Everything above is the streaming model alone. The best numbers in the paper are not. On VBR, loop closure takes ATE
+from 30.14 m to 9.99 m, and on KITTI from 18.25 m to 13.49 m (**reported**, Tables 3 and 5). It is a separate,
+training-free back end, and its code is worth reading, because the bounded-memory story stops at its door.
+
+<Figure
+  src="/articles/abot-recon/fig2.png"
+  alt="Reconstructed point clouds and trajectories with loop closure: an 8.6 km, 48,656-frame drive through Wangjing with the trajectory coloured over time, three city drives (Wuhan 8.8 km, Beijing 48 km, Zhejiang 11.3 km) overlaid on street maps, a hand-held indoor traversal and a quadruped-robot capture."
+  caption="The paper's showcase runs, all with the optional loop closure on: long city drives overlaid on maps, a hand-held indoor walk and a quadruped robot. (paper, Figure 2)."
+/>
+
+Where it helps on KITTI is a list of the sequences that revisit places (**reported**, Table 3): 00 goes from 21.86 m to
+11.70 m, 02 from 69.87 m to 39.00 m, 05 from 13.54 m to 6.00 m and 06 from 12.04 m to 8.70 m. Sequences 01, 03, 04, 08
+and 10 do not change at all. 08 is the interesting zero: it does revisit streets, but in the opposite direction, and a
+forward-facing camera sees a different picture going the other way, so appearance-based retrieval is unlikely to match
+them (**reasoned**; the paper does not discuss it).
+
+### What the code does
+
+The pipeline in `loop_closure.py` and `sparse_loop/` runs **after** the stream, on the whole trajectory (**read**,
+defaults in `LoopClosureConfig`):
+
+1. **Describe every frame.** DINOv2-SALAD descriptors at 336 × 336, one per frame (`keyframe_stride` 1). In the demo
+   they are computed by a worker thread while the stream runs.
+2. **Retrieve.** FAISS inner-product search, top 5 neighbours per frame. A pair survives if its score exceeds 0.85 and
+   the two frames are more than 30 frames apart.
+3. **Suppress.** Candidates are ranked by score and kept greedily; each kept pair blocks every other candidate within 25
+   frames of either end. At most 50 survive to the next step.
+4. **Measure.** For each pair, the 10 frames centred on each end are put in one list, sorted by index, and run through
+   ABot-Recon as a single 20-frame stream. The relative pose between the two centre frames is read off that stream's
+   chained poses.
+5. **Optimise.** A sparse SE(3) pose graph: a node every 50 frames plus every loop endpoint, an odometry edge between
+   consecutive nodes from the streamed trajectory, one edge per loop. Levenberg-Marquardt for 30 iterations, first node
+   fixed, on CUDA only (the solver raises without a GPU).
+6. **Spread.** Each node's correction is interpolated to every frame between nodes: rotations by slerp, translations
+   linearly.
+
+Four details matter more than they look.
+
+**The loop measurement asks the model to do something it was not trained for.** In step 4, with $i$ the old frame and $j$ the
+new one, frame $i+4$ is followed directly by frame $j-5$. To the model that is one adjacent step, and the relative
+pose between the two visits rests on that one prediction across a jump of thousands of frames. It works when the two
+visits look alike, which is what retrieval selected for, and the 30-frame and 25-frame rules keep it from being asked
+about the same place twice in a row (**read** and **reasoned**).
+
+**Every loop edge gets the same, small weight.** The weight is
+`pose_graph_loop_weight * sqrt(inliers / rigid_min_inliers)`, 0.01 × √(128 / 24) = 0.0231. But `inliers` is never
+counted: every edge is created with the config's `default_inliers`, 128. There is no per-edge verification, and the
+graph has no robust kernel. Odometry edges get weight 1, and since the residual is multiplied by the weight before it
+is squared, one loop edge counts for about 1/1,875 of an odometry edge (**read** and **reasoned**).
+
+**SE(3), not Sim(3).** The graph's `pose_graph_model` defaults to `se3` and the loop config does not change it. A
+monocular chain can drift in scale as well as in pose; this back end can bend the trajectory but cannot rescale part of
+it (**read**).
+
+**Rotation and translation share a scale.** Both residual weights are 1.0, so one radian of rotation error costs the
+same as one metre of translation error.
+
+### Experiment: the released back end on a drive that comes home
+
+I re-implemented steps 3, 5 and 6 with the released defaults: the NMS rule, the keyframe stride, the edge weights, the
+residual $\mathrm{Log}(Z\,\mathrm{Exp}(x_s)\,\mathrm{Exp}(x_d)^{-1})$ on world-to-camera log coordinates, the
+Levenberg-Marquardt schedule (λ from 1e-6, halved on success, doubled on failure) and the slerp spreading
+(**measured**, `loop_closure_toy.py`). Steps 1, 2 and 4 need the model and SALAD, so I stood in for them: a candidate
+is any frame within 4 m of an earlier frame at least 31 frames back, scored by distance, and each loop measurement is
+the true relative pose with 0.05° and 0.05 m of noise. That makes my loop edges better than the real ones can be.
+
+The drive is 4,661 frames, the length of KITTI-02: a 1,300 m × 900 m loop, then 640 frames back over its own start,
+like KITTI-00. The streamed trajectory has 0.05° of rotation noise and 2% of translation noise per step. The retrieval
+rule finds 642 candidate frames on the revisit; NMS keeps 20, below the cap of 50. Four seeds.
+
+<LoopLab />
+
+| Setting | Loop edges | ATE |
+|---|---|---|
+| no loop closure | 0 | 15.68 m |
+| released weight | 20 | 5.10 m |
+| weight × 10 | 20 | 4.00 m |
+| weight × 100 | 20 | 3.74 m |
+| released weight | 1 | 7.52 m |
+| released weight | 5 | 5.57 m |
+| weight × 100 | 1 | 4.19 m |
+| released weight, plus one false loop | 20 + 1 | 58.65 m |
+| weight × 100, plus one false loop | 20 + 1 | 313.87 m |
+
+Three readings (**measured**, then **reasoned**).
+
+**It works, and it is cautious.** The released setting cuts this drive's ATE by two thirds, 15.68 m to 5.10 m. Raising
+the loop weight a hundredfold gets 3.74 m. With good edges the low weight leaves about 1.4 m on the table.
+
+**One edge does most of it.** A single loop edge at the released weight gets 7.52 m; five get 5.57 m; twenty get 5.10 m.
+A revisit's edges all say much the same thing, which is why NMS can afford to keep few of them.
+
+**One false loop costs more than all the true ones save.** I added a single wrong edge, frames 2,300 and 900, which are
+920 m apart, measured as "the same place": two intersections that look alike. At the released weight the ATE goes
+from 5.10 m to 58.65 m, nearly four times worse than not closing loops at all. At a hundred times the weight it is
+313.87 m. The small weight is the only defence the graph has, and it limits the damage rather than preventing it. In
+the released pipeline, everything rides on the 0.85 SALAD threshold and the model's re-inferred pose being right.
+
+The paper's KITTI and VBR rows show no such failure, so retrieval held on those sequences. For a fleet of drives through
+repetitive streets, I would add a check before trusting an edge: the re-inferred relative pose against the odometry's
+own estimate, or the point maps' overlap, which the code already has (**reasoned**).
+
+**And the memory bound does not cover it.** Step 4 reads the old images back from disk, and steps 1 and 2 keep one
+descriptor per frame. That is optional and offline, and it is linear in the length of the drive (**read**).
+
 ## Training cost, licence and running it
 
-Training is two stages from π³'s weights: 32-frame clips for 32K iterations on 48 NVIDIA H20s, then 128-frame clips for
-38K iterations on 32 AMD MI308s, then 4K iterations training only the confidence branch (**reported**). Fine-tuning
-code is on the repository's `train` branch (**read**, README).
+The recipe, all **reported** (Section 4.1 and Tables 1 and 2):
+
+| Stage | Clips | Iterations | Hardware | What trains | Peak learning rate |
+|---|---|---|---|---|---|
+| I | 32 frames | 32K, batch 48 | 48 NVIDIA H20 | everything but the confidence branch; the absolute camera output is replaced by the adjacent-pose head | 1e-4, annealed to 1e-6 |
+| II | 128 frames | 38K, batch 32 | 32 AMD MI308 | everything, refiner switched on | 5e-5 for the refiner, 2e-5 for the rest |
+| III | as II | 4K | not stated | confidence branch only | 2e-5 |
+
+AdamW throughout, an EMA of the weights with decay 0.999, bf16 mixed precision, gradient clipping at 1.0, one sequence
+per GPU. Images are resized to width 504 and centre-cropped or padded to 504 × 280. The data mixture is 30 datasets,
+62.05% synthetic by sampling weight (TartanAir and TartanAir-v2, OmniWorld-Game, VirtualKITTI2, HyperSim and others)
+and 37.95% real (DL3DV, Waymo, ScanNet++, KITTI-360 and others, plus unnamed internal data). Unordered multi-view sets
+are turned into pseudo-videos by walking a camera pose graph. The appendix also shows rejected samples: sideways and
+upside-down BlendedMVS images and broken TartanAir and OmniWorld scenes, which is a useful reminder that a large mixture
+needs cleaning. Fine-tuning code is on the repository's `train` branch (**read**, README).
+
+The split learning rate in Stage II is the detail I would copy. The refiner starts from scratch, with its output layer
+initialised to zero, so its first correction is exactly nothing (**read**, `reset_parameters`), on top of a backbone
+that already predicts good steps. A lower rate for the backbone stops the new
+module's early, noisy gradients from undoing Stage I (**reasoned**).
 
 The licences need care. The source code is Apache-2.0. The weights are not: `MODEL_LICENSE.md` puts them under CC BY-NC
 4.0, non-commercial research and education only, because they are derived from π³'s weights, and says commercial use
@@ -288,15 +577,44 @@ python demo.py --image-dir frames/ --output-dir out/ --no-loop-closure --dense-s
 
 <ModelCard repo="acvlab/ABot-Recon" />
 
+## Where it sits
+
+The streaming 3D reconstruction literature has spent two years adding memory back to feed-forward models. CUT3R and
+TTT3R carry a recurrent state; StreamVGGT keeps the full causal cache; LingBot-Map keeps anchors, a pose-reference
+window and a trajectory memory; HorizonStream pairs local attention with persistent linear attention (**reported**, the
+paper's related work). On this site, [R³ and AMB3R-SLAM](/articles/da3-streaming-reconstruction) keep keyframe banks and
+optimise pose graphs online, [HiP3R](/articles/hip3r) reconstructs chunks and stitches them with two graphs, and
+[StructureGS-SLAM](/articles/structuregs-slam) closes drift against walls rather than loops.
+
+ABot-Recon is the opposite bet, and it is the classical one. Visual odometry has always predicted adjacent motion and
+chained it; DPVO and DROID-SLAM do it with a learned matcher and a bundle adjustment over a sliding window, and add a
+pose graph for loops. ABot-Recon replaces the matcher and the window optimiser with one feed-forward network that never
+optimises anything at inference, and keeps the pose graph as an optional extra. That is why its comparisons split the
+way they do: against the memory-heavy streaming models it wins on long drives, and against the classical optimisers
+with known intrinsics (DPVO, DPV-SLAM, Droid-W) it loses on Oxford Spires (**reasoned** from Tables 3 to 5).
+
+The broader overviews are in the site's [3D reconstruction roundup](/articles/3d-reconstruction-roundup).
+
 ## What I did not check
 
 - I did not run the model. The sandbox refused to execute the repository's code, and the model is 4.0 GB of fp32
   weights with a CUDA-first runtime. Every benchmark number above is the paper's.
 - The 50.98 MiB per frame and the 1.6 GiB of activations are arithmetic from tensor shapes and the reported peak, not a
   profile.
-- My drift toy uses Gaussian noise that is independent from step to step. A real model's errors are correlated (a
-  textureless stretch gives several bad steps in a row), which drifts faster; the refiner's temporal convolution is a
-  bet on exactly that correlation.
+- My first drift toy uses Gaussian noise that is independent from step to step. `composition.py` adds correlation and
+  shows how much it matters (12.25 m to 54.37 m at $\rho = 0.9$), but the correlation structure of the real model's
+  errors is unknown to me. I did not measure it.
+- `composition.py` evaluates the loss; it does not train anything. Whether a network trained on the composed loss
+  actually learns anti-correlated errors is the paper's Table 8 claim, not something I reproduced. I also had to pick
+  $\gamma$ (0.5); the paper does not publish it.
+- `loop_closure_toy.py` uses true positions in place of SALAD retrieval and near-true loop measurements in place of the
+  model's re-inference, and its drift has no scale component, so the SE(3) graph's inability to fix scale never shows.
+  Its numbers are an upper bound on what the released back end can do with good edges, and a demonstration of what one
+  bad edge costs. My solver uses numerical Jacobians and a dense solve where the released one uses PyPose Jacobians and a
+  preconditioned conjugate gradient on CUDA; on a graph of this size both should reach the same minimum, but I did not
+  run theirs.
+- I did not read the `train` branch, so the training-loss details (γ, the λs, the exact π³ losses) are the paper's
+  description only.
 - I did not verify that the released checkpoint is the one behind Tables 3 to 8. The checkpoint's parameter counts match
   the paper's (1B in total, 4.75M in the refiner).
 
@@ -306,7 +624,10 @@ ABot-Recon is a clean result: a feed-forward model with a fixed 12-frame view, n
 recurrent state, which beats the long-memory streaming models on KITTI and Oxford Spires and ties them on VBR. The
 memory bound is real and enforced in code, at about half a gibibyte of window on top of the weights. The insight that
 makes it work is about targets, not caches: ask only for things that look the same at frame 10 and frame 10,000, then
-spend the training budget on making their product hold together, mostly the rotation.
+spend the training budget on making their product hold together, mostly the rotation. My CPU re-implementations agree
+with that reading and add two limits to it: the composition loss sees correlated error only within its 11-frame
+horizon, and the loop-closure back end that produces the best headline numbers trusts every retrieved loop equally,
+with no verification, so one wrong match undoes all the right ones.
 
 What it does not do is beat geometry that knows its camera, or keep the indoor reconstruction edge that persistent
 memory buys. For a long drive with a GPU and no intrinsics, and a non-commercial use, it is the one I would try first.
