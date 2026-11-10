@@ -2,12 +2,13 @@
 
 import { useId, useState } from "react"
 
-import { GETS, PROBE } from "@/components/articles/astryx/data"
+import { CLI_SIZES, GETS, PROBE } from "@/components/articles/astryx/data"
 
 // Response sizes from the hosted MCP server, measured 2026-11-09: one get()
 // per component (24 of them) and the median search() answer at its default
 // limit of eight. Tokens are an estimate at four characters per token; the
 // server returns JSON text, so a real tokenizer will land near that, not on it.
+// The CLI rows are `astryx component <Name>` at 0.7.11, measured 2026-11-10.
 
 const CSS = `
 .asx-budget { margin: 2.5rem 0; font-family: var(--font-sans); border-top: 2px solid var(--foreground); border-bottom: 1px solid var(--border); padding: 0.75rem 0 1.25rem; }
@@ -30,6 +31,16 @@ const CSS = `
 
 type Unit = "chars" | "tokens"
 type Sort = "size" | "props"
+type Source = "mcp" | "json" | "full" | "brief" | "dense" | "propsJson"
+
+const SOURCES: { k: Source; label: string; desc: string }[] = [
+  { k: "mcp", label: "MCP get", desc: "get(name) from the hosted server" },
+  { k: "json", label: "CLI --json", desc: "astryx component <Name> --json (the same bytes at every --detail)" },
+  { k: "full", label: "CLI text", desc: "astryx component <Name>, text, --detail full" },
+  { k: "dense", label: "CLI --dense", desc: "astryx component <Name> --dense" },
+  { k: "propsJson", label: "CLI --props --json", desc: "astryx component <Name> --props --json" },
+  { k: "brief", label: "CLI brief", desc: "astryx component <Name> --detail brief, text" },
+]
 
 const median = (xs: number[]) => {
   const s = [...xs].sort((a, b) => a - b)
@@ -41,15 +52,32 @@ export function ContextBudget() {
   const id = useId()
   const [unit, setUnit] = useState<Unit>("tokens")
   const [sort, setSort] = useState<Sort>("size")
+  const [src, setSrc] = useState<Source>("mcp")
   const searchMedian = median(PROBE.map((r) => r.chars))
-  const getMedian = median(GETS.map((g) => g.chars))
+  const sized = GETS.map((g) => {
+    const c = CLI_SIZES.find((x) => x.n === g.n)
+    const v =
+      src === "mcp" || !c
+        ? g.chars
+        : src === "json"
+          ? c.json
+          : src === "full"
+            ? c.full
+            : src === "dense"
+              ? c.dense
+              : src === "propsJson"
+                ? c.props
+                : c.brief
+    return { n: g.n, props: g.props, chars: v }
+  })
+  const getMedian = median(sized.map((g) => g.chars))
   // json-render + Jev's catalog request: about 7,100 tokens on every call,
   // reported in this site's own article on it, converted back at 4 chars/token.
   const JEV_TOKENS = 7100
 
   const show = (chars: number) =>
     unit === "chars" ? Math.round(chars).toLocaleString("en-US") : `~${Math.round(chars / 4).toLocaleString("en-US")}`
-  const rows = [...GETS].sort((a, b) => (sort === "size" ? b.chars - a.chars : b.props - a.props))
+  const rows = [...sized].sort((a, b) => (sort === "size" ? b.chars - a.chars : b.props - a.props))
   const max = Math.max(JEV_TOKENS * 4, ...GETS.map((g) => g.chars))
 
   return (
@@ -59,8 +87,8 @@ export function ContextBudget() {
         What one answer costs an agent&apos;s context
       </p>
       <p className="asx-budget-sub">
-        Size of each <code>get(name)</code> response from the hosted server, and the median <code>search(query)</code>{" "}
-        answer. Tokens are estimated at four characters each.
+        Size of each component read, from the hosted server or from the CLI, beside the median MCP{" "}
+        <code>search(query)</code> answer. Tokens are estimated at four characters each.
       </p>
       <div className="asx-ctl" role="group" aria-label="Unit and order">
         <button type="button" aria-pressed={unit === "tokens"} onClick={() => setUnit("tokens")}>
@@ -75,6 +103,13 @@ export function ContextBudget() {
         <button type="button" aria-pressed={sort === "props"} onClick={() => setSort("props")}>
           Sort by prop count
         </button>
+      </div>
+      <div className="asx-ctl" role="group" aria-label="Which channel answers">
+        {SOURCES.map((x) => (
+          <button key={x.k} type="button" aria-pressed={src === x.k} onClick={() => setSrc(x.k)} title={x.desc}>
+            {x.label}
+          </button>
+        ))}
       </div>
       <ul className="asx-bars">
         <li className="is-ref">
@@ -104,9 +139,9 @@ export function ContextBudget() {
         ))}
       </ul>
       <p className="asx-note">
-        Median <code>get</code>: {show(getMedian)} {unit === "chars" ? "characters" : "tokens"}. A page that needs a
+        {SOURCES.find((x) => x.k === src)?.desc}: median {show(getMedian)} {unit === "chars" ? "characters" : "tokens"}. A page that needs a
         table, a dialog, a selector and a toast pulls about{" "}
-        {show(["Table", "Dialog", "Selector", "Toast"].reduce((s, n) => s + (GETS.find((g) => g.n === n)?.chars ?? 0), 0))}{" "}
+        {show(["Table", "Dialog", "Selector", "Toast"].reduce((s, n) => s + (sized.find((g) => g.n === n)?.chars ?? 0), 0))}{" "}
         {unit === "chars" ? "characters" : "tokens"} of reference, once. The dashed bar is the catalog json-render sends
         on every call (reported in the article linked below the chart, not measured here).
       </p>
