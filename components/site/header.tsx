@@ -19,7 +19,6 @@ const nav = [
   { href: "/projects", label: "projects" },
   { href: "/articles", label: "articles" },
   { href: "/blog", label: "blog" },
-  { href: "/arxiv", label: "arxiv" },
   { href: "/resume", label: "resume" },
   { href: "/about", label: "about" },
 ] as const

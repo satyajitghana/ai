@@ -178,7 +178,7 @@ const handler = createMcpHandler(
       {
         title: "List papers digests",
         description:
-          "Daily arXiv digests (newest first): date, paper titles + arxivIds, and standout flags. Optional limit.",
+          "The arXiv digest archive (mid-2026, no longer updated), newest first: date, paper titles + arxivIds, and standout flags. Optional limit.",
         inputSchema: { limit: z.number().int().positive().optional() },
       },
       async ({ limit }) => listPapersPayload(limit)
@@ -189,7 +189,7 @@ const handler = createMcpHandler(
       {
         title: "Get papers digest",
         description:
-          "Full daily arXiv digest by date (YYYY-MM-DD): per-paper abstract, Satyajit's take, standout flag, and derived arXiv links (abs/pdf/html/ar5iv).",
+          "One arXiv digest from the archive by date (YYYY-MM-DD): per-paper abstract, Satyajit's take, standout flag, and derived arXiv links (abs/pdf/html/ar5iv).",
         inputSchema: { date: z.string().min(1) },
       },
       async ({ date }) => getArxivDigestPayload(date)

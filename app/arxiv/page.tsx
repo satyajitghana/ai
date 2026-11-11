@@ -7,7 +7,7 @@ import { getArxivDigests } from "@/lib/content"
 export const metadata: Metadata = {
   title: "arXiv digest",
   description:
-    "A personalized daily arXiv digest — new papers in CV, 3D, and ML, ranked against my interests, each with a short take.",
+    "An archive of my mid-2026 arXiv digest: new papers in CV, 3D and ML, ranked against my interests, each with a short take. No longer updated.",
   alternates: { canonical: "/arxiv" },
 }
 
@@ -17,7 +17,7 @@ export default function Page() {
   return (
     <PageShell
       title="arXiv"
-      lede="A personalized daily arXiv digest — new papers ranked against my interests by the paper-scout agent, each with a short take. Links only; read them on arXiv."
+      lede={`An archive of the arXiv digest I ran in mid-2026: new papers ranked against my interests by the paper-scout agent, each with a short take. It is no longer updated${digests[0] ? `; the last is from ${digests[0].date}` : ""}. Links only; read them on arXiv.`}
       agentPath={{ json: "/api/arxiv" }}
     >
       <ul className="space-y-6" data-stagger>

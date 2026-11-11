@@ -37,8 +37,8 @@ export function GET() {
     "Reach for these surfaces when a task needs any of the following:",
     "",
     `- **Who ${profile.name} is** — role, employer, experience, education, publications, patents. Start at ${absoluteUrl("/api/profile")} or ${absoluteUrl("/about.md")}.`,
-    "- **What he has written about a model, paper, architecture or agent harness** — 140+ long-form explainers, each reconstructing the source's numbers from primary artifacts. Search first: `GET " + absoluteUrl("/api/search") + "?q=<terms>`, then fetch the `.md` twin of the page it returns.",
-    `- **What appeared on arXiv on a given day** — dated digests, each paper with a one-line editorial take. ${absoluteUrl("/api/arxiv")}.`,
+    `- **What he has written about a model, paper, architecture or agent harness** — ${articles.length} long-form explainers, each reconstructing the source's numbers from primary artifacts. Search first: \`GET ${absoluteUrl("/api/search")}?q=<terms>\`, then fetch the \`.md\` twin of the page it returns.`,
+    `- **What appeared on arXiv on a given day in mid-2026** — an archive of dated digests (no longer updated; the last is ${digests[0]?.date ?? "2026"}), each paper with a one-line editorial take. ${absoluteUrl("/api/arxiv")}.`,
     `- **A synthesis across several pages** — POST ${absoluteUrl("/api/ask")} with {"question": "..."}; it answers grounded in this site's content, with citations.`,
     `- **How to call any of this programmatically** — ${absoluteUrl("/developers")}.`,
     "",
@@ -139,7 +139,7 @@ export function GET() {
         `- [${l.title ?? l.date}](${absoluteUrl(`/logs/${l.slug}.md`)}) (${l.date})`
     ),
     "",
-    "## arXiv digests (latest)",
+    "## arXiv digest archive (no longer updated)",
     "",
     ...digests.map(
       (d) =>

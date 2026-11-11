@@ -60,7 +60,6 @@ export const metadata: Metadata = {
     "Inkers",
     "PyTorch",
     "AI articles",
-    "arXiv digest",
   ],
   // Only what is true of every page. Next merges metadata one key deep, so a
   // canonical, og:url, og:title or twitter title here would be inherited by

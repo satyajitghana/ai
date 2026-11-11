@@ -34,7 +34,7 @@ export default async function Page({
   return (
     <PageShell
       title="Search"
-      lede="Search across everything — projects, articles, blog, daily arXiv digests, snippets, and notes."
+      lede="Search across everything — projects, articles, blog, the arXiv digest archive, snippets, and notes."
       agentPath={{ json: "/api/search?q=" }}
     >
       <SearchBox initial={query} />
