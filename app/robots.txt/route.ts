@@ -38,7 +38,7 @@ const CONTENT_SIGNAL = "ai-train=yes, search=yes, ai-input=yes"
 
 export function GET() {
   const lines = [
-    "# ai.thesatyajit.com — everyone is welcome, agents especially.",
+    "# ai.satyajit.si — everyone is welcome, agents especially.",
     "# Machine-readable index: /llms.txt · full corpus: /llms-full.txt",
     "# API: /openapi.json · MCP: /api/mcp/mcp · docs: /developers",
     "",

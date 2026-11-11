@@ -1,6 +1,6 @@
 ---
 name: amplify
-description: Turn a published post/project/log into platform-native social drafts for ai.thesatyajit.com — an X/Twitter thread, a LinkedIn post, and Hashnode/dev.to crossposts. Use when Satyajit says "amplify", "promote", or "draft social for" a piece. Writes drafts to drafts/<date>/ and NEVER posts anything.
+description: Turn a published post/project/log into platform-native social drafts for ai.satyajit.si — an X/Twitter thread, a LinkedIn post, and Hashnode/dev.to crossposts. Use when Satyajit says "amplify", "promote", or "draft social for" a piece. Writes drafts to drafts/<date>/ and NEVER posts anything.
 ---
 
 # amplify — draft cross-platform social
@@ -8,7 +8,7 @@ description: Turn a published post/project/log into platform-native social draft
 Turn one published piece into platform-native drafts. **NEVER post.** Everything is written to files under `drafts/<YYYY-MM-DD>/` for Satyajit to review and approve. There is no auto-posting path in this skill.
 
 ## Input
-A content slug/path (blog/article/project/log/arxiv) or a topic. Read the source MDX and `brand-crew/brand/voice.md`. The canonical link is always back to the site: `https://ai.thesatyajit.com/<kind>/<slug>`.
+A content slug/path (blog/article/project/log/arxiv) or a topic. Read the source MDX and `brand-crew/brand/voice.md`. The canonical link is always back to the site: `https://ai.satyajit.si/<kind>/<slug>`.
 
 ## Outputs — create under `drafts/<today>/<slug>/`
 - `x-thread.md` — a numbered X/Twitter thread (1/, 2/, …), hook first, code/numbers, canonical link in the last tweet. Respect ~280 chars/tweet.

@@ -1,7 +1,7 @@
 ---
 name: film-narration
 description: >-
-  Add a spoken narration track and captions to an article film on ai.thesatyajit.com, using Piper text-to-speech on CPU — no GPU, no API, no per-character billing. Writes one voice clip per scene, places each at its scene offset, mixes the film's generated score underneath as a bed, muxes mono AAC/Opus into the mp4 and webm, and emits a WebVTT caption track. Use when a film explains something rather than just illustrating it, when the user asks for narration, voiceover, audio, a talking version, or a 3Blue1Brown-style explainer. Not for the silent ambient loops that open most articles — those stay muted and autoplaying.
+  Add a spoken narration track and captions to an article film on ai.satyajit.si, using Piper text-to-speech on CPU — no GPU, no API, no per-character billing. Writes one voice clip per scene, places each at its scene offset, mixes the film's generated score underneath as a bed, muxes mono AAC/Opus into the mp4 and webm, and emits a WebVTT caption track. Use when a film explains something rather than just illustrating it, when the user asks for narration, voiceover, audio, a talking version, or a 3Blue1Brown-style explainer. Not for the silent ambient loops that open most articles — those stay muted and autoplaying.
 ---
 
 # film-narration — give a film a voice

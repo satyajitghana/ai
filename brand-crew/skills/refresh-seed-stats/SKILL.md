@@ -1,6 +1,6 @@
 ---
 name: refresh-seed-stats
-description: Refresh the GitHub seed stats (repos/stars/followers) baked into data/profile.ts for ai.thesatyajit.com. Use when Satyajit says "refresh stats" or on the nightly stats-refresher routine. Fetches live counts and updates profile.seedStats, then runs pnpm validate.
+description: Refresh the GitHub seed stats (repos/stars/followers) baked into data/profile.ts for ai.satyajit.si. Use when Satyajit says "refresh stats" or on the nightly stats-refresher routine. Fetches live counts and updates profile.seedStats, then runs pnpm validate.
 ---
 
 # refresh-seed-stats — refresh GitHub seed stats

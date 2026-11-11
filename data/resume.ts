@@ -91,7 +91,7 @@ export const resume: Resume = {
     email: "satyajitghana7@gmail.com",
     github: "https://github.com/satyajitghana",
     linkedin: "https://www.linkedin.com/in/satyajitghana/",
-    website: "https://ai.thesatyajit.com",
+    website: "https://ai.satyajit.si",
   },
 
   summary:

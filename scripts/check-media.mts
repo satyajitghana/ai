@@ -70,7 +70,7 @@ async function checkRemote(ref: string) {
   await Promise.all(Array.from({ length: 8 }, async () => {
     for (let e = queue.shift(); e; e = queue.shift()) {
       const [path, h] = e
-      const res = await fetch(`${BASE}${path}?v=${h}`, { headers: { "user-agent": "ai.thesatyajit.com validate:media" } }).catch(() => null)
+      const res = await fetch(`${BASE}${path}?v=${h}`, { headers: { "user-agent": "ai.satyajit.si validate:media" } }).catch(() => null)
       if (!res?.ok) { problems.push(`${path}: the map lists it but ${BASE} returns ${res ? res.status : "a network error"}`); continue }
       const got = createHash("sha256").update(Buffer.from(await res.arrayBuffer())).digest("hex").slice(0, 16)
       if (got !== h) problems.push(`${path}: R2 has ${got}, the map says ${h}; re-run pnpm media:push`)

@@ -1,4 +1,4 @@
-// Hosted MCP server for ai.thesatyajit.com — a read-only "satyajit-ai" server.
+// Hosted MCP server for ai.satyajit.si — a read-only "satyajit-ai" server.
 //
 // mcp-handler (v1.1.x) exports the route handler directly; it owns the
 // [transport] convention and Next 16's Promise-wrapped route params. With

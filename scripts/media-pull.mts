@@ -33,7 +33,7 @@ async function main() {
   await Promise.all(Array.from({ length: 8 }, async () => {
     for (let e = queue.shift(); e; e = queue.shift()) {
       const [path, h] = e
-      const res = await fetch(`${BASE}${path}?v=${h}`, { headers: { "user-agent": "ai.thesatyajit.com media:pull" } }).catch(() => null)
+      const res = await fetch(`${BASE}${path}?v=${h}`, { headers: { "user-agent": "ai.satyajit.si media:pull" } }).catch(() => null)
       if (!res?.ok) { failed.push(`${path} (${res ? res.status : "network error"})`); continue }
       const body = Buffer.from(await res.arrayBuffer())
       const got = createHash("sha256").update(body).digest("hex").slice(0, 16)

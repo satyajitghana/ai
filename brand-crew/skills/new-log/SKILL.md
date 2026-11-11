@@ -1,6 +1,6 @@
 ---
 name: new-log
-description: Write a dated daily build-log entry for ai.thesatyajit.com. Use when Satyajit gives a braindump, a sentence about what he did today, or says "log from git". Creates content/logs/YYYY-MM-DD-slug.mdx with valid frontmatter, then runs pnpm validate.
+description: Write a dated daily build-log entry for ai.satyajit.si. Use when Satyajit gives a braindump, a sentence about what he did today, or says "log from git". Creates content/logs/YYYY-MM-DD-slug.mdx with valid frontmatter, then runs pnpm validate.
 ---
 
 # new-log — author a daily log

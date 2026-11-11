@@ -1,6 +1,6 @@
 ---
 name: add-patent
-description: Add a USPTO patent application ("Patent Pending") to ai.thesatyajit.com from a filing receipt. Use when Satyajit has a new patent filing to list on /patents. Appends to data/patents.ts, then runs pnpm validate.
+description: Add a USPTO patent application ("Patent Pending") to ai.satyajit.si from a filing receipt. Use when Satyajit has a new patent filing to list on /patents. Appends to data/patents.ts, then runs pnpm validate.
 ---
 
 # add-patent — add a patent record

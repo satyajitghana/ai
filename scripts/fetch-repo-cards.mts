@@ -435,7 +435,7 @@ async function ghGet(
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
     "x-github-api-version": "2022-11-28",
-    "user-agent": "ai.thesatyajit.com repo-card snapshot",
+    "user-agent": "ai.satyajit.si repo-card snapshot",
   }
   if (token) headers.authorization = `Bearer ${token}`
   // Conditional request: a 304 costs no rate-limit quota and leaves the

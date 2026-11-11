@@ -18,7 +18,7 @@ export function GET() {
     version: "0.2.0",
     name: "brand-crew",
     description:
-      "The Claude Code skills that author and maintain ai.thesatyajit.com — publishing articles, daily arXiv digests, build logs, projects, snippets and notes into a Zod-validated content layer.",
+      "The Claude Code skills that author and maintain ai.satyajit.si — publishing articles, daily arXiv digests, build logs, projects, snippets and notes into a Zod-validated content layer.",
     // What an agent actually needs before it decides to install any of this:
     // not what the skills are, but when reaching for them is the right move and
     // when it plainly is not. Per-skill `description` fields say what each one

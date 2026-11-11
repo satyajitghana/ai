@@ -10,7 +10,7 @@
 // R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and R2_ENDPOINT (the S3 endpoint the
 // dashboard shows with the token; R2_ACCOUNT_ID works in its place). R2_BUCKET
 // overrides the bucket. Objects go under ai/ only: the bucket is shared by
-// every thesatyajit.com site, one top-level prefix each.
+// every one of the sites, one top-level prefix each.
 //
 // Keys are the site path, so a changed file replaces the old object. Pages link
 // `?v=<hash>`, and the edge caches each URL for a year, so a page already

@@ -1,6 +1,6 @@
 ---
 name: update-uses
-description: Update the /uses page on ai.thesatyajit.com — gear, editor, and stack Satyajit reaches for. Use when he gets new hardware/software or wants to correct his setup. Edits data/uses.ts, then runs pnpm validate.
+description: Update the /uses page on ai.satyajit.si — gear, editor, and stack Satyajit reaches for. Use when he gets new hardware/software or wants to correct his setup. Edits data/uses.ts, then runs pnpm validate.
 ---
 
 # update-uses — edit the /uses page

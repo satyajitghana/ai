@@ -129,14 +129,14 @@ export function proxy(req: NextRequest) {
     if (!METHOD_ALLOWED.has(req.method) && !acceptsPost(pathname)) {
       return NextResponse.json(
         {
-          type: "https://ai.thesatyajit.com/developers#error-method_not_allowed",
+          type: "https://ai.satyajit.si/developers#error-method_not_allowed",
           title: "Method Not Allowed",
           status: 405,
           code: "method_not_allowed",
           detail: `${req.method} is not supported on ${pathname}.`,
           hint: "Every endpoint here is read-only except POST /api/ask. Use GET.",
           instance: pathname,
-          docs: "https://ai.thesatyajit.com/openapi.json",
+          docs: "https://ai.satyajit.si/openapi.json",
         },
         {
           status: 405,
@@ -158,14 +158,14 @@ export function proxy(req: NextRequest) {
       const retryAfter = Math.ceil(result.retryAfterMs / 1000)
       return NextResponse.json(
         {
-          type: "https://ai.thesatyajit.com/developers#error-rate_limited",
+          type: "https://ai.satyajit.si/developers#error-rate_limited",
           title: "Too Many Requests",
           status: 429,
           code: "rate_limited",
           detail: `Too many requests. Try again in ~${retryAfter}s.`,
           hint: "Read the RateLimit header for your remaining budget. Static JSON under /api/* is cacheable — cache it rather than re-fetching.",
           instance: pathname,
-          docs: "https://ai.thesatyajit.com/openapi.json",
+          docs: "https://ai.satyajit.si/openapi.json",
         },
         {
           status: 429,

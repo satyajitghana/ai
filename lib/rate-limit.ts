@@ -131,13 +131,13 @@ export function tooMany(result: RateLimitResult, rule: RateLimitRule = ASK_LIMIT
   return new Response(
     JSON.stringify(
       {
-        type: "https://ai.thesatyajit.com/developers#error-rate_limited",
+        type: "https://ai.satyajit.si/developers#error-rate_limited",
         title: "Too Many Requests",
         status: 429,
         code: "rate_limited",
         detail: `Too many requests. Try again in ~${retryAfterSec}s.`,
         hint: "Wait for the interval in Retry-After, then resume. Read the RateLimit header to pace subsequent calls.",
-        docs: "https://ai.thesatyajit.com/openapi.json",
+        docs: "https://ai.satyajit.si/openapi.json",
       },
       null,
       2,

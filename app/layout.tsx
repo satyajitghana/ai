@@ -14,7 +14,7 @@ import { JsonLd, personJsonLd, websiteJsonLd } from "@/lib/jsonld"
 import { WebMcp } from "@/components/site/webmcp"
 import { HOME_TITLE, SITE_DESCRIPTION, SITE_NAME, siteUrl } from "@/lib/site"
 
-// The Cloudflare Web Analytics site token for ai.thesatyajit.com (Cloudflare
+// The Cloudflare Web Analytics site token for ai.satyajit.si (Cloudflare
 // dashboard → Analytics & Logs → Web Analytics). Public by design: it only
 // labels beacons, and every page carries it. NEXT_PUBLIC_CF_ANALYTICS_TOKEN
 // overrides it; the default applies only to Vercel's production deployment,

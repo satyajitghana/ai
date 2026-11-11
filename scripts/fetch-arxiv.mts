@@ -169,7 +169,7 @@ async function main() {
     .replace(/%29&/g, ")&")}`
 
   const res = await fetch(url, {
-    headers: { "User-Agent": "ai.thesatyajit.com paper-scout (mailto:satyajitghana7@gmail.com)" },
+    headers: { "User-Agent": "ai.satyajit.si paper-scout (mailto:satyajitghana7@gmail.com)" },
   })
   if (!res.ok) {
     throw new Error(`arXiv API ${res.status} ${res.statusText}`)

@@ -14,7 +14,7 @@ const handle = profile.github.handle
 
 const headers: Record<string, string> = {
   Accept: "application/vnd.github+json",
-  "User-Agent": "ai.thesatyajit.com stats-refresher",
+  "User-Agent": "ai.satyajit.si stats-refresher",
 }
 if (process.env.GITHUB_TOKEN) {
   headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`

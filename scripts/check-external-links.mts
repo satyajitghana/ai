@@ -408,7 +408,7 @@ type Result = { url: string; status: number | null; verdict: Verdict; note: stri
 
 const UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-  "Chrome/131.0.0.0 Safari/537.36 (+link-check; ai.thesatyajit.com)"
+  "Chrome/131.0.0.0 Safari/537.36 (+link-check; ai.satyajit.si)"
 const TIMEOUT_MS = 10_000
 const HOST_CONCURRENCY = 8
 const HOST_DELAY_MS = 150

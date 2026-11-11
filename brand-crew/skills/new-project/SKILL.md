@@ -1,6 +1,6 @@
 ---
 name: new-project
-description: Add a project page to ai.thesatyajit.com from a GitHub repo URL. Use when Satyajit wants to showcase a repo/project. Pulls README/stack/stars via gh, creates content/projects/<slug>.mdx with valid frontmatter, then runs pnpm validate.
+description: Add a project page to ai.satyajit.si from a GitHub repo URL. Use when Satyajit wants to showcase a repo/project. Pulls README/stack/stars via gh, creates content/projects/<slug>.mdx with valid frontmatter, then runs pnpm validate.
 ---
 
 # new-project — author a project page

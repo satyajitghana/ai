@@ -1,4 +1,4 @@
-# ai.thesatyajit.com
+# ai.satyajit.si
 
 An **AI-native personal site** for Satyajit Ghana — a modern replacement for the
 dead "GitHub README" homepage. Every page is **dual-native**: a clean human document
@@ -6,7 +6,7 @@ dead "GitHub README" homepage. Every page is **dual-native**: a clean human docu
 content is authored and maintained by a crew of **Claude agents** (the `brand-crew`
 plugin), and everything ships through a Zod-validated content layer that fails loudly.
 
-🔗 **Live:** https://ai.thesatyajit.com
+🔗 **Live:** https://ai.satyajit.si
 
 ## What's here
 
@@ -72,7 +72,7 @@ on-brand content, self-validate, and ship via PR. Social is drafted, never auto-
 
 ## Deploy
 
-Vercel. Add the `ai.thesatyajit.com` domain, set any env vars you want live (see
+Vercel. Add the `ai.satyajit.si` domain, set any env vars you want live (see
 `.env.example`), and push — Vercel runs `pnpm build` and deploys, and content regenerates
 per deploy. The Zod-validated content layer is loaded during the build, so a malformed
 content edit fails the deploy rather than shipping broken.

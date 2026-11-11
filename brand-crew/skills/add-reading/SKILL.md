@@ -1,6 +1,6 @@
 ---
 name: add-reading
-description: Add or update an entry on the /reading page of ai.thesatyajit.com (papers and books queued, reading, or read). Use when Satyajit shares a paper/book link, arXiv id, or DOI to track, or wants to move an item's status. Edits data/reading.ts, then runs pnpm validate.
+description: Add or update an entry on the /reading page of ai.satyajit.si (papers and books queued, reading, or read). Use when Satyajit shares a paper/book link, arXiv id, or DOI to track, or wants to move an item's status. Edits data/reading.ts, then runs pnpm validate.
 ---
 
 # add-reading — edit the /reading list

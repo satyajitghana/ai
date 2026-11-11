@@ -13,11 +13,11 @@ import { absoluteUrl, siteUrl } from "@/lib/site"
 export const metadata: Metadata = {
   title: "Developers — Satyajit Ghana site API, MCP server & llms.txt",
   description:
-    "Developer documentation for ai.thesatyajit.com: a public read-only JSON API, an MCP server over Streamable HTTP, markdown twins of every page, llms.txt, and an OpenAPI 3.1 spec. No auth, no keys, RFC 9457 errors and RFC 9331 rate-limit headers.",
+    "Developer documentation for ai.satyajit.si: a public read-only JSON API, an MCP server over Streamable HTTP, markdown twins of every page, llms.txt, and an OpenAPI 3.1 spec. No auth, no keys, RFC 9457 errors and RFC 9331 rate-limit headers.",
   alternates: { canonical: "/developers" },
   keywords: [
     "Satyajit Ghana API",
-    "ai.thesatyajit.com API",
+    "ai.satyajit.si API",
     "MCP server",
     "llms.txt",
     "OpenAPI",
@@ -30,25 +30,25 @@ const SURFACES = [
     name: "JSON API",
     url: "/openapi.json",
     what: "19 read-only endpoints over the content layer. OpenAPI 3.1 spec with an operationId, a description and a typed response schema on every operation.",
-    call: "curl https://ai.thesatyajit.com/api/v1/articles",
+    call: "curl https://ai.satyajit.si/api/v1/articles",
   },
   {
     name: "MCP server",
     url: "/api/mcp/mcp",
     what: "Model Context Protocol over Streamable HTTP. Read-only tools including search_content and ask_satyajit. No auth.",
-    call: 'claude mcp add --transport http satyajit https://ai.thesatyajit.com/api/mcp/mcp',
+    call: 'claude mcp add --transport http satyajit https://ai.satyajit.si/api/mcp/mcp',
   },
   {
     name: "Markdown twins",
     url: "/llms.txt",
     what: "Every page exists as markdown. Append .md to any URL, or send Accept: text/markdown to the canonical URL — responses carry Vary: Accept.",
-    call: 'curl -H "Accept: text/markdown" https://ai.thesatyajit.com/about',
+    call: 'curl -H "Accept: text/markdown" https://ai.satyajit.si/about',
   },
   {
     name: "Whole corpus",
     url: "/llms-full.txt",
     what: "Every page of the site concatenated into one file, for when you would rather load it all than crawl.",
-    call: "curl https://ai.thesatyajit.com/llms-full.txt",
+    call: "curl https://ai.satyajit.si/llms-full.txt",
   },
 ] as const
 
@@ -86,12 +86,12 @@ export default function Page() {
           "@type": "WebAPI",
           name: "Satyajit Ghana site API",
           alternateName: [
-            "ai.thesatyajit.com API",
+            "ai.satyajit.si API",
             "Satyajit Ghana MCP server",
             "Satyajit Ghana developer documentation",
           ],
           description:
-            "Public read-only JSON API, MCP server and markdown surfaces for ai.thesatyajit.com. No authentication, OpenAPI 3.1, RFC 9457 errors, RFC 9331 rate-limit headers.",
+            "Public read-only JSON API, MCP server and markdown surfaces for ai.satyajit.si. No authentication, OpenAPI 3.1, RFC 9457 errors, RFC 9331 rate-limit headers.",
           url: absoluteUrl("/developers"),
           documentation: absoluteUrl("/openapi.json"),
           termsOfService: absoluteUrl("/privacy"),
@@ -115,7 +115,7 @@ export default function Page() {
         <p className="font-mono text-xs leading-6 text-muted-foreground">
           <span className="text-foreground">tl;dr</span>{" "}— no keys, no signup, no quotas worth
           worrying about. Base URL{" "}
-          <span className="text-foreground">https://ai.thesatyajit.com/api/v1</span>. Spec at{" "}
+          <span className="text-foreground">https://ai.satyajit.si/api/v1</span>. Spec at{" "}
           <a href="/openapi.json" className="text-foreground underline underline-offset-4">
             /openapi.json
           </a>
@@ -278,14 +278,14 @@ export default function Page() {
         </p>
         <pre className="mt-3 overflow-x-auto rounded border bg-muted/30 px-3 py-2 font-mono text-[11px] leading-5">
           <code>{`# Claude Code
-claude mcp add --transport http satyajit https://ai.thesatyajit.com/api/mcp/mcp
+claude mcp add --transport http satyajit https://ai.satyajit.si/api/mcp/mcp
 
 # Any MCP client, by config
 {
   "mcpServers": {
     "satyajit": {
       "type": "http",
-      "url": "https://ai.thesatyajit.com/api/mcp/mcp"
+      "url": "https://ai.satyajit.si/api/mcp/mcp"
     }
   }
 }`}</code>

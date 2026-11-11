@@ -1,5 +1,5 @@
 <!--
-  ai.thesatyajit.com — pull request
+  ai.satyajit.si — pull request
 
   Keep it short. Delete any section that doesn't apply.
   Everything ships via a Vercel preview; nothing auto-deploys.

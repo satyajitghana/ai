@@ -1,6 +1,6 @@
 ---
 name: update-now
-description: Update the /now page on ai.thesatyajit.com — what Satyajit is currently focused on. Use when he says "I'm now working on X" or wants to refresh his now-list. Edits data/now.ts and bumps `updated`, then runs pnpm validate.
+description: Update the /now page on ai.satyajit.si — what Satyajit is currently focused on. Use when he says "I'm now working on X" or wants to refresh his now-list. Edits data/now.ts and bumps `updated`, then runs pnpm validate.
 ---
 
 # update-now — edit the /now page

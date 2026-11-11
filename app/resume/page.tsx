@@ -90,7 +90,7 @@ export default function ResumePage() {
           </a>{" "}
           ·{" "}
           <a className="hover:text-foreground" href={contact.website}>
-            ai.thesatyajit.com
+            ai.satyajit.si
           </a>
         </p>
         <p className="mt-6 max-w-prose leading-7 text-muted-foreground">

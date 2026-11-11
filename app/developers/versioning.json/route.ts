@@ -19,7 +19,7 @@ export const dynamic = "force-static"
 export function GET() {
   return Response.json(
     {
-      $schema: "https://ai.thesatyajit.com/developers/versioning.json",
+      $schema: "https://ai.satyajit.si/developers/versioning.json",
       policy: DEPRECATION_POLICY_URL,
       documentation: absoluteUrl("/developers"),
       current: API_VERSION,

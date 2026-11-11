@@ -1,6 +1,6 @@
 ---
 name: add-snippet
-description: Add a code snippet to ai.thesatyajit.com (CUDA/PyTorch/C++/bash tricks). Use when Satyajit wants to save a small copy-pasteable code piece. Creates content/snippets/<slug>.mdx with valid frontmatter, then runs pnpm validate.
+description: Add a code snippet to ai.satyajit.si (CUDA/PyTorch/C++/bash tricks). Use when Satyajit wants to save a small copy-pasteable code piece. Creates content/snippets/<slug>.mdx with valid frontmatter, then runs pnpm validate.
 ---
 
 # add-snippet — author a code snippet

@@ -1,6 +1,6 @@
 ---
 name: new-note
-description: Add a digital-garden note to ai.thesatyajit.com (evergreen, interlinked with [[wikilinks]]). Use when Satyajit wants to capture or grow an evergreen concept note. Creates content/notes/<slug>.mdx with valid frontmatter, then runs pnpm validate.
+description: Add a digital-garden note to ai.satyajit.si (evergreen, interlinked with [[wikilinks]]). Use when Satyajit wants to capture or grow an evergreen concept note. Creates content/notes/<slug>.mdx with valid frontmatter, then runs pnpm validate.
 ---
 
 # new-note — author a digital-garden note

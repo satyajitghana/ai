@@ -81,7 +81,7 @@ export default function Page() {
           <a href={profile.links.x} className="underline underline-offset-4 hover:text-muted-foreground">x</a> ·{" "}
           <a href={profile.links.medium} className="underline underline-offset-4 hover:text-muted-foreground">medium</a> ·{" "}
           <a href={profile.links.scholar} className="underline underline-offset-4 hover:text-muted-foreground">scholar</a> ·{" "}
-          <a href={profile.links.website} className="underline underline-offset-4 hover:text-muted-foreground">thesatyajit.com</a>
+          <a href={profile.links.website} className="underline underline-offset-4 hover:text-muted-foreground">satyajit.si</a>
         </p>
       </section>
 

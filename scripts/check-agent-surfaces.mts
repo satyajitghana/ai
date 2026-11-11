@@ -12,7 +12,7 @@
  *
  * Needs a server. Point it at a dev server or a deployment:
  *   pnpm dev &&  pnpm check:agents
- *   BASE=https://ai.thesatyajit.com pnpm check:agents
+ *   BASE=https://ai.satyajit.si pnpm check:agents
  */
 
 const BASE = (process.env.BASE ?? "http://localhost:3000").replace(/\/$/, "")

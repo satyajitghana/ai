@@ -419,7 +419,7 @@ export function NeuronLabApp() {
       <div ref={rootRef} className="nl-root" data-theme={theme}>
         <div className="nl-top">
           <Link className="nl-brand" href="/">
-            {"←"} <span>neuron lab</span> <small>ai.thesatyajit.com</small>
+            {"←"} <span>neuron lab</span> <small>ai.satyajit.si</small>
           </Link>
         </div>
         <div className="nl-empty" style={{ padding: 24 }}>Loading…</div>
@@ -432,7 +432,7 @@ export function NeuronLabApp() {
       <div ref={rootRef} className="nl-root" data-theme={theme}>
         <div className="nl-top">
           <Link className="nl-brand" href="/">
-            {"←"} ai.thesatyajit.com
+            {"←"} ai.satyajit.si
           </Link>
         </div>
         <div className="nl-empty" style={{ padding: 24, maxWidth: 560 }}>
@@ -452,7 +452,7 @@ export function NeuronLabApp() {
     <div ref={rootRef} className="nl-root" data-theme={theme}>
       <header className="nl-top">
         <Link className="nl-brand" href="/" title="Back to the site">
-          {"←"} <span>neuron lab</span> <small>ai.thesatyajit.com</small>
+          {"←"} <span>neuron lab</span> <small>ai.satyajit.si</small>
         </Link>
         <select
           className="nl-select"

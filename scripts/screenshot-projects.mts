@@ -22,7 +22,7 @@ const DEMOS: Record<string, string> = {
   // vritti is behind a Cloudflare human-check — headless Chrome only gets the
   // challenge page, so its cover is omitted (add a screenshot by hand if wanted).
   fabrik: "https://fabrik-ui.vercel.app",
-  atoms: "https://atoms.thesatyajit.com",
+  atoms: "https://atoms.satyajit.si",
   botcha: "https://botcha-verify.vercel.app",
   penora: "https://penora-ui.vercel.app",
   rentree: "https://rentree-now.vercel.app",

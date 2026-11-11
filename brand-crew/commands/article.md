@@ -1,5 +1,5 @@
 ---
-description: Write a curated long-form AI article for ai.thesatyajit.com.
+description: Write a curated long-form AI article for ai.satyajit.si.
 argument-hint: [topic | notes | paper-url]
 ---
 

@@ -186,7 +186,7 @@ export function ResumeDocument({ resume }: { resume: Resume }): ReactElement {
     contact.email,
     "github.com/satyajitghana",
     "linkedin.com/in/satyajitghana",
-    "ai.thesatyajit.com",
+    "ai.satyajit.si",
   ].join("  ·  ")
 
   return (

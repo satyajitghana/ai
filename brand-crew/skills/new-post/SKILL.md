@@ -1,6 +1,6 @@
 ---
 name: new-post
-description: Write a new blog post for ai.thesatyajit.com. Use when Satyajit wants to publish a technical blog post, a "what I learned / what I shipped / TIL" daily post, or an explainer — from a topic, voice-note transcript, repo URL, or notes. Creates content/blog/<slug>.mdx with valid frontmatter, then runs pnpm validate.
+description: Write a new blog post for ai.satyajit.si. Use when Satyajit wants to publish a technical blog post, a "what I learned / what I shipped / TIL" daily post, or an explainer — from a topic, voice-note transcript, repo URL, or notes. Creates content/blog/<slug>.mdx with valid frontmatter, then runs pnpm validate.
 ---
 
 # new-post — author a blog post

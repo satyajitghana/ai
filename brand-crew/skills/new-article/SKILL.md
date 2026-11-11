@@ -1,6 +1,6 @@
 ---
 name: new-article
-description: Write a curated long-form AI article for ai.thesatyajit.com. Use when Satyajit wants to publish an evergreen explainer or essay on AI broadly (transformers, RL, diffusion, systems) — a rigorous teaching piece, not a personal build-log. Creates content/articles/<slug>.mdx with valid frontmatter, then runs pnpm validate.
+description: Write a curated long-form AI article for ai.satyajit.si. Use when Satyajit wants to publish an evergreen explainer or essay on AI broadly (transformers, RL, diffusion, systems) — a rigorous teaching piece, not a personal build-log. Creates content/articles/<slug>.mdx with valid frontmatter, then runs pnpm validate.
 ---
 
 # new-article — author a curated AI article

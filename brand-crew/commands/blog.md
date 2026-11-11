@@ -1,5 +1,5 @@
 ---
-description: Write a new blog post for ai.thesatyajit.com.
+description: Write a new blog post for ai.satyajit.si.
 argument-hint: [topic | notes | repo-url]
 ---
 

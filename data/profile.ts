@@ -17,7 +17,7 @@ export const profile = {
     x: "https://x.com/thesudoer_",
     medium: "https://satyajitghana.medium.com/",
     scholar: "https://scholar.google.com/citations?user=rZCRakQAAAAJ&hl=en",
-    website: "https://thesatyajit.com/",
+    website: "https://satyajit.si/",
     email: "satyajitghana7@gmail.com",
   },
   github: { handle: "satyajitghana" },

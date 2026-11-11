@@ -1,6 +1,6 @@
 ---
 name: add-papers-digest
-description: Build the daily arXiv paper digest for ai.thesatyajit.com. Use when Satyajit wants today's (or a given date's) personalized arXiv digest, "the papers", says "/arxiv", or asks the paper-scout to run. Runs scripts/fetch-arxiv.mts, curates the top candidates, writes a personal take per paper, and saves content/arxiv/YYYY-MM-DD.mdx, then runs pnpm validate.
+description: Build the daily arXiv paper digest for ai.satyajit.si. Use when Satyajit wants today's (or a given date's) personalized arXiv digest, "the papers", says "/arxiv", or asks the paper-scout to run. Runs scripts/fetch-arxiv.mts, curates the top candidates, writes a personal take per paper, and saves content/arxiv/YYYY-MM-DD.mdx, then runs pnpm validate.
 ---
 
 # add-papers-digest — daily arXiv digest

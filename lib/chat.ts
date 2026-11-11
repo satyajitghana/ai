@@ -182,12 +182,12 @@ export const offlinePayload = {
   error: "chat offline",
   detail:
     "The chat is offline right now. The site is still fully agent-readable: start at /llms.txt, fetch any page as .md, or use the /api/* JSON endpoints.",
-  type: "https://ai.thesatyajit.com/developers#error-service_unavailable",
+  type: "https://ai.satyajit.si/developers#error-service_unavailable",
   title: "Service Unavailable",
   status: 503,
   code: "service_unavailable",
   hint: "No model is configured. Use the static surfaces instead: /llms.txt, any page + .md, or the /api/* JSON endpoints — none of them need a model.",
-  docs: "https://ai.thesatyajit.com/openapi.json",
+  docs: "https://ai.satyajit.si/openapi.json",
 } as const
 
 // ── the tool set ────────────────────────────────────────────────────────────

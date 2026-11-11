@@ -174,7 +174,7 @@ export function renderOgImage({
           }}
         >
           <div style={{ display: "flex" }}>{footerLeft}</div>
-          <div style={{ display: "flex", color: MUTED }}>ai.thesatyajit.com</div>
+          <div style={{ display: "flex", color: MUTED }}>ai.satyajit.si</div>
         </div>
       </div>
     ),

@@ -11,14 +11,14 @@ import { siteUrl } from "@/lib/site"
 // ask, not like keywords.
 export const dynamic = "force-static"
 
-const urn = (ns: string, name: string) => `urn:air:ai.thesatyajit.com:${ns}:${name}`
+const urn = (ns: string, name: string) => `urn:air:ai.satyajit.si:${ns}:${name}`
 
 export function GET() {
   const catalog = {
     specVersion: "0.1",
     host: {
       name: SITE.name,
-      domain: "ai.thesatyajit.com",
+      domain: "ai.satyajit.si",
       url: siteUrl,
       description: SITE.description,
       contact: { email: SITE.contact, url: `${siteUrl}/contact` },
@@ -51,7 +51,7 @@ export function GET() {
         type: "application/openapi+json",
         url: `${siteUrl}/openapi.json`,
         representativeQueries: [
-          "List every long-form article on ai.thesatyajit.com",
+          "List every long-form article on ai.satyajit.si",
           "Fetch Satyajit Ghana's structured resume as JSON",
           "Search Satyajit's writing for a specific model name",
           "Get the list of Satyajit's patents and publications",
@@ -65,7 +65,7 @@ export function GET() {
         type: "text/plain",
         url: `${siteUrl}/llms.txt`,
         representativeQueries: [
-          "What is on ai.thesatyajit.com?",
+          "What is on ai.satyajit.si?",
           "How do I read this site as an agent?",
           "Where is the index of Satyajit's writing?",
         ],
@@ -78,7 +78,7 @@ export function GET() {
         type: "text/plain",
         url: `${siteUrl}/llms-full.txt`,
         representativeQueries: [
-          "Load the entire text of ai.thesatyajit.com",
+          "Load the entire text of ai.satyajit.si",
           "Give me everything Satyajit Ghana has published in one file",
         ],
       },
@@ -90,7 +90,7 @@ export function GET() {
         type: "text/html",
         url: `${siteUrl}/developers`,
         representativeQueries: [
-          "How do I authenticate against the ai.thesatyajit.com API?",
+          "How do I authenticate against the ai.satyajit.si API?",
           "What are the rate limits on Satyajit's API?",
           "How do I connect to Satyajit's MCP server?",
         ],

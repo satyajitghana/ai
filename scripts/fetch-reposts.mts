@@ -46,7 +46,7 @@ const LEDGER = join(ROOT, "data", "reposts-ledger.json")
 const LAST = join(tmpdir(), "reposts-last-scan.json")
 const BASE = "https://api.fxtwitter.com/2"
 const API = `${BASE}/profile`
-const UA = { "User-Agent": "Mozilla/5.0 (ai.thesatyajit.com recheck-reposts)" }
+const UA = { "User-Agent": "Mozilla/5.0 (ai.satyajit.si recheck-reposts)" }
 const STATUSES = ["article", "update", "covered", "skip", "triaged"] as const
 type Status = (typeof STATUSES)[number]
 

@@ -342,7 +342,7 @@ export function GET() {
       title: "Satyajit Ghana — site API",
       summary: "Read-only JSON API over an AI-native personal site.",
       description: [
-        "Read-only JSON API over the content layer of ai.thesatyajit.com — writing, projects, daily arXiv digests, resume, publications, patents and a quantified-self health panel.",
+        "Read-only JSON API over the content layer of ai.satyajit.si — writing, projects, daily arXiv digests, resume, publications, patents and a quantified-self health panel.",
         "",
         "**Other agent surfaces on the same site**",
         "- Markdown twin of any page: append `.md`, or send `Accept: text/markdown` to the canonical URL.",

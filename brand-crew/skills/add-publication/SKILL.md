@@ -1,6 +1,6 @@
 ---
 name: add-publication
-description: Add a peer-reviewed publication to ai.thesatyajit.com from a DOI or arXiv id. Use when Satyajit has a new paper to list on /publications. Resolves metadata, appends to data/publications.ts, then runs pnpm validate.
+description: Add a peer-reviewed publication to ai.satyajit.si from a DOI or arXiv id. Use when Satyajit has a new paper to list on /publications. Resolves metadata, appends to data/publications.ts, then runs pnpm validate.
 ---
 
 # add-publication — add a publication record

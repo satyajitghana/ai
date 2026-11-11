@@ -14,7 +14,7 @@ import { absoluteUrl } from "@/lib/site"
 export const metadata: Metadata = {
   title: "Privacy",
   description:
-    "What ai.thesatyajit.com collects, what it does not, and what happens to the questions you type into the site's AI console. No accounts, no advertising, no cross-site tracking.",
+    "What ai.satyajit.si collects, what it does not, and what happens to the questions you type into the site's AI console. No accounts, no advertising, no cross-site tracking.",
   alternates: { canonical: "/privacy" },
 }
 
@@ -32,7 +32,7 @@ export default function Page() {
           name: "Privacy",
           url: absoluteUrl("/privacy"),
           description:
-            "Privacy policy for ai.thesatyajit.com: no accounts, no advertising, no cross-site tracking.",
+            "Privacy policy for ai.satyajit.si: no accounts, no advertising, no cross-site tracking.",
           dateModified: "2026-08-15",
         }}
       />

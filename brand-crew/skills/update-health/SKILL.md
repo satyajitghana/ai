@@ -1,6 +1,6 @@
 ---
 name: update-health
-description: Update the biomarker dashboard on ai.thesatyajit.com from a lab panel. Use when Satyajit shares blood-work / lab results (PDF, photo, or text) to ingest. Rewrites the biomarker entries in data/health.ts (Zod-validated inline), then runs pnpm validate.
+description: Update the biomarker dashboard on ai.satyajit.si from a lab panel. Use when Satyajit shares blood-work / lab results (PDF, photo, or text) to ingest. Rewrites the biomarker entries in data/health.ts (Zod-validated inline), then runs pnpm validate.
 ---
 
 # update-health — biomarker dashboard
