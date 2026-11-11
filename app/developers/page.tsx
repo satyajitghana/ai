@@ -4,7 +4,7 @@ import Link from "next/link"
 import { PageShell } from "@/components/site/page-shell"
 import { profile } from "@/data/profile"
 import { JsonLd } from "@/lib/jsonld"
-import { absoluteUrl, siteUrl } from "@/lib/site"
+import { absoluteUrl, siteUrl, PERSON_ID } from "@/lib/site"
 
 // The developer portal. Everything an agent or a person needs to call this site
 // programmatically, at a predictable URL, with the product name in the title so
@@ -102,7 +102,7 @@ export default function Page() {
             { "@type": "WebPage", name: "API versioning and deprecation policy", url: absoluteUrl("/developers/versioning") },
             { "@type": "WebPage", name: "Authentication (there is none)", url: absoluteUrl("/auth.md") },
           ],
-          provider: { "@id": `${siteUrl}/#person` },
+          provider: { "@id": PERSON_ID },
           potentialAction: {
             "@type": "SearchAction",
             target: { "@type": "EntryPoint", urlTemplate: `${siteUrl}/api/search?q={q}` },

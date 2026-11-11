@@ -13,7 +13,7 @@ import type { Architecture } from "@/data/architectures"
 import { profile } from "@/data/profile"
 import type { Publication } from "@/data/publications"
 import type { ArchitectureDoc, Article as ContentArticle, BlogPost, Project } from "@/lib/content"
-import { absoluteUrl, siteUrl } from "@/lib/site"
+import { absoluteUrl, siteUrl, PERSON_ID, PERSON_URL } from "@/lib/site"
 import { archFilmKey, type Film, getFilm, isoDuration } from "@/lib/films"
 import { absoluteMediaUrl, isAbsolute } from "@/lib/media"
 
@@ -24,13 +24,14 @@ export function personJsonLd(): WithContext<Person> {
   return {
     "@context": "https://schema.org",
     "@type": "Person",
-    "@id": `${siteUrl}/#person`,
+    "@id": PERSON_ID,
     name: profile.name,
     description: `${profile.title} at ${profile.company.name} in ${profile.location}. ${profile.tagline} ${profile.bio[0]}`,
     disambiguatingDescription: profile.tagline,
     jobTitle: profile.title,
     email: `mailto:${profile.links.email}`,
-    url: siteUrl,
+    // His home page is satyajit.si (PERSON_URL); this site is one of his works.
+    url: PERSON_URL,
     image: absoluteUrl("/opengraph-image"),
     // The employer, described completely enough for an agent to verify the
     // affiliation and route a contact request without leaving the graph.
@@ -74,7 +75,7 @@ export function personJsonLd(): WithContext<Person> {
       profile.links.x,
       profile.links.medium,
       profile.links.scholar,
-      profile.links.website,
+      siteUrl,
     ],
     knowsAbout: [
       "Deep Learning",
@@ -98,7 +99,7 @@ export function websiteJsonLd(): WithContext<WebSite> {
     url: siteUrl,
     description:
       "Dual-native personal site: human-readable pages with agent-readable markdown, JSON, and MCP surfaces. Managed by Claude.",
-    author: { "@id": `${siteUrl}/#person` },
+    author: { "@id": PERSON_ID },
     // `query-input` is the Google sitelinks-searchbox extension to SearchAction,
     // which schema-dts does not model — cast to keep the spec-required shape.
     potentialAction: {
@@ -130,8 +131,8 @@ export function blogPostingJsonLd(post: BlogPost): WithContext<BlogPosting> {
     timeRequired: `PT${post.readingTimeMins}M`,
     inLanguage: "en",
     isAccessibleForFree: true,
-    author: { "@id": `${siteUrl}/#person` },
-    publisher: { "@id": `${siteUrl}/#person` },
+    author: { "@id": PERSON_ID },
+    publisher: { "@id": PERSON_ID },
   }
 }
 
@@ -156,8 +157,8 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
     timeRequired: `PT${article.readingTimeMins}M`,
     inLanguage: "en",
     isAccessibleForFree: true,
-    author: { "@id": `${siteUrl}/#person` },
-    publisher: { "@id": `${siteUrl}/#person` },
+    author: { "@id": PERSON_ID },
+    publisher: { "@id": PERSON_ID },
     // The primary sources the piece is built on, made machine-readable. Every
     // article here cites papers and repositories inline; an answer engine
     // deciding whether a page is grounded reads this rather than the prose.
@@ -220,8 +221,8 @@ export function architectureJsonLd(
     timeRequired: `PT${doc.readingTimeMins}M`,
     inLanguage: "en",
     isAccessibleForFree: true,
-    author: { "@id": `${siteUrl}/#person` },
-    publisher: { "@id": `${siteUrl}/#person` },
+    author: { "@id": PERSON_ID },
+    publisher: { "@id": PERSON_ID },
     ...(cites.length ? { citation: cites } : {}),
     ...(film ? { video: filmVideo(film, doc.title, "the architecture") } : {}),
   }
@@ -276,7 +277,7 @@ export function scholarlyArticleJsonLd(
     headline: pub.title,
     author: pub.authors.map((name) =>
       name === profile.name
-        ? { "@id": `${siteUrl}/#person` }
+        ? { "@id": PERSON_ID }
         : { "@type": "Person" as const, name }
     ),
     datePublished: String(pub.year),
@@ -306,7 +307,7 @@ export function softwareSourceCodeJsonLd(
     url: absoluteUrl(`/projects/${project.slug}`),
     ...(project.repo ? { codeRepository: project.repo } : {}),
     programmingLanguage: project.stack.join(", "),
-    author: { "@id": `${siteUrl}/#person` },
+    author: { "@id": PERSON_ID },
   }
 }
 

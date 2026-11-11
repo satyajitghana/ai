@@ -4,7 +4,7 @@ import Link from "next/link"
 import { PageShell } from "@/components/site/page-shell"
 import { profile } from "@/data/profile"
 import { JsonLd } from "@/lib/jsonld"
-import { absoluteUrl, siteUrl } from "@/lib/site"
+import { absoluteUrl, PERSON_ID } from "@/lib/site"
 
 // A trust-anchor page. Agents check /about, /contact and /privacy before they
 // treat a site as a citable source, and a contact page that is just a mailto
@@ -64,7 +64,7 @@ export default function Page() {
           name: `Contact ${profile.name}`,
           url: absoluteUrl("/contact"),
           description: `How to reach ${profile.name}.`,
-          mainEntity: { "@id": `${siteUrl}/#person` },
+          mainEntity: { "@id": PERSON_ID },
         }}
       />
 

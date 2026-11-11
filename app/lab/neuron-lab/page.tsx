@@ -5,7 +5,7 @@ import type { WebApplication, WithContext } from "schema-dts"
 import { NeuronLabApp } from "@/components/neuron-lab/app"
 import { JsonLd } from "@/lib/jsonld"
 import { seo } from "@/lib/seo"
-import { absoluteUrl } from "@/lib/site"
+import { absoluteUrl, PERSON_ID } from "@/lib/site"
 
 const PATH = "/lab/neuron-lab"
 const TITLE = "Neuron lab: steer a language model's neurons in your browser"
@@ -23,7 +23,7 @@ const app: WithContext<WebApplication> = {
   applicationCategory: "EducationalApplication",
   operatingSystem: "Any modern browser",
   isAccessibleForFree: true,
-  author: { "@id": `${absoluteUrl("/")}#person` },
+  author: { "@id": PERSON_ID },
 }
 
 export default function NeuronLabPage() {

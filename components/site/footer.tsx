@@ -6,6 +6,7 @@ import {
 } from "@phosphor-icons/react/dist/ssr"
 
 import { profile } from "@/data/profile"
+import { PERSON_URL } from "@/lib/site"
 
 const footerLinks = [
   { href: "/models", label: "models" },
@@ -50,7 +51,15 @@ export function SiteFooter() {
       <div className="mt-6 flex flex-wrap items-center justify-between gap-3 font-mono text-xs text-muted-foreground">
         <span className="flex items-center gap-3">
           <span>
-            © {new Date().getFullYear()} {profile.name}
+            © {new Date().getFullYear()}{" "}
+            {/* His home page: the visible link that ties this site to satyajit.si */}
+            <a
+              href={PERSON_URL}
+              rel="me"
+              className="underline-offset-2 transition-colors hover:text-foreground hover:underline"
+            >
+              {profile.name}
+            </a>
           </span>
           <a
             href={profile.links.github}

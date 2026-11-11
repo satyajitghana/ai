@@ -15,7 +15,7 @@ import {
 } from "@/lib/math-wall"
 import { DISCIPLINES } from "@/components/articles/openai-math/catalogue-data"
 import { seo } from "@/lib/seo"
-import { absoluteUrl, siteUrl } from "@/lib/site"
+import { absoluteUrl, siteUrl, PERSON_ID } from "@/lib/site"
 
 import { MathWall } from "./math-wall"
 
@@ -44,7 +44,7 @@ export default function Page() {
     name: `${TITLE}: openai/math, one short video per claimed result`,
     description: DESCRIPTION,
     isPartOf: { "@id": `${siteUrl}/#website` },
-    author: { "@id": `${siteUrl}/#person` },
+    author: { "@id": PERSON_ID },
     about: { "@type": "SoftwareSourceCode", name: "openai/math", codeRepository: MATH_REPO },
     isBasedOn: absoluteUrl(MATH_ARTICLE),
     mainEntity: {
