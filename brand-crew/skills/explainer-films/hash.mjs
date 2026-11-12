@@ -140,8 +140,25 @@ export function storyEngineSha(style) {
   return sha
 }
 
+// A story film's bespoke scenes are drawn by its own modules,
+// custom/<key>/<module>.js. They are part of that film's engine and of no
+// other's: a film with none hashes exactly as before, and editing one film's
+// module stales only that film.
+export function customModules(sb) {
+  const names = [...new Set((sb.scenes || []).filter(s => s && s.type === 'custom' && typeof s.module === 'string').map(s => s.module))].sort()
+  return names.map(n => ({ name: n, file: join(SKILL_DIR, 'custom', sb.slug, `${n}.js`) }))
+}
+function filmEngine(sb) {
+  if (!isStory(sb)) return engineSha(sb.style)
+  const mods = customModules(sb)
+  if (!mods.length) return storyEngineSha(sb.style)
+  const h = createHash('sha256').update('bespoke\0' + storyEngineSha(sb.style) + '\0')
+  for (const m of mods) { h.update(m.name + '\0'); h.update(existsSync(m.file) ? readFileSync(m.file) : 'missing'); h.update('\0') }
+  return h.digest('hex')
+}
+
 export function filmSha(sb, date) {
-  const engine = isStory(sb) ? storyEngineSha(sb.style) : engineSha(sb.style)
+  const engine = filmEngine(sb)
   return createHash('sha256').update(engine + '\n' + date + '\n' + canon(sb) + '\n' + JSON.stringify(lexiconFor(sb))).digest('hex').slice(0, 16)
 }
 

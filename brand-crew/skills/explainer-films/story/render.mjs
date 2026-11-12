@@ -79,6 +79,22 @@ function mediaOf(sc) {
 }
 async function prepMedia(page, sb) {
   for (const sc of sb.scenes || []) if (sc.type === 'figure') { const m = mediaOf(sc); await page.evaluate(m => FILM.media(m.key, m.kind, m.urls, 24), m) }
+  await prepBespoke(page, sb)
+}
+// A bespoke scene's drawing code is the film's own module,
+// custom/<key>/<module>.js beside this skill, loaded once per page.
+async function prepBespoke(page, sb) {
+  for (const sc of sb.scenes || []) {
+    if (sc.type !== 'custom') continue
+    const id = `${sb.slug}/${sc.module}`
+    if (await page.evaluate(id => BESPOKE.has(id), id)) continue
+    const file = join(SKILL, 'custom', sb.slug, `${sc.module}.js`)
+    if (!existsSync(file)) throw new Error(`custom scene: no module ${file}`)
+    await page.evaluate(id => { BESPOKE.loading = id }, id)
+    await page.addScriptTag({ path: file })
+    await page.evaluate(() => { BESPOKE.loading = null })
+    if (!(await page.evaluate(id => BESPOKE.has(id), id))) throw new Error(`custom scene: ${file} did not call BESPOKE.define({ draw })`)
+  }
 }
 
 async function sheet(page, sb, times, cols, w, out, labels = true) {
@@ -274,7 +290,7 @@ const main = async () => {
       // the narration each storyboard will speak, before anything is timed
       const page = await openPage(browser)
       const out = {}
-      for (const f of files) { const sb = loadSb(f); out[sb.slug] = await page.evaluate(sb => FILM.lines(sb), sb) }
+      for (const f of files) { const sb = loadSb(f); await prepBespoke(page, sb); out[sb.slug] = await page.evaluate(sb => FILM.lines(sb), sb) }
       console.log(JSON.stringify(out))
     } else if (mode === 'thumb') {
       const out = opt.out || 'thumbs'; mkdirSync(out, { recursive: true })

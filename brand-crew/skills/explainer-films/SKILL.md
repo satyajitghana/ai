@@ -55,7 +55,8 @@ you mean to re-render its film and thumbnail.
 "format": "story"        opt-in, per storyboard
 scenes                   10-24 (chapter cards count)
 narration                400-750 words (the checker enforces both ends); each beat ≤ 40 words
-renders through          story/render.mjs → story/studio.html → story/explainer.js + story/scenes.js
+renders through          story/render.mjs → story/studio.html → story/explainer.js + story/scenes.js + story/bespoke.js
+bespoke scenes           custom/<key>/<module>.js, one per film (see "Bespoke scenes")
 ```
 
 **Why it is separate.** Every legacy film and thumbnail is hashed against the
@@ -105,6 +106,133 @@ A story film is not a longer slideshow. It answers a question:
 | `trace` | `title`, `stages[]` (2-6, `{label ≤ 4 w, sub? ≤ 5 w}`), `steps[]` (2-8, `{at: stage index, value ≤ 32 chars / 6 w, note?, term?, say}`) | The worked example. One concrete thing walks the stages; at each the big card under the current stage says what it has become ("512 keys" → "128 pool keys" → "64 buckets"). Values already passed stay under their stages, so the whole computation is on screen at the end. Steps may stay on a stage or skip one. |
 | `code` | `title?`, `credit?` (≤ 10 w, e.g. the file path), `code[]` (2-14 lines, ≤ 64 chars), `steps[]` (1-5, `{lines: [from, to] 1-based, note?, term?, say}`) | The article's own code on a card, a range highlighted per step, the rest dimmed. Light syntax colour (keywords, strings, comments). No line numbers. **Every line must appear verbatim in the article** (a code fence or inline code), as a quote must. |
 | `inset` | `title`, `nodes` (2-8), `edges?`, `groups?`, `open` (a node id), `inner {title? ≤ 6 w, nodes (2-8), edges?}`, `steps[]` (2-9, `{inner?: bool, show?, flow?, highlight?, note?, term?, say}`) | A diagram, then one node opened: the camera dives in, the node's box grows into a frame, and the inner diagram builds inside it. Steps with `inner: true` name inner ids; the first step is outside; a later step without `inner` comes back out. Both diagrams use the diagram rules below (positions, overlap, arrows); keep the inner title to one line. |
+| `custom` | `module`, `mechanism?`, `title?`, `params?`, `steps[]` (1-8, `{say, note?, term?, …}`) | A bespoke scene: drawn by this film's own module. Every story film needs at least one with `mechanism: true`. See "Bespoke scenes" below. |
+
+### Bespoke scenes
+
+The built-in scene types make every film look like the others. A **bespoke
+scene** is drawn by code written for this film alone, from the article's own
+widget, figure or idea: k-means centroids moving each iteration, an attention
+mask filling, a tape machine stepping, a denoising trajectory, a chart
+morphing. **Every story film from now on has at least one bespoke mechanism
+scene** (the checker fails one without it; `nex-n2-6` and `raon-1-nano`,
+written before, are exempt).
+
+**In the storyboard:**
+
+```json
+{ "type": "custom", "module": "buckets", "mechanism": true,
+  "title": "Buckets by meaning, one block at a time",
+  "params": { "query": 150,
+              "legend": ["512 keys in a block, 64 dims each", "128 pool keys", "..."] },
+  "steps": [ { "say": "Picture the index space in two dimensions...", "term": "..." },
+             { "say": "Every four neighbouring keys are summed..." } ] }
+```
+
+| field | |
+|---|---|
+| `module` | the file `brand-crew/skills/explainer-films/custom/<key>/<module>.js` (key: the film's key, e.g. `latent-sparse-attention` or `architectures/transformer`) |
+| `mechanism` | `true` counts it as a mechanism scene (and toward the bespoke rule). Each module is its own kind for the "two kinds" rule |
+| `title` | optional heading (≤ 8 words), drawn by the engine |
+| `params` | anything the module needs. **Every string in it is screen text** (≤ 14 words each; digits checked against the article). Numbers are geometry. `"data": "article"` declares the numbers are the article's (see Truth) |
+| `steps[]` | 1-8 beats: `say` (required, ≤ 40 words), `note?`, `term?`, plus any fields the module reads (strings in them are screen text too) |
+
+**The module** is a plain script (not an ES module) that calls
+`BESPOKE.define({ plan?, draw, stampAt?, host? })` once. Wrap its private state
+in a function, as the examples do; it runs in the page beside every other
+module.
+
+```js
+BESPOKE.define((() => {
+  // fixed data, computed once with its own seeded PRNG (never Math.random)
+  return {
+    // optional: per-step minimum seconds, sounds, and where motion needs every frame
+    plan: (params, steps) => ({
+      min: [3.2, 3.2, 4.6],                                  // seconds; the voice may make a step longer
+      events: [{ step: 0, at: .2, type: 'ticks', n: 16, span: 1.2 }, { step: 2, at: .3, type: 'ding' }],
+      motion: [{ step: 2, from: 0, to: 3.2 }],               // painted on ones, unsmeared; or motion: 'all'
+    }),
+    stampAt: k => [1230, k.top + 30],                         // where the Illustrative stamp goes (optional)
+    draw(k) {                                                 // every frame; a pure function of k
+      const grow = k.ease(k.p(1, 1.2, .2))                   // step 1's progress over 1.2 s, after 0.2 s
+      k.seed('ring'); k.line(k.circle(600, 590, 255, 72), .8, k.dim)
+      k.text(k.params.legend[k.step], 1010, 420, { role: 'head', size: 40, maxW: 360, lines: 2 })
+      k.point = [1000, 420]; k.mood = 'thinking'
+    },
+  }
+})())
+```
+
+The kit `k`, handed to `draw` each frame:
+
+| | |
+|---|---|
+| time | `k.step` (current beat), `k.s` (its step object), `k.steps`, `k.lt` (scene time), `k.t`, `k.dur`; `k.at(i)` when step i starts, `k.since(i)`, `k.p(i, d, delay)` 0→1 over `d` s after step i starts (+delay), `k.span(a, b)` 0→1 over scene time; all are 1 in a thumbnail |
+| easing | `k.ease`, `k.easeOut`, `k.expoOut`, `k.backOut`, `k.lerp`, `k.clamp`, `k.seg` |
+| state | `k.thumb` (a still: draw the finished state), `k.mini` (the recap replay), `k.params`, `k.top` (y under the heading), `k.W`/`k.H` (1920x1080) |
+| colour | `k.P` (palette: `a`, `b`, `hi`, `light`, `bg`, …), `k.ink`, `k.dim`, `k.paper`, `k.dark`, `k.pixel`, `k.tone('a'|'b'|'hi'|'light')`, `k.textOn(col)`, `k.mix(a, b, t)` |
+| paint (the style's own brush) | `k.shape(pts, {fill, op, sw, ink})`, `k.line(pts, sw, col, {closed})`, `k.flat(pts, col, a)` (opaque, no brush), `k.hl(x, y, w, h, col, t)` (the style's highlighter), `k.arrow(pts, col, sw, t)`, `k.glow(x, y, r, col, a)` (dark styles only), `k.seed(key)` (call before each shape: its boil and brush texture are keyed to it) |
+| geometry | `k.circle(x, y, r)`, `k.ellipse`, `k.rect(x, y, w, h)`, `k.rrect(x, y, w, h, r)`, `k.through(pts)` (a smooth curve), `k.partial(pts, t)` (a path drawn to t), `k.along(pts, d)`, `k.lenOf(pts)` |
+| transform | `k.push()`, `k.pop()`, `k.translate`, `k.rotate`, `k.scale`, `k.alpha(a)` (inside push/pop), `k.focus(t, px)` (arrive out of focus, sharpen as t→1) |
+| type | `k.text(str, x, y, {role: head|body|mono|label, size, min, maxW, lines, lh, col, align, alpha})` returns `{w, h, px}`; `k.measure(str, same)` sizes it without drawing |
+| host | set `k.point = [x, y]` (what it points at), `k.mood` (neutral, happy, surprised, thinking, proud, excited), `k.hop = false` to keep it still |
+| random | `k.rng(seed)` → a seeded `() => [0, 1)`, the same every frame and every render |
+| more | `k.STORY`: the engine's internals (`layoutDiagram`, `drawNode`, `drawEdge`, …) for a module that wants the diagram look |
+
+The engine draws the scene's `title`, the folio, each step's `note` and
+`term`, the host, and the Illustrative stamp; the module draws the rest.
+Room: content keeps to x 110-1380 (the host stands right of that) and from
+`k.top` to about y 930 (the caption and lower-third live below). Size text
+with `k.measure` and stack by the heights it returns: pixel's type is twice
+as wide as sumi's, and the checker cannot measure a module's layout, so look
+at it in **pixel and one other style** before rendering.
+
+**Truth, enforced while it draws.** A module never makes a number that reaches
+the screen. Every string drawn (through `k.text` or anything else that writes
+text) is audited: if it holds a digit, it must be a piece of one of the
+scene's own strings (title, `params`, a step's `note`, `term` or other
+fields), cut at word edges and never through a number, or the render stops
+with an error. So "45,056" shows only if the storyboard wrote "45,056", and
+values switch rather than count: a counter ticking from "8,192" to
+"45,056" would show numbers the article never printed, and cannot be drawn.
+The checker holds the scene's strings to the article. The audit compares
+without case, since some styles set type in capitals.
+
+**Simulations are labelled.** A scene whose `params` do not say
+`"data": "article"` is a simulation (toy clusters, random scores, a synthetic
+trajectory) and is stamped **Illustrative** by the engine. With
+`"data": "article"`, every number anywhere in `params` must be one the
+article prints (the checker enforces it), and there is no stamp. Plot the
+article's own measurements that way; keep a toy a toy.
+
+**Determinism.** No `Math.random` (it throws while a module draws; use
+`k.rng`), no clock, no network, no `import()`: the checker refuses a module
+that mentions them, and a frame must be a pure function of time. Modules are
+at most 60 KB.
+
+**Hashing.** A film's hash covers its own modules and nothing else's: editing
+`custom/<key>/x.js` stales that film alone, and a story film with no bespoke
+scenes hashes as before. The runtime is `story/bespoke.js`, part of the story
+engine, so it is frozen like the rest of `story/`.
+
+**Worked example:** `custom/latent-sparse-attention/buckets.js` animates the
+article's BucketLab widget: 64 toy keys on a circle (the index space in two
+dimensions), pooled 4 to 1, merged by the code's Ward rule in real
+mutual-cheapest rounds (cost a_b + a_b' - a_(b+b'), cap 16) down to 8 buckets,
+a centroid per bucket, then a query that scores the centroids and lights the
+best 3; beside it, a legend of what each stage is in the real block, in the
+article's numbers. `beam.js` animates its TreeBeam: four rows of nodes, the
+beam keeping the best and fanning to four children per kept node, then the
+bill as two bars, 45,056 against 1,310,720. Both are stamped Illustrative.
+
+**Designing one.** Start from what the article already animates or draws (a
+widget in `components/articles/<slug>/`, a key figure, the worked example in
+its prose) and ask what moving picture would make the mechanism obvious in
+ten seconds: the state of the thing at each step, changing as the narrator
+names it. One idea per scene, three to six steps, the narration naming what
+moves. Write the module, then
+`node brand-crew/skills/explainer-films/story/render.mjs sheet <sb.json> --at=<times in the scene> --cols=2 --w=960 --out=x.jpg`
+in this style and in pixel, and fix what collides.
 
 ### Lower-thirds: `term`
 
@@ -160,12 +288,14 @@ The checker holds them to the article like any other scene:
   `--preview --out=<scratch dir>`.
 
 **Pilot:** `data/films/latent-sparse-attention.json` (sumi): a hook, three
-chapters, a diagram, two charts, two traces, an inset into the tree search,
-two of the paper's figures, the limits as steps; 17 scenes, 725 words of
-narration, 4 min 49 s. Rendered at 1280x720, x264 CRF 36 `-tune animation`
-(`STORY_FLAGS` in `build.mjs`; the legacy path stays at 34): 7.1 MB, small mono
-type (tick labels, trace sub-labels) still crisp. Painted in about 200 s on an
-M1 Max with 4 pages, about 280 s end to end with the voice cached.
+chapters, a diagram, two charts, two bespoke scenes (`buckets`, `beam`), a
+trace, two of the paper's figures, the limits as steps; 17 scenes, 4 min 57 s.
+Rendered at 1280x720, x264 CRF 36 `-tune animation` (`STORY_FLAGS` in
+`build.mjs`; the legacy path stays at 34): 7.5 MB, small mono type (tick
+labels, trace sub-labels) still crisp. Painted in about 225 s on an M1 Max
+with 3 pages, about 260 s end to end with the voice cached. Keep the default
+3 pages on a Mac: a render with 4 once lost its WebGL context in p5.brush
+(`clearTarget` of null) and had to be rerun.
 
 ### Rendering on a Mac
 

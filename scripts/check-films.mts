@@ -55,7 +55,7 @@ import { join } from "node:path"
 
 import { MEDIA_MAP, mediaExists } from "./media-files"
 import { z } from "zod"
-import { NAMESPACES, articleDate, filmSha, fontsSha, isStory, sourceOf, splitKey, storyboardKeys } from "../brand-crew/skills/explainer-films/hash.mjs"
+import { NAMESPACES, articleDate, customModules, filmSha, fontsSha, isStory, sourceOf, splitKey, storyboardKeys } from "../brand-crew/skills/explainer-films/hash.mjs"
 
 const ROOT = process.cwd()
 const SB_DIR = join(ROOT, "data", "films")
@@ -204,8 +204,18 @@ const StoryOnly = [
     inner: z.object({ title: str(6).optional(), nodes: z.array(NODE).min(2).max(8), edges: z.array(EDGE).max(12).optional() }).strict(),
     steps: z.array(z.object({ inner: z.boolean().optional(), show: z.array(z.string()).optional(), flow: z.array(z.string()).optional(), highlight: z.array(id).optional(), note, say: sayS, term: termS }).strict()).min(2).max(9),
   }).strict(),
+  // a bespoke scene: drawn by the film's own module, custom/<key>/<module>.js
+  z.object({
+    type: z.literal("custom"), module: z.string().regex(/^[a-z][a-z0-9-]*$/, "a module name: lowercase, digits, hyphens"),
+    title: str(8).optional(), mechanism: z.boolean().optional(),
+    params: z.record(z.string(), z.unknown()).optional(),
+    steps: z.array(z.object({ say: sayS, note, term: termS }).passthrough()).min(1).max(8),
+  }).strict(),
 ] as const
 const StoryScene = z.discriminatedUnion("type", [...sceneTypes({ story: true }), ...StoryOnly])
+// Story storyboards written before bespoke scenes existed. Every other story
+// film needs at least one bespoke mechanism scene.
+const BESPOKE_EXEMPT = new Set(["nex-n2-6", "raon-1-nano"])
 const base = {
   slug: z.string(),
   kicker: str(6),
@@ -300,7 +310,7 @@ function beatLines(sc: Sc): string[] {
     case "end": return [sc.say ?? `To recap: ${sc.recap.join("; ")}.`, "Every source is in the full article. I'm Name. Bye!"]
     case "chapter": return [sc.say ?? sc.title]
     case "hook": return [sc.say ?? sc.text]
-    case "chart": case "trace": case "code": case "inset": return sc.steps.map((s) => s.say)
+    case "chart": case "trace": case "code": case "inset": case "custom": return sc.steps.map((s) => s.say)
   }
 }
 const BUDGET = 280   // narration words: about 90 s of speech at Kokoro 1.1x, a film of ~105 s
@@ -472,7 +482,9 @@ for (const slug of files) {
     if (count("hook") > 1 || (count("hook") === 1 && types[0] !== "hook")) fail(slug, "a hook is the cold open: at most one, and only as the first scene")
     if (types[types.length - 1] !== "end" || count("end") !== 1) fail(slug, "end must be the last scene, once")
     if (count("title") !== 1) fail(slug, "exactly one title")
-    const mech = types.filter((t) => MECH_STORY.has(t))
+    // a bespoke scene counts as a mechanism scene when it says so, each module its own kind
+    const mech = sb.scenes.flatMap((sc) => (MECH_STORY.has(sc.type) ? [sc.type] : sc.type === "custom" && sc.mechanism ? [`custom:${sc.module}`] : []))
+    if (!BESPOKE_EXEMPT.has(slug) && !sb.scenes.some((sc) => sc.type === "custom" && sc.mechanism)) fail(slug, "a story film needs at least one bespoke mechanism scene (type custom, mechanism: true), designed from the article's own widget, figure or idea; see SKILL.md, \"Bespoke scenes\"")
     if (mech.length < 3 || new Set(mech).size < 2) fail(slug, `a story film explains in depth: at least three mechanism scenes of at least two kinds (${[...MECH_STORY].join(", ")}); this has ${mech.length}`)
     if (count("takeaway") !== 1) fail(slug, "exactly one takeaway")
     if (count("quote") > 2) fail(slug, "at most two quotes")
@@ -566,6 +578,40 @@ for (const slug of files) {
       // quoted code: every line is the article's own, as a quote is
       for (const line of sc.code) if (line.trim() && !src.includes(line.trim())) fail(slug, `${at}: code line is not in the article: "${line.trim()}"`)
       sc.steps.forEach((st, j) => { const [a, b] = st.lines; if (a > b || b > sc.code.length) fail(slug, `${at} step ${j}: lines [${a}, ${b}] must run forward within 1-${sc.code.length}`) })
+    }
+    if (sc.type === "custom") {
+      // the module: there, defining itself, deterministic, offline
+      const mod = customModules(sb).find((m: { name: string; file: string }) => m.name === sc.module)!
+      if (!existsSync(mod.file)) fail(slug, `${at}: no module ${mod.file.slice(ROOT.length + 1)}`)
+      else {
+        const code = readFileSync(mod.file, "utf8")
+        if (!/BESPOKE\.define\s*\(/.test(code)) fail(slug, `${at}: ${sc.module}.js never calls BESPOKE.define({ draw })`)
+        for (const [re, what] of [[/Math\.random/, "Math.random (use k.rng)"], [/Date\.now|new Date|performance\.now/, "the clock"], [/\bfetch\s*\(|XMLHttpRequest|WebSocket|\bimport\s*\(/, "the network"]] as const)
+          if (re.test(code)) fail(slug, `${at}: ${sc.module}.js uses ${what}; a frame is a pure function of time`)
+        if (code.length > 60000) fail(slug, `${at}: ${sc.module}.js is over 60 KB`)
+      }
+      // everything it may show: every string in its title, params and steps
+      const texts: string[] = []
+      const walk = (v: unknown, key = "") => {
+        if (typeof v === "string") { if (key !== "say") texts.push(v) }
+        else if (Array.isArray(v)) v.forEach((x) => walk(x, key))
+        else if (v && typeof v === "object") for (const [kk, x] of Object.entries(v)) walk(x, kk)
+      }
+      walk(sc.params ?? {}); walk(sc.steps)
+      for (const t of texts) {
+        if (words(t) > 14) fail(slug, `${at}: "${t.slice(0, 40)}…" is over 14 words; a bespoke scene's labels are labels`)
+        for (const n of numTokens(t)) if (!nums.has(n)) fail(slug, `${at}: "${n}" (in "${t}") does not appear in the article`)
+      }
+      // "data": "article" says the numbers it plots are the article's: then every one must be
+      if ((sc.params as { data?: unknown } | undefined)?.data === "article") {
+        const asNum = new Set([...nums].map(Number))
+        const each = (v: unknown, path: string) => {
+          if (typeof v === "number") { if (!asNum.has(Math.abs(v))) fail(slug, `${at}: params${path} is ${v}, which the article does not print; drop "data": "article" (the scene is then stamped Illustrative) or use the article's numbers`) }
+          else if (Array.isArray(v)) v.forEach((x, i) => each(x, `${path}[${i}]`))
+          else if (v && typeof v === "object") for (const [kk, x] of Object.entries(v)) each(x, `${path}.${kk}`)
+        }
+        each(sc.params, "")
+      }
     }
     if (sc.type === "inset") {
       if (!sc.nodes.some((n) => n.id === sc.open)) fail(slug, `${at}: open "${sc.open}" is not a node of the outer diagram`)
