@@ -91,6 +91,8 @@ Two things are load-bearing and easy to break:
 
 - **Every route names its own canonical; content pages use `seo(path, title, description)` (`lib/seo.ts`).** Next merges metadata one key deep, so a page with no `alternates`/`openGraph`/`twitter` inherits the root layout's whole block. The layout once carried canonical `/` and the homepage's og/twitter titles, which made `/now`, `/uses`, `/notes/*`, `/resume` and eight other routes declare themselves duplicates of the homepage, and gave every shared article the site's own blurb on X. The layout now sets only what is true of every page. `seo()` also sizes what a result shows: the " · Satyajit Ghana" suffix only when the title still fits in 60 characters, and the meta description cut to ≤158 at a sentence end (articles' descriptions are paragraphs; the full text stays in the page and the JSON-LD). A new route: add `alternates: { canonical }`, or use `seo()`.
 
+- **Discovery of new pages.** `app/sitemap.ts` gives each index page the lastmod of its newest entry, and each article and architecture doc its thumbnail (image sitemap) and, when filmed, its film (video sitemap). Next writes sitemap fields unescaped, so text goes through its `xml()`. `.github/workflows/indexnow.yml` submits the content pages a production deploy added or changed to IndexNow (Bing and others; Google reads the sitemap); its key is public by design and lives at `public/<key>.txt` — don't delete it. `/feed.xml` carries the newest 50 items, not the archive.
+
 What none of this fixes is **backlinks**, which come from other people citing the work. The lever there is `/amplify` plus Satyajit's approval, not markup.
 
 ## data/*.ts records (typed, hand-curated)

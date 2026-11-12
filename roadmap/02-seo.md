@@ -1,6 +1,7 @@
 # SEO — audit, on-page improvements, and the off-page playbook
 
-_Audited 2026-07-24. Site: ai.thesatyajit.com (Next.js 16 App Router)._
+_Audited 2026-07-24 on ai.thesatyajit.com; re-audited 2026-11-12 after the move
+to ai.satyajit.si (the old host 301s path-for-path). Next.js 16 App Router._
 
 The technical/on-page foundation here is already strong. This doc records the
 audit, the concrete changes shipped in this pass, and the off-page (backlink)
@@ -41,11 +42,39 @@ work — which is manual by nature and can't be committed as code.
 Verify after deploy: Google Rich Results Test + Search Console → Enhancements
 (Breadcrumbs, Articles) and the sitemap submission.
 
+## Pass 2 — 2026-11-12, after the domain move
+
+Audited live and in code: no old-host reference in the code that writes
+metadata, canonicals, the sitemap, robots, JSON-LD, the feed, llms.txt or the
+OpenAPI document (the 2026-06-03 log's own prose still names it, as history);
+every route has one `<h1>` and its own canonical; `/search` and the 404 are
+`noindex`; every `<Figure>` has `alt`; no duplicate titles or descriptions;
+`validate:links` holds the orphan floor. Changed:
+
+1. Article/architecture/blog/project JSON-LD `author` and `publisher` carry
+   `@type`, `name` and `url` beside the `@id`, instead of a bare reference that
+   only resolves for a consumer joining nodes across script blocks.
+2. `/articles` and `/architectures` emit `CollectionPage` + `ItemList` (the
+   items the server renders, name and url only) and use `seo()`.
+3. Four routes had no share image (`seo()` sets `openGraph`, which drops the
+   root card): `/architectures`, `/math`, `/articles/scoring`, `/lab/neuron-lab`
+   now have their own `opengraph-image.tsx`.
+4. Sitemap: lastmod on index pages, thumbnails as image entries, the 211 films
+   as video entries.
+5. `/feed.xml`: newest 50 items (was every item, ~800 KB per poll) and an
+   `atom:link rel="self"`.
+6. `/arxiv/<date>` and `/logs/<slug>` descriptions (a 288-character run-on;
+   none) and `og:url`; `/developers*` titles no longer get the suffix past 60.
+7. IndexNow on production deploys (`.github/workflows/indexnow.yml`).
+
+Open: 520 of 701 article titles exceed 60 characters ("Subject: hook"), so
+results truncate them. A `seoTitle` frontmatter field is the fix if Search
+Console shows poor click-through on them. The explainer-film engine still
+paints `ai.thesatyajit.com` on every thumbnail and film end card.
+
 ## On-page backlog (worth doing, not yet done)
 
-- **Related-articles block** at the foot of each article (3–5 links by shared
-  tag / BM25 neighbours). Adds internal links (crawl depth + topical clustering)
-  and dwell time. The BM25 index in `lib/search.ts` already gives neighbours.
+- ~~Related-articles block~~ — done (`lib/related.ts`, `<RelatedArticles>`).
 - **`FAQPage` / `HowTo`** JSON-LD on explainers that naturally Q&A.
 - **Tag hub pages** (`/articles/tag/<tag>`) — topical landing pages that
   aggregate internal links and rank for the topic term.
