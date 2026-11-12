@@ -50,7 +50,7 @@ dimension's mean passes 2.2. Score and tier are computed, never written.
 - Topic boundaries: SLAM → robotics; a domain benchmark → its domain (evals only when it is about evaluation method); decision models → llm-architecture.
 
 ## Body
-- MDX. Read `brand-crew/brand/voice.md` first and write in that voice: precise, engineer-first, dry wit, no marketing fluff, show the math/code/numbers.
+- MDX. Read `brand-crew/brand/voice.md` first and write in that voice: precise, engineer-first, dry wit, no marketing fluff, show the math/code/numbers. Follow its "Sound like a person, not a pipeline" section: no fixed skeleton or template headings, few em dashes, no crutch phrases, sources named in the sentence rather than "(reported)" tags on every number, a real position at the end. `pnpm check:tells <slug>` enforces it for articles dated 2026-11-12 on.
 - Rendered with the **MDX explainer kit** — use freely for a rich, interactive piece:
   `<Math>`/`$$…$$` and `$…$`, `<Diagram>`, `<AttentionMatrix>`, `<StepThrough>`,
   `<Plot>`, `<Callout type="tip|note|warning">…</Callout>`, `<Figure>`.

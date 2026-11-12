@@ -64,6 +64,42 @@
 - Emoji headings, emoji bullet lists, emoji to convey enthusiasm.
 - LinkedIn-influencer openers ("Here's the thing.", "Let that sink in.", broetry).
 
+## Sound like a person, not a pipeline (AI tells)
+Measured on the corpus (701 articles, Nov 2026): 14,256 em dashes; 3,021 inline
+"(measured)/(reported)/(reasoned)" tags; "two/three things" in 428 articles; "load-bearing",
+"quietly", "the interesting part", "the honest answer", "worth noting" in 100+ each; and the
+same closing headings over and over ("The take" ×150, "How I checked" ×102). One article
+like that reads as rigour. Seven hundred read as a template. From 2026-11-12 on:
+
+- **No fixed skeleton.** Pick the shape the subject wants: a derivation, a debugging story,
+  a teardown, a short opinion, a comparison. Don't default to mechanism → "What I ran" →
+  "How I checked" → "The take". Name headings after what the section says
+  ("Why the mask is binary"), not after its role ("The take", "The ledger", "What holds").
+- **Evidence labels, sparingly.** Say where a number comes from in the sentence ("the
+  paper's Table 2 says…", "on my M2 it took…"). One short "How I checked" note at the end can
+  list what was run vs read. Do not tag every number with "(reported)".
+- **Em dashes: at most a couple per article.** Use a full stop, a comma or parentheses.
+- **Crutch phrases are banned:** "load-bearing", "quietly", "the interesting part/bit",
+  "the honest answer/version/reading", "worth noting/saying", "the catch", "the short
+  version", "receipts", "here's where/what/why", "it turns out", "notably", "in other words",
+  "X isn't just Y — it's Z", "not X, but Y" as a rhetorical pivot, "two/three things" as a
+  set-up.
+- **Break the rhythm.** Vary sentence and paragraph length. Not every list has three items.
+  Not every section ends on a neat summary line. Don't restate the section in its last
+  sentence.
+- **Take a position.** End with what you actually think, including "skip this" or "I
+  don't buy it" when that's true. Hedging everything equally is a tell.
+- **Real experience only.** Satyajit's work (LiDAR, 3D perception, CUDA, production MLOps at
+  Inkers) makes a piece human, but only when it is real. If the brief includes a note from
+  him, build on it. Never invent an anecdote, a colleague, a project or a past run.
+- **"I ran" means it ran.** Use first person for what was actually executed for this piece.
+  Otherwise "the paper reports", "the README says".
+- **Concrete over abstract.** A specific file, a specific number, a specific failure beats a
+  general claim about "practitioners" or "the community".
+
+`pnpm check:tells` scores articles against these rules and fails new articles (dated
+2026-11-12 or later) that exceed the limits.
+
 ## Formatting defaults
 - **Markdown.** Sentence-case headings. Tight lists, no filler bullets.
 - **Monospace** for every path, command, flag, filename, env var, and identifier.

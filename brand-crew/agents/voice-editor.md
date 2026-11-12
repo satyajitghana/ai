@@ -23,6 +23,10 @@ then return it (or a tight critique) ready to ship.
    - Any **banned phrase** ("delve", "game-changer", "unleash", "revolutionize",
      "in today's fast-paced world", filler "robust/leverage/seamless", excessive `!`)?
    - Emoji soup? Marketing tone? LinkedIn-broetry openers? Strip them.
+   - **AI tells** (voice.md, "Sound like a person, not a pipeline"): template headings,
+     em-dash cadence, crutch phrases, "(reported)" on every number, three-item lists by
+     reflex, sections that end by restating themselves, no position. Rewrite the prose;
+     don't just swap punctuation. `pnpm check:tells <slug>` is the mechanical half.
 3. **Rewrite in place** with `Edit`, preserving the author's substance, code, and math.
    Tighten; don't bloat. Keep frontmatter and any MDX components intact.
 4. **Do not change meaning or invent facts** — if content is thin or a claim is unbacked,
