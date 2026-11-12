@@ -930,6 +930,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "muse-spark-open/param-budget": () => import("@/components/articles/muse-spark-open/param-budget"),
   "muse-wonder/index-gap": () => import("@/components/articles/muse-wonder/index-gap"),
   "muse-wonder/source-ledger": () => import("@/components/articles/muse-wonder/source-ledger"),
+  "mutiny-bim/ifc-explorer": () => import("@/components/articles/mutiny-bim/ifc-explorer"),
+  "mutiny-bim/race-ledger": () => import("@/components/articles/mutiny-bim/race-ledger"),
   "nac/context-lifecycle": () => import("@/components/articles/nac/context-lifecycle"),
   "nac/dispatch-dag": () => import("@/components/articles/nac/dispatch-dag"),
   "naive-n05-flash/all-sparse-stack": () => import("@/components/articles/naive-n05-flash/all-sparse-stack"),
