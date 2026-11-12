@@ -81,6 +81,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "apodex-frontier-agent/context-budget": () => import("@/components/articles/apodex-frontier-agent/context-budget"),
   "apodex-frontier-agent/harness-delta": () => import("@/components/articles/apodex-frontier-agent/harness-delta"),
   "apodex-frontier-agent/sandbox-tiers": () => import("@/components/articles/apodex-frontier-agent/sandbox-tiers"),
+  "arc-1-0/headline-check": () => import("@/components/articles/arc-1-0/headline-check"),
+  "arc-1-0/route-picker": () => import("@/components/articles/arc-1-0/route-picker"),
   "arc-cua/driver-cost": () => import("@/components/articles/arc-cua/driver-cost"),
   "arcee-open-models-api/price-ladder": () => import("@/components/articles/arcee-open-models-api/price-ladder"),
   "arete-27b/eval-anatomy": () => import("@/components/articles/arete-27b/eval-anatomy"),
