@@ -32,7 +32,7 @@ BESPOKE.define((() => {
   const coff = CAMS.map(() => [(rnd() - .5) * .14, (rnd() - .5) * .14, (rnd() - .5) * 1.4])
 
   return {
-    stampAt: k => [1230, Math.max(k.top + 40, 250)],
+    stampAt: k => [360, Math.max(k.top + 40, 250) + 520],
     plan: () => ({
       min: [4.2, 3.8, 3.8, 3.8, 4.4],
       events: [{ step: 0, at: .3, type: 'ticks', n: 5, span: 1 }, { step: 1, at: .2, type: 'whoosh' }, { step: 2, at: .2, type: 'whoosh' },
