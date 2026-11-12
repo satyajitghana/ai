@@ -1144,6 +1144,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "pplx-decider-v1-1/question-bill": () => import("@/components/articles/pplx-decider-v1-1/question-bill"),
   "pplx-embed-v2-late/maxsim-explorer": () => import("@/components/articles/pplx-embed-v2-late/maxsim-explorer"),
   "pplx-embed-v2-late/storage-calculator": () => import("@/components/articles/pplx-embed-v2-late/storage-calculator"),
+  "praxis-1/chunk-clock": () => import("@/components/articles/praxis-1/chunk-clock"),
+  "praxis-1/two-step-sampler": () => import("@/components/articles/praxis-1/two-step-sampler"),
   "prime-agent/commit-history": () => import("@/components/articles/prime-agent/commit-history"),
   "prime-agent/harness-layers": () => import("@/components/articles/prime-agent/harness-layers"),
   "prime-agent/host-bridge": () => import("@/components/articles/prime-agent/host-bridge"),
