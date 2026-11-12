@@ -2,125 +2,182 @@
 
 // MutinyBIM's commit rule, as planCommit() in
 // packages/bim-kernel/src/changeset.ts (commit 94513ba) applies it to an
-// agent's command that was built on an older revision:
-// 1. the server re-runs the command on the current head with its own code;
-// 2. a delete of an element another session changed since the base is refused;
-// 3. an authored field another session wrote since the base is refused, unless
-//    the head already holds the value this command writes (sameValue);
-// 4. edits from the same session (one browser tab, one agent run) never
-//    compete with each other;
-// 5. otherwise the change commits, rebased onto the head.
-// The intent check (an earlier change's recorded intent must still hold on any
-// element this one writes) is in the prose, not modelled here.
-// The element and the millimetre values are illustrative.
+// agent's command built on an older revision, split by what each command
+// records as authored. Corrected 2026-11-12 after the site's hands-on run
+// (/articles/mutiny-bim) raced two sessions on that commit:
+// - move_wall records start/end: a second move of the same wall is refused by
+//   name (measured; a person or an agent gets the same words). Moves are
+//   deltas, so two identical moves still conflict (measured).
+// - delete_elements is refused if another session changed the element since
+//   the base, whatever field it was, even an unrecorded thickness (measured).
+// - set_element_thickness leaves through finish(reader, working, touched, [],
+//   ...) in elements/commands.ts: an empty authored list, so two thickness
+//   edits both commit and the later one wins, silently (measured: 300 vs 250,
+//   revisions 15 and 16, the wall ended at 250).
+// - set_element_values shares that exit line (read in the code, not raced).
+// - set_parameters records values.<name> (read in the code, not raced).
+// - different fields on one wall: both commit (measured for thickness vs move).
+// - edits from the same session are dropped from the comparison (read in the
+//   code; the measured "two tabs" race was two sessions and was refused).
+// Wall ids and values are illustrative; outcomes are the run's or the code's.
 
+import Link from "next/link"
 import { useState } from "react"
 
-type First = "none" | "height" | "thickness" | "sameHeight"
-type Second = "setHeight" | "delete"
+type Cmd = "move" | "thickness" | "values" | "params" | "delete"
+type Basis = "measured" | "read in code"
+type Kind = "refused" | "silent" | "committed"
 
-const FIRSTS: { id: First; label: string }[] = [
-  { id: "none", label: "nobody touched wall-12" },
-  { id: "height", label: "Priya set height to 2,900" },
-  { id: "thickness", label: "Priya set thickness to 200" },
-  { id: "sameHeight", label: "Priya set height to 3,000" },
+const CMDS: { id: Cmd; label: string; cmd: string; records: string }[] = [
+  { id: "move", label: "move the wall", cmd: "move_wall", records: "start, end" },
+  { id: "thickness", label: "set its thickness", cmd: "set_element_thickness", records: "nothing (empty list)" },
+  { id: "values", label: "set an element value", cmd: "set_element_values", records: "nothing (empty list)" },
+  { id: "params", label: "set a part parameter", cmd: "set_parameters", records: "values.<name>" },
+  { id: "delete", label: "delete it", cmd: "delete_elements", records: "n/a: reads which elements changed" },
 ]
 
-const SECONDS: { id: Second; label: string }[] = [
-  { id: "setHeight", label: "set height to 3,000" },
-  { id: "delete", label: "delete wall-12" },
-]
+type Out = { kind: Kind; code: string; why: string; basis: Basis }
 
-function decide(first: First, second: Second, sameSession: boolean) {
-  const changed = first !== "none"
-  if (sameSession && changed) {
-    return { ok: true, code: "committed", why: "Both edits come from the same session, so the earlier one is not competing intent." }
-  }
-  if (second === "delete") {
-    if (changed) {
-      return { ok: false, code: "conflict", why: "Priya changed wall-12 after you looked at it; check it before deleting." }
+function decide(cmd: Cmd, otherField: boolean, sameSession: boolean): Out {
+  if (sameSession) {
+    return {
+      kind: "committed",
+      code: "committed",
+      why: "Changesets from the agent's own session are left out of the comparison, so its earlier edit does not compete with it.",
+      basis: "read in code",
     }
-    return { ok: true, code: "committed", why: "Nobody changed wall-12 since your base revision." }
   }
-  if (first === "height") {
-    return { ok: false, code: "conflict", why: "Priya changed wall-12 height while you were editing." }
+  if (cmd === "delete") {
+    return {
+      kind: "refused",
+      code: "refused, by name",
+      why: "Priya changed wall-12 after you looked at it; check it before deleting. The delete rule reads which elements changed, so even her unrecorded thickness edit protects the wall.",
+      basis: "measured",
+    }
   }
-  if (first === "sameHeight") {
-    return { ok: true, code: "committed", why: "Priya wrote height too, but the head already holds 3,000, the value you write: no competing value." }
+  if (otherField) {
+    return {
+      kind: "committed",
+      code: "committed (rebased)",
+      why: "Priya wrote a different field. The agent's command re-runs on her revision and both changes stand.",
+      basis: cmd === "move" || cmd === "thickness" ? "measured" : "read in code",
+    }
   }
-  if (first === "thickness") {
-    return { ok: true, code: "committed (rebased)", why: "Different authored field. Your command re-ran on the newer head and only height changed." }
+  if (cmd === "move") {
+    return {
+      kind: "refused",
+      code: "refused, by name",
+      why: "Priya changed wall-12 start while you were editing. Even the same +50 is refused: a move is a delta, so re-run on her head it lands somewhere else.",
+      basis: "measured",
+    }
   }
-  return { ok: true, code: "committed", why: "Nothing changed since your base revision." }
+  if (cmd === "params") {
+    return {
+      kind: "refused",
+      code: "refused, by name",
+      why: "set_parameters records values.<name>, so the server sees Priya wrote that parameter since your base and refuses, unless the head already holds your value.",
+      basis: "read in code",
+    }
+  }
+  if (cmd === "thickness") {
+    return {
+      kind: "silent",
+      code: "committed: last write wins",
+      why: "The command records no authored field, so there is nothing to compare. Priya's 300 and the agent's 250 both commit as revisions 15 and 16; the wall ends at 250 and nobody is told.",
+      basis: "measured",
+    }
+  }
+  return {
+    kind: "silent",
+    code: "committed: last write wins",
+    why: "set_element_values leaves through the same finish(…, [], …) line as thickness: no authored field, so the later value overwrites Priya's without a word.",
+    basis: "read in code",
+  }
+}
+
+const TONE: Record<Kind, string> = {
+  refused: "border-sky-500/50 bg-sky-500/5",
+  committed: "border-emerald-500/50 bg-emerald-500/5",
+  silent: "border-amber-500/60 bg-amber-500/10",
 }
 
 export function CommitRace() {
-  const [first, setFirst] = useState<First>("height")
-  const [second, setSecond] = useState<Second>("setHeight")
+  const [cmd, setCmd] = useState<Cmd>("thickness")
+  const [otherField, setOtherField] = useState(false)
   const [sameSession, setSameSession] = useState(false)
-  const out = decide(first, second, sameSession)
+  const out = decide(cmd, otherField && cmd !== "delete", sameSession)
+  const meta = CMDS.find((c) => c.id === cmd)!
 
   return (
     <figure
       className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/20 to-transparent"
-      aria-label="MutinyBIM commit decision for two editing sessions"
+      aria-label="MutinyBIM commit decision for two editing sessions, by command"
     >
       <div className="flex items-center justify-between border-b px-4 py-2.5 font-mono text-xs text-muted-foreground">
-        <span>planCommit · base r41, head r42</span>
-        <span className="text-muted-foreground/60">rules from the repo</span>
+        <span>planCommit · base r14, head r15</span>
+        <span className="text-muted-foreground/60">corrected 12 Nov 2026</span>
       </div>
       <div className="grid gap-4 p-4 sm:grid-cols-2 sm:p-5">
         <div className="space-y-2">
-          <div className="text-sm font-semibold">r42, already committed by {sameSession ? "this same session" : "Priya (another session)"}</div>
+          <div className="text-sm font-semibold">Both sessions, from the same base, on wall-12:</div>
           <div className="flex flex-col gap-1.5">
-            {FIRSTS.map((f) => (
-              <Choice key={f.id} on={first === f.id} onClick={() => setFirst(f.id)} label={f.label} />
+            {CMDS.map((c) => (
+              <Choice key={c.id} on={cmd === c.id} onClick={() => setCmd(c.id)} label={c.label} sub={c.cmd} />
             ))}
           </div>
           <label className="mt-2 flex items-center gap-2 font-mono text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={otherField && cmd !== "delete"}
+              disabled={cmd === "delete"}
+              onChange={(e) => setOtherField(e.target.checked)}
+            />
+            Priya edited a different field instead
+          </label>
+          <label className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
             <input type="checkbox" checked={sameSession} onChange={(e) => setSameSession(e.target.checked)} />
-            r42 came from the agent&apos;s own session
+            r15 came from the agent&apos;s own session
           </label>
         </div>
         <div className="space-y-2">
-          <div className="text-sm font-semibold">The agent&apos;s command, built on r41</div>
-          <div className="flex flex-col gap-1.5">
-            {SECONDS.map((s) => (
-              <Choice key={s.id} on={second === s.id} onClick={() => setSecond(s.id)} label={s.label} />
-            ))}
+          <div className="text-sm font-semibold">Priya committed r15 first. The agent&apos;s command arrives:</div>
+          <div className="rounded-md border px-3 py-2 font-mono text-xs text-muted-foreground">
+            {meta.cmd} records as authored: <span className="text-foreground">{meta.records}</span>
           </div>
-          <div
-            className={
-              "mt-3 rounded-lg border p-3 " +
-              (out.ok ? "border-emerald-500/50 bg-emerald-500/5" : "border-rose-500/50 bg-rose-500/5")
-            }
-            aria-live="polite"
-          >
-            <div className="font-mono text-xs uppercase tracking-wide">{out.code}</div>
+          <div className={"mt-3 rounded-lg border p-3 " + TONE[out.kind]} aria-live="polite">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-xs uppercase tracking-wide">{out.code}</span>
+              <span className="rounded-full border px-2 py-0.5 font-mono text-[10px] text-muted-foreground">{out.basis}</span>
+            </div>
             <div className="mt-1 text-sm">{out.why}</div>
           </div>
         </div>
       </div>
       <figcaption className="border-t px-4 py-3 text-sm text-muted-foreground">
-        The server re-runs the agent&apos;s command on r42 and checks it against every changeset since r41. Refusals
-        carry the other person&apos;s name and the field. The wall and its values are illustrative.
+        The server re-runs the agent&apos;s command on the head and compares only the fields the command records as
+        authored. &ldquo;Measured&rdquo; outcomes are from the race run in the{" "}
+        <Link className="underline" href="/articles/mutiny-bim">
+          hands-on Mutiny BIM article
+        </Link>
+        ; &ldquo;read in code&rdquo; ones were not raced. Wall ids are illustrative.
       </figcaption>
     </figure>
   )
 }
 
-function Choice({ on, onClick, label }: { on: boolean; onClick: () => void; label: string }) {
+function Choice({ on, onClick, label, sub }: { on: boolean; onClick: () => void; label: string; sub: string }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={on}
       className={
-        "rounded-md border px-2.5 py-1 text-left font-mono text-xs " +
+        "flex items-baseline justify-between gap-2 rounded-md border px-2.5 py-1 text-left font-mono text-xs " +
         (on ? "border-foreground bg-foreground text-background" : "text-muted-foreground hover:text-foreground")
       }
     >
-      {label}
+      <span>{label}</span>
+      <span className="opacity-60">{sub}</span>
     </button>
   )
 }
