@@ -285,6 +285,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "deepseek-harness/turn-flow": () => import("@/components/articles/deepseek-harness/turn-flow"),
   "deepseek-v4-1-flash-1017/spark-fit": () => import("@/components/articles/deepseek-v4-1-flash-1017/spark-fit"),
   "deepseek-v4-1-flash-1017/version-diff": () => import("@/components/articles/deepseek-v4-1-flash-1017/version-diff"),
+  "deja-view/gate-schedule": () => import("@/components/articles/deja-view/gate-schedule"),
+  "deja-view/loop-dial": () => import("@/components/articles/deja-view/loop-dial"),
   "delta-matching/delta-row": () => import("@/components/articles/delta-matching/delta-row"),
   "delta-matching/pass-map": () => import("@/components/articles/delta-matching/pass-map"),
   "delta-matching/rowsum-lab": () => import("@/components/articles/delta-matching/rowsum-lab"),
