@@ -16,6 +16,13 @@ import { cn } from "@/lib/utils"
 //     unit (points, or Elo on the three Elo rows), sign flipped on lower-is-better.
 //   - ZeroBench avg@5 / pass@5 uses avg@5. GLM-5.3's HLE scores are text-only.
 //   - "In the launch chart" marks the 14 panels of the blog's headline figure.
+//
+// Corrected 2026-11-12 against the Hugging Face model card's table and the blog
+// as it reads now; the page was revised twice after launch (Internet Archive
+// copies). Agents' Last Exam, GPT-6 Astra: 32.8 (ALL) and 38.8 (CLI) on
+// 23 October, 41.8 and 44.2 from 24 October 08:01 UTC. APEX-Agents: K3.1 Pro
+// 67.2 and DeepSeek 63.4 through 25 October, 69.4 and 69.8 now. None of the
+// three changes a tally.
 
 const MODELS = ["Kimi K3.1 Pro", "Claude Fable 5.1", "GPT-6 Astra", "Claude Opus 5.5", "DeepSeek-V4.1-Flash-1017", "GLM-5.3"]
 const SHORT = ["K3.1 Pro", "Fable 5.1", "GPT-6 Astra", "Opus 5.5", "DS-V4.1-Flash", "GLM-5.3"]
@@ -44,12 +51,12 @@ const ROWS: Row[] = [
   { name: "ChartoGraphy w/ python", cat: "agentic", s: [90.2, 88.4, 91.0, 89.0, 83.0, null], chart: true },
   { name: "BabyVision w/ python", cat: "agentic", s: [95.4, 95.1, 96.6, 97.7, 92.5, null] },
   { name: "ZeroBench_main w/ python (pass@5)", cat: "agentic", s: [63.0, 59.0, 58.0, 61.0, 51.0, null], chart: true },
-  { name: "Agents' Last Exam (ALL)", cat: "agentic", s: [43.2, null, 32.8, 42.6, 37.7, 26.2], chart: true },
-  { name: "Agents' Last Exam (CLI)", cat: "agentic", s: [44.2, null, 38.8, 40.7, 36.0, 29.4] },
+  { name: "Agents' Last Exam (ALL)", cat: "agentic", s: [43.2, null, 41.8, 42.6, 37.7, 26.2], chart: true },
+  { name: "Agents' Last Exam (CLI)", cat: "agentic", s: [44.2, null, 44.2, 40.7, 36.0, 29.4] },
   { name: "Automation Bench-AA", cat: "agentic", s: [73.3, 59.4, 68.5, 69.5, 66.6, 62.2] },
   { name: "GDPval-AA v2.1 (Elo)", cat: "agentic", s: [1846, 1754, 1573, 1866, 1746, 1650], chart: true },
   { name: "AA-Briefcase v1.1 (Elo)", cat: "agentic", s: [1678, 1672, 1569, 1803, 1570, 1507] },
-  { name: "APEX-Agents", cat: "agentic", s: [67.2, 68.6, 64.7, 73.5, 63.4, 56.6] },
+  { name: "APEX-Agents", cat: "agentic", s: [69.4, 68.6, 64.7, 73.5, 69.8, 56.6] },
   { name: "OfficeQA Pro v2", cat: "agentic", s: [64.4, 54.5, 54.4, 62.2, 40.4, 31.1], chart: true },
   { name: "OfficeQA Pro", cat: "agentic", s: [67.4, 68.6, 66.2, null, 62.4, 58.6] },
   { name: "Frontier Finance", cat: "agentic", s: [58.6, 60.8, 45.0, 56.7, 54.5, 57.5], chart: true },
