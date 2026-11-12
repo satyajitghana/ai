@@ -1,0 +1,257 @@
+---
+title: "Flide: forking a hybrid model's state so every question runs in one pass"
+description: "Flide is an inference engine for decision models such as Jev. It lays a request's shared state and all its questions out as one flat token stream, masks attention so each question sees only the state and itself, and runs every Gated DeltaNet layer twice so each question resumes from the state's exact recurrent snapshot. I read the paper and the code, rebuilt the mask from pack.py, checked the construction on a random-weight toy hybrid in numpy (bit-identical to isolated prompts in float64; a delimiter token or an unmasked recurrence moves answers), and pinned the 9.5x: it is one cell, Qwen3.5-0.8B on full QuALITY articles at about 18 questions each, single client. The same cell is about 3.4x at 4B and 1.5x at 27B, and most of the 0.8B gap is per-question front-end and scheduling work, since vLLM's prefix cache already cuts the token bill to 1.7x Flide's."
+date: 2026-11-12
+tags:
+  - inference
+  - kv-cache
+  - hybrid-attention
+  - linear-attention
+  - vllm
+  - sglang
+  - calibration
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Rebuilds Flide's fork mask from its code, checks exactness on a numpy toy hybrid, and traces the 9.5x to one table cell and how it shrinks with model size."
+topic: inference-serving
+kind: paper
+level: research
+runsOn: datacenter
+licence: Apache-2.0
+---
+
+import { ForkMask } from "@/components/articles/flide-decision-inference/fork-mask"
+import { SpeedupLedger } from "@/components/articles/flide-decision-inference/speedup-ledger"
+
+A decision model answers questions about a piece of context by scoring a closed set of options. It never writes a sentence. You hand it an agent trajectory, a support ticket or a screenshot, plus a handful of typed questions ("is the task done?", "which tool next?", "how urgent, 0 to 3?"), and it returns a probability for every option. [Jev](/articles/jev-system-one-models) made the shape popular in September, and the [ecosystem that followed](/articles/jev-ecosystem) has produced dozens of open checkpoints, most of them fine-tunes of Qwen3.5 or Gemma 4.
+
+Those checkpoints are served by engines built for chat. That mismatch is the subject of [*Flide: Accelerating Decision Inference with Exact State Forking*](https://arxiv.org/abs/2610.42148) (Bobo Li, Jiajia Song, Hao Fei, Wynne Hsu, Mong Li Lee; NUS and Oxford; posted 30 October). The claim on the README is that Flide is "up to 9.5 times faster than vLLM and SGLang, and every answer is the one the model gives the question alone."
+
+Both halves of that sentence are true under conditions the README leaves out. This piece works through the mechanism first, because it is a tidy idea, and then pins each number to the table cell it came from.
+
+| | |
+|---|---|
+| Paper | [arXiv 2610.42148](https://arxiv.org/abs/2610.42148), 20 pages, project page [flide.org](https://flide.org), docs at [docs.flide.org](https://docs.flide.org/) |
+| Code | [OmniJev/Flide](https://github.com/OmniJev/Flide), Apache-2.0, read at commit `46834ce` (12 November, release 0.1.14); Triton kernels, Gated DeltaNet pieces derived from flash-linear-attention |
+| Models served | Qwen3.5 and Gemma 4 chat models through their next token, plus 34 decision-model families listed in the docs (OneJev, Open-Jev, pplx-decider, Clef, Drex, KnowLine…) through plugins |
+| Hardware in the paper | one NVIDIA H200, bfloat16, CUDA graphs on |
+| Baselines | vLLM 0.32 (decision endpoint, prefix caching on), SGLang 0.5.21, SGLang multi-item scoring, vllm-jev 0.3.7 |
+| Headline | "up to 9.5 times lower latency and 8.5 times higher throughput than the best baseline" |
+
+<RepoCard repo="OmniJev/Flide" />
+
+## What a decision request costs
+
+A request is a state $s$ of $P$ tokens and $n$ questions $q_1 \dots q_n$. The engine renders each question exactly as it would look if asked alone, so $s \oplus q_i$ is the standalone prompt for question $i$, token for token. With $h_i$ the final hidden state at the last token of $q_i$, the answer is a softmax over the option rows of the output head:
+
+$$
+p_i(o) = \frac{\exp(w_o^\top h_i)}{\sum_{o' \in O_i} \exp(w_{o'}^\top h_i)}, \qquad o \in O_i
+$$
+
+where $w_o$ is the row for option $o$ (a label token such as `A` or `yes` for a chat model, a trained slot for a decision model like OneJev). That is the paper's Equation 1. One forward pass, one row read per question, no decoding loop. The model card for [OneJev1.6-0.8B](https://huggingface.co/OmniJev/OneJev1.6-0.8B), published under the same OmniJev organisation as Flide, describes it the same way: "a calibrated probability for every option in a single forward pass."
+
+The request shape on the wire is TypeSafe's `/v1/systemone` API, which Flide serves:
+
+```bash
+curl http://localhost:8000/v1/systemone -H "Content-Type: application/json" -d '{
+  "state": "Order #1182 arrived with a cracked screen. The customer asks for a refund and attached two photos.",
+  "questions": {
+    "action": {"type": "choice", "instructions": "What should support do next?",
+               "criteria": {"refund": "refund the order", "replace": "send a replacement", "escalate": "ask a human"}},
+    "urgent": {"type": "noul", "instructions": "Does this need a reply within the hour?"}
+  }
+}'
+```
+
+Here is the arithmetic that motivates everything else. Run each $s \oplus q_i$ as its own sequence and you compute
+
+$$
+nP + \sum_i |q_i|
+$$
+
+tokens. Compute the state once and branch the questions off it and you compute
+
+$$
+P + \sum_i |q_i|.
+$$
+
+When the state is long and the questions are many and short, the first is roughly $n$ times the second. The paper's Table 2 gives the token counts for its workloads under Qwen3.5's tokenizer. Full QuALITY articles average 5,835 state tokens and 18.1 questions; one sequence per question is 107,085 tokens, the flat stream 7,454. That is 14.4x more work for the naive layout. MultiRC paragraphs are short (327 tokens) but carry 47.6 questions each, so 17,808 against 2,663, a factor of 6.7. A single RACE question per passage gives a factor of exactly 1, which matters later.
+
+## Why vLLM and SGLang do not get there
+
+No serving engine is as naive as $nP$. vLLM's decision endpoint computes the shared state once and then lets every question resume from the prefix cache. For a pure transformer that is nearly free: the KV of any prefix is the first rows of the KV of a longer sequence, as the [vLLM piece](/articles/vllm) and the [attention and KV cache explainer](/architectures/attention-kv) walk through.
+
+Qwen3.5 is not a pure transformer. Its `config.json` (the same layout as OneJev1.6-0.8B's, which I read) has 24 layers in a 3:1 pattern: 18 Gated DeltaNet layers and 6 full-attention layers. A Gated DeltaNet layer keeps no per-token rows. It folds every token into one matrix-valued state:
+
+$$
+\mathbf{S}_t = \alpha_t \mathbf{S}_{t-1}\left(\mathbf{I} - \eta_t \mathbf{k}_t \mathbf{k}_t^\top\right) + \eta_t \mathbf{v}_t \mathbf{k}_t^\top, \qquad \mathbf{o}_t = \mathbf{S}_t \mathbf{q}_t
+$$
+
+with a decay $\alpha_t$ and a write strength $\eta_t$ computed from the token, and a short causal convolution in front. (The [gated delta rule article](/articles/ltc-gated-delta) derives this recurrence properly.) You cannot slice $\mathbf{S}_t$ back to an earlier position. You can only resume from a snapshot taken at that exact token. Engines take those snapshots at cache-block boundaries, so a question resumes from the last boundary before the end of the state and recomputes the tail. [FlashState](/articles/flashstate) is a whole paper about how expensive that gap gets for agents.
+
+To get a feel for the sizes, take OneJev1.6-0.8B's config. Each Gated DeltaNet layer has 16 value heads of $128 \times 128$, so one layer's state is 262,144 numbers; Flide keeps it in float32, which is 1 MiB per layer and 18 MiB for the 18 layers. The six attention layers hold 2 KV heads of dimension 256, so a token's keys and values cost 6 × 2 × 2 × 256 × 2 bytes = 12,288 bytes in bfloat16. One recurrent snapshot costs as much memory as 1,536 tokens of KV. That arithmetic is mine, from the config, and it explains why nobody snapshots every token.
+
+The paper's Table 13 shows what this means in tokens actually computed, for one request alone on Qwen3.5-0.8B. On full QuALITY articles vLLM computes 12,448 tokens against Flide's 7,460, about 1.7x; SGLang computes 30,826, about 4.1x. On MultiRC, whose states are only a few hundred tokens long, vLLM computes 17,314 against Flide's 2,668. That is close to Table 2's one-sequence-per-question figure of 17,808, so the cache restores very little of a short state.
+
+SGLang has a second mode, multi-item scoring, that does share the state: it appends every question to one sequence with a delimiter token in front of each. Each question now reads a token its standalone prompt never had. Its hidden states change, and so do its probabilities. Hold that thought until the fidelity section.
+
+## The tree is logical, the stream is physical
+
+Flide's framing is that a decision request is a tree. The state is the trunk, each question a branch, and a branch must see the trunk and itself and nothing else. Generation engines turn every branch into a separate sequence. Multi-item scoring flattens the tree into the sequence itself. Flide keeps the tree as metadata and lays the round out as one flat stream, with no padding between requests:
+
+$$
+\bigl[\, s^{(1)} \mid s^{(2)} \mid \cdots \mid q^{(1)}_1 \mid \cdots \mid q^{(1)}_{n_1} \mid q^{(2)}_1 \mid \cdots \bigr]
+$$
+
+Every token carries its request index $j$, its branch index $c$ (0 for the trunk) and its position $t$. Question positions restart at $P$ for every branch, so the rotary embedding each question token gets is exactly the one it gets in $s \oplus q_i$. Norms, projections and MLPs act on one token at a time and do not care about the layout at all. Only the two token-mixing layers need to know about the tree.
+
+<Figure
+  src="/articles/flide-decision-inference/fig1.png"
+  alt="Four panels. (a) Three requests, each a shared state box branching into two or three question boxes. (b) A flat stream with all states first and all questions after; below it a block attention mask where each question row is coloured over its own state and its own diagonal block, and a Gated DeltaNet panel where one state S_P fans out to three questions each read into p1, p2, p3. (c) Rounds of different composition packed into streams of length 256 and 512 and replayed through CUDA graphs captured once, with metadata for segment lengths, positions, key ranges and state indices. (d) Step t saves a checkpoint at position m inside the state; step t+1 restores the cached prefix and computes only the tail and the new tokens."
+  caption="Flide's design in one picture: requests as trees, one flat stream with a fork-aware attention mask and a two-call Gated DeltaNet, CUDA graphs keyed on stream length, and checkpoints for growing agent states (Flide paper, Figure 2)."
+/>
+
+### Attention: a mask with two ranges
+
+In a full-attention layer, a query token $x$ may attend to a key token $y$ when
+
+$$
+j_y = j_x, \qquad c_y \in \{0, c_x\}, \qquad t_y \le t_x .
+$$
+
+Same request; key in the trunk or in the query's own branch; key not later. That is Equation 3, and it is the tree attention speculative decoding uses to verify candidate tokens. A sliding-window layer (Gemma 4 has them) adds $t_x - t_y < W$, which selects the same keys as the standalone prompt because the positions agree.
+
+In the code the mask is never materialised. `flide/runtime/pack.py` writes a `key_ranges[T, 4]` tensor: for each query token, a low and high index into the state part of the stream and a low and high index into the branch part. A state token at position $a$ gets keys from its state's start up to itself. A question token gets the whole of its own request's state, then its own branch up to itself. The attention kernel in `flide/kernels/attention.py` walks those two ranges, so the states of other requests sitting between them in the stream are never visited. It loads fully visible key blocks without a mask at all and masks only the blocks a range cuts through.
+
+The widget below rebuilds that layout from the same rule. Rows are query tokens in stream order, columns are keys. Add a second request and watch its state slot in between the first request's state and questions without leaking into either. Turn on the delimiter to see what multi-item scoring does instead.
+
+<ForkMask />
+
+With six state tokens and three questions of 3, 2 and 4 tokens, the stream holds 15 tokens; three standalone prompts would hold 27. Every question row is identical, cell for cell in its own coordinates, to the mask of its standalone causal prompt. That is the whole trick for attention.
+
+### Gated DeltaNet: fork the state, not the mask
+
+There is no attention matrix in a Gated DeltaNet layer to mask. $\mathbf{S}_t$ already contains every earlier token, so if $q_2$ follows $q_1$ in the stream, $q_2$ inherits $q_1$ through the recurrence whatever the mask says. Each question has to restart from $\mathbf{S}_P$, the state at the last token of its trunk.
+
+Flide runs every Gated DeltaNet layer in two calls over the stream. Call 1 processes the state segments of all requests (they are contiguous at the front of the stream) and keeps each request's final $\mathbf{S}_P$ and its convolution window. Call 2 processes all question segments at once, each starting from its own request's $\mathbf{S}_P$, picked by index. In `flide/backbones/qwen35/decoder.py` that is literally `initial_state=state.index_select(0, b.branch_job)` with `cu_seqlens=b.cu_suffix`: the variable-length chunked kernel from flash-linear-attention, handed one initial state per branch. The convolution reads its three predecessors through the same kind of index, so the first tokens of a question see the last tokens of the state, as they would in the standalone prompt. Nothing is copied.
+
+## Why it is exact, and what exact means
+
+The paper's Proposition 3.1: for a causal model in exact arithmetic, the hidden state Flide computes at any token of $q_i$ equals the hidden state at that token when the model processes $s \oplus q_i$ alone, regardless of the other requests and questions in the round. The proof in Appendix A is a short induction over layers. Each token enters with the same id and position as in the standalone sequence. Pointwise layers act on one token. Attention sees exactly the keys the standalone prompt has before it, by Equation 3. Gated DeltaNet continues from the exact $\mathbf{S}_P$ and convolution window the state reaches alone. Equal inputs to a layer give equal outputs, and nothing in any step reads another question.
+
+"Exact" gets used for four different things in the paper and the README, and they should be kept apart:
+
+1. **In exact arithmetic**, a forked answer equals the isolated one. That is the proposition. It is stated for causal models; the code also serves OneJev checkpoints trained with block-bidirectional attention (state and each question bidirectional within themselves), where the same two-range argument goes through but is not what the proposition states.
+2. **In floating point**, the two differ at rounding level. The authors' correctness ladder (Appendix G) runs OneJev1.5-0.8B in float32 against a float64 forward pass and requires every Flide path to stay within twice the error that the transformers library reaches, which is $6.0 \times 10^{-3}$.
+3. **Across server load**, the default mode does not keep bits. Table 12's default rows show the share of answers whose bits survive a change of load dropping as low as 13.8% (Gemma 4 E2B, one RACE question per state) and 26.7% (Qwen3.5-4B, same workload). A matrix product over more rows can pick another tile shape and reorder its sums.
+4. **With `--batch-invariant`**, every answer keeps its bits at any load on the same hardware and software, and every forked answer has the bits of its question asked alone. Table 12 says 100% on all six models and six workloads. The cost the paper quotes is "at most 10 percent of the throughput at 64 clients". Single-client latency can cost more: on Gemma 4 E2B, a lone RACE request goes from 8.6 to 13.5 ms.
+
+None of this makes Flide's bfloat16 answers equal to a float32 forward pass. Against that reference it flips some decisions just as vLLM does, which I come back to below.
+
+### A toy check of the construction
+
+I did not have a GPU to run Flide, and the house rule is not to execute third-party code anyway. What I could check is the construction itself. I wrote a small hybrid in numpy, about 140 lines and none of them Flide's: 8 layers in Qwen3.5's 3:1 pattern, gated-delta-rule layers with a 4-tap causal convolution, softmax attention with rotary positions, residual MLPs, a 4-option readout, random weights. For 100 random requests (states of 24 to 63 tokens, 2 to 6 questions of 3 to 8 tokens, 397 questions in all) I compared each question's answer computed four ways against its standalone prompt:
+
+```python
+# fork:     [s | q1 | ... | qn], attention by Equation 3, GDN in two calls (trunk -> S_P, branches from S_P)
+# mis:      the same, with one delimiter token at the head of every branch
+# maskonly: attention masked by Equation 3, but each GDN layer runs the stream as one sequence
+# concat:   s + q1 + ... + qn as one causal sequence, nothing masked
+allow = ((branch[None, :] == 0) | (branch[None, :] == branch[:, None])) & (pos[None, :] <= pos[:, None])
+```
+
+| Layout | float64: answers with identical bits | top answer flipped vs standalone | mean total variation |
+|---|---|---|---|
+| fork | 397 of 397 | 0 | 0 |
+| maskonly | n/a | 10 of 397 | 0.0065 |
+| mis (delimiter) | n/a | 21 of 397 | 0.0140 |
+| concat | n/a | 29 of 397 | 0.0218 |
+
+The fork matched the standalone prompts bit for bit in float64, across all 397 questions, with the forked layout computing 6,435 tokens where the standalone prompts took 19,190. In float32 the hidden states differed by at most $1.6 \times 10^{-6}$ and the option probabilities by a total variation of at most $2.3 \times 10^{-7}$; 251 of the 397 kept identical bits. I did not chase which numpy kernel reorders its sums, which is the floating-point point the paper makes about load.
+
+The other three rows are the useful ones. Masking attention alone is not enough on a hybrid: the first question is clean (it starts right where the state ends), every later one inherits its siblings through the recurrence. A delimiter shifts every question. The magnitudes mean nothing (random weights, a 4-option toy); only the direction carries over. A toy cannot say anything about Flide's Triton kernels either. What it does say is that the two-range mask plus a two-call recurrence is the right construction, and that neither half works without the other.
+
+## Graphs that survive a change of request mix
+
+The second problem is launches. A short decision request on a 0.8B model takes a few milliseconds of GPU time, and launching thousands of kernels one at a time would dominate it. CUDA graphs remove launch overhead but freeze every launch's shape, and a server sees a different tree every round.
+
+Flide's answer is to make the tree pure GPU data. Segment lengths, positions, key ranges and state indices live in fixed-size device buffers filled before each replay; every kernel derives its work from them. At start-up Flide captures a family of graphs indexed by stream length $T$, each with fixed capacities for requests, branches, Gated DeltaNet chunks and readout rows. A round picks the smallest graph that fits and pads only at the tail. A round that exceeds the largest graph is split along request boundaries.
+
+Two smaller pieces finish the job. **Selective readout**: the head reads only the last token of each question, so the final layer computes keys and values for every token but runs the rest of the layer, MLP included, only at those rows. **Incremental forking**: for an agent whose history grows a step at a time, Flide saves a checkpoint (float32 recurrent state and conv window per Gated DeltaNet layer, plus attention KV) at a position $m$ a little before the end of the state, during the same pass that answers the questions. The next step resumes from $m$ and computes only the tail and the new tokens. Placing $m$ slightly early is deliberate: the last tokens of a conversational turn are the ones most likely to change.
+
+The paper's ablation on Qwen3.5-4B (Table 5, timed inside the engine, no HTTP server) says what each piece buys. Without forks, a full QuALITY article goes from 135.6 ms to 1,868.5 ms. Without CUDA graphs, a lone Decision Index request goes from 8.8 to 76.1 ms. Without flat graphs (one replay per request), a round of short RACE requests drops from 210.3 to 134.9 requests a second. Selective readout is worth a few percent everywhere.
+
+## Where 9.5x comes from
+
+The headline is one cell of Table 3: Qwen3.5-0.8B, full QuALITY articles with all their questions in one request, median latency of a single client. SGLang takes 359 ms, vLLM 362 ms, Flide 37.7 ms. 359 / 37.7 is 9.52. The 8.5x throughput figure is the same workload at 8 clients: 39.1 requests a second against SGLang's 4.6.
+
+Every baseline in that table starts cold. Each copy of a row begins its state with its own tag line, and every prefix cache is emptied before each concurrency level, so no request reuses another's state. The questions inside one request still share their state on every engine.
+
+Now move along the row. The same workload at 4B is 476 against 141 ms, about 3.4x. At 9B, 562 against 232, about 2.4x. At 27B the paper prints vLLM as "1.2k" and Flide as 781, about 1.5x. On one-question workloads under load, Flide matches the best baseline and no more, which the paper says plainly.
+
+Why does the lead collapse with size when the token savings do not? Table 13 answers it. On that 0.8B QuALITY request, vLLM fed pre-tokenized ids computes exactly the tokens it computes behind its endpoint, 12,448, yet takes 350 ms instead of 537 ms on the 14 October build the analysis uses. The difference, 187 ms, is rendering and tokenizing one prompt per question. Behind that, every question is still a sequence of its own to schedule and restore. Flide computes 1.7x fewer tokens than vLLM on that request but is about 9x faster at 0.8B. At 27B the forward pass dominates, and the 1.5x lead sits close to the 1.7x token ratio. The widget lays the two ratios side by side.
+
+<SpeedupLedger />
+
+That is not a criticism of the engineering. Front-end and per-sequence overhead are real costs, and decision models are small: OneJev's sweet spot is 0.8B to 9B, exactly where the overhead dominates. But "9.5x faster" is a statement about small models and many questions per state. On a 27B decision model with one question per request, expect parity.
+
+The paper's sweep in Figure 5 makes the scaling explicit. With a state of about two thousand tokens and a growing number of questions, vLLM and SGLang climb roughly linearly while Flide only adds each branch's tokens. At 64 questions Flide is 12.7 times faster than vLLM.
+
+<Figure
+  src="/articles/flide-decision-inference/fig2.png"
+  alt="Two log-scale line charts on Qwen3.5-4B. Left: latency in milliseconds against questions per state from 1 to 64; vLLM and SGLang rise from about 50 ms to about 700 to 1,500 ms while Flide rises from about 35 ms to about 120 ms. Right: latency per agent step against thousands of tokens of history from 1 to 17; Flide stays around 25 to 40 ms, vLLM, SGLang and multi-item scoring sit between about 100 ms and 1,300 ms, with one agent solid and eight agents dotted."
+  caption="Latency as questions per state grow (left) and as an agent's history grows (right), Qwen3.5-4B on one H200. The paper's figure, not a measurement of mine (Flide paper, Figure 5)."
+/>
+
+For growing agent histories (Table 7, SWE-agent trajectories replayed step by step, several questions per step), the marginal cost per thousand tokens of history is 0.6 to 1.0 ms on Flide against 11.1 to 14.5 ms for vLLM and SGLang, and Flide completes 4.4 to 7.2 times the steps per second of the strongest baseline. That is the checkpoint-at-$m$ design paying off.
+
+On dedicated decision models the gap is smaller but real. Against vllm-jev, the engine written for Open-Jev, Flide is "roughly threefold" faster on short RACE inputs (Open-Jev-2B: 8.9 ms against 41.8 ms single-client) and up to 1.7 times faster on cut QuALITY articles. Accuracy matches to the decimal on QuALITY and within 1.2 points on RACE.
+
+## Fidelity: closest in total variation, not free of flips
+
+The paper measures every engine's answers against a float32 forward pass of the same model, with TF32 off. Averaged over the four Qwen3.5 sizes, Flide's top answer agrees with that reference most often on every workload (Table 4), and its mean total variation is lowest on DI, QuALITY and MultiRC (Table 11). Multi-item scoring is the outlier: on Qwen3.5-0.8B with full QuALITY articles it flips 28.9% of decisions at a 0.5 threshold. Figure 4 shows the whole distribution shift.
+
+<Figure
+  src="/articles/flide-decision-inference/fig3.png"
+  alt="Four density plots of total variation from the fp32 reference on a log axis from 10^-5 to 10^-1, for DI, RACE, QuALITY and MultiRC on Qwen3.5-4B. Flide, vLLM and SGLang curves overlap, peaking around 10^-3 to 10^-2; the multi-item scoring curve is shifted right, peaking near 10^-1."
+  caption="Total variation of each answer from the float32 reference on Qwen3.5-4B, every question of a state in one request. Multi-item scoring sits about an order of magnitude to the right (Flide paper, Figure 4)."
+/>
+
+Read the table rather than the summary, though. Flide in bfloat16 still flips up to 2.3% of decisions against float32, and in at least one cell it flips more than vLLM: Qwen3.5-0.8B on RACE, 2.3% against vLLM's 1.4%. "Exact" in this paper means equal to the same model asking the question alone at the same precision. It does not mean equal to float32.
+
+Where Flide clearly wins is stability under load. Between one client and 64, Flide changes at most 0.2% of top answers, SGLang up to 1.7%, vLLM up to 3.2% (Section 4.3). For a decision model whose output feeds a threshold, that is the property that matters most in production. A routing rule that fires at 0.5 should not fire differently at 3 a.m. because the server was quiet. The [piece on Jev's non-determinism](/articles/jev-is-not-deterministic) is about exactly this.
+
+## The rest of the engine
+
+A few smaller results are worth having in one place. All are the paper's or the README's figures:
+
+- **Memory**: on Qwen3.5-4B Flide peaks at 18.8 GiB (the model, 2.1 GiB of CUDA graphs, workspace). vLLM and SGLang reserve most of the card by default; capped at a tenth of it, they peak at 17.2 and 18.7 GiB, and Flide's lead holds at equal memory (Table 14).
+- **Images**: on 397 GQA images with 4,525 yes-or-no questions, Flide answers an image 5.0 to 7.5 times faster than the better baseline, which has to send one chat request per question (Table 15).
+- **Start-up**: a 0.8B server answers its first request after 36.3 s with the shipped kernel bundle, against 180.6 s compiling and tuning Triton kernels from an empty cache (Table 17).
+- **The demo**: the README's email triage tags 10,000 emails with eight questions each in 28 s on one H200 with OneJev1.6-0.8B, 10.0 ms for one email.
+- **Platform**: NVIDIA GPUs on Linux or WSL2. PyTorch 2.12 to 2.14, flash-linear-attention 0.5.2 and up. Sessions (incremental forking) take text-only states and are disabled for the block-bidirectional attention variant.
+
+<ModelCard repo="OmniJev/OneJev1.6-0.8B" />
+
+OneJev1.6-0.8B itself is a sensible thing to point Flide at: 852,985,920 parameters in the safetensors header, 100,592,896 of them the vision tower, Apache-2.0. Its card reports 48.82 on the public part of Decision Index 0.3; the board's own `index.json` (generated 11 November) lists 48.76.
+
+## The same week: Gemini Decisions, and THX-02
+
+Flide is an open engine. The week it got attention, Google shipped the closed version of the same idea. The [Gemini Decisions API](https://blog.google/innovation-and-ai/technology/developers-tools/gemini-decisions-api) (11 November) runs Gemini Decision 1 over "one multimodal input … (up to 256K tokens) along with up to 1,000 independent questions", with yes/no, multiple choice from 2 to 255 options, and rubric scores. Google reports 150 to 250 ms end to end and prices it at \$0.10 per million input tokens with \$0 for output. A flat price on input tokens only makes sense if the questions share the input once, which is the point of state forking, but Google does not say how its serving works and I have no way to check any of it.
+
+[THX-02](https://huggingface.co/HAL-X-AI/THX-02) from HAL-X is an open "thinking decision model", 4.5B parameters plus a 60M think adapter, Apache-2.0, with an [API](https://api.hal-x.ai/docs/thx-02). The claim circulating is that it beats Jev on the Decision Index. Its card never mentions Jev. It reports 65.06 with thinking and 63.83 without, measured by HAL-X on a 6,018-request sample of the public suite with option-order averaging (`tta=4`). The board's own run of Jev 1.14 scores 60.7 on the full public suite of 140,178 requests. So "beats Jev" is a comparison across sources, sample sizes and test-time tricks, and THX-02 has no entry on the board yet. The card is candid about this in its limitations section. It also compares the other open models in its table on their full-suite numbers against its own sample, which is the kind of comparison [week four's look at THX-01](/articles/jev-alternatives-week-four) already found worth being careful with.
+
+## Who should run it
+
+If you serve a Qwen3.5- or Gemma 4-based decision model under about 10B parameters, and your requests carry more than one question per state, Flide is the engine I would try first. The mechanism is correct by construction, the code is small enough to read in an afternoon (the core is `pack.py`, the attention kernel and two calls in the decoder), and `flide verify` checks the fork guarantee on your own model and requests. The default mode's bits move with load; if a threshold on the output gates anything that matters, turn on `--batch-invariant` and measure the latency it costs you.
+
+If your requests are one question each against a 27B model, the paper's own tables say you will gain very little over vLLM. And none of this changes how good the model's answers are: Flide reproduces whatever the model would say alone, including its mistakes and its calibration. Pick the model on the [Decision Index](/articles/jev-alternatives-week-five) and the engine on Table 3, separately.
+
+*Sources: the arXiv HTML and LaTeX source of 2610.42148 (figures rendered from the source PDFs at 300 dpi), a shallow clone of OmniJev/Flide at `46834ce` (read, not run), the OneJev1.6-0.8B `config.json` and safetensors header (read by HTTP range request), the Decision Index Space's `data/index.json`, the THX-02 card and the Google blog post. The numpy toy is my own code; it ran on a laptop CPU in about 12 seconds per precision.*

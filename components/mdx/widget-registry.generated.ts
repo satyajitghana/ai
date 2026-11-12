@@ -390,6 +390,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "flex-pi/shared-latent": () => import("@/components/articles/flex-pi/shared-latent"),
   "flex-pi/stream-matrix": () => import("@/components/articles/flex-pi/stream-matrix"),
   "flex-pi/task-ladder": () => import("@/components/articles/flex-pi/task-ladder"),
+  "flide-decision-inference/fork-mask": () => import("@/components/articles/flide-decision-inference/fork-mask"),
+  "flide-decision-inference/speedup-ledger": () => import("@/components/articles/flide-decision-inference/speedup-ledger"),
   "flint/bench-table": () => import("@/components/articles/flint/bench-table"),
   "flint/decode-ceiling": () => import("@/components/articles/flint/decode-ceiling"),
   "flux-3-action/replan-clock": () => import("@/components/articles/flux-3-action/replan-clock"),
