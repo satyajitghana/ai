@@ -4,26 +4,29 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 
-// Fourteen probes I ran on torch 2.14.1+cpu and torch 2.15.0+cpu (CPython 3.12, one shared 4-vCPU VM, no GPU).
-// "changed" = the two wheels answered differently. "same" = identical answer. "blind" = the claim needs hardware or
-// a system the CPU wheel does not have, so the probe says nothing about it.
+// Seventeen probes I ran on torch 2.14.1 and torch 2.15.0, both the macOS arm64 wheels from PyPI, CPython 3.12, on an
+// M1 Max (Apple GPU available, no NVIDIA). "changed" = the two wheels answered differently. "same" = identical answer.
+// "blind" = the claim needs hardware or a build these wheels do not have, so the probe says nothing about it.
 
 type Row = { claim: string; probe: string; a: string; b: string; v: "changed" | "same" | "blind" }
 
 const ROWS: Row[] = [
   { claim: "Python 3.10 dropped", probe: "wheel tags on PyPI", a: "cp310 to cp314", b: "cp311 to cp315", v: "changed" },
-  { claim: "MPS stream API", probe: "dir(torch.mps) for 'stream'", a: "none", b: "Stream, current_stream, default_stream, set_stream, stream, streams", v: "changed" },
+  { claim: "nccl means the rewrite", probe: "registration code for nccl", a: "nccl2 only if TORCH_DIST_USE_NCCL2 == 1", b: "nccl2 unless TORCH_DIST_USE_NCCL2 == 0", v: "changed" },
+  { claim: "New backend entry point", probe: "torch.distributed.backends entry points", a: "8 names", b: "+ nccl4py", v: "changed" },
+  { claim: "One-sided transports, Python watchdog", probe: "ls torch/distributed", a: "flight_recorder", b: "+ _transport, _nccl4py, _watchdog", v: "changed" },
   { claim: "FSDP2 fp32 for chosen params", probe: "MixedPrecisionPolicy fields", a: "4 fields", b: "+ param_dtype_override_fn", v: "changed" },
-  { claim: "One-sided transports", probe: "ls torch/distributed", a: "flight_recorder", b: "+ _transport, _nccl4py", v: "changed" },
+  { claim: "MPS stream API", probe: "dir(torch.mps) for 'stream'", a: "none", b: "Stream, current_stream, default_stream, set_stream, stream, streams", v: "changed" },
+  { claim: "FP8 on MPS", probe: "cast a tensor on mps to float8_e4m3fn", a: "Undefined type Float8_e4m3fn", b: "works", v: "changed" },
   { claim: "Cuspy profiler config", probe: "names containing 'uspy'", a: "none", b: "CuspyConfig", v: "changed" },
   { claim: "XPU event IPC", probe: "dir(torch.xpu.Event)", a: "none", b: "ipc_handle, from_ipc_handle", v: "changed" },
-  { claim: "XPU MemPool non_split", probe: "MemPool.__init__ signature", a: "use_on_oom", b: "use_on_oom, no_split", v: "changed" },
-  { claim: "Stable ABI sort", probe: "grep sort in stable/ops.h", a: "no match", b: "match", v: "changed" },
-  { claim: "Header-only c10/util", probe: "headeronly/util/irange.h", a: "absent, 46 headers", b: "present, 53 headers", v: "changed" },
+  { claim: "XPU MemPool split policy", probe: "MemPool.__init__ signature", a: "use_on_oom", b: "use_on_oom, no_split", v: "changed" },
+  { claim: "Stable ABI sort", probe: "sort( in stable/ops.h", a: "no", b: "yes", v: "changed" },
+  { claim: "Header-only c10/util", probe: "headers in headeronly/util", a: "29", b: "36", v: "changed" },
   { claim: "FlyDSL in Inductor", probe: "files named *flydsl*", a: "0", b: "10", v: "changed" },
-  { claim: "FP8 e4m3fn and _scaled_mm", probe: "CPU cast and a 16x32 scaled_mm", a: "works", b: "works", v: "same" },
-  { claim: "F.grouped_mm exists", probe: "bf16, aligned shapes, CPU", a: "works", b: "works", v: "same" },
-  { claim: "Compiled output unchanged", probe: "max abs diff, compiled vs eager", a: "1.67e-06", b: "1.67e-06", v: "same" },
+  { claim: "FP8 _scaled_mm on CPU", probe: "a 16x32 _scaled_mm on CPU", a: "works", b: "works", v: "same" },
+  { claim: "grouped_mm on MPS", probe: "bf16 F.grouped_mm, 4 groups, on mps", a: "works", b: "works", v: "same" },
+  { claim: "Reconfigure contract", probe: "gloo shrink and grow, 4 processes", a: "6, 3, 7", b: "6, 3, 7", v: "same" },
   { claim: "Rewritten NCCL by default", probe: "needs a CUDA build and NCCL", a: "not testable", b: "not testable", v: "blind" },
 ]
 
@@ -71,7 +74,7 @@ export function ProbeTable() {
         </table>
       </div>
       <figcaption className="mt-3 text-xs text-muted-foreground">
-        Measured on the two CPU wheels, CPython 3.12. A probe that sees a new name proves the surface shipped, not that it works or is fast.
+        Run on the two macOS wheels from PyPI, CPython 3.12, M1 Max. A probe that sees a new name proves the surface shipped, not that it works or is fast.
       </figcaption>
     </figure>
   )

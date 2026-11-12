@@ -1,7 +1,8 @@
 ---
-title: "PyTorch 2.15: the NCCL rewrite becomes the default, and what a CPU box can check"
-description: "PyTorch 2.15 shipped on 28 October 2026 with 3,117 commits from 583 contributors. I read the release blog, counted what it names by area, and installed the 2.14.1 and 2.15.0 CPU wheels side by side to probe fourteen of its claims. Ten new surfaces are visibly there, three things behave identically, and the headline change, the rewritten NCCL backend as the default for every nccl process group, cannot be exercised without GPUs. A small torch.compile test showed no result I would defend."
+title: "PyTorch 2.15: NCCL communicators are now built up front, and a group can lose a rank and keep going"
+description: "PyTorch 2.15 (28 October 2026, 3,117 commits) makes the rewritten NCCL backend the default. This explains what that changes from first principles: process groups versus communicators, why eager creation costs about 231 MiB per unused group on an H100, and how reconfigure shrinks and grows a group after a rank dies. I ran that lifecycle on four CPU processes with gloo, read the NCCL path in the v2.15.0 source, and timed the release's Apple Silicon speedups (five ops, six shapes) on an M1 Max with both official wheels."
 date: 2026-10-31
+updated: 2026-11-12
 tags:
   - pytorch
   - distributed-training
@@ -13,12 +14,12 @@ rating:
   novelty: 1
   verification: 2
   runnable: 2
-  explains: 1
-  takeaway: 2
-  durability: 1
+  explains: 2
+  takeaway: 3
+  durability: 2
   reach: 2
-  unique: 1
-  why: "Probes fourteen release claims on two real wheels and says plainly which could not be tested; the rest is a careful reading of the blog."
+  unique: 2
+  why: "Explains the NCCL default switch from communicators up, runs the reconfigure lifecycle on CPU, and times five MPS speedups on two official wheels."
 topic: tools-infra
 kind: roundup
 level: practitioner
@@ -29,120 +30,202 @@ licence: BSD-3-Clause
 import { ChangeMap } from "@/components/articles/pytorch-2-15/change-map"
 import { ProbeTable } from "@/components/articles/pytorch-2-15/probe-table"
 import { BackendSwitch } from "@/components/articles/pytorch-2-15/backend-switch"
+import { EagerCost } from "@/components/articles/pytorch-2-15/eager-cost"
+import { LifecycleStepper } from "@/components/articles/pytorch-2-15/lifecycle-stepper"
+import { MpsCheck } from "@/components/articles/pytorch-2-15/mps-check"
 
-PyTorch 2.15 came out on 28 October. The [release blog](https://pytorch.org/blog/pytorch-2-15-release-blog/) counts 3,117 commits from 583 contributors since 2.14, and the @PyTorch post announcing it led with the distributed work, NVGEMM, Apple Silicon and accelerator support. A release this size is mostly a list, and a list is hard to read for what matters to you. So I did two things. I grouped what the blog names and picked the changes I think carry weight. Then I took the claims that a CPU box can see and checked them against the real wheels.
+PyTorch 2.15 came out on 28 October. The [release blog](https://pytorch.org/blog/pytorch-2-15-release-blog/) counts 3,117 commits from 583 contributors, and its first item is the one that changes jobs people already run: every process group created with `backend="nccl"` now gets a rewritten NCCL implementation. The blog gives that change three short paragraphs. The [full release notes](https://github.com/pytorch/pytorch/releases/tag/v2.15.0) give it a page, and the pull requests behind it give the rest, including a bug report from vLLM that shows what the switch costs.
+
+The first version of this article read only the blog and called the NCCL change untestable. That was half right. The NCCL path needs NVIDIA GPUs, but the reconfiguration contract it implements is shared with gloo, which runs on a laptop. So this rewrite does three jobs: it explains what a communicator is and why building it eagerly matters, it walks one group through a rank failure on four real CPU processes, and it times the release's Apple Silicon numbers on an M1 Max, the one set of claims this machine can check directly.
+
+<Figure src="/articles/pytorch-2-15/fig1.jpg" alt="PyTorch 2.15 release highlights graphic listing six items: rewritten NCCL backend becomes the default; one-sided transports with a NIXL backend; finer memory and communication control in FSDP2 and pipelining; faster NVFP4 LLM decoding on NVIDIA Blackwell GPUs; FP8 and faster decode on Apple Silicon; broader platform support." caption="The six highlights, in the order PyTorch ranks them (PyTorch 2.15 release blog, header graphic)." />
 
 <RepoCard repo="pytorch/pytorch" />
 
-Labels used throughout: **measured** is something I ran or counted myself, **reported** is the blog's or the authors' statement that I did not re-run, **reasoned** is my inference from either. My runs are on a shared 4-vCPU cloud VM with no GPU, CPython 3.12, two threads. I installed `torch==2.14.1+cpu` and `torch==2.15.0+cpu` from the PyTorch CPU index into separate directories and ran the same scripts against each. I could not read the full GitHub release notes: the sandbox returns 403 for `github.com`, so everything below about what changed comes from the blog, which names five backwards-incompatible changes, and from the wheels themselves.
+## A process group is a list of names; a communicator is the wiring
 
-## What the blog actually says, by area
+Distributed training starts with N processes, usually one per GPU, that need to agree on numbers. Each has a **rank** from 0 to N−1. To sum gradients across all of them you call `dist.all_reduce(tensor)`, and every rank gets the same total back.
 
-The blog has fifteen feature sections and five deprecation notes. I counted the distinct PR numbers cited under each feature section and grouped the sections by who they serve.
+A **process group** is PyTorch's object for "these ranks, talking together". `init_process_group` makes the default one with every rank in it, and `new_group` makes subsets: a tensor-parallel group of 8, a data-parallel group of 64, a pipeline pair. Large jobs make dozens. The group itself is cheap. It holds the member list, a key-value **store** (usually a TCP server on rank 0) that members use to find each other, and a pointer to a **backend** that does the actual moving of bytes.
 
-<ChangeMap />
+For NVIDIA GPUs the backend is NCCL, and the thing NCCL builds is a **communicator** (`ncclComm_t`). A communicator is the expensive part. To make one, rank 0 creates a unique id, publishes it through the store, and every member calls `ncclCommInitRankConfig` with it. That call is itself collective: all members must show up. NCCL then discovers the topology (NVLink, PCIe, InfiniBand), picks ring and tree layouts, opens connections to peers and allocates GPU buffers for staging data in flight. The buffers are the part that shows up in `nvidia-smi`.
 
-**Measured.** The sections cite 108 PR numbers in total. Against 3,117 commits, the blog names about 3.5% of the release, and a PR cited in two sections is counted twice, so that is a ceiling. The counts say where the writing effort went, not where the engineering went. Apple Silicon draws more citations (25) than NVIDIA (21), which tells you who wrote a lot of small PRs more than it tells you the relative importance of Apple's GPU.
+Since all members must join, when you build the communicator is a design choice with consequences:
 
-Two things are absent from the blog's feature list that you might expect from the previous three releases. There is no `torch.compile` or Inductor performance section on its own. The compiler shows up inside other items: Dynamo gets Python 3.15 support, Inductor autotunes FlyDSL templates on AMD, and NVGEMM is a GEMM backend that Inductor can choose. And there is no training-speed headline number for any model. The numbers the blog does give are all on Apple Silicon.
+- **Lazy** (the legacy `ProcessGroupNCCL`): build it at the first collective that needs it. A group you create and never use costs nothing. A misconfigured network shows up at the first `all_reduce`, which may be minutes into the job.
+- **Eager** (the new default): build it inside `init_process_group` or `new_group`. Errors surface at startup, and the first collective is not slowed by a bootstrap. But every group pays for its buffers immediately, used or not.
 
-## The six that matter
+Write $G$ for the groups a process creates, $U$ for the ones that ever run a collective, $c_0$ for what a communicator allocates when it is built, and $c_1$ for its footprint after it has run. Then, per GPU,
 
-I picked these by asking what changes the behaviour of a job I would already be running, then what changes what I can run at all, then what is new but narrow.
+$$
+M_{\text{lazy}} = U\,c_1, \qquad M_{\text{eager}} = G\,c_0 + U\,(c_1 - c_0).
+$$
 
-### 1. The rewritten NCCL backend is now the default
+The two agree once every group is used ($U = G$). They differ by $(G - U)\,c_0$ when some groups are made "just in case", which serving engines do all the time.
 
-**Reported.** In 2.14 the rewritten backend, ported from torchcomms, was an opt-in preview called `nccl2`. In 2.15 every process group created with the backend name `nccl` uses it. Two rollback paths exist: set `TORCH_DIST_USE_NCCL2=0`, or ask for the `nccl-legacy` backend by name. Communicators are now created eagerly with the process group instead of lazily at the first collective. Reconfiguration, the step where a failed rank is replaced or the group shrinks and grows, can opt into a fast path that needs NCCL 2.29 or newer, so surviving ranks skip a full bootstrap. The same reconfiguration is enabled on ROCm with RCCL 2.30.7.
+## What `backend="nccl"` resolves to now
 
-The second half of this change is debuggability. A backend-agnostic flight recorder writes a post-mortem to disk when a collective hangs, and watchdog health is published to the debug server, so a timeout on any rank makes every rank dump its recorder. Anyone who has chased a hang on 512 GPUs knows why: the rank that times out is rarely the rank that caused it. All of this is labelled **API Unstable** in the blog.
-
-Here is the resolution table as I understand it from the blog. It is reported, not run.
+None of the four backend names is new. I installed `torch==2.14.1` and `torch==2.15.0` from PyPI side by side and read both wheels: `nccl`, `nccl2`, `nccl-lazy` and `nccl-legacy` are registered as entry points in both. What changed is one comparison in `_register_builtin_nccl_backend`. In 2.14.1 plain `nccl` builds the rewrite only if `TORCH_DIST_USE_NCCL2 == "1"`. In 2.15.0 it builds the rewrite unless the variable is `"0"`. Registration happens the first time a process asks for that name, so the variable has to be set on every rank before the first group is created.
 
 <BackendSwitch />
 
-**Why it matters, reasoned.** Making a rewrite the default is a bet that the preview period found the problems. Eager communicator creation changes startup behaviour: failures that used to show up at the first all-reduce now show up when the group is created, which is better, and also means a job with a misconfigured network fails earlier and in a different place than your runbook says. If you operate training clusters, the first thing I would do is run one representative job with `TORCH_DIST_USE_NCCL2=0` and one without, and diff the logs.
+The rewrite was ported from [torchcomms](https://github.com/meta-pytorch/torchcomms), Meta's experimental communications library, whose README now says it is deprecated because its features have been upstreamed into `torch.distributed`. The [release notes](https://github.com/pytorch/pytorch/releases/tag/v2.15.0) list what differs from the legacy backend in practice:
 
-**Measured, and its limit.** I could not exercise any of this. The CPU wheel reports `dist.is_nccl_available() == False`, and `torch.distributed.Backend.backend_list` on 2.15 is `undefined, gloo, nccl, xccl, ucc, mpi, fake` on both wheels. What I can say from the Python sources: the string `nccl2` appears in one file under `torch/distributed` in 2.14.1 and in four in 2.15.0, `TORCH_DIST_USE_NCCL2` and `nccl-legacy` each appear once in both, and the 2.15.0 wheel has two new directories, `_transport` and `_nccl4py`. That fits the blog and proves nothing about speed or stability. The flight recorder was already a package in 2.14.1, so the change is in what feeds it and when it dumps, not that it exists.
+- Communicators are created eagerly in `init_process_group()` and `new_group()`, "allocating GPU memory even for unused groups".
+- Each group binds to one GPU: `device_id` if you pass it, else `LOCAL_RANK % torch.cuda.device_count()`. `torch.cuda.set_device()` is ignored, and one process driving several GPUs needs `nccl-legacy`.
+- `isinstance(pg, ProcessGroupNCCL)` is now `False`, and legacy-only methods such as `comm_split_count()` are gone.
+- An async `all_gather`'s future holds the list of per-rank outputs rather than one stacked tensor.
+- `nccl-legacy` and `TORCH_DIST_USE_NCCL2=0` "will be removed in the next release".
 
-### 2. One-sided transports and a NIXL backend
+The legacy behaviour is on a one-release clock. The two supported choices are `nccl`, which is eager, and `nccl-lazy`, which builds one eager communicator for collectives and a separate lazily created two-rank communicator and stream for each send/recv peer pair, so point-to-point traffic to different peers can overlap. [PR #193241](https://github.com/pytorch/pytorch/pull/193241) makes pipeline stages print a warning steering users to `nccl-lazy`, because pipeline parallelism is mostly point-to-point.
 
-**Reported.** `torch.distributed` gains a Python transport API for one-sided data movement: one side reads or writes the other's memory without the other posting a matching receive. Peers connect through a store and need neither a process group nor collectives. `Transport.read_stream` and `write_stream` enqueue the transfer on a CUDA stream, so it can be captured by `torch.cuda.graph`. NIXL is the first backend. **Measured:** the `_transport` directory is in the 2.15.0 wheel and absent from 2.14.1. The leading underscore and the **API Unstable** label say what to expect.
+The PR that flipped the default ([#192281](https://github.com/pytorch/pytorch/pull/192281)) carries a TorchTitan test matrix: ten training steps with the legacy and new backends gave identical loss and gradient norm, and eight parallelism layouts passed on 4 GPUs.
 
-**Reasoned.** This is the building block for disaggregated serving, where a prefill machine pushes a KV cache to a decode machine, and for parameter servers that never stall a trainer. Neither needs a collective, and a collective forces every participant to show up. That the transfer is graph-capturable is the interesting part: the usual cost of one-sided movement in a latency-sensitive loop is the launch overhead around it.
+<Figure src="/articles/pytorch-2-15/fig2.png" alt="A table from the pull request. Deterministic parity between legacy NCCL and default nccl2 over 10 training steps, global_avg_loss, global_max_loss and grad_norm matched exactly: PASS. Then TP+FSDP, PP+FSDP, DDP, HSDP, CP, FSDP+CP, DeepSeek V3 with HSDP and expert parallelism, and Qwen3 MoE with FSDP, tensor and expert parallelism: all PASS." caption="The release-test matrix attached to the PR that made the rewrite the default, run on 4 GPUs with the variable unset (pytorch/pytorch PR #192281, description)." />
 
-### 3. FSDP2 and pipelining: control over memory and what gets communicated
+## What eager creation costs
 
-**Reported.** Four changes, all labelled **API Unstable**:
+The release notes say each eagerly created communicator allocates about 200 MiB. The clearest measurement is in [issue #199957](https://github.com/pytorch/pytorch/issues/199957), whose report says the switch broke vLLM's nightly CI with out-of-memory errors on H100s. vLLM's tensor-parallel-2 setup creates about ten groups (world, TP, PP, DP, EP and others, several with one rank), and the engine saw about 2.5 GiB less free memory per GPU with the new backend.
 
-- `MixedPrecisionPolicy(param_dtype_override_fn=...)` lets precision-sensitive parameters, the blog names MoE router gates and norm weights, stay fp32 while the rest trains in bf16, still with one all-gather per `fully_shard`.
-- A whole gradient-accumulation step can be captured in one CUDA graph.
-- Gradients accumulate directly into `.grad` and follow each parameter's `grad_dtype`.
-- Pipeline parallelism allocates receive buffers just before each receive instead of up front for every microbatch, releases forward outputs once their sends finish, and takes a `max_outstanding_sends` budget. FSDP gradient reduction can overlap with the next compute.
+<Figure src="/articles/pytorch-2-15/fig3.png" alt="The issue text and its results table. On torch 2.15.0.dev20261002 with NCCL 2.30.7 on two H100 96GB GPUs and 9 groups: nccl2 default allocates +2080 MiB (231 MiB per group) after nine new_group calls and +4672 MiB after one all_reduce per group; legacy allocates +0 MiB then +4672 MiB; nccl2 with NCCL_COMM_SPLIT_SHARE_RESOURCES=1 allocates +1188 MiB (132 MiB per group) at both points." caption="Eager creation charges every group up front; the totals converge once all groups are used (pytorch/pytorch issue #199957, Results)." />
 
-**Measured.** `MixedPrecisionPolicy.__dataclass_fields__` is `param_dtype, reduce_dtype, output_dtype, cast_forward_inputs` on 2.14.1 and gains `param_dtype_override_fn` on 2.15.0. The text `grad_dtype` appears in `_fsdp_api.py` in 2.15.0 and not in 2.14.1.
+That table is the formula above with numbers in it: $c_0 \approx 231$ MiB and $c_1 \approx 519$ MiB per group on that machine (2080 and 4672 divided by 9). A follow-up in the same thread on GB200 measured 197 MiB per group. The slider below scales the H100 figures to other group counts, which assumes every group costs the same; that is my extrapolation, not a measurement.
 
-**Why it matters, reasoned.** Keeping a router gate in fp32 inside an otherwise bf16 model is a recurring fix for mixture-of-experts instability, and until now it meant either splitting the module into separate FSDP units, with extra all-gathers, or patching dtypes by hand. The dtype change is also the one change in this item that is *not* opt-in: the blog lists it under backwards-incompatible changes because the default behaviour with `reduce_dtype=None` moves.
+<EagerCost />
 
-### 4. NVGEMM for NVFP4 decode
+One mechanism detail explains the second option. On the new backend, `new_group` normally builds a group by splitting the parent's communicator (`ncclCommSplit`) rather than bootstrapping from nothing, so an NCCL setting that lets split communicators share their parent's resources applies to every subgroup. There are three ways out, and they trade differently. `nccl-legacy` works today and disappears next release. `NCCL_COMM_SPLIT_SHARE_RESOURCES=1` lets split communicators share buffers, which cut the issue's total to 1188 MiB whether or not the groups were used, at a possible cost to concurrency the reporter flagged as unmeasured. And 2.15 shipped a third, `ProcessGroupNCCL.Options.lazy_init` from [PR #200020](https://github.com/pytorch/pytorch/pull/200020), which keeps the new backend but builds a group's communicator on its first operation. Its PR reports nine groups going from +1774 MiB to +0 MiB at `new_group`, with nothing changed after use. The issue is still open as I write, and the default stays eager.
 
-**Reported.** NVGEMM, the CuTeDSL GEMM backend that arrived in 2.14, now folds the scalar dequantization factor of ModelOpt NVFP4 layers into the GEMM, which removes one pointwise launch per layer during decode. A shape-aware candidate policy covers Blackwell decode shapes that nvMatmulHeuristics misses. Kernels can use programmatic dependent launch, so a Triton consumer starts while the producer GEMM is finishing. The headline is "faster 4-bit LLM decoding on Blackwell". There is no number for it in the blog.
+## Reconfiguration: losing a rank without losing the job
 
-**Reasoned.** At decode, a batch of one token multiplies a tiny activation by a large weight. Each layer is then bound by launching and memory traffic more than by arithmetic, so deleting a launch per layer is worth something, in proportion to the number of layers. A 60-layer model with four 4-bit linears per layer saves on the order of 240 launches per token. I did not measure launch cost, and I cannot, so I will not turn that into milliseconds. **Measured:** the only visible trace on the CPU wheel is an Inductor configuration key, `_nvgemm_max_profiling_configs_default`, present in both versions. This is the item where the blog gives you the least to check, and it requires a Blackwell GPU.
+The second half of the headline is reconfiguration. In a classic job, one dead GPU kills everything: the survivors block in their next collective until a timeout, the launcher tears the job down, and it restarts from the last checkpoint. On thousands of GPUs that is a routine event, and the lost time adds up.
 
-### 5. Apple Silicon: FP8, streams and the only numbers in the blog
+Reconfiguration keeps the surviving processes alive and rebuilds the communicator with a new member list. The API in 2.15 is three experimental functions in `torch.distributed`, documented under "Fault-tolerant reconfiguration":
 
-**Reported.** This is the one section with figures. More MPS operators move from MPSGraph to native Metal kernels. A single-row softmax over a 128,256-entry vocabulary drops by 8x, upsample backward is up to 21.7x faster, and reductions share one set of kernels, making `norm` full reductions more than 100x faster. For decode, `F.linear` now uses the existing gemv kernels (1.23x geometric mean, up to 5x on small projections), and the new MPS `grouped_mm` has a gemv path giving 1.32 to 1.34x MoE decode throughput on an M3 Ultra. QR of a 512 by 512 matrix falls from about 7 seconds to 1.5 ms.
+- `_supports_reconfigure(group)` says whether the backend can do it.
+- `_get_reconfigure_handle(group)` returns a short string identifying this process in the current generation, for example `gloo:1:-1:1:127.0.0.1:29641` (backend, rank, generation uuid, stable rank, store address).
+- `_reconfigure(uuid, handles)` builds a new generation. You pass a fresh `uuid` every time and one handle per member; a handle's position in the list becomes that process's new rank.
 
-New surface: `torch.float8_e4m3fn` and `_scaled_mm` (tensorwise or rowwise scaling) on MPS, and a public stream API modelled on CUDA's: `torch.mps.Stream`, `current_stream`, `set_stream`, the `torch.mps.stream` context manager, and `Tensor.record_stream`.
+PyTorch does not decide who is alive or tell the survivors. Something outside the group, a fault-tolerance controller such as torchft or your own rendezvous over the store, collects handles from the processes that are still answering and hands every one of them the same list.
 
-**Measured.** On 2.14.1, `dir(torch.mps)` contains no name with "stream". On 2.15.0 it contains `Stream, current_stream, default_stream, set_stream, stream, streams`. That is the API surface, on a CPU wheel, with no Apple GPU to run it on; `torch.backends.mps.is_available()` is `False` here. The fp8 cast and a 16 by 32 `_scaled_mm` already ran on CPU in 2.14.1, so FP8 itself is not new to PyTorch, only to MPS.
+For NCCL, a full reconfigure tears the old communicator down and runs a fresh `ncclCommInitRankConfig` on everyone, which is the same bootstrap as at startup. 2.15 adds an opt-in fast path ([PR #199240](https://github.com/pytorch/pytorch/pull/199240)), ported from torchcomms: with `TORCH_NCCL2_RECONFIGURE_SHRINK_GROW=1` on every rank and NCCL 2.29 or newer, survivors keep their existing communicator and call `ncclCommShrink(NCCL_SHRINK_ABORT)` to cut the dead ranks out, and newcomers are added with `ncclCommGrow`. I checked the shipped v2.15.0 source (`nccl2/ReconfigureNCCL.cpp`) rather than trusting the PR text. The rule that decides the path depends only on the handle list, so every rank picks the same one:
 
-**Reasoned.** The speedups are real in kind: a single-row softmax or a QR going from seconds to milliseconds means the old path was doing something poorly suited to the shape, and replacing it with a direct kernel is the fix. Shapes of that kind (batch one, one vocabulary row, a small projection) are the decode loop of a local LLM. But the quoted ratios are the authors' own, on the hardware they chose. I would expect the geometric mean (1.23x) to describe a typical model better than the 100x outliers do.
+1. The **quorum** is the largest set of handles that share a previous generation uuid, and it needs at least two members.
+2. The quorum must come first in the list, in ascending old-rank order, because NCCL's shrink keeps survivors in order and grow appends joiners at the end. Any other order means a fresh init on every rank.
+3. A reconfigure with the same members and no joiners also uses fresh init, since the old communicator may already be revoked.
 
-### 6. Platform breadth: ROCm, Intel, CUDA 13, Python 3.15
+Reconfigure needs `ncclCommRevoke`, which the source gates at NCCL 2.28 for CUDA builds and RCCL 2.30.7 for ROCm ([PR #194774](https://github.com/pytorch/pytorch/pull/194774), which explains that RCCL 2.30.4 hangs on the missing-rank path). The Linux CUDA wheel on PyPI depends on `nvidia-nccl-cu13==2.30.7`, so the default install clears both NCCL floors.
 
-**Reported.** FlyDSL joins CuTeDSL, Triton and Helion as a kernel DSL PyTorch can drive: on AMD gfx950 Inductor autotunes FlyDSL templates for GEMM, ragged grouped matmul and MXFP4/MXFP8 `scaled_mm` alongside Triton and ATen. On gfx1250 (MI450) Inductor uses the Tensor Data Mover. ROCm 10.0 wheels arrive next to 7.14, all built on AMD's TheRock packages, which install ROCm as a pip dependency rather than bundling it. Intel XPU gets SYCL free-function kernels, event sharing across processes, and `MemPool` policies. CUDA 13.2 becomes the default wheel with 13.4 beside it, and the 13.4 wheels add experimental support for NVIDIA Rubin. Dynamo supports Python 3.15.
+### The same lifecycle, run on four CPU processes
 
-**Measured.** In the 2.15.0 wheel, 10 files under `torch/_inductor` have `flydsl` in their name, against none in 2.14.1. `torch.xpu.Event` gains `ipc_handle` and `from_ipc_handle`, and `torch.xpu.MemPool.__init__` gains a `no_split` argument. A Dynamo version gate reads `sys.version_info >= (3, 15)` in 2.14.1 and `>= (3, 16)` in 2.15.0, which is where the upper bound for supported Pythons moved.
+The reconfigure contract is the same across backends; the NCCL source says its handle format and rank-assignment rule "match ProcessGroupGloo's reconfigure". Gloo runs on CPU, so I could drive it. Four processes started a group with `enable_reconfigure=True`, three of them formed generation 1, one died, the survivors shrank to generation 2, and the spare joined in generation 3. This is the core of the script:
 
-## The breaking-changes list, and which items I could test
+```python
+dist.init_process_group("gloo", store=store, rank=wid, world_size=4,
+                        enable_reconfigure=True, timeout=timedelta(seconds=5))
 
-The blog lists five.
+def gather_handles(store, tag, me, members):
+    store.set(f"{tag}/{me}", dist._get_reconfigure_handle())
+    return [store.get(f"{tag}/{m}").decode() for m in members]
 
-1. **Python 3.10 is gone.** **Measured:** the PyPI wheel tags for 2.14.1 are `cp310` to `cp314`; for 2.15.0 they are `cp311` to `cp315`. The blog adds that remaining 3.10 code paths, including in Dynamo, will be removed in coming releases.
-2. **`nccl` selects the rewritten backend.** Covered above; untested.
-3. **C++ warnings from `torch.ops` and custom ops now propagate to Python.** I ran a mismatched `aten.add` and got the same `RuntimeError` on both wheels, which is an error and not a warning, so it does not test the item. Untested.
-4. **macOS 14 is no longer supported for MPS.** A statement about CI, not code. Untested.
-5. **FSDP2 separates sharded and unsharded gradient dtypes.** The new `grad_dtype` text is in the wheel; the changed default is not something I ran.
+h = gather_handles(store, "gen1", wid, [0, 1, 2])          # process 3 waits
+dist._reconfigure(uuid=1, handles=h).wait()
+x = torch.tensor([float(wid + 1)]); dist.all_reduce(x)     # 1 + 2 + 3
+# process 2 calls os._exit(0); the others try one more all_reduce, which times out
+h = gather_handles(store, "gen2", wid, [0, 1])
+dist._reconfigure(uuid=2, handles=h).wait()                # 1 + 2
+h = gather_handles(store, "gen3", wid, [0, 1, 3])          # process 3 joins as rank 2
+dist._reconfigure(uuid=3, handles=h).wait()                # 1 + 2 + 4
+```
 
-Two of the five I could confirm from the artifact itself. Two are about GPUs or a Mac. One I tried and could not provoke.
+And what it printed on 2.15.0 (2.14.1 printed the same):
 
-## Fourteen probes on two wheels
+```text
+[rank0] gen1 rank 0 size 3 all_reduce 6.0
+[rank2] exiting (simulated failure)
+[rank0] collective with dead peer failed after 5.0 s: RuntimeError ... Timed out waiting 5000ms
+[rank0] gen2 (shrunk) rank 0 size 2 all_reduce 3.0
+[rank3] gen3 (grown) rank 2 size 3 all_reduce 7.0
+exit codes [0, 0, 0, 0]
+```
 
-Here is the full set: ten claims where the two wheels answer differently, three where they answer the same, and one I could not probe at all.
+Step through it, and flip the toggle to see what the NCCL fast path does differently at the shrink and grow steps:
+
+<LifecycleStepper />
+
+What this run does and does not show: it shows the contract: handles, fresh uuids, position-as-rank, a spare becoming rank 2. It does not show the 2.15 change, because gloo's reconfigure behaves the same on 2.14.1; what 2.15 adds is the NCCL fast path and reconfigure on ROCm. And gloo always reconnects from scratch (about 2 ms on loopback here), so it is the analogue of NCCL's full re-init, never of shrink/grow.
+
+My first attempt also hung, which is instructive. I had the survivors fire an asynchronous `all_reduce` at the dead peer and abandon it after a 3-second `wait`. The wait raised, the survivors went on to shrink, grow and print the right sums, and then neither of them exited: the launcher's 90-second `join` gave up on both with no error printed. The group's default timeout is 30 minutes (`default_pg_timeout` in the wheel), and my reading is that the abandoned operation was still holding the group until then. I changed both the call and the timeout at once, a blocking `all_reduce` instead of the abandoned one and a 5-second group timeout, so the transport itself failed the collective; after that every process exited with code 0. That is the shape of a real distributed hang: the rank that is stuck is not the one that failed, and nothing is printed.
+
+### The flight recorder, and why it gated the rollout
+
+That is why the debugging half of the headline exists. The legacy backend records every collective in a ring buffer (the flight recorder) and can dump it when the watchdog sees a timeout. The rewrite had none. [PR #192233](https://github.com/pytorch/pytorch/pull/192233) says that before it, the new backend "produced nothing at all when it hung, which was the operability regression blocking its rollout". It adds a backend-agnostic recorder fed from the c10d dispatcher hooks, so it also covers MPI and UCC. [PR #199092](https://github.com/pytorch/pytorch/pull/199092) publishes watchdog health to the debug server, so one rank's timeout triggers a dump on every rank. And [PR #192858](https://github.com/pytorch/pytorch/pull/192858) fixed a bug that would have attached no recorder at all to the default name once the default flipped, because one code path read the environment variable and another assumed plain `nccl` recorded itself.
+
+Other fallout fixed before the release, which tells you what to test in your own stack: vLLM's probe for the communicator pointer called the legacy `_comm_ptr()` and broke ([#198865](https://github.com/pytorch/pytorch/pull/198865)), and the watchdog thread created a stray CUDA context on GPU 0 from every rank on the host, seven extra 522 MiB contexts per host on a 256-GPU TorchTitan run ([#198339](https://github.com/pytorch/pytorch/pull/198339)).
+
+## The rest of the breaking-changes list
+
+The blog lists five backwards-incompatible changes. The release notes list 26, plus 8 deprecations, and the first version of this article repeated the blog's count. The ones most likely to bite, beyond NCCL:
+
+- **Distributed checkpoints are not readable by older versions.** Metadata now records tensor strides, and 2.14 fails on a 2.15 checkpoint with `too many values to unpack (expected 5)`. There is no flag to write the old format. Upgrade every reader before any writer.
+- **FSDP2 gradient dtype.** With `MixedPrecisionPolicy(param_dtype=torch.bfloat16)` and `reduce_dtype` left at `None`, fp32 parameters now accumulate and reduce-scatter gradients in fp32, which the notes say doubles reduce-scatter bytes. Set `reduce_dtype` explicitly to keep 2.14 behaviour.
+- **Pipeline config renamed without an alias.** `pipeline_per_direction_p2p` is now `pipeline_per_edge_p2p`; setting the old attribute raises, and the old environment variable is silently ignored.
+- **Wheels.** Python 3.10 is gone; the PyPI tags go from `cp310`–`cp314` in 2.14.1 to `cp311`–`cp315` in 2.15.0. CUDA 12.6 and 13.0 wheels are no longer published, and the default is CUDA 13.2. MPS now requires macOS 15.
+- **Checkpoint loading is stricter.** A security fix means that after `import torch.distributed`, `torch.load(weights_only=True)` no longer treats builtin exceptions as safe globals, so checkpoints that pickled an exception need `torch.serialization.add_safe_globals`.
+- **Small semantic shifts.** `import torch` cannot be re-run in one process; nested tensors are no longer allowed by `torch.load(weights_only=True)`; selective activation checkpointing saves rather than recomputes ops with ordered effects; ops undefined for complex inputs raise `TypeError`; float32 `sin` and `cos` on Arm CPUs use 3.5-ULP kernels (faster, less accurate).
+
+## Everything else the release names
+
+The blog's fifteen feature sections cite 108 PR numbers between them, about 3.5% of the 3,117 commits, so the blog is a selection, and it spends its words on distributed work and Apple Silicon.
+
+<ChangeMap />
+
+**One-sided transports.** `torch.distributed._transport` moves data by one side reading or writing the other's memory, with no matching receive and no process group, connecting peers through a store. NIXL is the first backend, and `read_stream`/`write_stream` enqueue transfers on a CUDA stream so they can be captured in a CUDA graph. This is the primitive for pushing a KV cache from a prefill machine to a decode machine. The `_transport` directory is in the 2.15.0 wheel and not in 2.14.1, and the leading underscore means what it usually does.
+
+**FSDP2 and pipelining.** `param_dtype_override_fn` keeps chosen parameters, the blog names MoE router gates and norms, in fp32 while the rest trains in bf16, with one all-gather per `fully_shard`. Before, that meant splitting the module into separate FSDP units and paying for extra all-gathers. `finalize_backward(async_op=True)` lets gradient reduction overlap other compute, and pipelines allocate receive buffers just before each receive.
+
+**NVGEMM for NVFP4 decode.** The CuTeDSL GEMM backend folds the NVFP4 dequantization scale into the GEMM, removing one pointwise launch per layer during decode on Blackwell. The blog gives no number for this, and I have no Blackwell GPU.
+
+**Platforms.** FlyDSL GEMM templates on AMD gfx950 (ten `flydsl` files under `torch/_inductor` in 2.15.0, none in 2.14.1), Tensor Data Mover on gfx1250, ROCm 10.0 wheels built on AMD's TheRock packages, SYCL free-function kernels and cross-process events on Intel, and `torch.compile` on Python 3.15.
+
+## Checking the Apple Silicon numbers on an M1 Max
+
+The MPS section is the only one with figures, and this machine has an Apple GPU, so these I could test. I took the exact shape and dtype from each PR's own table, ran both official wheels in separate processes, and alternated 2.14.1 and 2.15.0 for ten rounds each. Every process warmed up, then took 15 samples of 100 back-to-back calls followed by one `torch.mps.synchronize()`, so a sample measures throughput rather than one launch plus one sync. The full `norm` took 10 calls per sample, since on 2.14.1 each one took about 40 ms. I report the median of the ten per-process medians and the spread between the fastest and slowest process. The slow ops got fewer calls: upsample backward ten samples of two calls, and QR five single calls per process, in ten processes on 2.15.0 and three on 2.14.1, where one call takes 21 seconds.
+
+One caveat on conditions: other jobs were rendering video on this GPU during parts of the run, and `ioreg`, sampled before each process, often showed the GPU near 100% busy. Spread captures some of that. It was large for the sub-30 µs `F.linear` calls on 2.14.1 (one process ran nearly 3x slower than the rest) and small everywhere else.
+
+<MpsCheck />
+
+| Op, PR shape | 2.14.1 | 2.15.0 | my speedup | PR or blog |
+|---|---|---|---|---|
+| softmax 1x128256 fp32 | 101.5 µs | 29.0 µs | 3.5x | 8.0x |
+| `F.linear` 896 → 128, bf16 + bias | 22.3 µs | 11.7 µs | 1.9x | 5.05x |
+| `F.linear` 896 → 896, bf16 + bias | 24.7 µs | 13.0 µs | 1.9x | 3.13x |
+| `vector_norm` 4096x4096 bf16 | 39,542 µs | 92.3 µs | 428x | 170x |
+| upsample backward, bilinear, to 640x640 | 112.4 ms | 19.25 ms | 5.8x | 21.7x |
+| `linalg.qr` 512x512 fp32 | 21,024 ms | 4.99 ms | about 4,200x | about 4,700x |
+
+Every claim holds in direction, and the pattern in the gaps is consistent. Where the old path was a bad algorithm, the speedup survives or grows on older hardware: a full `norm` that took 39.5 ms now takes 92 µs, and QR on the GPU went from about 21 seconds to about 5 ms, which on this Mac is roughly the speed of the CPU path (4.8 to 6.6 ms). Two exploratory QR runs I did earlier, while the GPU was busy with other work, gave 0.7 to 5 seconds per call on 2.15.0; the ten clean processes ranged from 4.5 to 5.7 ms, so treat the QR figure as what an unloaded GPU does. Where the old path was a fine algorithm with high launch overhead, the gain shrinks: softmax and the small decode projections gain 2x to 3.5x here against 3x to 8x in the PRs. The `F.linear` PR reports its 1.23x as a geometric mean over 96 bf16 shapes; on the one 4096-wide shape I added, the gain was 1.1x with overlapping spreads, which is no gain I would claim. If you serve small models on an older Mac, expect the decode-loop gains to be modest and the linear-algebra ones to be large.
+
+## A `torch.compile` comparison I could not run
+
+The first version of this piece timed `torch.compile` on a shared cloud VM and got medians that moved threefold between runs, which settles nothing. I wrote a better design for this Mac: per-wheel Inductor cache directories, the cold run reported separately, then ten warm processes per wheel, alternated, each recording Dynamo's frame counters to prove compilation happened. It never got as far as a timing. Both wheels died with a segmentation fault before printing any result, and one 2.15.0 attempt hung instead; I did not diagnose why, so I make no claim about either release from it. What would settle the question is that script on an idle Linux machine with a pinned clock, ten processes per wheel, with the spread reported. The release notes' compiler items, cached fusion search and lower per-call overhead in compiled code, are what it would test.
+
+## Seventeen probes on two wheels
+
+The rest of what a laptop can see, re-run on the two macOS wheels:
 
 <ProbeTable />
 
-The three that match are as informative as the ten that differ. FP8 conversion and `scaled_mm`, and `F.grouped_mm`, are not new to CPU. The first `grouped_mm` probe I wrote used unaligned shapes and failed with `strides should be multiple of 16 bytes` on both wheels; with bf16 and 16-byte-aligned shapes it ran on both. That is a property of the op, not a change.
+Two of the "same" rows need a word. `grouped_mm` already ran on MPS in 2.14.1, so the probe only shows the call succeeds; the release notes list a native MPS implementation as new in 2.15 ([PR #194933](https://github.com/pytorch/pytorch/pull/194933) reports 300.3 µs falling to 5.6 µs on one bf16 shape), plus the gemv decode path behind the blog's 1.32 to 1.34x MoE figure, which its PR measured on an M3 Ultra. I did not time `grouped_mm`. And the reconfigure contract behaves identically, which is why the CPU run above explains the mechanism but does not test the 2.15 change. One correction from the probes: the blog calls the new Intel `MemPool` policy `non_split`; the argument in the wheel is `no_split`.
 
-## A torch.compile test that did not settle anything
+## What I would do with this release
 
-The blog has no compiler headline, but I wanted to know whether a plain `torch.compile` regressed or improved on CPU. The model is four pre-norm transformer blocks, width 256, 4 heads, batch 4, sequence 128, no gradients, two threads. I timed eager and compiled calls alternately in the same process, 60 each, so that slow stretches on a shared box hit both.
+If you run NCCL jobs, upgrade, but read your memory budget first. Count the groups your stack creates and multiply by roughly 200 MiB; if that number matters, set `lazy_init` on the groups you create speculatively rather than reaching for `nccl-legacy`, which has one release left. Use `nccl-lazy` for pipeline stages. Pass `device_id` to `init_process_group` instead of relying on `set_device`. Run one job with `TORCH_DIST_USE_NCCL2=0` and one without, and diff the startup logs, since failures that used to appear at the first collective now appear at group creation.
 
-**Measured.**
+Treat reconfigure as something to try, not something to build on yet. Every function in it has a leading underscore, and the fast path is opt-in for a reason: its correctness depends on rank order. Reconfigure itself is not new: my run worked the same on 2.14.1, and the rewrite already had a full re-init path. What 2.15 adds is the shrink/grow fast path, reconfigure on ROCm, and the default backend that carries it, which puts surviving a dead GPU without a restart within reach of stock PyTorch rather than a separate library.
 
-| wheel | cold compile | eager median | compiled median | eager over compiled |
-|---|---|---|---|---|
-| 2.14.1, run 1 | 29.6 s | 126.8 ms | 112.6 ms | 1.13x |
-| 2.14.1, run 2 | 2.2 s (warm cache) | 51.0 ms | 44.8 ms | 1.14x |
-| 2.15.0, run 1 | 26.6 s | 35.4 ms | 27.5 ms | 1.29x |
+Upgrade checkpoint readers before writers, set `reduce_dtype` explicitly in FSDP2, and if you are on a Mac, update: the MPS gains are real, and on an M1 Max some of them are larger than PyTorch claims. For profiling the CUDA side once you have a GPU, my [torch.profiler walkthrough](/articles/torch-profiler) is the place to start; for how PyTorch now targets a very different accelerator, see [TorchTPU](/articles/torchtpu).
 
-A second 2.15.0 run did not finish inside my time limit. The medians moved by a factor of three between runs because other jobs were using the same four cores, and an earlier, non-interleaved pass gave eager times of 31.8 and 40.5 ms on 2.14.1 against 60.5 and 61.7 ms on 2.15.0, which would make 2.15 look twice as slow if I believed it. I do not. Compiled output differed from eager by at most 1.67e-06 on both wheels.
+## Machine, wheels and scripts
 
-So: compiled beats eager by about 1.1 to 1.3x on this model on both versions, and I have one 2.15 data point for the ratio. The 1.13 versus 1.29 gap is inside what a loaded machine produces. I would not cite it as an improvement. A usable comparison needs an idle machine, a dozen runs per wheel and a fixed clock, none of which I had.
-
-## What to do with this
-
-If you run NCCL jobs, test with the variable set both ways before upgrading the fleet, and read your hang runbook against the new flight recorder. If you run FSDP2 on mixed-precision MoE models, read the `grad_dtype` note first, since it changes a default. If you serve on Apple Silicon, the MPS gains are the best-documented in the release, and the numbers are the authors'. If you are on Python 3.10, you are done. Nothing here asks you to change code before you upgrade, with the possible exception of the FSDP2 dtype change.
-
-What I could not do: run anything on a GPU, so the NCCL rewrite, NVGEMM, FlyDSL and the transports are checked for existence only; read the full GitHub release notes, which would list far more than the five breaking changes the blog does; or measure the Apple Silicon figures. The workflow is cheap enough to repeat: pull both wheels, diff `dir()` and file lists, and put a name to each claim. For profiling the new CUDA-graph attribution once you have a GPU, my [torch.profiler walkthrough](/articles/torch-profiler) is the place to start.
+Everything I ran used `torch==2.14.1` and `torch==2.15.0` from PyPI in two separate virtual environments, CPython 3.12.3, on an Apple M1 Max with 64 GB under macOS 26.6.2. No third-party code ran. The reconfigure run used gloo over loopback with four spawned processes and a TCP store. Source reading used the `v2.15.0` tag of pytorch/pytorch (commit `31a77fc9`) and the installed wheels' own Python files. Figures for NCCL memory, the TorchTitan matrix, the PR tables and every Blackwell, ROCm and Intel item are the authors' numbers, not mine.
