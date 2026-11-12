@@ -19,7 +19,7 @@
 BESPOKE.define((() => {
   const N = 6, DIV = 3
   return {
-    stampAt: k => [1250, Math.max(k.top + 70, 280) + 70],
+    stampAt: k => [1230, Math.max(k.top + 70, 280) + 3 * 150 - 10],
     plan: () => ({
       min: [4.2, 4.6, 3.8, 3.8, 4.6],
       events: [
@@ -36,13 +36,13 @@ BESPOKE.define((() => {
     draw(k) {
       const p = k.params, i = k.step
       const rows = p.rows || []
-      const Y0 = Math.max(k.top + 70, 280), GAP = 140
+      const Y0 = Math.max(k.top + 70, 280), GAP = 150
       const RY = [Y0, Y0 + GAP, Y0 + 2 * GAP, Y0 + 3 * GAP]
-      const X0 = 230, DX = 196, R = 26
+      const X0 = 230, DX = 196, R = 32
       const bx = j => X0 + j * DX
-      const lab = { role: 'label', size: 24, min: 12, maxW: 900, lines: 1 }
+      const lab = { role: 'label', size: 28, min: 12, maxW: 900, lines: 1 }
       const at = (st, d, delay) => (k.thumb ? 1 : k.p(st, d, delay))
-      const green = k.mix(k.P.b, k.ink, .15), red = k.P.a
+      const green = k.mix(k.P.a, k.ink, .2), red = '#C2410C'
 
       // a row of turn beads joined by a line; state(j) -> 'ok' | 'bad' | 'ghost' | 'hi' | null
       const row = (key, y, appear, state, endMark) => {
@@ -53,7 +53,7 @@ BESPOKE.define((() => {
         for (let j = 0; j < N; j++) {
           const s = state(j), a = shown(j)
           if (!s || a <= 0) continue
-          const col = s === 'bad' ? red : s === 'hi' ? green : s === 'ghost' ? k.mix(k.paper, k.dim, .35) : k.mix(k.paper, k.ink, .2)
+          const col = s === 'bad' ? red : s === 'hi' ? green : s === 'ghost' ? k.mix(k.paper, k.dim, .35) : k.mix(k.paper, k.ink, .45)
           k.seed(key + j)
           k.shape(k.circle(bx(j), y, R * a, 28), { fill: col, op: s === 'ghost' ? .35 : .85, sw: .8 })
         }
@@ -67,12 +67,12 @@ BESPOKE.define((() => {
 
       // row 0: the teacher's successful reference
       const a0 = at(0, 1, .1)
-      if (rows[0]) k.text(rows[0], X0 - 50, RY[0] - 46, { ...lab, alpha: a0 })
+      if (rows[0]) k.text(rows[0], X0 - 50, RY[0] - 52, { ...lab, alpha: a0 })
       row('ref', RY[0], a0, () => 'ok', 'ok')
 
       // row 1: the student's failed rollout, diverging at turn DIV
       const a1 = at(0, 1, .9)
-      if (rows[1]) k.text(rows[1], X0 - 50, RY[1] - 46, { ...lab, alpha: a1 })
+      if (rows[1]) k.text(rows[1], X0 - 50, RY[1] - 52, { ...lab, alpha: a1 })
       row('stu', RY[1], a1, j => (j < DIV ? 'ok' : j === DIV ? 'bad' : 'ghost'), a1 >= 1 ? 'bad' : null)
       if (a1 >= 1) {
         const da = k.thumb ? 1 : k.easeOut(k.p(0, .6, 1.9))
@@ -82,7 +82,7 @@ BESPOKE.define((() => {
       // row 2: retry from the restored state, with the steering prompt
       if (i >= 1 && i <= 2) {
         const a2 = at(1, .8, .1)
-        if (rows[2]) k.text(rows[2], X0 - 50, RY[2] - 46, { ...lab, alpha: a2 })
+        if (rows[2]) k.text(rows[2], X0 - 50, RY[2] - 52, { ...lab, alpha: a2 })
         const cx = X0 - 50, cw = bx(DIV) - R - 60 - cx, cy = RY[2] - 34, ch = 68
         k.push(); k.alpha(a2)
         k.seed('card' + (i === 2 ? 'b' : 'a'))
@@ -114,7 +114,7 @@ BESPOKE.define((() => {
       if (i >= 3) {
         const yR = RY[2]
         const a3 = at(3, 1, .1)
-        if (rows[3]) k.text(rows[3], X0 - 50, yR - 46, { ...lab, alpha: Math.max(a3, i > 3 ? 1 : 0) })
+        if (rows[3]) k.text(rows[3], X0 - 50, yR - 52, { ...lab, alpha: Math.max(a3, i > 3 ? 1 : 0) })
         const grow = i > 3 ? 1 : a3
         row('rev', yR, 1, j => (j < DIV ? 'ok' : j === DIV ? 'hi' : (grow * (N - DIV) > j - DIV ? 'ok' : null)), grow >= 1 ? 'ok' : null)
         if (i === 4) {
