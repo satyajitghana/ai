@@ -19,6 +19,9 @@
 import { readFileSync, statSync } from "node:fs"
 import { extname, join, relative, resolve } from "node:path"
 
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+
 import { AwsClient } from "aws4fetch"
 
 import { PUBLIC, ROOT, isMediaPath, loadMap, localMedia, saveMap, sha16 } from "./media-files"
@@ -68,14 +71,21 @@ async function main() {
 
   const ep = endpoint()
   const { R2_ACCESS_KEY_ID: id, R2_SECRET_ACCESS_KEY: secret } = process.env
-  if (!ep || !id || !secret) {
+  const r2 = ep && id && secret ? new AwsClient({ accessKeyId: id, secretAccessKey: secret, service: "s3", region: "auto" }) : null
+  // No S3 keys: fall back to a logged-in Cloudflare CLI (`cf r2 objects put`), as on Satyajit's machine.
+  // It cannot set cache-control; the media zone's cache rule and the ?v=<hash> URLs carry the caching.
+  const cf = r2 ? null : await promisify(execFile)("cf", ["r2", "buckets", "list", "-q"]).then(() => "cf", () => null)
+  if (!r2 && !cf) {
     console.error(
-      "\nmedia:push: no R2 credentials (R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT or R2_ACCOUNT_ID).\n" +
-        "Nothing was uploaded. Set them in the shell (or the cloud environment), then re-run.\n",
+      "\nmedia:push: no R2 credentials (R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT or R2_ACCOUNT_ID),\n" +
+        "and no logged-in `cf` CLI. Nothing was uploaded. Set them in the shell (or the cloud environment), then re-run.\n",
     )
     process.exit(1)
   }
-  const r2 = new AwsClient({ accessKeyId: id, secretAccessKey: secret, service: "s3", region: "auto" })
+  if (cf) console.log("media:push: no S3 keys; uploading with the Cloudflare CLI (cf r2 objects put)")
+  const cfPut = (key: string, file: string, type: string) =>
+    promisify(execFile)("cf", ["r2", "objects", "put", key, "--bucket-name", BUCKET, "--file", file, "--content-type", type, "-q"], { maxBuffer: 1 << 24 })
+      .then(() => ({ ok: true, status: 200, statusText: "OK" }), (e: unknown) => ({ ok: false, status: 0, statusText: String(e).slice(0, 300) }))
 
   let done = 0
   const failed: string[] = []
@@ -83,12 +93,12 @@ async function main() {
   await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
     for (let f = queue.shift(); f; f = queue.shift()) {
       if (!isMediaPath(f.path)) continue
-      const body = readFileSync(f.file)
-      const res = await r2.fetch(`${ep}/${BUCKET}/${PREFIX}${f.path.split("/").map(encodeURIComponent).join("/")}`, {
+      const type = TYPES[extname(f.path).toLowerCase()] ?? "application/octet-stream"
+      const res = !r2 ? await cfPut(`${PREFIX}${f.path}`, f.file, type) : await r2.fetch(`${ep}/${BUCKET}/${PREFIX}${f.path.split("/").map(encodeURIComponent).join("/")}`, {
         method: "PUT",
-        body,
+        body: readFileSync(f.file),
         headers: {
-          "content-type": TYPES[extname(f.path).toLowerCase()] ?? "application/octet-stream",
+          "content-type": type,
           "cache-control": "public, max-age=31536000, immutable",
         },
       }).catch((e: unknown) => ({ ok: false, status: 0, statusText: String(e) }) as const)
