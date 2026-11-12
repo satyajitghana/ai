@@ -850,6 +850,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "memharness/replay-vs-reconstruct": () => import("@/components/articles/memharness/replay-vs-reconstruct"),
   "mercury-3/denoise-race": () => import("@/components/articles/mercury-3/denoise-race"),
   "mercury-3/speed-gap": () => import("@/components/articles/mercury-3/speed-gap"),
+  "meta-encoder/decide-softmax": () => import("@/components/articles/meta-encoder/decide-softmax"),
+  "meta-encoder/one-tower": () => import("@/components/articles/meta-encoder/one-tower"),
   "meta-rebalancer/local-search-lab": () => import("@/components/articles/meta-rebalancer/local-search-lab"),
   "meta-rebalancer/model-size": () => import("@/components/articles/meta-rebalancer/model-size"),
   "metrictrail/ablation-ladder": () => import("@/components/articles/metrictrail/ablation-ladder"),
