@@ -5,16 +5,16 @@ import { PageShell } from "@/components/site/page-shell"
 import { architectures, architectureSignal } from "@/data/architectures"
 import { getArchitectureDocs } from "@/lib/content"
 import { archFilmKey, getFilm } from "@/lib/films"
+import { collectionPageJsonLd, JsonLd } from "@/lib/jsonld"
+import { seo } from "@/lib/seo"
 import { getThumb } from "@/lib/thumbs"
 
 import { ArchitecturesList } from "./architectures-list"
 
-export const metadata: Metadata = {
-  title: "Architectures",
-  description:
-    "A curated gallery of the building-block architectures behind modern models — each rated on interestingness and uniqueness, many drawn as distill-style diagrams.",
-  alternates: { canonical: "/architectures" },
-}
+const DESCRIPTION =
+  "A curated gallery of the building-block architectures behind modern models, each rated on interest and uniqueness, many drawn as distill-style diagrams."
+
+export const metadata: Metadata = seo("/architectures", "Architectures", DESCRIPTION)
 
 export default function Page() {
   // Slim, serializable projection handed to the client gallery. The signal is
@@ -24,7 +24,8 @@ export default function Page() {
   // full explainer (content/architectures/<slug>.mdx) links to its page and
   // shows the thumbnail painted from its storyboard; both come from the
   // content layer and the committed thumbnail manifest, not from public/.
-  const docs = new Set(getArchitectureDocs().map((d) => d.slug))
+  const docList = getArchitectureDocs()
+  const docs = new Set(docList.map((d) => d.slug))
   const items = architectures
     .filter((a) => ARCH_DIAGRAM_SLUGS.has(a.slug))
     .map((a) => {
@@ -56,6 +57,16 @@ export default function Page() {
       lede="The building-block architectures behind modern models — attention, MoE, state-space, positional, diffusion — each rated on how interesting and how unique it is, and many drawn as detailed distill-style diagrams."
       agentPath={{ json: "/api/architectures" }}
     >
+      {/* The explainers this gallery links to; entries without one have no page of their own. */}
+      <JsonLd
+        data={collectionPageJsonLd({
+          path: "/architectures",
+          name: "Architectures",
+          description: DESCRIPTION,
+          total: docList.length,
+          items: docList.map((d) => ({ name: d.title, path: `/architectures/${d.slug}` })),
+        })}
+      />
       <ArchitecturesList items={items} />
     </PageShell>
   )

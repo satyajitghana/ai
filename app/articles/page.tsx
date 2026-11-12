@@ -5,6 +5,8 @@ import Link from "next/link"
 import { SCORING_PATH } from "@/components/site/article-rating"
 import { PageShell } from "@/components/site/page-shell"
 import type { TopicId } from "@/data/taxonomy"
+import { collectionPageJsonLd, JsonLd } from "@/lib/jsonld"
+import { seo } from "@/lib/seo"
 
 import { ArticlesList } from "./articles-list"
 import { articleCards } from "./cards"
@@ -13,11 +15,7 @@ import { PAGE } from "./page-size"
 const LEDE =
   "Long-form explainers on AI, organised by what you want from them: the must-reads, what you can run yourself, ideas worth learning, and what's new."
 
-export const metadata: Metadata = {
-  title: "Articles",
-  description: LEDE,
-  alternates: { canonical: "/articles" },
-}
+export const metadata: Metadata = seo("/articles", "Articles", LEDE)
 
 export default function Page() {
   // The first page of cards in the default lens (Newest), plus every other
@@ -46,6 +44,15 @@ export default function Page() {
       }
       agentPath={{ json: "/api/articles" }}
     >
+      <JsonLd
+        data={collectionPageJsonLd({
+          path: "/articles",
+          name: "Articles",
+          description: LEDE,
+          total: cards.length,
+          items: cards.slice(0, PAGE).map((a) => ({ name: a.title, path: `/articles/${a.slug}` })),
+        })}
+      />
       <ArticlesList
         first={cards.slice(0, PAGE)}
         rest={cards.slice(PAGE).map(({ slug, title }) => ({ slug, title }))}

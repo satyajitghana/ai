@@ -2,6 +2,7 @@ import type {
   Article,
   BlogPosting,
   BreadcrumbList,
+  CollectionPage,
   Person,
   ScholarlyArticle,
   SoftwareSourceCode,
@@ -19,6 +20,14 @@ import { absoluteMediaUrl, isAbsolute } from "@/lib/media"
 
 // Centralized JSON-LD builders (schema-dts-typed). Injected via <JsonLd /> with
 // the `<` escape the Next.js json-ld guide requires.
+
+// The author/publisher of everything here, by reference to the Person that
+// satyajit.si defines (PERSON_ID), with its name and url inline. A bare
+// {"@id"} only resolves for a consumer that joins nodes across <script> blocks;
+// Google's Article rich result checks for author.name and author.url on the
+// node itself, and an answer engine reading one block should not need a second
+// to learn who wrote the page. ~80 bytes a page.
+const AUTHOR = { "@type": "Person" as const, "@id": PERSON_ID, name: profile.name, url: PERSON_URL }
 
 export function personJsonLd(): WithContext<Person> {
   return {
@@ -131,8 +140,8 @@ export function blogPostingJsonLd(post: BlogPost): WithContext<BlogPosting> {
     timeRequired: `PT${post.readingTimeMins}M`,
     inLanguage: "en",
     isAccessibleForFree: true,
-    author: { "@id": PERSON_ID },
-    publisher: { "@id": PERSON_ID },
+    author: AUTHOR,
+    publisher: AUTHOR,
   }
 }
 
@@ -157,8 +166,8 @@ export function articleJsonLd(article: ContentArticle): WithContext<Article> {
     timeRequired: `PT${article.readingTimeMins}M`,
     inLanguage: "en",
     isAccessibleForFree: true,
-    author: { "@id": PERSON_ID },
-    publisher: { "@id": PERSON_ID },
+    author: AUTHOR,
+    publisher: AUTHOR,
     // The primary sources the piece is built on, made machine-readable. Every
     // article here cites papers and repositories inline; an answer engine
     // deciding whether a page is grounded reads this rather than the prose.
@@ -221,8 +230,8 @@ export function architectureJsonLd(
     timeRequired: `PT${doc.readingTimeMins}M`,
     inLanguage: "en",
     isAccessibleForFree: true,
-    author: { "@id": PERSON_ID },
-    publisher: { "@id": PERSON_ID },
+    author: AUTHOR,
+    publisher: AUTHOR,
     ...(cites.length ? { citation: cites } : {}),
     ...(film ? { video: filmVideo(film, doc.title, "the architecture") } : {}),
   }
@@ -268,6 +277,49 @@ export function breadcrumbJsonLd(
   }
 }
 
+// An index page (/articles, /architectures) as a CollectionPage whose main
+// entity is an ItemList of the pages it links. Only what the server renders
+// goes in (name and url, nothing else): the list is serialized twice, in the
+// HTML and the RSC payload, and every byte is read from the ISR store in 8 KB
+// units. `numberOfItems` is the whole collection, so a consumer knows the list
+// is the head of it.
+export function collectionPageJsonLd({
+  path,
+  name,
+  description,
+  total,
+  items,
+}: {
+  path: string
+  name: string
+  description: string
+  total: number
+  items: { name: string; path: string }[]
+}): WithContext<CollectionPage> {
+  const url = absoluteUrl(path)
+  return {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    "@id": url,
+    url,
+    name,
+    description,
+    inLanguage: "en",
+    isPartOf: { "@id": `${siteUrl}/#website` },
+    author: AUTHOR,
+    mainEntity: {
+      "@type": "ItemList",
+      numberOfItems: total,
+      itemListElement: items.map((it, i) => ({
+        "@type": "ListItem",
+        position: i + 1,
+        name: it.name,
+        url: absoluteUrl(it.path),
+      })),
+    },
+  }
+}
+
 export function scholarlyArticleJsonLd(
   pub: Publication
 ): WithContext<ScholarlyArticle> {
@@ -277,7 +329,7 @@ export function scholarlyArticleJsonLd(
     headline: pub.title,
     author: pub.authors.map((name) =>
       name === profile.name
-        ? { "@id": PERSON_ID }
+        ? AUTHOR
         : { "@type": "Person" as const, name }
     ),
     datePublished: String(pub.year),
@@ -307,7 +359,7 @@ export function softwareSourceCodeJsonLd(
     url: absoluteUrl(`/projects/${project.slug}`),
     ...(project.repo ? { codeRepository: project.repo } : {}),
     programmingLanguage: project.stack.join(", "),
-    author: { "@id": PERSON_ID },
+    author: AUTHOR,
   }
 }
 
