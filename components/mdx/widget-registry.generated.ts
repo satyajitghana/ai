@@ -1522,6 +1522,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "toast-1/token-ladder": () => import("@/components/articles/toast-1/token-ladder"),
   "tokenizers-v1-combinatorial-bpe/measured-speedups": () => import("@/components/articles/tokenizers-v1-combinatorial-bpe/measured-speedups"),
   "tokenizers-v1-combinatorial-bpe/merge-stepper": () => import("@/components/articles/tokenizers-v1-combinatorial-bpe/merge-stepper"),
+  "tokin-token-native-rollouts/retoken-drift": () => import("@/components/articles/tokin-token-native-rollouts/retoken-drift"),
+  "tokin-token-native-rollouts/turn-tree": () => import("@/components/articles/tokin-token-native-rollouts/turn-tree"),
   "toks-tokenizer/merge-order": () => import("@/components/articles/toks-tokenizer/merge-order"),
   "toks-tokenizer/speed-cells": () => import("@/components/articles/toks-tokenizer/speed-cells"),
   "torch-profiler/schedule-strip": () => import("@/components/articles/torch-profiler/schedule-strip"),
