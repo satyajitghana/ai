@@ -1,0 +1,457 @@
+---
+title: "LeapQuant: an 8-bit recurrent state that stops rounding every token"
+description: "Gated DeltaNet and Kimi Delta Attention layers in Qwen, Kimi and GLM models read and rewrite a 128 x 128 state per head on every decode step, and storing that state below FP32 the obvious way breaks them: on Qwen3.5-9B a BF16 state drops AIME 2026 from 87.9 to 72.1 and INT8 drops it to 3.9. LeapQuant, from Berkeley, UW and MIT, re-quantizes the state once per 16-token window, pulls its largest outliers out as four FP16 rank-one Compensator Tokens, and smooths the rest, and at 8 bits it averages 84.4 against FP32's 84.0 over twelve model-task pairs. I derive the delta rule and the error recurrence from scratch, show why a BF16 state cannot even represent a 0.999 decay, build a simulator of all three fixes on a toy head, read the TileLang kernels and the vLLM plugin, and check every speed and memory figure against the paper. The kernel and accuracy claims hold. The released code is 8-bit only, needs Hopper-class TMA, keeps vLLM's FP32 allocation, and refuses prefix caching, which is where the paper's 56% memory cut was measured."
+date: 2026-11-12
+tags:
+  - linear-attention
+  - quantization
+  - kernels
+  - inference
+  - vllm
+  - state-space-models
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 1
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Delta rule and rounding-error recurrence from first principles, a simulator of all three fixes, and a code read separating what ships from what was measured."
+topic: quantization
+kind: paper
+level: practitioner
+runsOn: consumer-gpu
+licence: Apache-2.0
+---
+
+import { StateQuantSim } from "@/components/articles/leapquant/state-quant-sim"
+import { StateBudget } from "@/components/articles/leapquant/state-budget"
+
+Earlier today I worked out why [Qwen3.8-27B serves only so many streams on a 3090](/articles/qwen3-8-27b-throughput-week).
+The answer was not the KV cache. Each stream carries 48 Gated DeltaNet layers of recurrent state, 144 MiB of it in
+the FP32 the config asks for, allocated before the first token and read and rewritten on every decode step. Halve
+the precision and you halve the bill. Nobody halves it, because the models get worse when you do.
+
+[LeapQuant](https://arxiv.org/abs/2609.38166) (Yi Pan, Haocheng Xi and eleven co-authors from UC Berkeley, UW, MIT,
+Perplexity and NVIDIA; I read v2 of 10 November) is about that last sentence. Its claim, from
+[Yi Pan's thread](https://x.com/conlesspan/status/2120643704792989972): 8-bit recurrent states that match FP32
+accuracy across Qwen, Kimi and GLM models, linear-attention kernels up to 4.25x faster, up to 2x inference
+throughput and up to 56% less memory, all without training or calibration data. The code is at
+[github.com/leapquant/leapquant](https://github.com/leapquant/leapquant) under Apache-2.0, and there is a project
+page at [leapquant.github.io](https://leapquant.github.io).
+
+The thread's 34-second animation explains the method well, and three clips from it appear below.
+
+<Video
+  src="/articles/leapquant/clip1"
+  poster="/articles/leapquant/clip1-poster.jpg"
+  alt="An animated line chart titled 'Round every token: the error piles up'. A black FP32 trajectory climbs; a grey INT8 line rounded every token drifts below it with a counter reaching 48 roundings. A red LeapQuant INT8 line then leaps along dotted arcs, rounding once every 16 tokens, and tracks the black line with 3 roundings."
+  caption="Rounding every token against rounding once per 16-token window. The trajectories are drawn, not measured (video from @conlesspan's post on X)."
+/>
+
+## The state, from the update rule up
+
+Softmax attention keeps every key and value and pays for it with a cache that grows with the context. Linear
+attention keeps one matrix per head (the [linear-attention roundup](/articles/linear-attention-state-roundup) reads
+that matrix as an online regressor; here it is enough to read it as a memory). With keys $k_t \in \mathbb{R}^{d_k}$ and values $v_t \in \mathbb{R}^{d_v}$, the
+plainest version adds each pair into a state $S_t \in \mathbb{R}^{d_k \times d_v}$ and reads it with the query:
+
+$$
+S_t = S_{t-1} + k_t v_t^{\top}, \qquad o_t = S_t^{\top} q_t .
+$$
+
+Read $S$ as an associative memory: query it with a stored key and you get that key's value plus crosstalk from
+everything else. Nothing is ever removed, so the crosstalk grows. The delta rule (Schlag et al.,
+the "fast weight programmers" paper) fixes that by first asking the memory what it currently returns for $k_t$, and
+writing only the difference:
+
+$$
+S_t = S_{t-1} + \beta_t\, k_t \bigl(v_t - S_{t-1}^{\top} k_t\bigr)^{\top} = \bigl(I - \beta_t k_t k_t^{\top}\bigr) S_{t-1} + \beta_t k_t v_t^{\top}.
+$$
+
+$\beta_t \in (0, 1)$ is a learned write strength. With $\beta_t = 1$ and a unit-norm key, the old association
+along $k_t$ is erased and replaced. The Gated DeltaNet paper writes the second form in the transposed
+$d_v \times d_k$ orientation, as $S_{t-1}(I - \beta k k^\top) + \beta v k^\top$. Same thing. I use the paper's $d_k \times d_v$ orientation throughout, where keys index rows and values index columns.
+
+Gated DeltaNet (GDN, used by Qwen3.5 and [Qwen3.8-Flash-Next](/articles/qwen3-8-flash-next)) adds a forgetting
+gate, a scalar decay $\alpha_t \in (0, 1)$ per head per token. Kimi Delta Attention (KDA, used by Kimi Linear and
+[GLM-5.3-Flash](/articles/glm-5-3-flash)) makes the decay a vector, one factor per key channel, which gives each
+channel [its own half-life](/articles/kda-half-life). The LeapQuant paper writes both as one update, its equation 1:
+
+$$
+S_t = \operatorname{Diag}(\alpha_t)\, S_{t-1} + \beta_t\, k_t \bigl(v_t - S_{t-1}^{\top}(\alpha_t \odot k_t)\bigr)^{\top}, \qquad o_t = S_t^{\top} q_t .
+$$
+
+Expand KDA's $(I - \beta k k^\top)\operatorname{Diag}(\alpha) S + \beta k v^\top$ and you get exactly this (the
+paper's Appendix A does it for both). The form that matters for everything below is its equation 3. Call the
+bracketed term the correction, $u_t = \beta_t\bigl(v_t - S_{t-1}^{\top}(\alpha_t \odot k_t)\bigr)$, and every
+token's update is a decay followed by one rank-one write:
+
+$$
+S_t = \operatorname{Diag}(\alpha_t)\, S_{t-1} + k_t u_t^{\top}.
+$$
+
+A token is three small vectors, $(\alpha_t, k_t, u_t)$. The state is a $128 \times 128$ matrix per head. Hold
+that asymmetry in mind.
+
+## Why a decode step is a memory copy
+
+At decode, every linear-attention head does this per token: load $S$ from HBM, compute $u_t$ with one
+matrix-vector product, apply the decay and the rank-one write, compute $o_t$ with another matrix-vector product,
+store $S$. For a $128 \times 128$ FP32 head that is 64 KiB in and 64 KiB out for roughly four multiply-adds per
+element, about one FLOP per byte. The [ReplaySSM piece](/articles/replayssm) does the tighter count, 0.63 FLOP per
+byte, against the roughly 20 an H100 needs to keep its FP32 cores busy. Batching does not help, because every
+sequence brings its own state. The recurrence is a bandwidth problem with a little arithmetic attached.
+
+The paper's Figure 1 puts a size on it. On GLM-5.3-Flash in NVFP4 at batch 256 on a B200, linear attention is
+about a third of decode time, and that share does not shrink as the context grows, because the state does not grow
+with the context. The right panel is the other half of the bill: with prefix caching, a serving engine keeps one
+copy of the state per cached prefix block, and on Qwen3.5-9B that overtakes the KV cache.
+
+<Figure
+  src="/articles/leapquant/fig1.png"
+  alt="Left: stacked bars of decode-time share for GLM-5.3-Flash-NVFP4 at context lengths 4K to 256K, with linear attention near 34% at every length, GEMM around 50%, sparse attention growing from 3% to 12%. Right: horizontal bars of GPU memory for Qwen3.5-9B with prefix caching at 256K to 2M cached tokens, where the linear state cache grows to roughly 105 GB at 2M, more than the KV cache."
+  caption="Where the recurrent state costs: (a) decode-time breakdown for GLM-5.3-Flash-NVFP4 on a B200 at batch 256; (b) memory for Qwen3.5-9B with one state checkpoint per 1,024 cached tokens (LeapQuant paper, Figure 1)."
+/>
+
+So the fix is obvious: store $S$ in fewer bits. vLLM and SGLang already let you pick BF16 instead of FP32. The
+paper's Table 1 shows what that costs.
+
+## Rounding every token
+
+The naive scheme stores the state in a low-bit format and, after every decode step, computes the new state from
+the stored one and stores it again (the paper's equation 2):
+
+$$
+S_t = \operatorname{Diag}(\alpha_t)\, \hat S_{t-1} + k_t u_t^{\top}, \qquad \hat S_t = \mathtt{quant}_b(S_t).
+$$
+
+Run an exact FP32 trajectory beside it, on the same inputs, and call the gap $E_t$. Subtract the two updates and
+$v_t$ cancels. Appendix B.1 gets the error recurrence, its equation 9:
+
+$$
+E_t = \operatorname{Diag}(\alpha_t)\, E_{t-1} - w_t \bigl(E_{t-1}^{\top} b_t\bigr)^{\top} + \varepsilon_t ,
+$$
+
+with $w_t = \beta_t k_t$, $b_t = \alpha_t \odot k_t$, and $\varepsilon_t$ the rounding error of step $t$. Two
+readings of this. First, the error is not amplified: the decay and the delta-rule erase both shrink it, so it does
+not blow up exponentially. Second, nothing removes it either. Each $\varepsilon_t$ is carried forward by exactly
+the dynamics that carry a memory written at step $t$. A head whose decay is close to 1 remembers for thousands of
+tokens, and it remembers its rounding errors for just as long. The error settles where the rate at which rounding
+adds it balances the rate at which forgetting removes it. Round every token and that equilibrium sits high.
+
+That would be tolerable if the per-step errors were independent noise. They are not, and BF16 shows why with no
+model involved. BF16 has 8 significant bits, so two neighbouring values are between 0.39% and 0.78% apart.
+Multiply a stored value by a decay of 0.999 and it moves by 0.1%, less than half the gap, so it rounds straight
+back to where it was. I checked this exhaustively over values from 0.01 to 10 with the simulator's BF16 rounding:
+with $\alpha = 0.999$, 100% of stored values never decay at all. At 0.998 it is 96%, at 0.997 37%. A head that the
+model trained to forget slowly, stored in BF16 and re-rounded each step, does not forget. The same logic eats any
+part of a write $k_t u_t^\top$ smaller than half a step. That is the paper's point in B.1: "each update is small
+relative to the state", so per-step rounding throws away part of it every time, in the same direction, and the
+errors add up coherently instead of averaging out. FP16, with three more mantissa bits, has the same cliff further
+out: my count puts 0.9995 safe and 0.9999 frozen.
+
+Table 1 is what that does to reasoning. Over AIME 2026, BeyondAIME, GPQA-Diamond and LiveCodeBench v6 on three
+models, the FP32 state averages 84.0 and a BF16 state 72.5, the 11.5-point drop the thread quotes. On Qwen3.5-9B
+alone, AIME falls from 87.9 to 72.1 in BF16, to 3.9 in INT8 and to 0.0 in FP8. Its AIME traces run to tens of
+thousands of tokens, so there is a lot of time to drift. The collapse is model-specific: GLM-5.3-Flash keeps 87.4
+on AIME with a per-step INT8 state, and Qwen3.8-Flash-Next is between the two. The paper's summary is that every
+8-bit baseline still loses more than 10 points on at least one task of the two less sensitive models.
+
+Figure 3 measures the drift directly, as state error against the FP32 trajectory over 64K decoded tokens of PG-19
+on Qwen3.5-9B. INT8 per-step leaves the chart almost at once. BF16 per-step climbs steadily. The paper also tried
+stochastic rounding, the textbook cure for coherent rounding bias: it lowers the BF16 error at 64K by 3x and
+makes INT8 diverge.
+
+<Figure
+  src="/articles/leapquant/fig3.png"
+  alt="Line chart of state MSE times ten to the minus five against decoded tokens from 0 to 64K. INT8 rounded every step shoots past 50 within about 4K tokens; BF16 rounded every step passes 50 by 16K. Dashed INT8-w rises slowly to about 16 at 64K. Dashed BF16-w and the LeapQuant line stay near zero; an inset shows LeapQuant below BF16-w, about 0.9 against 1.3 at 64K."
+  caption="State error against the FP32 trajectory over 64K decoded tokens on Qwen3.5-9B. Solid lines re-quantize every token; '-w' lines once per 16-token window; LeapQuant is INT8 with all three fixes (LeapQuant paper, Figure 3)."
+/>
+
+## Fix one: leap over a window
+
+The error recurrence says the problem is how often you round, so round less often. That needs a way to compute
+outputs from a state you do not rewrite. Equation 3 gives it. Start a window at a quantized state $\hat S_0$, apply
+$p$ tokens, and unroll (the paper's equation 4, with $\Gamma_{a:b}$ the product of the decays from step $a$ to
+step $b$):
+
+$$
+S_\ell = \Gamma_{1:\ell}\, \hat S_0 + \sum_{j=1}^{\ell} \Gamma_{j+1:\ell}\, k_j u_j^{\top}, \qquad 1 \le \ell \le p .
+$$
+
+The state at any point in the window is the fixed boundary state, decayed, plus the window's rank-one writes,
+decayed. You never need $S_\ell$ itself, only $S_\ell^\top x$ for a query or a key. Transpose and multiply
+(Appendix B.2, equation 10):
+
+$$
+S_\ell^{\top} x = \hat S_0^{\top}\, \Gamma_{1:\ell}\, x + \sum_{j=1}^{\ell} u_j \bigl(k_j^{\top} \Gamma_{j+1:\ell}\, x\bigr).
+$$
+
+The first term is one pass over the stored low-bit matrix. Each buffered token adds one dot product and one scaled
+vector, $O(d_k + d_v)$. The decays are diagonal and accumulate incrementally. So a decode step inside the window
+reads $\hat S_0$, reads the buffer, appends its own $(\alpha, k, u)$ to the buffer, and writes no state at all.
+Only at the end of the window does the kernel materialize $S_p$ and quantize it once, into the next window's
+$\hat S_0$. Rounding happens $p$ times less often, and because what gets rounded is the accumulated update rather
+than sixteen separate small ones, the sub-half-step writes are no longer thrown away.
+
+<Figure
+  src="/articles/leapquant/fig2.png"
+  alt="Two panels. (a) Per-token quantization: an FP32 state S0 is quantized to a blue S-hat-0, updated to S1 and quantized again, repeatedly, with errors labelled 0.5%, 2%, 10%. (b) Per-window quantization: S0 is quantized once to S-hat-0; buffer tokens 1 to p are added to it without re-quantizing, and only Sp is quantized, with errors labelled 0.5% and 1%."
+  caption="Per-token against per-window quantization. The error percentages in the panels are schematic (LeapQuant paper, Figure 2)."
+/>
+
+This is the same identity as [ReplaySSM](/articles/replayssm), from Tri Dao's lab and NVIDIA, which this site
+covered in October and which LeapQuant cites. ReplaySSM also writes its state once per 16 tokens, to save the write traffic, and keeps the
+checkpoint at high precision. LeapQuant keeps only the low-bit copy and pays for it with one rounding per window,
+the "one checkpoint, rounded once per window" case that the ReplaySSM piece measured on a toy as better than
+per-step but far from free. That is why LeapQuant needs the next two fixes and ReplaySSM does not.
+
+The ablation in Table 2 shows the window alone does most of the work. On Qwen3.5-9B, an INT8 state rounded every
+step scores 7.1 on AIME and 9.2 on LiveCodeBench; per-window INT8 scores 82.4 and 60.6. Per-window BF16 scores
+87.8 on AIME, against FP32's 87.9. Note that Table 2's per-step INT8 run is not the one in Table 1, which reports
+3.9 and 10.7 for the same cells; both are near zero. Table 3 varies the window: accuracy improves up to 16 tokens
+and stops, and the kernel is fastest at 16 too (2.52x over FP32 at batch 256 on a B200, against 1.59x at 4 tokens
+and 2.20x at 32), because a longer window means a longer buffer to read every step.
+
+Here is all of this on a toy head you can drive. It is one GDN head with a $32 \times 32$ state, L2-normalised keys
+with two biased channels and four wide ones, two large biased value channels, decays just under 1 and write
+strengths of 0.05 to 0.15, run 4,096 steps exactly and again with a quantized state. The grey line stores every
+step with nothing else. The orange line uses your settings.
+
+<StateQuantSim />
+
+With the defaults (INT8, long memory), storing every step ends at 15% relative state error after 4,096
+quantizations. A 16-token window with no other fix brings that to 4.3% with 256 quantizations. Four Compensator
+Tokens and smoothing bring it to 1.0%. At INT4 the difference is starker: per-step INT4 diverges, its error past
+1000% by the end, while the window with four Compensator Tokens and smoothing holds near 21%. The toy saturates where Figure 3 keeps climbing, because my longest decay is shorter than a
+real model's; the order of the curves carries over, not their values.
+
+## Fix two: pull the outliers out as tokens
+
+The window decides how often the state is rounded. The second fix decides how much each rounding costs. The paper's
+Figure 6 shows one Qwen3.5-9B head (layer 13, head 16) at 8K tokens of context, its entries divided by the median
+magnitude. The largest is 176 times the median, and the big ones sit in a few rows and columns.
+
+With symmetric INT8 and one scale per value channel, which is what the code does, a column's step is its largest
+entry divided by 127. A column containing a 176x outlier quantizes every ordinary entry in it on a grid sized for
+the outlier: a median-sized entry gets less than one level. That is the source of the per-quantization error.
+
+The structure is also low-rank. Figure 5 in the paper shows a few singular values carry most of the state's
+energy, and a value that is large along a row and a column at once is what a rank-one outer product looks like.
+So before quantizing $S_p$, fit the best rank-one approximation and subtract it (equation 5):
+
+$$
+(\tilde k, \tilde u) = \arg\min_{k, u} \bigl\lVert S_p - k u^{\top} \bigr\rVert_F, \qquad R_p = S_p - \tilde k \tilde u^{\top}, \qquad \hat R_p = \mathtt{quant}_b(R_p).
+$$
+
+By Eckart and Young the minimiser is the top singular pair, and with $r$ of them it is the top $r$. Only the
+residual $R_p$ is quantized; the pairs are kept in FP16.
+
+The name comes from the shape. $\tilde k \tilde u^\top$ is exactly the form of a token's write $k_j u_j^\top$, so
+at the start of the next window the Compensator Tokens go into the window's buffer ahead of the real tokens, with a
+decay of 1. The readout in equation 10 already handles buffered rank-one writes, so the decode kernel processes them
+on the same path at the cost of $r$ extra records. The kernel docstring in `kernels.py` says it plainly: "the
+Compensator Tokens are handled exactly like R extra buffer entries with weight 1." No model-specific code, no second
+state.
+
+<Figure
+  src="/articles/leapquant/fig4.png"
+  alt="Matrix diagram: an FP32 state Sp with one tall outlier column on top equals a flatter quantized residual R-hat-0, plus a purple rank-one Compensator Token k-tilde u-tilde transpose, plus grey buffer tokens k1 u1 transpose through kp up transpose, all bracketed as the reconstruction."
+  caption="Per-window reconstruction with Compensator Tokens: the state is a low-bit residual, a few FP16 rank-one terms that hold its large-magnitude structure, and the window's buffered real-token updates (LeapQuant paper, Figure 4)."
+/>
+
+The paper uses $r = 4$ at 8 bits and $r = 6$ at 6 and 4 bits. Table 3 sweeps it at 8 bits: two tokens give 85.7
+on AIME, four give 87.9, eight 88.1, and sixteen give 87.9 with the kernel at 0.74x, slower than FP32. Up to four
+are hidden behind the state read on a B200; more become visible. In the ablation, adding four Compensator Tokens to
+per-window INT8 lifts AIME from 82.4 to 86.6 and LiveCodeBench from 60.6 to 61.5.
+
+How the fit is computed in the shipped kernel is cheaper than the argmin suggests. The paper says power iteration.
+`make_flush` runs `ITERS=1` round of subspace iteration from a fixed random start (`Q0`, seeded with 0),
+orthogonalises with CholeskyQR2 on the tensor cores, and carries the previous window's factors algebraically instead
+of rebuilding them into the dense state. One iteration from a random start does not find the exact top-four
+subspace. It finds a subspace that holds most of a spectrum this concentrated, and what it misses lands in the
+residual, which is quantized anyway. That is a sound trade, and the accuracy tables are measured with it.
+
+## Fix three: smooth what is left
+
+After the Compensator Tokens the residual is flatter, but not flat. In Figure 6 the peak drops from 176x the median
+to 47x; a few key rows still stand out. Per-value-channel scales do nothing about a row that is large across every
+column. So the third fix rescales rows. For each key row $i$ of the residual, take $c_i$ as the square root of the
+row's mean absolute value, divide the row by it, and quantize (equation 7):
+
+$$
+\hat R_0^{C} = \mathtt{quant}_b\bigl(C^{-1} R_0\bigr), \qquad C = \operatorname{Diag}(c).
+$$
+
+The square root splits the difference between doing nothing and fully normalising, the same move SmoothQuant
+makes between activations and weights. The scales are FP32, fixed within a window and recomputed at each boundary.
+Undoing it costs nothing at read time. Appendix B.3 writes the dequantized INT8 payload as $(Z_0 / 127) B$, with $B$
+the per-value-channel scales, so
+
+$$
+\bigl[C\,\mathtt{dequant}(\hat R_0^{C})\bigr]^{\top} \Gamma x = B\, \frac{Z_0^{\top}}{127}\, C\, \Gamma x ,
+$$
+
+and $C$ folds into the vector $\Gamma x$ before it meets the integer matrix. The kernel multiplies a 128-long vector
+by one more diagonal. The code computes exactly the paper's rule, `sk = torch.sqrt(res.abs().mean(-2)).clamp_min(1e-12)`
+in the KDA path and `s_k[c] = sqrt(mean_v |E[v, c]|)` in the flush kernel's docstring.
+
+In Figure 6 smoothing takes the peak from 47x to 5.3x the median. In the ablation it takes per-window INT8 with
+Compensator Tokens from 86.6 to 87.9 on AIME and from 61.5 to 64.1 on LiveCodeBench, both equal to FP32, at a
+kernel speedup of 2.52x.
+
+<Figure
+  src="/articles/leapquant/fig6.png"
+  alt="Three 3D surface plots of magnitude over median across 128 value channels and 128 key channels. (a) The original state, labelled hard to quantize, has red spikes up to 176 concentrated in a band of value channels. (b) After Compensator Tokens, labelled easier, most spikes are gone but a few reach 30. (c) After smoothing, labelled easy, the surface is flat and low."
+  caption="One Qwen3.5-9B head (layer 13, head 16) at 8K context, normalised by the median: outliers reach 176x in the state, 47x after Compensator Tokens, 5.3x after smoothing (LeapQuant paper, Figure 6)."
+/>
+
+<Video
+  src="/articles/leapquant/clip2"
+  poster="/articles/leapquant/clip2-poster.jpg"
+  alt="Animation: a grey 3D bar field labelled 176x with tall black outlier bars under the update equation; red rows and columns lift out as Compensator Tokens into an FP16 side panel; the remaining field is rescaled per key row and flattens; then a log-scale chart of state error over 65,536 tokens shows INT8 every token on top, INT8 every 16 below it, and LeapQuant INT8 lowest."
+  caption="Outliers lifted out as Compensator Tokens, the residual smoothed, then the measured error curves. The intermediate peak ratios the animation counts through are in-between frames; the paper's numbers are 176x, 47x and 5.3x (video from @conlesspan's post on X)."
+/>
+
+In my toy the order is the same and the proportions are not. The exact state's peak is 48x its median, four
+Compensator Tokens take the residual to 5.3x, and smoothing to 5.1x. My outlier rows are mostly rank-one, so the
+Compensator Tokens remove them and leave smoothing little to do. Turn the Compensator Tokens off in the simulator
+and smoothing alone is worth something: per-window INT8 goes from 4.3% to 3.0%. The paper's head has row structure
+that four rank-one terms do not capture, which is why smoothing earns its 2.6 points on LiveCodeBench there.
+
+## What 1.19 bytes buys, and what it costs to carry
+
+The paper says each window-boundary state takes 1.19 bytes per element instead of 4, a 3.4x reduction. The layout
+comment in `state.py` gives the pieces, and the arithmetic per $128 \times 128$ head is mine: 16,384 bytes of INT8
+residual, 128 FP32 smoothing scales for the key rows and 128 FP32 quantization scales for the value channels
+(1,024 bytes), and four Compensator Tokens of 128 + 128 FP16 values (2,048 bytes). That is 19,456 bytes, 1.1875 bytes per element. It checks.
+
+That figure is for a state at rest, a checkpoint. A request that is decoding also carries its window buffer: 16
+tokens of key and correction, 8 KiB per head, which matches the paper's "around 8 KiB per head per layer" (the
+paper says FP16; the code's `Kbuf` and `Ubuf` are BF16, the same size). That
+adds half a byte per element, so an active GDN stream holds 1.69 bytes per element. KDA's buffer also keeps a
+per-channel FP16 decay for each buffered token (the `Gbuf` tensor), another 4 KiB per head, so an active KDA stream
+holds 1.94, barely under BF16's 2. The memory win on a live request is modest. The big one is on cached checkpoints,
+which carry no buffer, and that is where the paper measures it.
+
+Traffic is the better story. An FP32 state moves 8 bytes per element per step, 4 in and 4 out. On my reading of the
+kernels, a LeapQuant step reads the 1.19-byte checkpoint and the buffer (half full on average), appends one record,
+and writes a checkpoint once every 16 steps, about 1.5 bytes per element per step for GDN. That is roughly 5x less
+than FP32 and 2.6x less than BF16, which is in the range of the kernel speedups the paper measures. This is an
+estimate from the layout, not a measurement.
+
+<StateBudget />
+
+For the Qwen3.8-27B case that started this, 48 layers of 48 heads, the state per stream would go from 144 MiB in
+FP32 to 60.75 MiB active or 42.75 MiB as a cached checkpoint. The 3090 article inferred a pool of five to six GiB
+from HyperQwen's logs, where 37 FP32 streams actually ran. Taking 5.5 GiB as the midpoint, that is 39 FP32 streams,
+78 in BF16 and 92 with LeapQuant's layout. The last number is what
+the paper's design would give. The next section is about why the released code does not give it yet, and why it
+would not run on a 3090 anyway.
+
+## The speed numbers, cell by cell
+
+Figure 7 is one linear-attention layer (32 heads, $d_k = d_v = 128$) against the FP32 kernel in FLA. The 4.25x in
+the thread is one cell: GDN on an RTX 5090 at batch 512. At batch 512, GDN is 2.68x, 3.95x and 4.25x faster on the
+B200, RTX PRO 6000 and RTX 5090, and KDA 2.41x, 3.38x and 3.64x. The abstract's "2.05-3.70x" is the average per GPU.
+The gains are larger on the two workstation cards, which the paper reads as state traffic being a stronger
+bottleneck there.
+
+<Figure
+  src="/articles/leapquant/fig7.png"
+  alt="Six bar-chart panels of throughput in millions of tokens per second against batch sizes 32, 128 and 512, FP32 against LeapQuant, for GDN and KDA on B200, RTX PRO 6000 and RTX 5090. Speedups printed above the bars run from 1.33x to 4.25x, rising with batch size; the largest is GDN on RTX 5090 at batch 512."
+  caption="Kernel throughput of one linear-attention layer, FP32 against LeapQuant INT8 (LeapQuant paper, Figure 7)."
+/>
+
+A layer kernel is not a model. In pure decode steps through vLLM at 4K context, the gain is 1.22-1.29x at the
+largest batch on a B200 and 1.22-1.57x on the RTX PRO 6000, growing with batch size as linear attention takes more
+of each step. Appendix C has the gain still at 1.18x for Kimi-Linear-48B-A3B at 8K context.
+
+End to end (Figure 9), the paper reports 1.19-2.98x output throughput on the B200 and 1.31-1.65x on the RTX PRO
+6000, and 1.57x on average. The top of that range is GPQA, whose long outputs make the state checkpoints dominate
+memory: concurrency rises from 10 to 23 requests per GPU on GLM-5.3-Flash and from 32 to 61 on Qwen3.8-Flash-Next.
+The thread's "up to 2x" undersells the paper's own maximum and oversells its average. Those end-to-end runs keep a
+state checkpoint every 1K cached tokens, which the paper calls the vLLM and SGLang default with prefix caching on,
+and that is also the setting for the memory figure: 41%, 51% and 56% less end-to-end memory on Qwen3.5-9B,
+Qwen3.5-35B-A3B and Kimi-Linear-48B-A3B. The spacing matters, because the saving scales with how many checkpoints
+are kept. The [FlashState](/articles/flashstate) paper found vLLM checkpointing GLM-5.3-Flash only at 4,352-token
+block boundaries and SGLang on a 256-token grid, so real engines sit on both sides of the paper's 1K.
+
+<Video
+  src="/articles/leapquant/clip3"
+  poster="/articles/leapquant/clip3-poster.jpg"
+  alt="Animated bars: AIME 2026 accuracy with an FP32 state at 87.9, INT8 rounded every token at 7.1, and LeapQuant INT8 at 87.9, circled as equal to FP32; then horizontal bars of LeapQuant INT8 kernel speedup over the FP32 GDN layer at batch 512: B200 2.68x, RTX PRO 6000 3.95x, RTX 5090 4.25x."
+  caption="The accuracy and kernel numbers from Table 2 and Figure 7 as the animation shows them; the bars grow through in-between values before landing (video from @conlesspan's post on X)."
+/>
+
+The accuracy side holds up at 8 bits. LeapQuant averages 84.4 over the twelve model-task pairs against FP32's 84.0
+and stays within 2.5 points of FP32 on every pair. At 6 bits it also averages 84.4. At 4 bits it averages 80.6
+against TurboQuant's 45.0 and MXFP4's 16.7, within 3.2 points on Qwen3.5-9B and 1.3 on Qwen3.8-Flash-Next, but
+GLM-5.3-Flash loses 6.5 points on AIME and 11.7 on BeyondAIME. "Matches FP32" is an 8-bit and 6-bit claim.
+
+## What the released code does
+
+I cloned the repository at commit `61434a9` (11 November) and read `state.py`, the two vLLM hooks and the parts of
+`kernels.py` (2,332 lines of TileLang) I cite: the docstrings, the step kernel's load stage and the flush kernel's
+fit and residual. I did not run it: there is no Hopper or Blackwell GPU here. What the code says:
+
+- **It is 8-bit only.** `kernels.py` opens with "TileLang kernels of LeapQuant's 8-bit recurrent state (rank-4
+  Compensator Tokens + smoothed INT8 residual, window L = 16)". There is no 6-bit or 4-bit path, and `make_flush`
+  asserts $1 \le R \le 4$, or $R = 8$ for 128 x 128 GDN heads only, so the paper's $r = 6$ low-bit configuration cannot be built.
+- **It keeps the FP32 allocation.** The `state.py` docstring: "the 8-bit checkpoint lives inside vLLM's fp32 state
+  slot". The INT8 payload, the scales and the factors are views aliasing the FP32 tensor, and the window buffers are
+  allocated beside it. Per active request the plugin holds more memory than plain vLLM, not less. What it saves is
+  traffic, which is where the speedup comes from.
+- **It refuses prefix caching.** `get_state` raises unless the engine runs with `--no-enable-prefix-caching`, and
+  `serve.sh` passes that flag. The paper's 41-56% memory reductions and its largest end-to-end gains were measured
+  with a checkpoint per 1K cached tokens. The open code cannot reproduce that setting.
+- **Speculative decoding falls back to per-step rounding.** In `vllm/gdn.py`, a step with speculative tokens takes
+  a "round trip every slot" path: dequantize, run vLLM's own kernel, quantize again, reset the window. `vllm/glm.py`
+  does the same for KDA.
+  That is a quantization per verification step, the regime the paper shows failing. The paper does not evaluate
+  speculative decoding, so I cannot say how much it matters with a few accepted tokens per step.
+- **It needs TMA.** The step kernel's producer warp streams the INT8 tile, the scales, the factors and the buffer
+  with `T.tma_copy`. TMA arrived with Hopper. The paper's three GPUs are Blackwell parts, and I found no fallback.
+  An RTX 3090 is out.
+- **It covers two model classes.** The plugin hooks vLLM's Qwen GDN layer and GLM-5.3's KDA layer, and the GLM path
+  asserts "LeapQuant supports the bounded KDA gate only". Kimi-Linear, which the paper evaluates at 8 bits, is not
+  wired in.
+- **It is pinned to `vllm==0.30.0` and `tilelang==0.1.12`**, with head shapes 128 x 128, 64 x 128 and 64 x 64.
+
+One comment in the flush kernel is the kind you only write after a bad night: a floor on the cumulative decay
+because "a fully decayed head has a denormal product (2e-41 seen on 9B layer 11) and 1/pn = inf", which poisoned
+the residual into NaN outputs. Carrying a product of 16 decays and dividing by it is exactly where a real model's
+gates will find the edge of FP32.
+
+## Worth running on Blackwell, not yet on a 3090
+
+The analysis is the best part. Equation 9 plus the observation that per-step rounding is biased, not noisy, explains
+both the BF16 drop and why stochastic rounding barely helps, and the fix follows from it: round less often, and
+make each rounding cheaper. The window is the big lever, worth about 75 AIME points over per-step INT8 on
+Qwen3.5-9B by itself; Compensator Tokens and smoothing take the last five. Reusing the token path for the outlier
+factors is the kind of design where the kernel gets simpler instead of harder.
+
+For an engine that serves GDN or KDA models on Blackwell, at large batch, without prefix caching, the released
+plugin is worth trying today: the kernel speedups come from traffic and the plugin keeps that. Everyone else should
+read the paper for the method and wait for the port. The memory story, which is the one the 3090 case needed, is in
+the paper and not yet in the code. And if you are on a consumer card doing what HyperQwen did, storing the state at
+16 bits and re-rounding it every token, the BF16 arithmetic above is a reason to prefer FP16 over BF16: FP16's
+mantissa still moves a 0.9995 decay that BF16 cannot represent. That last point is my reasoning from the number
+formats; the paper tests BF16 and not FP16.
+
+The step I would watch for next is the one ReplaySSM already took: keep the boundary state in high precision for
+the recurrence and use the low-bit copy only for reads. That takes most of the rounding out of the loop, though not
+all: the high-precision copy is itself rounded at each flush unless it stays in FP32, and on GDN the corrections
+computed from the low-bit copy carry its error through the rest of a window. It also costs the memory LeapQuant is
+trying to save. LeapQuant's answer is that with three fixes, one rounding per 16 tokens is
+small enough. On its tables, at 8 bits, it is.
+
+**How I checked.** Read: the paper (v2), its appendices and all six figures I reproduce; the thread and its video;
+`state.py`, `vllm/gdn.py`, `vllm/glm.py`, `serve.sh` and `pyproject.toml` in full and the cited parts of `kernels.py`,
+at commit `61434a9`. Computed: the 1.1875 bytes per element and 8 KiB buffer from the layout, the per-stream sizes from the
+Qwen3.8-27B and GLM-5.3-Flash shapes, the traffic estimate, and the BF16 and FP16 decay counts. Ran: the toy
+simulator above, whose code is `components/articles/leapquant/sim.ts`. Not run: LeapQuant itself.
