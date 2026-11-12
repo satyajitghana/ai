@@ -95,6 +95,11 @@ export function personJsonLd(): WithContext<Person> {
       "CUDA",
       "MLOps",
       "PyTorch",
+      "AI Agents",
+      "Reality Capture",
+      "Scan-to-BIM",
+      "Building Information Modeling",
+      "Gaussian Splatting",
     ],
   }
 }

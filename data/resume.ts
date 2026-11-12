@@ -95,38 +95,40 @@ export const resume: Resume = {
   },
 
   summary:
-    "Engineering leader and deep-learning systems builder. I lead engineering for " +
-    "industrial-AI products — 3D perception, LiDAR/point-cloud pipelines, and " +
-    "structural-defect analysis — and ship them as high-performance C++/CUDA/gRPC " +
-    "services. Two USPTO patents pending. Previously taught MLOps and computer vision.",
+    "Engineering leader building AI agents and reality-capture systems for construction. " +
+    "I architect, build and research Kaël, Inkers' AI-native PMC platform, and build the " +
+    "capture-to-BIM work around it: 360° and fisheye site scans to metric splats, meshes " +
+    "and point clouds, and point-cloud-to-BIM. Before that, 3D perception, LiDAR pipelines " +
+    "and C++/CUDA/gRPC services. Two USPTO patents pending. Previously taught MLOps and computer vision.",
 
   experience: [
     {
       organization: "Inkers Technology",
       url: "https://inkers.ai",
       location: "Bengaluru, India",
-      // NOTE: employment dates below are sensible estimates and require
-      // Satyajit's confirmation before this resume is treated as final.
+      // Dates follow the portfolio's experience list (satyajit.si, lib/data.ts),
+      // which is the more authoritative source. It overlaps the first two roles
+      // by a month (Apr-May 2023); kept as written there.
       roles: [
-        // Head of Engineering — current. Estimated promotion ~2024.
-        { title: "Head of Engineering", start: "2024-01" },
-        // Deep Learning Software Engineer — estimated ~2022–2024.
+        { title: "Head of Engineering", start: "2023-04" },
         {
           title: "Deep Learning Software Engineer",
-          start: "2022-06",
-          end: "2024-01",
+          start: "2022-04",
+          end: "2023-05",
         },
-        // Deep Learning Associate — estimated start ~2021.
         {
           title: "Deep Learning Associate",
           start: "2021-07",
-          end: "2022-06",
+          end: "2022-04",
         },
       ],
       summary:
         "Lead engineering for industrial-AI products across 3D perception, " +
         "LiDAR/point-cloud pipelines, and structural-defect analysis.",
       highlights: [
+        "Lead the architecture of Kaël, Inkers' AI-native PMC (construction project-management) platform, and implement it across the agent backend (FastAPI, Agno, Gemini) and the React frontend; its agents turn recorded project meetings into drafted project documents.",
+        "Built a pipeline from Insta360 dual-fisheye site walks to metric, gravity-aligned Gaussian splats, meshes and dense point clouds (SAM 3.1 masking, rig SfM with IMU scale and gravity, OpenMVS), with a three.js viewer that overlays the design model.",
+        "Building point-cloud-to-BIM (a model writes a building as an element program that compiles to IFC and Revit) and an MCP agent workspace inside Revit for drawings-to-BIM.",
         "Lead engineering for industrial-AI products: 3D perception, LiDAR/point-cloud pipelines, and structural-defect analysis.",
         "Design custom neural networks, CUDA kernels, and high-performance C++/gRPC services for production deployment.",
         "Named inventor on 2 USPTO patents pending (assigned to Inkers); grew from Deep Learning Associate to Head of Engineering.",
@@ -184,6 +186,24 @@ export const resume: Resume = {
   ],
 
   projects: [
+    {
+      name: "Hagrid",
+      description:
+        "Multi-agent research system for Indian equities: analyst, manager, CIO and risk agents on Agno and Gemini, market data via the Fyers API, FastAPI and Next.js.",
+      url: "https://hagrid.satyajit.si",
+    },
+    {
+      name: "Vritti UI",
+      description:
+        "Copy-paste React component registry with page blocks and a theme editor.",
+      url: "https://vritti.satyajit.si",
+    },
+    {
+      name: "Quantum Orbital Visualizer",
+      description:
+        "Atomic orbitals computed in Rust and C++ compiled to WebAssembly, rendered with three.js.",
+      url: "https://atoms.satyajit.si",
+    },
     {
       name: "torch-point-ops",
       description:

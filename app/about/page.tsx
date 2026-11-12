@@ -4,6 +4,15 @@ import Link from "next/link"
 import { PageShell } from "@/components/site/page-shell"
 import { profile } from "@/data/profile"
 
+// Articles on this site that sit closest to the capture-to-BIM work.
+const related = [
+  { slug: "3dgs-capture-pipelines", label: "Gaussian-splat capture from a 360 camera" },
+  { slug: "gofish-fisheye-gaussian-splatting", label: "GOFish: splats on whole fisheye images" },
+  { slug: "kolc-3dgs-bim", label: "KOLC+: Gaussian splats inside BIM" },
+  { slug: "spatiallm", label: "SpatialLM: a room scan in, a floor plan out" },
+  { slug: "debim", label: "debim: a YAML building language and IFC" },
+] as const
+
 export const metadata: Metadata = {
   title: "About",
   description: profile.tagline,
@@ -12,13 +21,13 @@ export const metadata: Metadata = {
 
 const timeline = [
   {
-    period: "now",
+    period: "2023 →",
     what: "Head of Engineering · Inkers Technology",
     detail:
-      "Leading engineering for industrial AI — 3D perception, LiDAR/point-cloud pipelines, structural-defect analysis. Two USPTO patents pending.",
+      "Kaël, Inkers' AI-native PMC platform: architecture, agent backend, frontend and research; reality capture from 360° and fisheye site walks; point-cloud-to-BIM. Earlier: 3D perception, LiDAR pipelines and structural-defect analysis. Two USPTO patents pending.",
   },
   {
-    period: "2021 →",
+    period: "2021 – 23",
     what: "Deep Learning Engineer · Inkers Technology",
     detail:
       "Custom neural networks, deployment pipelines, high-performance C++/gRPC services.",
@@ -48,6 +57,53 @@ export default function Page() {
             {para}
           </p>
         ))}
+      </section>
+
+      <section className="mt-12">
+        <h2 className="mb-4 font-mono text-xs tracking-wide text-muted-foreground">
+          ~/work
+        </h2>
+        <ul className="space-y-6">
+          {profile.work.map((w) => (
+            <li key={w.name}>
+              <p className="font-medium">
+                {w.url ? (
+                  <a
+                    href={w.url}
+                    className="underline underline-offset-4 hover:text-muted-foreground"
+                  >
+                    {w.name}
+                  </a>
+                ) : (
+                  w.name
+                )}{" "}
+                <span className="font-mono text-xs font-normal text-muted-foreground">
+                  {w.kind === "inkers" ? "at Inkers" : "indie"} · {w.status}
+                </span>
+              </p>
+              <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
+                {w.what}
+              </p>
+              <p className="mt-1 font-mono text-xs text-muted-foreground">
+                {w.stack.join(" · ")}
+              </p>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-6 max-w-prose text-sm leading-6 text-muted-foreground">
+          Related reading here:{" "}
+          {related.map((r, i) => (
+            <span key={r.slug}>
+              <Link
+                href={`/articles/${r.slug}`}
+                className="underline underline-offset-4 hover:text-foreground"
+              >
+                {r.label}
+              </Link>
+              {i < related.length - 1 ? "; " : "."}
+            </span>
+          ))}
+        </p>
       </section>
 
       <section className="mt-12">
