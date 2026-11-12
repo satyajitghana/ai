@@ -21,7 +21,7 @@ BESPOKE.define((() => {
   const cx = j => X0 + j * (CW + GAP) + CW / 2
 
   return {
-    stampAt: k => [1270, Math.max(k.top + 40, 250) + 500],
+    stampAt: k => [1240, Math.max(k.top + 40, 250) - 50],
     plan: () => ({
       min: [3.6, 4.2, 4.2, 3.8],
       events: [
@@ -50,10 +50,10 @@ BESPOKE.define((() => {
         const fill = cloud && split > .5 ? k.P.b : k.P.a
         k.push(); k.alpha(appear)
         k.seed('card' + j + (cloud && split > .5 ? 'c' : 'l'))
-        k.shape(k.rrect(x, CY, CW, CH, 14), { fill, op: cloud && i === 3 ? .95 : .6, sw: .9 })
-        if (p.cards && p.cards[j]) k.text(p.cards[j], x + CW / 2, CY + 26, { role: 'label', size: 22, min: 12, maxW: CW - 16, lines: 2, align: 'center', col: k.textOn(fill) })
+        k.shape(k.rrect(x, CY, CW, CH, 14), { fill, op: cloud && i === 3 ? .5 : .28, sw: 1.1 })
+        if (p.cards && p.cards[j]) k.text(p.cards[j], x + CW / 2, CY + 26, { role: 'label', size: 25, min: 12, maxW: CW - 14, lines: 2, align: 'center', col: k.ink })
         const tag = cloud && split > .5 ? p.cloud : p.local
-        if (tag) k.text(tag, x + CW / 2, CY + CH - 26, { role: 'mono', size: 18, min: 10, maxW: CW - 16, lines: 1, align: 'center', col: k.textOn(fill), alpha: i === 0 ? .7 : 1 })
+        if (tag) k.text(tag, x + CW / 2, CY + CH - 26, { role: 'mono', size: 20, min: 10, maxW: CW - 16, lines: 1, align: 'center', col: cloud && split > .5 ? k.P.b : k.dim, alpha: i === 0 ? .8 : 1 })
         k.pop()
       }
 
