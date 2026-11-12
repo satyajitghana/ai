@@ -5,7 +5,13 @@ import { getArticles, getBlogPosts, getLogs } from "@/lib/content"
 import { absoluteUrl, siteUrl } from "@/lib/site"
 
 // RSS feed of articles + blog + logs — subscribable by humans and agents alike.
+//
+// The newest FEED_ITEMS only. It once carried every item (707, ~800 KB), and a
+// feed reader re-downloads the whole document on every poll to learn about one
+// new entry. The archive is the sitemap, /llms.txt and /api/articles; a feed is
+// for what is new.
 export const dynamic = "force-static"
+const FEED_ITEMS = 50
 
 export function GET() {
   const feed = new Feed({
@@ -16,6 +22,8 @@ export function GET() {
     language: "en",
     copyright: `© ${new Date().getFullYear()} ${profile.name}`,
     author: { name: profile.name, link: siteUrl },
+    // <atom:link rel="self">: the feed's own URL, which validators ask for
+    feedLinks: { rss: absoluteUrl("/feed.xml") },
   })
 
   const items = [
@@ -40,7 +48,9 @@ export function GET() {
       description: l.body.slice(0, 280),
       date: new Date(l.date),
     })),
-  ].sort((a, b) => b.date.getTime() - a.date.getTime())
+  ]
+    .sort((a, b) => b.date.getTime() - a.date.getTime())
+    .slice(0, FEED_ITEMS)
 
   for (const item of items) feed.addItem(item)
 
