@@ -1201,6 +1201,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "qwen-warp-llamampere/trellis-codes": () => import("@/components/articles/qwen-warp-llamampere/trellis-codes"),
   "qwen3-8-27b-on-12gb/trellis-decode": () => import("@/components/articles/qwen3-8-27b-on-12gb/trellis-decode"),
   "qwen3-8-27b-on-12gb/vram-planner": () => import("@/components/articles/qwen3-8-27b-on-12gb/vram-planner"),
+  "qwen3-8-27b-throughput-week/batch-roofline": () => import("@/components/articles/qwen3-8-27b-throughput-week/batch-roofline"),
+  "qwen3-8-27b-throughput-week/claim-map": () => import("@/components/articles/qwen3-8-27b-throughput-week/claim-map"),
   "qwen3-8-27b-variants/answer-cost": () => import("@/components/articles/qwen3-8-27b-variants/answer-cost"),
   "qwen3-8-27b-variants/token-weights": () => import("@/components/articles/qwen3-8-27b-variants/token-weights"),
   "qwen3-8-2b-distill/filter-anatomy": () => import("@/components/articles/qwen3-8-2b-distill/filter-anatomy"),
