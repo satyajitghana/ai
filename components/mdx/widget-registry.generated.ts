@@ -8,6 +8,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "3d-reconstruction-roundup-3/certify-toy": () => import("@/components/articles/3d-reconstruction-roundup-3/certify-toy"),
   "3d-reconstruction-roundup-3/lamaria-board": () => import("@/components/articles/3d-reconstruction-roundup-3/lamaria-board"),
   "3d-reconstruction-roundup-3/regime-bars": () => import("@/components/articles/3d-reconstruction-roundup-3/regime-bars"),
+  "3d-reconstruction-roundup-4/affine-align": () => import("@/components/articles/3d-reconstruction-roundup-4/affine-align"),
+  "3d-reconstruction-roundup-4/segment-kernel": () => import("@/components/articles/3d-reconstruction-roundup-4/segment-kernel"),
   "3d-reconstruction-roundup/floater-toy": () => import("@/components/articles/3d-reconstruction-roundup/floater-toy"),
   "3dcodeverse/refine-loop": () => import("@/components/articles/3dcodeverse/refine-loop"),
   "3dcodeverse/row-ledger": () => import("@/components/articles/3dcodeverse/row-ledger"),
