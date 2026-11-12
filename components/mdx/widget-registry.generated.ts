@@ -1622,6 +1622,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "web-font-agent-prompt/byte-ladder": () => import("@/components/articles/web-font-agent-prompt/byte-ladder"),
   "web-font-agent-prompt/fallback-fit": () => import("@/components/articles/web-font-agent-prompt/fallback-fit"),
   "web-font-agent-prompt/table-bytes": () => import("@/components/articles/web-font-agent-prompt/table-bytes"),
+  "weight-edits-without-finetuning/edit-toy": () => import("@/components/articles/weight-edits-without-finetuning/edit-toy"),
+  "weight-edits-without-finetuning/touched-bars": () => import("@/components/articles/weight-edits-without-finetuning/touched-bars"),
   "weight-space-programming/dose-curve": () => import("@/components/articles/weight-space-programming/dose-curve"),
   "weight-space-programming/edit-anatomy": () => import("@/components/articles/weight-space-programming/edit-anatomy"),
   "weight-space-programming/loop-strip": () => import("@/components/articles/weight-space-programming/loop-strip"),
