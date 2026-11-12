@@ -760,6 +760,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "lithos-metal/decode-budget": () => import("@/components/articles/lithos-metal/decode-budget"),
   "littlebit-0-1-bit/bpw-calculator": () => import("@/components/articles/littlebit-0-1-bit/bpw-calculator"),
   "littlebit-0-1-bit/init-error": () => import("@/components/articles/littlebit-0-1-bit/init-error"),
+  "llama-modchip/codebook-explorer": () => import("@/components/articles/llama-modchip/codebook-explorer"),
+  "llama-modchip/token-budget": () => import("@/components/articles/llama-modchip/token-budget"),
   "llamacpp-decision-models/cost-explorer": () => import("@/components/articles/llamacpp-decision-models/cost-explorer"),
   "llamacpp-decision-models/prompt-anatomy": () => import("@/components/articles/llamacpp-decision-models/prompt-anatomy"),
   "llm-compressor-0-14/gptq-sweep": () => import("@/components/articles/llm-compressor-0-14/gptq-sweep"),
