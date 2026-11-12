@@ -88,7 +88,7 @@ BESPOKE.define((() => {
   const HOLES = runsOf(d => count(CORNER, d) === 0)
 
   return {
-    stampAt: k => [1150, k.top - 30],
+    stampAt: k => [1395, Math.max(k.top + 30, 230) + 40],
     plan: () => ({
       min: [3.6, 4.6, 4.2, 4.2, 5.4],
       events: [{ step: 0, at: .3, type: 'draw' }, { step: 1, at: .2, type: 'ticks', n: 5, span: 2.2 }, { step: 2, at: .2, type: 'ticks', n: 5, span: 2.2 },
