@@ -28,6 +28,12 @@ export default function ModelsPage() {
         effort), llm-stats, provider docs, and Epoch (ECI). Leaderboards churn — treat this as a
         dated picture, not live data.
       </p>
+      <p className="-mt-4 mb-6 max-w-prose font-mono text-xs text-muted-foreground">
+        Index v5 is a new scale with different benchmarks, and Artificial Analysis has re-scored{" "}
+        {models.filter((m) => m.intelligence != null).length} of these models on it so far. The
+        rest show no intelligence score rather than a v4 number that would not compare, so the
+        older history thins out until they are re-run.
+      </p>
 
       <IntelligenceScatter models={models} />
       <MetricRanking models={models} />

@@ -1,253 +1,282 @@
-# /models sources — snapshot 2026-10-08
+# /models sources — snapshot 2026-11-12
 
-Provenance for `data/models.ts`. Plain list, one line per model that was added or changed in the October refresh.
+Provenance for `data/models.ts`. Plain list, one line per model.
 
-- **AA**: every AA-measured value comes from one fetch of https://artificialanalysis.ai/leaderboards/models on 2026-10-08 (Intelligence Index v4.3.2, up from v4.3 in September; the version and its changelog are on https://artificialanalysis.ai/methodology/intelligence-benchmarking), parsed from the per-model records in the page's Next.js payload. The per-model page is linked below by AA model slug; each line names the variant used (the highest-effort reasoning variant, by AA's current variant name) and says when AA marks the score as estimated.
-- **llm-stats**: https://llm-stats.com/ai-news and its JSON (https://api.zeroeval.com/leaderboard/models/list, `/leaderboard/models/<id>`) for the release sweep and for models AA does not list; the page URL is https://llm-stats.com/models/<id>.
-- **Release sweep**: AA's release list (the same payload), llm-stats' release list, and Hugging Face (`/api/models?author=…&sort=createdAt`) for open-weight releases; provider facts (sizes, availability, launch prices) come through llm-stats' per-model records, which cite the provider pages.
-- **Epoch ECI**: re-fetched this time. `eci` is the `eci` column of `epoch_capabilities_index/eci_scores.csv` in https://epoch.ai/data/benchmark_data.zip (fetched 2026-10-08), set on 88 rows where Epoch scores the same model version; everything else is null. Kimi K3's ECI is now Epoch's 157.45, replacing the 155.53 carried from scaling01.
+- **AA**: every AA-measured value comes from one fetch on 2026-11-12 of the per-model records in Artificial Analysis's Next.js payload. AA now scores on **Intelligence Index v5.0.1** (v5.0 in October, v5.0.1 in November; changelog under "Version History" on https://artificialanalysis.ai/methodology/intelligence-benchmarking). The leaderboard page https://artificialanalysis.ai/leaderboards/models now embeds only the 284 current variants, so the full set of 735 variant records (deprecated ones included) was read from https://artificialanalysis.ai/models/o3, which embeds all of them; all 284 leaderboard records are identical to their copies there, and https://artificialanalysis.ai/models/kimi-k3 embeds the same 735 records with identical values. Speed is now `headline.outputSpeed` and latency `headline.timeToFirstToken`. Only 122 variants carry a v5 score; a row whose variant AA has not re-run has `intelligence: null` (no v4.3.2 score is carried: the scales differ). AA's payload no longer marks scores as estimated.
+- **llm-stats**: https://api.zeroeval.com/leaderboard/models/list (release sweep) and `/leaderboard/models/<id>` for models AA does not list; page URL https://llm-stats.com/models/<id>.
+- **Hugging Face**: `/api/models?author=…&search=…` and `/api/models/<repo>` (creation date, safetensors parameter total) plus each repo's `config.json` for context length.
+- **Epoch ECI**: `eci` column of `epoch_capabilities_index/eci_scores.csv` in https://epoch.ai/data/benchmark_data.zip, fetched 2026-11-12. Epoch re-fitted the index, so every ECI value moved (Opus 5.5 167.33 → 168.54, Falcon-180B 112.13 → 107.11). Set on 95 rows.
 
-## Updated from AA (186)
+## Updated from AA (193)
 
-Intelligence, price, speed, latency and context re-read from AA for all of these. "Changed" lists the AA fields whose value moved since September (unlisted means AA's numbers are identical); "also" lists other fields that changed.
+Everything re-read from AA. "v5" is the row's Intelligence Index now; "changed" lists other AA fields that moved since October.
 
-- A.X-K2 — https://artificialanalysis.ai/models/a-x-k2 (A.X-K2); changed: intelligence; null: price (AA lists none), speed/latency (AA has no measurement)
-- Apodex 1.1 — https://artificialanalysis.ai/models/apodex-1-1 (Apodex 1.1); null: size (not published), speed/latency (AA has no measurement)
-- Apriel-1.6-15B-Thinker — https://artificialanalysis.ai/models/apriel-v1-6-15b-thinker (Apriel-v1.6-15B-Thinker, estimated); null: speed/latency (AA has no measurement)
-- Celeris-1 — https://artificialanalysis.ai/models/celeris-1 (Celeris-1); changed: speed, latency; null: size (not published)
-- Command A — https://artificialanalysis.ai/models/command-a (Command A, estimated); changed: speed, latency
-- DBRX Instruct — https://artificialanalysis.ai/models/dbrx (DBRX Instruct, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- DeepSeek V4 Flash — https://artificialanalysis.ai/models/deepseek-v4-flash-0420 (DeepSeek V4 Flash 0420 (Max)); also ECI (Epoch); null: speed/latency (AA has no measurement)
-- DeepSeek V4 Flash 0731 — https://artificialanalysis.ai/models/deepseek-v4-flash (DeepSeek V4 Flash 0731 (Max)); changed: speed, latency; also ECI (Epoch)
-- DeepSeek V4 Flash Vision — https://artificialanalysis.ai/models/deepseek-v4-flash-vision (DeepSeek V4 Flash Vision (Max)); changed: speed, latency; null: size (not published)
-- DeepSeek V4 Pro — https://artificialanalysis.ai/models/deepseek-v4-pro-0424 (DeepSeek V4 Pro 0424 (Max)); changed: speed, latency; also ECI (Epoch)
-- DeepSeek V4 Pro 0813 — https://artificialanalysis.ai/models/deepseek-v4-pro (DeepSeek V4 Pro 0813 (Max)); changed: speed, latency; also ECI (Epoch)
-- DeepSeek V4.1 Flash — https://artificialanalysis.ai/models/deepseek-v4-1-flash (DeepSeek V4.1 Flash (Max)); changed: speed, latency; also ECI (Epoch)
-- DeepSeek-R1-Distill-Llama-70B — https://artificialanalysis.ai/models/deepseek-r1-distill-llama-70b (DeepSeek R1 Distill Llama 70B, estimated); null: speed/latency (AA has no measurement)
-- DeepSeek-R1-Distill-Qwen-32B — https://artificialanalysis.ai/models/deepseek-r1-distill-qwen-32b (DeepSeek R1 Distill Qwen 32B, estimated); also ECI (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
-- Devstral 2 — https://artificialanalysis.ai/models/devstral-2 (Devstral 2); list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
-- ERNIE 4.5 300B-A47B — https://artificialanalysis.ai/models/ernie-4-5-300b-a47b (ERNIE 4.5 300B A47B, estimated); null: speed/latency (AA has no measurement)
-- EXAONE 4.0 32B — https://artificialanalysis.ai/models/exaone-4-0-32b-reasoning (EXAONE 4.0 32B (Reasoning), estimated); list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
-- EXAONE 4.5 33B — https://artificialanalysis.ai/models/exaone-4-5-33b (EXAONE 4.5 33B (Reasoning), estimated); also variant: was "EXAONE 4.5 33B"; null: price (AA lists none), speed/latency (AA has no measurement)
-- Fable 5 — https://artificialanalysis.ai/models/claude-fable-5 (Claude Fable 5 (Max, Opus 4.8 Fallback)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Fable 5.1 — https://artificialanalysis.ai/models/claude-fable-5-1 (Claude Fable 5.1 (Max, Default Fallback)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- G9v3-39A5B — https://artificialanalysis.ai/models/g9v3-39a5b (G9v3-39A5B, estimated); null: speed/latency (AA has no measurement)
-- G9v3-3B — https://artificialanalysis.ai/models/g9v3-3b (G9v3-3B, estimated); null: speed/latency (AA has no measurement)
-- Gemini 2.5 Flash — https://artificialanalysis.ai/models/gemini-2-5-flash-reasoning (Gemini 2.5 Flash (Reasoning), estimated); changed: speed, latency; null: size (not published)
-- Gemini 2.5 Flash-Lite — https://artificialanalysis.ai/models/gemini-2-5-flash-lite-reasoning (Gemini 2.5 Flash-Lite (Reasoning), estimated); changed: speed, latency; null: size (not published)
-- Gemini 2.5 Pro — https://artificialanalysis.ai/models/gemini-2-5-pro (Gemini 2.5 Pro); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Gemini 3 Flash — https://artificialanalysis.ai/models/gemini-3-flash-reasoning (Gemini 3 Flash Preview (Reasoning), estimated); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Gemini 3 Pro — https://artificialanalysis.ai/models/gemini-3-pro (Gemini 3 Pro Preview (High), estimated); also ECI (Epoch); null: size (not published), speed/latency (AA has no measurement)
-- Gemini 3.1 Flash-Lite — https://artificialanalysis.ai/models/gemini-3-1-flash-lite-preview (Gemini 3.1 Flash-Lite); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Gemini 3.1 Pro — https://artificialanalysis.ai/models/gemini-3-1-pro-preview (Gemini 3.1 Pro Preview); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Gemini 3.5 Flash — https://artificialanalysis.ai/models/gemini-3-5-flash (Gemini 3.5 Flash (High)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Gemini 3.5 Flash-Lite — https://artificialanalysis.ai/models/gemini-3-5-flash-lite (Gemini 3.5 Flash-Lite); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Gemini 3.6 Flash — https://artificialanalysis.ai/models/gemini-3-6-flash (Gemini 3.6 Flash (High)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Gemini 3.7 Flash — https://artificialanalysis.ai/models/gemini-3-7-flash (Gemini 3.7 Flash (High)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Gemini 3.8 Flash — https://artificialanalysis.ai/models/gemini-3-8-flash (Gemini 3.8 Flash (High)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Gemma 3 270M — https://artificialanalysis.ai/models/gemma-3-270m (Gemma 3 270M, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Gemma 3 27B — https://artificialanalysis.ai/models/gemma-3-27b (Gemma 3 27B Instruct); also ECI (Epoch); null: speed/latency (AA has no measurement)
-- Gemma 4 12B — https://artificialanalysis.ai/models/gemma-4-12b (Gemma 4 12B (Reasoning), estimated); changed: speed, latency, context
-- Gemma 4 26B A4B — https://artificialanalysis.ai/models/gemma-4-26b-a4b (Gemma 4 26B A4B (Reasoning), estimated); also ECI (Epoch); null: speed/latency (AA has no measurement)
-- Gemma 4 31B — https://artificialanalysis.ai/models/gemma-4-31b (Gemma 4 31B (Reasoning)); changed: intelligence, speed, latency; also ECI (Epoch)
-- Gemma 4 E2B — https://artificialanalysis.ai/models/gemma-4-e2b (Gemma 4 E2B (Reasoning), estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Gemma 4 E4B — https://artificialanalysis.ai/models/gemma-4-e4b (Gemma 4 E4B (Reasoning), estimated); changed: speed, latency
-- GLM-5.2 — https://artificialanalysis.ai/models/glm-5-2 (GLM-5.2 (Max)); changed: speed, latency; also ECI (Epoch)
-- GLM-5.3 — https://artificialanalysis.ai/models/glm-5-3 (GLM-5.3 (Max)); changed: speed, latency; also ECI (Epoch)
-- GLM-5.3 Flash — https://artificialanalysis.ai/models/glm-5-3-flash (GLM-5.3-Flash); changed: speed, latency; also ECI (Epoch)
-- GPT-5.3 Codex — https://artificialanalysis.ai/models/gpt-5-3-codex (GPT-5.3 Codex (Xhigh), estimated); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- GPT-5.5 — https://artificialanalysis.ai/models/gpt-5-5 (GPT-5.5 (Xhigh)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- GPT-5.5 Instant — https://artificialanalysis.ai/models/gpt-5-5-instant-06-26 (GPT-5.5 Instant (June 2026)); changed: speed, latency; null: size (not published)
-- GPT-5.6 Luna — https://artificialanalysis.ai/models/gpt-5-6-luna (GPT-5.6 Luna (Max)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- GPT-5.6 Sol — https://artificialanalysis.ai/models/gpt-5-6-sol (GPT-5.6 Sol (Max)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- GPT-5.6 Terra — https://artificialanalysis.ai/models/gpt-5-6-terra (GPT-5.6 Terra (Max)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- GPT-6 Astra — https://artificialanalysis.ai/models/gpt-6-astra (GPT-6 Astra (Max)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- GPT-6 Luna — https://artificialanalysis.ai/models/gpt-6-luna (GPT-6 Luna (Max)); changed: intelligence, speed, latency; also ECI (Epoch); null: size (not published)
-- GPT-6 Sol — https://artificialanalysis.ai/models/gpt-6-sol (GPT-6 Sol (Max)); changed: intelligence, speed, latency, context; also ECI (Epoch); null: size (not published)
-- gpt-oss-120b — https://artificialanalysis.ai/models/gpt-oss-120b (gpt-oss-120b (High)); changed: speed, latency; also ECI (Epoch)
-- gpt-oss-20b — https://artificialanalysis.ai/models/gpt-oss-20b (gpt-oss-20b (High)); changed: speed, latency; also ECI (Epoch)
-- Granite 4.0 H Small — https://artificialanalysis.ai/models/granite-4-0-h-small (Granite 4.0 H Small, estimated); changed: speed, latency
-- Granite 4.1 30B — https://artificialanalysis.ai/models/granite-4-1-30b (Granite 4.1 30B, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Granite 4.1 3B — https://artificialanalysis.ai/models/granite-4-1-3b (Granite 4.1 3B, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Granite 4.1 8B — https://artificialanalysis.ai/models/granite-4-1-8b (Granite 4.1 8B, estimated); changed: price, speed, latency; null: price (AA lists none), speed/latency (AA has no measurement)
-- Granite 4.2 30B — https://artificialanalysis.ai/models/granite-4-2-30b (Granite 4.2 30B, estimated); changed: speed, latency
-- Granite 4.2 3B — https://artificialanalysis.ai/models/granite-4-2-3b (Granite 4.2 3B); changed: speed, latency
-- Granite 4.2 8B — https://artificialanalysis.ai/models/granite-4-2-8b (Granite 4.2 8B); changed: speed, latency
-- Grok 4 — https://artificialanalysis.ai/models/grok-4 (Grok 4, estimated); also ECI (Epoch); null: size (not published), speed/latency (AA has no measurement)
-- Grok 4 Fast — https://artificialanalysis.ai/models/grok-4-fast-reasoning (Grok 4 Fast (Reasoning), estimated); also ECI (Epoch); null: size (not published), speed/latency (AA has no measurement)
-- Grok 4.1 Fast — https://artificialanalysis.ai/models/grok-4-1-fast-reasoning (Grok 4.1 Fast (Reasoning), estimated); list price kept from the Jul 2026 snapshot (AA lists none); null: size (not published), speed/latency (AA has no measurement)
-- Grok 4.20 — https://artificialanalysis.ai/models/grok-4-20 (Grok 4.20 0309 v2 (Reasoning), estimated); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Grok 4.3 — https://artificialanalysis.ai/models/grok-4-3 (Grok 4.3 (High)); changed: speed, latency; null: size (not published)
-- Grok 4.5 — https://artificialanalysis.ai/models/grok-4-5 (Grok 4.5 (High)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Grok 4.6 — https://artificialanalysis.ai/models/grok-4-6-xhigh (Grok 4.6 (Xhigh)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Grok 4.7 — https://artificialanalysis.ai/models/grok-4-7 (Grok 4.7 (Xhigh)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Grok Build 0.1 — https://artificialanalysis.ai/models/grok-build-0-1-06-16 (Grok Build 0.1 0616, estimated); changed: speed, latency; null: size (not published)
-- Haiku 4.5 — https://artificialanalysis.ai/models/claude-4-5-haiku-reasoning (Claude 4.5 Haiku (Reasoning)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Hermes 4 405B — https://artificialanalysis.ai/models/hermes-4-llama-3-1-405b-reasoning (Hermes 4 - Llama-3.1 405B (Reasoning), estimated); changed: speed, latency
-- Hermes 4 70B — https://artificialanalysis.ai/models/hermes-4-llama-3-1-70b-reasoning (Hermes 4 - Llama-3.1 70B (Reasoning), estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Hunyuan Hy3 — https://artificialanalysis.ai/models/hy3 (Hy3); changed: price, speed, latency
-- HyperCLOVA X SEED Think 32B — https://artificialanalysis.ai/models/hyperclova-x-seed-think-32b (HyperCLOVA X SEED Think (32B), estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Inkling — https://artificialanalysis.ai/models/inkling (Inkling (Xhigh)); changed: speed, latency; also ECI (Epoch)
-- Inkling Small — https://artificialanalysis.ai/models/inkling-small (Inkling Small); changed: intelligence, speed, latency; also ECI (Epoch)
-- Jamba 1.6 Mini — https://artificialanalysis.ai/models/jamba-1-6-mini (Jamba 1.6 Mini, estimated); null: size (not published), price (AA lists none), speed/latency (AA has no measurement)
-- Jamba 1.7 Large — https://artificialanalysis.ai/models/jamba-1-7-large (Jamba 1.7 Large, estimated); list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
-- Jamba Mini 1.7 — https://artificialanalysis.ai/models/jamba-1-7-mini (Jamba 1.7 Mini, estimated); list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
-- K-EXAONE 2.0 — https://artificialanalysis.ai/models/k-exaone-2-0-0803 (K-EXAONE 2.0 0803, estimated); null: size (not published), price (AA lists none), speed/latency (AA has no measurement)
-- K2 Horizon 0.9B — https://artificialanalysis.ai/models/k2-horizon-0-9b (K2 Horizon 0.9B); null: price (AA lists none), speed/latency (AA has no measurement)
-- K2 Horizon 3.7B — https://artificialanalysis.ai/models/k2-horizon-3-7b (K2 Horizon 3.7B); null: price (AA lists none), speed/latency (AA has no measurement)
-- K2 Horizon 375B A23B — https://artificialanalysis.ai/models/k2-horizon-375b-a23b (K2 Horizon 375B A23B); changed: price, speed, latency
-- K2 Horizon 7B — https://artificialanalysis.ai/models/k2-horizon-7b (K2 Horizon 7B); null: price (AA lists none), speed/latency (AA has no measurement)
-- K2 Horizon MoVA 36B A4B — https://artificialanalysis.ai/models/k2-horizon-mova-36b-a4b (K2 Horizon MoVA 36B A4B); null: price (AA lists none), speed/latency (AA has no measurement)
-- Kimi K2.6 — https://artificialanalysis.ai/models/kimi-k2-6 (Kimi K2.6 (Reasoning)); changed: speed, latency; also variant: was "Kimi K2.6", ECI (Epoch)
-- Kimi K3 — https://artificialanalysis.ai/models/kimi-k3 (Kimi K3 (Max)); changed: speed, latency; also ECI (Epoch)
-- LFM2-2.6B — https://artificialanalysis.ai/models/lfm2-2-6b (LFM2 2.6B, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- LFM2.5-2.6B — https://artificialanalysis.ai/models/lfm2-5-2-6b (LFM2.5-2.6B, estimated); null: speed/latency (AA has no measurement)
-- LFM2.5-8B-A1B — https://artificialanalysis.ai/models/lfm2-5-8b-a1b (LFM2.5-8B-A1B, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- LFM2.5-VL-1.6B — https://artificialanalysis.ai/models/lfm2-5-vl-1-6b (LFM2.5-VL-1.6B, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Ling 3.0 Flash — https://artificialanalysis.ai/models/ling-3-0-flash (Ling 3.0 Flash); changed: intelligence, speed, latency
-- Ling 3.0 Flash Fin — https://artificialanalysis.ai/models/ling-3-0-flash-fin (Ling-3.0-flash-Fin); changed: speed, latency
-- Ling 3.0 Flash VL — https://artificialanalysis.ai/models/ling-3-0-flash-vl (Ling-3.0-flash-VL); changed: speed, latency; null: size (not published)
-- Ling 3.0 Tiny — https://artificialanalysis.ai/models/ling-3-0-tiny (Ling 3.0 Tiny); changed: intelligence, speed, latency; null: size (not published)
-- Llama 3.1 405B — https://artificialanalysis.ai/models/llama-3-1-instruct-405b (Llama 3.1 Instruct 405B, estimated); also ECI (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
-- Llama 3.1 8B — https://artificialanalysis.ai/models/llama-3-1-instruct-8b (Llama 3.1 Instruct 8B, estimated); changed: speed, latency; also ECI (Epoch)
-- Llama 3.2 3B — https://artificialanalysis.ai/models/llama-3-2-instruct-3b (Llama 3.2 Instruct 3B, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Llama 3.3 70B — https://artificialanalysis.ai/models/llama-3-3-instruct-70b (Llama 3.3 Instruct 70B, estimated); changed: speed, latency; also ECI (Epoch)
-- Llama 4 Maverick — https://artificialanalysis.ai/models/llama-4-maverick (Llama 4 Maverick, estimated); changed: price, speed, latency; also ECI (Epoch)
-- Llama 4 Scout — https://artificialanalysis.ai/models/llama-4-scout (Llama 4 Scout, estimated); changed: speed, latency; also ECI (Epoch)
-- Llama-3.1-Nemotron-Ultra-253B — https://artificialanalysis.ai/models/llama-3-1-nemotron-ultra-253b-v1-reasoning (Llama 3.1 Nemotron Ultra 253B v1 (Reasoning), estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Llama-3.3-Nemotron-Super-49B v1.5 — https://artificialanalysis.ai/models/llama-nemotron-super-49b-v1-5-reasoning (Llama Nemotron Super 49B v1.5 (Reasoning), estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- LongCat 2.0 — https://artificialanalysis.ai/models/longcat-2-0 (LongCat 2.0); null: speed/latency (AA has no measurement)
-- Magistral Medium 1.2 — https://artificialanalysis.ai/models/magistral-medium-2509 (Magistral Medium 1.2, estimated); null: size (not published), price (AA lists none), speed/latency (AA has no measurement)
-- Mercury 2 — https://artificialanalysis.ai/models/mercury-2 (Mercury 2, estimated); changed: speed, latency; null: size (not published)
-- Mercury 2.5 — https://artificialanalysis.ai/models/mercury-2-5 (Mercury 2.5); changed: speed, latency; null: size (not published)
-- MiMo-V2-Flash — https://artificialanalysis.ai/models/mimo-v2-flash-reasoning (MiMo-V2-Flash (Reasoning), estimated); null: speed/latency (AA has no measurement)
-- MiMo-V2.6-Flash — https://artificialanalysis.ai/models/mimo-v2-6-flash (MiMo-V2.6-Flash); changed: intelligence, speed, latency, context; also newly listed by AA (was a non-AA row)
-- MiMo-V2.6-Pro — https://artificialanalysis.ai/models/mimo-v2-6-pro (MiMo-V2.6-Pro); changed: speed, latency
-- MiniCPM5-2B — https://artificialanalysis.ai/models/minicpm5-2b (MiniCPM5-2B); null: price (AA lists none), speed/latency (AA has no measurement)
-- MiniMax M3 — https://artificialanalysis.ai/models/minimax-m3 (MiniMax-M3); changed: speed, latency; also ECI (Epoch)
-- Mistral Large 3 — https://artificialanalysis.ai/models/mistral-large-3 (Mistral Large 3); changed: speed, latency
-- Mistral Medium 3.1 — https://artificialanalysis.ai/models/mistral-medium-3-1 (Mistral Medium 3.1); list price kept from the Jul 2026 snapshot (AA lists none); null: size (not published), speed/latency (AA has no measurement)
-- Mistral Medium 3.5 — https://artificialanalysis.ai/models/mistral-medium-3-5 (Mistral Medium 3.5); changed: speed, latency; also ECI (Epoch)
-- Mistral Small 3.2 — https://artificialanalysis.ai/models/mistral-small-3-2 (Mistral Small 3.2, estimated); also ECI (Epoch); null: speed/latency (AA has no measurement)
-- Mistral Small 4 — https://artificialanalysis.ai/models/mistral-small-4 (Mistral Small 4 (Reasoning)); changed: speed, latency
-- Mixtral 8x22B — https://artificialanalysis.ai/models/mistral-8x22b-instruct (Mixtral 8x22B Instruct, estimated); also ECI (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
-- Mixtral 8x7B — https://artificialanalysis.ai/models/mixtral-8x7b-instruct (Mixtral 8x7B Instruct, estimated); also ECI (Epoch); null: speed/latency (AA has no measurement)
-- Motif 3 — https://artificialanalysis.ai/models/motif-3 (Motif 3, estimated); null: size (not published), price (AA lists none), speed/latency (AA has no measurement)
-- Muse Glimmer — https://artificialanalysis.ai/models/muse-glimmer (Muse Glimmer (High)); changed: speed, latency
-- Muse Spark — https://artificialanalysis.ai/models/muse-spark (Muse Spark, estimated); also ECI (Epoch); null: size (not published), price (AA lists none), speed/latency (AA has no measurement)
-- Muse Spark 1.1 — https://artificialanalysis.ai/models/muse-spark-1-1 (Muse Spark 1.1 (Xhigh)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Muse Spark 1.2 — https://artificialanalysis.ai/models/muse-spark-1-2 (Muse Spark 1.2 (Xhigh)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Muse Spark 1.3 — https://artificialanalysis.ai/models/muse-spark-1-3 (Muse Spark 1.3 (Max)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Nemotron 3 Nano 30B A3B — https://artificialanalysis.ai/models/nvidia-nemotron-3-nano-30b-a3b-reasoning (NVIDIA Nemotron 3 Nano 30B A3B (Reasoning)); changed: speed, latency
-- Nemotron 3 Nano Omni 30B A3B — https://artificialanalysis.ai/models/nemotron-3-nano-omni-30b-a3b (Nemotron 3 Nano Omni 30B A3B Reasoning, estimated); changed: price, speed, latency
-- Nemotron 3 Super 120B A12B — https://artificialanalysis.ai/models/nvidia-nemotron-3-super-120b-a12b (Nemotron 3 Super 120B A12B (Reasoning)); changed: speed, latency
-- Nemotron 3 Ultra 550B A55B — https://artificialanalysis.ai/models/nvidia-nemotron-3-ultra-550b-a55b (Nemotron 3 Ultra 550B A55B (Reasoning)); changed: speed, latency; also ECI (Epoch)
-- Nemotron 3.5 Lightning 30B A3B — https://artificialanalysis.ai/models/nemotron-3-5-lightning (Nemotron 3.5 Lightning); changed: price, speed, latency
-- Nemotron Nano 9B v2 — https://artificialanalysis.ai/models/nvidia-nemotron-nano-9b-v2-reasoning (NVIDIA Nemotron Nano 9B V2 (Reasoning), estimated); changed: speed, latency
-- North Mini Code — https://artificialanalysis.ai/models/north-mini-code (North Mini Code); changed: speed, latency
-- Nova 2.0 Lite — https://artificialanalysis.ai/models/nova-2-0-lite-reasoning (Nova 2.0 Lite (High), estimated); changed: speed, latency; null: size (not published)
-- Nova 2.0 Pro Preview — https://artificialanalysis.ai/models/nova-2-0-pro-reasoning-medium (Nova 2.0 Pro Preview (Medium), estimated); changed: speed, latency; null: size (not published)
-- Nova Lite — https://artificialanalysis.ai/models/nova-lite (Nova Lite, estimated); changed: speed, latency; null: size (not published)
-- Nova Micro — https://artificialanalysis.ai/models/nova-micro (Nova Micro, estimated); changed: speed, latency; null: size (not published)
-- Nova Premier — https://artificialanalysis.ai/models/nova-premier (Nova Premier, estimated); list price kept from the Jul 2026 snapshot (AA lists none); null: size (not published), speed/latency (AA has no measurement)
-- Nova Pro — https://artificialanalysis.ai/models/nova-pro (Nova Pro, estimated); also ECI (Epoch); null: size (not published), speed/latency (AA has no measurement)
-- o3 — https://artificialanalysis.ai/models/o3 (o3, estimated); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- o3-mini — https://artificialanalysis.ai/models/o3-mini-high (o3-mini (High)); changed: intelligence, speed, latency; also variant: was "o3-mini", ECI (Epoch); null: size (not published)
-- OLMo 3 32B Think — https://artificialanalysis.ai/models/olmo-3-32b-think (Olmo 3 32B Think, estimated); list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
-- OLMo 3 7B Instruct — https://artificialanalysis.ai/models/olmo-3-7b-instruct (Olmo 3 7B Instruct, estimated); null: speed/latency (AA has no measurement)
-- OLMo 3.1 32B Think — https://artificialanalysis.ai/models/olmo-3-1-32b-think (Olmo 3.1 32B Think, estimated); null: speed/latency (AA has no measurement)
-- Opus 4.6 — https://artificialanalysis.ai/models/claude-opus-4-6-adaptive (Claude Opus 4.6 (Max), estimated); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Opus 4.7 — https://artificialanalysis.ai/models/claude-opus-4-7 (Claude Opus 4.7 (Max), estimated); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Opus 4.8 — https://artificialanalysis.ai/models/claude-opus-4-8 (Claude Opus 4.8 (Max)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Opus 5 — https://artificialanalysis.ai/models/claude-opus-5 (Claude Opus 5 (Max)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Opus 5.5 — https://artificialanalysis.ai/models/claude-opus-5-5 (Claude Opus 5.5 (Max, Default Fallback)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Phi-4 — https://artificialanalysis.ai/models/phi-4 (Phi-4, estimated); changed: speed, latency; also ECI (Epoch)
-- Phi-4 Multimodal — https://artificialanalysis.ai/models/phi-4-multimodal (Phi-4 Multimodal Instruct, estimated); changed: speed, latency; null: size (not published), speed/latency (AA has no measurement)
-- Quasar 438B — https://artificialanalysis.ai/models/quasar-438b (Quasar 438B (Max, Based on GLM-5.2)); changed: speed, latency
-- Qwen2.5-72B — https://artificialanalysis.ai/models/qwen2-5-72b-instruct (Qwen2.5 Instruct 72B, estimated); also ECI (Epoch); null: speed/latency (AA has no measurement)
-- Qwen2.5-Coder-32B — https://artificialanalysis.ai/models/qwen2-5-coder-32b-instruct (Qwen2.5 Coder Instruct 32B, estimated); also ECI (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
-- Qwen3-14B — https://artificialanalysis.ai/models/qwen3-14b-instruct-reasoning (Qwen3 14B (Reasoning), estimated); changed: speed, latency; also ECI (Epoch)
-- Qwen3-235B-A22B — https://artificialanalysis.ai/models/qwen3-235b-a22b-instruct-reasoning (Qwen3 235B A22B (Reasoning), estimated); changed: speed, latency; also ECI (Epoch)
-- Qwen3-30B-A3B — https://artificialanalysis.ai/models/qwen3-30b-a3b-instruct-reasoning (Qwen3 30B A3B (Reasoning), estimated); changed: speed, latency; also ECI (Epoch)
-- Qwen3-32B — https://artificialanalysis.ai/models/qwen3-32b-instruct-reasoning (Qwen3 32B (Reasoning), estimated); changed: speed; also ECI (Epoch)
-- Qwen3-4B — https://artificialanalysis.ai/models/qwen3-4b-instruct-reasoning (Qwen3 4B (Reasoning), estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Qwen3-8B — https://artificialanalysis.ai/models/qwen3-8b-instruct-reasoning (Qwen3 8B (Reasoning), estimated); changed: speed, latency; also ECI (Epoch)
-- Qwen3-Coder-480B-A35B — https://artificialanalysis.ai/models/qwen3-coder-480b-a35b-instruct (Qwen3 Coder 480B A35B Instruct, estimated); changed: speed, latency
-- Qwen3-VL-235B-A22B — https://artificialanalysis.ai/models/qwen3-vl-235b-a22b-reasoning (Qwen3 VL 235B A22B (Reasoning), estimated); changed: speed, latency
-- Qwen3.7 Max — https://artificialanalysis.ai/models/qwen3-7-max (Qwen3.7 Max); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Qwen3.8 2.4T A95B — https://artificialanalysis.ai/models/qwen3-8-2-4t-a95b (Qwen3.8 2.4T A95B); changed: speed, latency, context
-- Qwen3.8 27B — https://artificialanalysis.ai/models/qwen3-8-27b (Qwen3.8 27B (Xhigh)); changed: speed, latency; also ECI (Epoch)
-- Qwen3.8 Max — https://artificialanalysis.ai/models/qwen3-8-max (Qwen3.8 Max (0902)); changed: speed, latency; also ECI (Epoch)
-- Qwen3.8 Max (0803) — https://artificialanalysis.ai/models/qwen3-8-max-0803 (Qwen3.8 Max); changed: speed, latency; also ECI (Epoch)
-- Qwen3.8-Flash-Next — https://artificialanalysis.ai/models/qwen3-8-flash-next (Qwen3.8-Flash-Next); changed: speed, latency
-- QwQ-32B — https://artificialanalysis.ai/models/qwq-32b (QwQ 32B, estimated); also ECI (Epoch); null: speed/latency (AA has no measurement)
-- Reka Flash 3 — https://artificialanalysis.ai/models/reka-flash-3 (Reka Flash 3, estimated); changed: speed, latency
-- Sarvam 105B — https://artificialanalysis.ai/models/sarvam-105b (Sarvam 105B (High), estimated); null: speed/latency (AA has no measurement)
-- Sarvam 30B — https://artificialanalysis.ai/models/sarvam-30b (Sarvam 30B (High), estimated); null: speed/latency (AA has no measurement)
-- Sarvam-M — https://artificialanalysis.ai/models/sarvam-m-reasoning (Sarvam M (Reasoning, Based on Mistral Small 3.1), estimated); null: speed/latency (AA has no measurement)
-- Snowflake Arctic — https://artificialanalysis.ai/models/arctic-instruct (Arctic Instruct, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Solar Open2 250B — https://artificialanalysis.ai/models/solar-open2-250b (Solar Open2 250B, estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Solar Pro 2 — https://artificialanalysis.ai/models/solar-pro-2-reasoning (Solar Pro 2 (Reasoning), estimated); null: price (AA lists none), speed/latency (AA has no measurement)
-- Solar Pro 3 — https://artificialanalysis.ai/models/solar-pro-3 (Solar Pro 3); changed: speed, latency; null: size (not published)
-- Solar Pro 4 — https://artificialanalysis.ai/models/solar-pro4 (Solar Pro 4, estimated); changed: speed, latency; null: size (not published)
-- Sonar — https://artificialanalysis.ai/models/sonar (Sonar, estimated); list price kept from the Jul 2026 snapshot (AA lists none); null: size (not published), speed/latency (AA has no measurement)
-- Sonar Pro — https://artificialanalysis.ai/models/sonar-pro (Sonar Pro, estimated); list price kept from the Jul 2026 snapshot (AA lists none); null: size (not published), speed/latency (AA has no measurement)
-- Sonar Reasoning Pro — https://artificialanalysis.ai/models/sonar-reasoning-pro (Sonar Reasoning Pro, estimated); list price kept from the Jul 2026 snapshot (AA lists none); null: size (not published), speed/latency (AA has no measurement)
-- Sonnet 4.6 — https://artificialanalysis.ai/models/claude-sonnet-4-6-adaptive (Claude Sonnet 4.6 (Max)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Sonnet 5 — https://artificialanalysis.ai/models/claude-sonnet-5 (Claude Sonnet 5 (Max)); changed: speed, latency; also ECI (Epoch); null: size (not published)
-- Step 3.7 Flash — https://artificialanalysis.ai/models/step-3-7-flash (Step 3.7 Flash, estimated); changed: speed, latency
-- Step 5 Preview — https://artificialanalysis.ai/models/step-5 (Step 5 Preview); changed: speed, latency; null: size (not published)
+- A.X-K2 — https://artificialanalysis.ai/models/a-x-k2 (A.X-K2); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Apodex 1.1 — https://artificialanalysis.ai/models/apodex-1-1 (Apodex 1.1); v5 13.7; changed: speed, latency
+- Apriel-1.6-15B-Thinker — https://artificialanalysis.ai/models/apriel-v1-6-15b-thinker (Apriel-v1.6-15B-Thinker); no v5 score; changed: price; null: price (AA lists none), speed/latency (AA has no measurement)
+- Celeris-1 — https://artificialanalysis.ai/models/celeris-1 (Celeris-1); no v5 score; changed: speed, latency
+- Command A — https://artificialanalysis.ai/models/command-a (Command A); no v5 score; changed: speed, latency
+- DBRX Instruct — https://artificialanalysis.ai/models/dbrx (DBRX Instruct); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- DeepSeek V4 Flash — https://artificialanalysis.ai/models/deepseek-v4-flash-0420 (DeepSeek V4 Flash 0420 (Max)); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 146.85 (Epoch)
+- DeepSeek V4 Flash 0731 — https://artificialanalysis.ai/models/deepseek-v4-flash (DeepSeek V4 Flash 0731 (Max)); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 154.41 (Epoch)
+- DeepSeek V4 Flash Vision — https://artificialanalysis.ai/models/deepseek-v4-flash-vision (DeepSeek V4 Flash Vision (Max)); no v5 score; changed: speed, latency; size 284B from AA `parameters`
+- DeepSeek V4 Pro — https://artificialanalysis.ai/models/deepseek-v4-pro-0424 (DeepSeek V4 Pro 0424 (Max)); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 150.17 (Epoch)
+- DeepSeek V4 Pro 0813 — https://artificialanalysis.ai/models/deepseek-v4-pro (DeepSeek V4 Pro 0813 (Max)); v5 23.1; changed: speed, latency; ECI 155.94 (Epoch)
+- DeepSeek V4.1 Flash — https://artificialanalysis.ai/models/deepseek-v4-1-flash (DeepSeek V4.1 Flash (Max)); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 156.7 (Epoch)
+- DeepSeek-R1-Distill-Llama-70B — https://artificialanalysis.ai/models/deepseek-r1-distill-llama-70b (DeepSeek R1 Distill Llama 70B); no v5 score; AA marks it deprecated; null: speed/latency (AA has no measurement)
+- DeepSeek-R1-Distill-Qwen-32B — https://artificialanalysis.ai/models/deepseek-r1-distill-qwen-32b (DeepSeek R1 Distill Qwen 32B); no v5 score; AA marks it deprecated; ECI dropped (Epoch no longer lists the model; was 137.44); null: price (AA lists none), speed/latency (AA has no measurement)
+- Devstral 2 — https://artificialanalysis.ai/models/devstral-2 (Devstral 2); no v5 score; AA marks it deprecated; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- ERNIE 4.5 300B-A47B — https://artificialanalysis.ai/models/ernie-4-5-300b-a47b (ERNIE 4.5 300B A47B); no v5 score; changed: price; null: price (AA lists none), speed/latency (AA has no measurement)
+- EXAONE 4.0 32B — https://artificialanalysis.ai/models/exaone-4-0-32b-reasoning (EXAONE 4.0 32B (Reasoning)); no v5 score; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- EXAONE 4.5 33B — https://artificialanalysis.ai/models/exaone-4-5-33b (EXAONE 4.5 33B (Reasoning)); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Fable 5 — https://artificialanalysis.ai/models/claude-fable-5 (Claude Fable 5 (Max, Opus 4.8 Fallback)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 164.13 (Epoch)
+- Fable 5.1 — https://artificialanalysis.ai/models/claude-fable-5-1 (Claude Fable 5.1 (Max, Default Fallback)); v5 49.2; changed: speed, latency; AA marks it deprecated; ECI 166.99 (Epoch)
+- G9v3-39A5B — https://artificialanalysis.ai/models/g9v3-39a5b (G9v3-39A5B); no v5 score; changed: price; null: price (AA lists none), speed/latency (AA has no measurement)
+- G9v3-3B — https://artificialanalysis.ai/models/g9v3-3b (G9v3-3B); no v5 score; changed: price; null: price (AA lists none), speed/latency (AA has no measurement)
+- Gemini 2.5 Flash — https://artificialanalysis.ai/models/gemini-2-5-flash-reasoning (Gemini 2.5 Flash (Reasoning)); no v5 score; changed: speed, latency; AA marks it deprecated
+- Gemini 2.5 Flash-Lite — https://artificialanalysis.ai/models/gemini-2-5-flash-lite-reasoning (Gemini 2.5 Flash-Lite (Reasoning)); no v5 score; changed: speed, latency; AA marks it deprecated
+- Gemini 2.5 Pro — https://artificialanalysis.ai/models/gemini-2-5-pro (Gemini 2.5 Pro); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 144.87 (Epoch)
+- Gemini 3 Flash — https://artificialanalysis.ai/models/gemini-3-flash-reasoning (Gemini 3 Flash Preview (Reasoning)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 152.32 (Epoch)
+- Gemini 3 Pro — https://artificialanalysis.ai/models/gemini-3-pro (Gemini 3 Pro Preview (High)); no v5 score; AA marks it deprecated; ECI 152.98 (Epoch); null: speed/latency (AA has no measurement)
+- Gemini 3.1 Flash-Lite — https://artificialanalysis.ai/models/gemini-3-1-flash-lite-preview (Gemini 3.1 Flash-Lite); v5 6.2; changed: speed, latency; AA marks it deprecated; ECI 145.01 (Epoch)
+- Gemini 3.1 Pro — https://artificialanalysis.ai/models/gemini-3-1-pro-preview (Gemini 3.1 Pro Preview); no v5 score; changed: speed, latency; ECI 156.18 (Epoch)
+- Gemini 3.5 Flash — https://artificialanalysis.ai/models/gemini-3-5-flash (Gemini 3.5 Flash (High)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 155.28 (Epoch)
+- Gemini 3.5 Flash-Lite — https://artificialanalysis.ai/models/gemini-3-5-flash-lite (Gemini 3.5 Flash-Lite); v5 11.7; changed: speed, latency; ECI 145.63 (Epoch)
+- Gemini 3.6 Flash — https://artificialanalysis.ai/models/gemini-3-6-flash (Gemini 3.6 Flash (High)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 155.21 (Epoch)
+- Gemini 3.7 Flash — https://artificialanalysis.ai/models/gemini-3-7-flash (Gemini 3.7 Flash (High)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 158.36 (Epoch); null: speed/latency (AA has no measurement)
+- Gemini 3.8 Flash — https://artificialanalysis.ai/models/gemini-3-8-flash (Gemini 3.8 Flash (High)); v5 30.8; changed: speed, latency; ECI 158.79 (Epoch)
+- Gemini 4 Argon — https://artificialanalysis.ai/models/gemini-4-argon (Gemini 4 Argon (High)); v5 50.4; changed: price, speed, latency; ECI 166.48 (new match)
+- Gemma 3 270M — https://artificialanalysis.ai/models/gemma-3-270m (Gemma 3 270M); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Gemma 3 27B — https://artificialanalysis.ai/models/gemma-3-27b (Gemma 3 27B Instruct); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 127.51 (Epoch)
+- Gemma 4 12B — https://artificialanalysis.ai/models/gemma-4-12b (Gemma 4 12B (Reasoning)); no v5 score; changed: price, speed, latency; null: price (AA lists none), speed/latency (AA has no measurement)
+- Gemma 4 26B A4B — https://artificialanalysis.ai/models/gemma-4-26b-a4b (Gemma 4 26B A4B (Reasoning)); no v5 score; changed: price, speed, latency; ECI 141.64 (Epoch)
+- Gemma 4 31B — https://artificialanalysis.ai/models/gemma-4-31b (Gemma 4 31B (Reasoning)); v5 4.4; changed: speed, latency; ECI 144.27 (Epoch)
+- Gemma 4 E2B — https://artificialanalysis.ai/models/gemma-4-e2b (Gemma 4 E2B (Reasoning)); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Gemma 4 E4B — https://artificialanalysis.ai/models/gemma-4-e4b (Gemma 4 E4B (Reasoning)); no v5 score; changed: speed, latency
+- GLM-5.2 — https://artificialanalysis.ai/models/glm-5-2 (GLM-5.2 (Max)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 153.03 (Epoch)
+- GLM-5.3 — https://artificialanalysis.ai/models/glm-5-3 (GLM-5.3 (Max)); v5 31.7; changed: speed, latency; ECI 157.1 (Epoch)
+- GLM-5.3 Flash — https://artificialanalysis.ai/models/glm-5-3-flash (GLM-5.3-Flash); v5 27.8; changed: speed, latency; ECI 153.82 (Epoch)
+- GPT-5.3 Codex — https://artificialanalysis.ai/models/gpt-5-3-codex (GPT-5.3 Codex (Xhigh)); no v5 score; changed: speed, latency; ECI dropped (Epoch no longer lists the model; was 156.77)
+- GPT-5.5 — https://artificialanalysis.ai/models/gpt-5-5 (GPT-5.5 (Xhigh)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 160.1 (Epoch)
+- GPT-5.5 Instant — https://artificialanalysis.ai/models/gpt-5-5-instant-06-26 (GPT-5.5 Instant (June 2026)); no v5 score; changed: speed, latency
+- GPT-5.6 Luna — https://artificialanalysis.ai/models/gpt-5-6-luna (GPT-5.6 Luna (Max)); v5 23.8; changed: speed, latency; AA marks it deprecated; ECI 156.67 (Epoch)
+- GPT-5.6 Sol — https://artificialanalysis.ai/models/gpt-5-6-sol (GPT-5.6 Sol (Max)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 162.99 (Epoch)
+- GPT-5.6 Terra — https://artificialanalysis.ai/models/gpt-5-6-terra (GPT-5.6 Terra (Max)); v5 32.3; changed: speed, latency; AA marks it deprecated; ECI 160.73 (Epoch)
+- GPT-6 Astra — https://artificialanalysis.ai/models/gpt-6-astra (GPT-6 Astra (Max)); v5 56.9; changed: speed, latency; ECI 169.0 (Epoch)
+- GPT-6 Luna — https://artificialanalysis.ai/models/gpt-6-luna (GPT-6 Luna (Max)); v5 27.9; changed: speed, latency; ECI 156.41 (Epoch)
+- GPT-6 Sol — https://artificialanalysis.ai/models/gpt-6-sol (GPT-6 Sol (Max)); v5 44.2; changed: speed, latency; AA marks it deprecated; ECI 163.75 (Epoch)
+- GPT-6.1 Sol — https://artificialanalysis.ai/models/gpt-6-1-sol (GPT-6.1 Sol (Max)); v5 54.6; changed: speed, latency; ECI 168.48 (Epoch)
+- gpt-oss-120b — https://artificialanalysis.ai/models/gpt-oss-120b (gpt-oss-120b (High)); v5 3.8; changed: price, speed, latency; ECI 140.16 (Epoch)
+- gpt-oss-20b — https://artificialanalysis.ai/models/gpt-oss-20b (gpt-oss-20b (High)); no v5 score; changed: price, speed, latency; ECI 134.97 (Epoch)
+- Granite 4.0 H Small — https://artificialanalysis.ai/models/granite-4-0-h-small (Granite 4.0 H Small); no v5 score; changed: price, speed, latency; null: price (AA lists none), speed/latency (AA has no measurement)
+- Granite 4.1 30B — https://artificialanalysis.ai/models/granite-4-1-30b (Granite 4.1 30B); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- Granite 4.1 3B — https://artificialanalysis.ai/models/granite-4-1-3b (Granite 4.1 3B); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- Granite 4.1 8B — https://artificialanalysis.ai/models/granite-4-1-8b (Granite 4.1 8B); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- Granite 4.2 30B — https://artificialanalysis.ai/models/granite-4-2-30b (Granite 4.2 30B); no v5 score; changed: price, speed, latency; null: price (AA lists none), speed/latency (AA has no measurement)
+- Granite 4.2 3B — https://artificialanalysis.ai/models/granite-4-2-3b (Granite 4.2 3B); v5 4.7; changed: price, speed, latency; null: price (AA lists none), speed/latency (AA has no measurement)
+- Granite 4.2 8B — https://artificialanalysis.ai/models/granite-4-2-8b (Granite 4.2 8B); v5 5.1; changed: speed, latency
+- Grok 4 — https://artificialanalysis.ai/models/grok-4 (Grok 4); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 146.9 (Epoch)
+- Grok 4 Fast — https://artificialanalysis.ai/models/grok-4-fast-reasoning (Grok 4 Fast (Reasoning)); no v5 score; AA marks it deprecated; ECI 144.31 (Epoch); null: speed/latency (AA has no measurement)
+- Grok 4.1 Fast — https://artificialanalysis.ai/models/grok-4-1-fast-reasoning (Grok 4.1 Fast (Reasoning)); no v5 score; AA marks it deprecated; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- Grok 4.20 — https://artificialanalysis.ai/models/grok-4-20 (Grok 4.20 0309 v2 (Reasoning)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 152.28 (Epoch)
+- Grok 4.3 — https://artificialanalysis.ai/models/grok-4-3 (Grok 4.3 (High)); no v5 score; changed: speed, latency; AA marks it deprecated
+- Grok 4.5 — https://artificialanalysis.ai/models/grok-4-5 (Grok 4.5 (High)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 154.98 (Epoch)
+- Grok 4.6 — https://artificialanalysis.ai/models/grok-4-6-xhigh (Grok 4.6 (Xhigh)); v5 31; changed: speed, latency; AA marks it deprecated; ECI 157.79 (Epoch)
+- Grok 4.7 — https://artificialanalysis.ai/models/grok-4-7 (Grok 4.7 (Xhigh)); v5 35.5; changed: speed, latency; ECI 156.18 (Epoch)
+- Grok Build 0.1 — https://artificialanalysis.ai/models/grok-build-0-1-06-16 (Grok Build 0.1 0616); no v5 score; changed: speed, latency; AA marks it deprecated
+- Haiku 4.5 — https://artificialanalysis.ai/models/claude-4-5-haiku-reasoning (Claude 4.5 Haiku (Reasoning)); v5 7.4; changed: speed, latency; AA marks it deprecated; ECI 142.83 (Epoch)
+- Haiku 5.5 — https://artificialanalysis.ai/models/claude-haiku-5-5 (Claude Haiku 5.5 (Max)); v5 36.5; changed: speed, latency; ECI 160.43 (new match)
+- Hermes 4 405B — https://artificialanalysis.ai/models/hermes-4-llama-3-1-405b-reasoning (Hermes 4 - Llama-3.1 405B (Reasoning)); no v5 score; changed: speed, latency
+- Hermes 4 70B — https://artificialanalysis.ai/models/hermes-4-llama-3-1-70b-reasoning (Hermes 4 - Llama-3.1 70B (Reasoning)); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Hunyuan Hy3 — https://artificialanalysis.ai/models/hy3 (Hy3); no v5 score; changed: speed, latency
+- HyperCLOVA X SEED Think 32B — https://artificialanalysis.ai/models/hyperclova-x-seed-think-32b (HyperCLOVA X SEED Think (32B)); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Inkling — https://artificialanalysis.ai/models/inkling (Inkling (Xhigh)); v5 12.5; changed: speed, latency; ECI 148.39 (Epoch)
+- Inkling Small — https://artificialanalysis.ai/models/inkling-small (Inkling Small); v5 12.9; changed: speed, latency; ECI 150.75 (Epoch)
+- Jamba 1.6 Mini — https://artificialanalysis.ai/models/jamba-1-6-mini (Jamba 1.6 Mini); no v5 score; AA marks it deprecated; size 52B from AA `parameters`; null: price (AA lists none), speed/latency (AA has no measurement)
+- Jamba 1.7 Large — https://artificialanalysis.ai/models/jamba-1-7-large (Jamba 1.7 Large); no v5 score; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- Jamba Mini 1.7 — https://artificialanalysis.ai/models/jamba-1-7-mini (Jamba 1.7 Mini); no v5 score; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- K-EXAONE 2.0 — https://artificialanalysis.ai/models/k-exaone-2-0-0803 (K-EXAONE 2.0); v5 7.6; size 750B from AA `parameters`; null: price (AA lists none), speed/latency (AA has no measurement)
+- K2 Horizon 0.9B — https://artificialanalysis.ai/models/k2-horizon-0-9b (K2 Horizon 0.9B); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- K2 Horizon 3.7B — https://artificialanalysis.ai/models/k2-horizon-3-7b (K2 Horizon 3.7B); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- K2 Horizon 375B A23B — https://artificialanalysis.ai/models/k2-horizon-375b-a23b (K2 Horizon 375B A23B); v5 17.8; changed: speed, latency
+- K2 Horizon 7B — https://artificialanalysis.ai/models/k2-horizon-7b (K2 Horizon 7B); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- K2 Horizon MoVA 36B A4B — https://artificialanalysis.ai/models/k2-horizon-mova-36b-a4b (K2 Horizon MoVA 36B A4B); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Kimi K2.6 — https://artificialanalysis.ai/models/kimi-k2-6 (Kimi K2.6 (Reasoning)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 151.56 (Epoch)
+- Kimi K3 — https://artificialanalysis.ai/models/kimi-k3 (Kimi K3 (Max)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 158.58 (Epoch)
+- LFM2-2.6B — https://artificialanalysis.ai/models/lfm2-2-6b (LFM2 2.6B); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- LFM2.5-2.6B — https://artificialanalysis.ai/models/lfm2-5-2-6b (LFM2.5-2.6B); no v5 score; changed: price; null: price (AA lists none), speed/latency (AA has no measurement)
+- LFM2.5-8B-A1B — https://artificialanalysis.ai/models/lfm2-5-8b-a1b (LFM2.5-8B-A1B); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- LFM2.5-VL-1.6B — https://artificialanalysis.ai/models/lfm2-5-vl-1-6b (LFM2.5-VL-1.6B); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Ling 3.0 Flash — https://artificialanalysis.ai/models/ling-3-0-flash (Ling 3.0 Flash); no v5 score; changed: speed, latency; AA marks it deprecated
+- Ling 3.0 Flash Fin — https://artificialanalysis.ai/models/ling-3-0-flash-fin (Ling-3.0-flash-Fin); no v5 score; changed: price, speed, latency; null: price (AA lists none), speed/latency (AA has no measurement)
+- Ling 3.0 Flash VL — https://artificialanalysis.ai/models/ling-3-0-flash-vl (Ling-3.0-flash-VL); no v5 score; changed: price, speed, latency; size 124B from AA `parameters`; null: price (AA lists none), speed/latency (AA has no measurement)
+- Ling 3.0 Tiny — https://artificialanalysis.ai/models/ling-3-0-tiny (Ling 3.0 Tiny); no v5 score; changed: speed, latency; size 7.9B from AA `parameters`
+- Ling 3.1 Flash — https://artificialanalysis.ai/models/ling-3-1-flash (Ling 3.1 Flash); no v5 score; changed: speed, latency; now open weights: https://huggingface.co/inclusionAI/Ling-3.1-flash; article /articles/ling-3-1-flash
+- Llama 3.1 405B — https://artificialanalysis.ai/models/llama-3-1-instruct-405b (Llama 3.1 Instruct 405B); no v5 score; ECI 127.8 (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
+- Llama 3.1 8B — https://artificialanalysis.ai/models/llama-3-1-instruct-8b (Llama 3.1 Instruct 8B); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 111.14 (Epoch)
+- Llama 3.2 3B — https://artificialanalysis.ai/models/llama-3-2-instruct-3b (Llama 3.2 Instruct 3B); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- Llama 3.3 70B — https://artificialanalysis.ai/models/llama-3-3-instruct-70b (Llama 3.3 Instruct 70B); no v5 score; changed: price, speed, latency; ECI 126.13 (Epoch)
+- Llama 4 Maverick — https://artificialanalysis.ai/models/llama-4-maverick (Llama 4 Maverick); no v5 score; changed: price, speed, latency; ECI 132.08 (Epoch)
+- Llama 4 Scout — https://artificialanalysis.ai/models/llama-4-scout (Llama 4 Scout); no v5 score; changed: price, speed, latency; ECI 127.68 (Epoch)
+- Llama-3.1-Nemotron-Ultra-253B — https://artificialanalysis.ai/models/llama-3-1-nemotron-ultra-253b-v1-reasoning (Llama 3.1 Nemotron Ultra 253B v1 (Reasoning)); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Llama-3.3-Nemotron-Super-49B v1.5 — https://artificialanalysis.ai/models/llama-nemotron-super-49b-v1-5-reasoning (Llama Nemotron Super 49B v1.5 (Reasoning)); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- LongCat 2.0 — https://artificialanalysis.ai/models/longcat-2-0 (LongCat 2.0); no v5 score; changed: price, speed, latency
+- Magistral Medium 1.2 — https://artificialanalysis.ai/models/magistral-medium-2509 (Magistral Medium 1.2); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Mercury 2 — https://artificialanalysis.ai/models/mercury-2 (Mercury 2); no v5 score; changed: speed, latency; AA marks it deprecated
+- Mercury 2.5 — https://artificialanalysis.ai/models/mercury-2-5 (Mercury 2.5); no v5 score; changed: price, speed, latency
+- MiMo-V2-Flash — https://artificialanalysis.ai/models/mimo-v2-flash-reasoning (MiMo-V2-Flash (Reasoning)); no v5 score; AA marks it deprecated; null: speed/latency (AA has no measurement)
+- MiMo-V2.6-Flash — https://artificialanalysis.ai/models/mimo-v2-6-flash (MiMo-V2.6-Flash); v5 26.7; changed: speed, latency
+- MiMo-V2.6-Pro — https://artificialanalysis.ai/models/mimo-v2-6-pro (MiMo-V2.6-Pro); v5 29.9; changed: speed, latency
+- MiniCPM5-2B — https://artificialanalysis.ai/models/minicpm5-2b (MiniCPM5-2B); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- MiniMax M3 — https://artificialanalysis.ai/models/minimax-m3 (MiniMax-M3); v5 18.9; changed: speed, latency; ECI 147.74 (Epoch)
+- Mistral Large 3 — https://artificialanalysis.ai/models/mistral-large-3 (Mistral Large 3); no v5 score; changed: speed, latency; AA marks it deprecated
+- Mistral Large 4 Preview — https://artificialanalysis.ai/models/mistral-large-4-preview (Mistral Large 4 Preview); v5 25.3; changed: price, speed, latency; AA marks it deprecated; ECI 152.69 (new match)
+- Mistral Medium 3.1 — https://artificialanalysis.ai/models/mistral-medium-3-1 (Mistral Medium 3.1); no v5 score; AA marks it deprecated; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- Mistral Medium 3.5 — https://artificialanalysis.ai/models/mistral-medium-3-5 (Mistral Medium 3.5); v5 4.6; changed: speed, latency; ECI 141.59 (Epoch)
+- Mistral Small 3.2 — https://artificialanalysis.ai/models/mistral-small-3-2 (Mistral Small 3.2); no v5 score; changed: speed, latency; AA marks it deprecated; ECI dropped (Epoch no longer lists the model; was 131.74)
+- Mistral Small 4 — https://artificialanalysis.ai/models/mistral-small-4 (Mistral Small 4 (Reasoning)); v5 4.3; changed: speed, latency
+- Mixtral 8x22B — https://artificialanalysis.ai/models/mistral-8x22b-instruct (Mixtral 8x22B Instruct); no v5 score; AA marks it deprecated; ECI 118.69 (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
+- Mixtral 8x7B — https://artificialanalysis.ai/models/mixtral-8x7b-instruct (Mixtral 8x7B Instruct); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 113.22 (Epoch)
+- Motif 3 — https://artificialanalysis.ai/models/motif-3 (Motif 3); no v5 score; size 314B from AA `parameters`; null: price (AA lists none), speed/latency (AA has no measurement)
+- Muse Glimmer — https://artificialanalysis.ai/models/muse-glimmer (Muse Glimmer (High)); v5 6.3; changed: price, speed, latency
+- Muse Spark — https://artificialanalysis.ai/models/muse-spark (Muse Spark); no v5 score; AA marks it deprecated; ECI 153.14 (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
+- Muse Spark 1.1 — https://artificialanalysis.ai/models/muse-spark-1-1 (Muse Spark 1.1 (Xhigh)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 154.87 (Epoch)
+- Muse Spark 1.2 — https://artificialanalysis.ai/models/muse-spark-1-2 (Muse Spark 1.2 (Xhigh)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 155.04 (Epoch)
+- Muse Spark 1.3 — https://artificialanalysis.ai/models/muse-spark-1-3 (Muse Spark 1.3 (Max)); v5 36.6; changed: speed, latency; AA marks it deprecated; ECI 158.24 (Epoch)
+- Nemotron 3 Nano 30B A3B — https://artificialanalysis.ai/models/nvidia-nemotron-3-nano-30b-a3b-reasoning (NVIDIA Nemotron 3 Nano 30B A3B (Reasoning)); no v5 score; changed: speed, latency
+- Nemotron 3 Nano Omni 30B A3B — https://artificialanalysis.ai/models/nemotron-3-nano-omni-30b-a3b (Nemotron 3 Nano Omni 30B A3B Reasoning); no v5 score; changed: price, speed, latency; null: price (AA lists none), speed/latency (AA has no measurement)
+- Nemotron 3 Super 120B A12B — https://artificialanalysis.ai/models/nvidia-nemotron-3-super-120b-a12b (Nemotron 3 Super 120B A12B (Reasoning)); no v5 score; changed: speed, latency; AA marks it deprecated
+- Nemotron 3 Ultra 550B A55B — https://artificialanalysis.ai/models/nvidia-nemotron-3-ultra-550b-a55b (Nemotron 3 Ultra 550B A55B (Reasoning)); v5 11.8; changed: price, speed, latency; ECI 146.95 (Epoch)
+- Nemotron 3.5 Lightning 30B A3B — https://artificialanalysis.ai/models/nemotron-3-5-lightning (Nemotron 3.5 Lightning); v5 5.5; changed: speed, latency
+- Nemotron Nano 9B v2 — https://artificialanalysis.ai/models/nvidia-nemotron-nano-9b-v2-reasoning (NVIDIA Nemotron Nano 9B V2 (Reasoning)); no v5 score; changed: speed, latency
+- North Mini Code — https://artificialanalysis.ai/models/north-mini-code (North Mini Code); v5 3.4; changed: speed, latency
+- Nova 2.0 Lite — https://artificialanalysis.ai/models/nova-2-0-lite-reasoning (Nova 2.0 Lite (High)); no v5 score; changed: speed, latency
+- Nova 2.0 Pro Preview — https://artificialanalysis.ai/models/nova-2-0-pro-reasoning-medium (Nova 2.0 Pro Preview (Medium)); no v5 score; changed: speed, latency
+- Nova Lite — https://artificialanalysis.ai/models/nova-lite (Nova Lite); no v5 score; changed: speed, latency; AA marks it deprecated
+- Nova Micro — https://artificialanalysis.ai/models/nova-micro (Nova Micro); no v5 score; changed: speed, latency
+- Nova Premier — https://artificialanalysis.ai/models/nova-premier (Nova Premier); no v5 score; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- Nova Pro — https://artificialanalysis.ai/models/nova-pro (Nova Pro); no v5 score; changed: speed, latency; AA marks it deprecated; ECI dropped (Epoch no longer lists the model; was 123.8)
+- o3 — https://artificialanalysis.ai/models/o3 (o3); no v5 score; changed: speed, latency; ECI 147.05 (Epoch)
+- o3-mini — https://artificialanalysis.ai/models/o3-mini-high (o3-mini (High)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 140.61 (Epoch)
+- OLMo 3 32B Think — https://artificialanalysis.ai/models/olmo-3-32b-think (Olmo 3 32B Think); no v5 score; AA marks it deprecated; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- OLMo 3 7B Instruct — https://artificialanalysis.ai/models/olmo-3-7b-instruct (Olmo 3 7B Instruct); no v5 score; changed: price; null: price (AA lists none), speed/latency (AA has no measurement)
+- OLMo 3.1 32B Think — https://artificialanalysis.ai/models/olmo-3-1-32b-think (Olmo 3.1 32B Think); no v5 score; changed: price; null: price (AA lists none), speed/latency (AA has no measurement)
+- Opus 4.6 — https://artificialanalysis.ai/models/claude-opus-4-6-adaptive (Claude Opus 4.6 (Max)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 156.34 (Epoch)
+- Opus 4.7 — https://artificialanalysis.ai/models/claude-opus-4-7 (Claude Opus 4.7 (Max)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 157.44 (Epoch)
+- Opus 4.8 — https://artificialanalysis.ai/models/claude-opus-4-8 (Claude Opus 4.8 (Max)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 159.94 (Epoch)
+- Opus 5 — https://artificialanalysis.ai/models/claude-opus-5 (Claude Opus 5 (Max)); v5 44.2; changed: speed, latency; AA marks it deprecated; ECI 164.68 (Epoch)
+- Opus 5.5 — https://artificialanalysis.ai/models/claude-opus-5-5 (Claude Opus 5.5 (Max, Default Fallback)); v5 59.1; changed: speed, latency; ECI 168.54 (Epoch)
+- Phi-4 — https://artificialanalysis.ai/models/phi-4 (Phi-4); no v5 score; changed: speed, latency; ECI 129.04 (Epoch)
+- Phi-4 Multimodal — https://artificialanalysis.ai/models/phi-4-multimodal (Phi-4 Multimodal Instruct); no v5 score; changed: price, speed, latency; size 5.6B from AA `parameters`
+- Quasar 438B — https://artificialanalysis.ai/models/quasar-438b (Quasar 438B (Max, Based on GLM-5.2)); no v5 score; changed: price, speed, latency; null: price (AA lists none), speed/latency (AA has no measurement)
+- Qwen2.5-72B — https://artificialanalysis.ai/models/qwen2-5-72b-instruct (Qwen2.5 Instruct 72B); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 127.18 (Epoch)
+- Qwen2.5-Coder-32B — https://artificialanalysis.ai/models/qwen2-5-coder-32b-instruct (Qwen2.5 Coder Instruct 32B); no v5 score; AA marks it deprecated; ECI 118.94 (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
+- Qwen3-14B — https://artificialanalysis.ai/models/qwen3-14b-instruct-reasoning (Qwen3 14B (Reasoning)); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 136.14 (Epoch)
+- Qwen3-235B-A22B — https://artificialanalysis.ai/models/qwen3-235b-a22b-instruct-reasoning (Qwen3 235B A22B (Reasoning)); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 138.42 (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
+- Qwen3-30B-A3B — https://artificialanalysis.ai/models/qwen3-30b-a3b-instruct-reasoning (Qwen3 30B A3B (Reasoning)); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 134.14 (Epoch)
+- Qwen3-32B — https://artificialanalysis.ai/models/qwen3-32b-instruct-reasoning (Qwen3 32B (Reasoning)); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 136.89 (Epoch)
+- Qwen3-4B — https://artificialanalysis.ai/models/qwen3-4b-instruct-reasoning (Qwen3 4B (Reasoning)); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- Qwen3-8B — https://artificialanalysis.ai/models/qwen3-8b-instruct-reasoning (Qwen3 8B (Reasoning)); no v5 score; changed: price, speed, latency; AA marks it deprecated; ECI 132.09 (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
+- Qwen3-Coder-480B-A35B — https://artificialanalysis.ai/models/qwen3-coder-480b-a35b-instruct (Qwen3 Coder 480B A35B Instruct); no v5 score; changed: price, speed, latency; AA marks it deprecated
+- Qwen3-VL-235B-A22B — https://artificialanalysis.ai/models/qwen3-vl-235b-a22b-reasoning (Qwen3 VL 235B A22B (Reasoning)); no v5 score; changed: price, speed, latency; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- Qwen3.7 Max — https://artificialanalysis.ai/models/qwen3-7-max (Qwen3.7 Max); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 154.54 (Epoch)
+- Qwen3.8 2.4T A95B — https://artificialanalysis.ai/models/qwen3-8-2-4t-a95b (Qwen3.8 2.4T A95B); no v5 score; changed: speed, latency
+- Qwen3.8 27B — https://artificialanalysis.ai/models/qwen3-8-27b (Qwen3.8 27B (Xhigh)); v5 20.1; changed: speed, latency; ECI 152.64 (Epoch)
+- Qwen3.8 Max — https://artificialanalysis.ai/models/qwen3-8-max (Qwen3.8 Max (0902)); v5 33.7; changed: speed, latency; ECI 155.97 (Epoch)
+- Qwen3.8 Max (0803) — https://artificialanalysis.ai/models/qwen3-8-max-0803 (Qwen3.8 Max); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 157.59 (Epoch)
+- Qwen3.8-Flash-Next — https://artificialanalysis.ai/models/qwen3-8-flash-next (Qwen3.8-Flash-Next); v5 28.6; changed: speed, latency
+- QwQ-32B — https://artificialanalysis.ai/models/qwq-32b (QwQ 32B); no v5 score; changed: price; AA marks it deprecated; ECI 136.48 (Epoch); null: price (AA lists none), speed/latency (AA has no measurement)
+- Reka Flash 3 — https://artificialanalysis.ai/models/reka-flash-3 (Reka Flash 3); no v5 score; changed: price, speed, latency
+- Sarvam 105B — https://artificialanalysis.ai/models/sarvam-105b (Sarvam 105B (High)); no v5 score; changed: speed, latency
+- Sarvam 30B — https://artificialanalysis.ai/models/sarvam-30b (Sarvam 30B (High)); no v5 score; changed: price; null: price (AA lists none), speed/latency (AA has no measurement)
+- Sarvam-M — https://artificialanalysis.ai/models/sarvam-m-reasoning (Sarvam M (Reasoning, Based on Mistral Small 3.1)); no v5 score; AA marks it deprecated; null: speed/latency (AA has no measurement)
+- Snowflake Arctic — https://artificialanalysis.ai/models/arctic-instruct (Arctic Instruct); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- Solar Mini 4 — https://artificialanalysis.ai/models/solar-mini4 (Solar Mini 4); no v5 score; changed: speed, latency
+- Solar Open2 250B — https://artificialanalysis.ai/models/solar-open2-250b (Solar Open2 250B); no v5 score; null: price (AA lists none), speed/latency (AA has no measurement)
+- Solar Pro 2 — https://artificialanalysis.ai/models/solar-pro-2-reasoning (Solar Pro 2 (Reasoning)); no v5 score; AA marks it deprecated; null: price (AA lists none), speed/latency (AA has no measurement)
+- Solar Pro 3 — https://artificialanalysis.ai/models/solar-pro-3 (Solar Pro 3); no v5 score; changed: speed, latency; AA marks it deprecated; size 102B from AA `parameters`
+- Solar Pro 4 — https://artificialanalysis.ai/models/solar-pro4 (Solar Pro 4); v5 14.2; changed: speed, latency
+- Sonar — https://artificialanalysis.ai/models/sonar (Sonar); no v5 score; AA marks it deprecated; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- Sonar Pro — https://artificialanalysis.ai/models/sonar-pro (Sonar Pro); no v5 score; AA marks it deprecated; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- Sonar Reasoning Pro — https://artificialanalysis.ai/models/sonar-reasoning-pro (Sonar Reasoning Pro); no v5 score; AA marks it deprecated; list price kept from the Jul 2026 snapshot (AA lists none); null: speed/latency (AA has no measurement)
+- Sonnet 4.6 — https://artificialanalysis.ai/models/claude-sonnet-4-6-adaptive (Claude Sonnet 4.6 (Max)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 152.86 (Epoch)
+- Sonnet 5 — https://artificialanalysis.ai/models/claude-sonnet-5 (Claude Sonnet 5 (Max)); no v5 score; changed: speed, latency; AA marks it deprecated; ECI 156.94 (Epoch)
+- Sonnet 5.5 — https://artificialanalysis.ai/models/claude-sonnet-5-5 (Claude Sonnet 5.5 (Max, Default Fallback)); v5 54.5; changed: speed, latency; ECI 166.56 (Epoch)
+- Step 3.7 Flash — https://artificialanalysis.ai/models/step-3-7-flash (Step 3.7 Flash); no v5 score; changed: speed, latency; AA marks it deprecated
+- Step 5 Preview — https://artificialanalysis.ai/models/step-5 (Step 5 Preview); v5 28.5; changed: speed, latency; size 600B from AA `parameters`; now open weights: https://huggingface.co/stepfun-ai/Step-5-Preview; article /articles/step-5-preview
 
-## Added from AA (7)
+## Added from AA (23)
 
-- Gemini 4 Argon — https://artificialanalysis.ai/models/gemini-4-argon (Gemini 4 Argon (High)); https://llm-stats.com/models/gemini-4-argon (rollout limited to the Fairwind trusted-tester program; introductory and later price per Google's launch blog as summarised there); null: size (not published), speed/latency (AA has no measurement)
-- GPT-6.1 Sol — https://artificialanalysis.ai/models/gpt-6-1-sol (GPT-6.1 Sol (Max)); https://llm-stats.com/models/gpt-6.1-sol; ECI (Epoch); null: size (not published)
-- Haiku 5.5 — https://artificialanalysis.ai/models/claude-haiku-5-5 (Claude Haiku 5.5 (Max)); https://llm-stats.com/models/claude-haiku-5-5; article /articles/claude-haiku-5-5; null: size (not published)
-- Ling 3.1 Flash — https://artificialanalysis.ai/models/ling-3-1-flash (Ling 3.1 Flash); https://llm-stats.com/models/ling-3.1-flash (size ~560B/25B active; API only, weights not yet released)
-- Mistral Large 4 Preview — https://artificialanalysis.ai/models/mistral-large-4 (Mistral Large 4 Preview); https://llm-stats.com/models/mistral-large-4 (1.05T/52B active per Mistral docs; weights promised for end of October); article /articles/mistral-large-4
-- Solar Mini 4 — https://artificialanalysis.ai/models/solar-mini4 (Solar Mini 4); https://llm-stats.com/models/solar-mini4 (35B/3B active, proprietary)
-- Sonnet 5.5 — https://artificialanalysis.ai/models/claude-sonnet-5-5 (Claude Sonnet 5.5 (Max, Default Fallback)); https://llm-stats.com/models/claude-sonnet-5-5; ECI (Epoch); null: size (not published)
+- Agnes 2.5 Pro Theta — https://artificialanalysis.ai/models/agnes-2-5-pro-theta (Agnes 2.5 Pro Theta); v5 24
+- Beam 1.0 — https://artificialanalysis.ai/models/reflection-beam (Beam 1.0); v5 17.7; weights https://huggingface.co/reflection/Beam-1.0-501B-A23B (Apache 2.0); size 501B/23B active from AA; article /articles/reflection-beam; ECI 150.91 (Epoch)
+- Command A+ — https://artificialanalysis.ai/models/command-a-plus (Command A+); v5 6.2; weights https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16 (Apache 2.0); size 218B/25B active from AA; released 2026-05-20; not on the page before because AA had no Index for it; first scored on v5
+- DeepSeek V4.1 Flash 1017 — https://artificialanalysis.ai/models/deepseek-v4-1-flash-1017 (DeepSeek V4.1 Flash 1017 (Max)); v5 32.6; weights https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017 (MIT); article /articles/deepseek-v4-1-flash-1017; size 763B is the stored count from https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017 as counted in the article (AA lists 552B), same convention as the V4.1 Flash row; ECI 159.41 (Epoch)
+- Fable 5.2 — https://artificialanalysis.ai/models/claude-fable-5-2 (Claude Fable 5.2 (Max, Default Fallback)); v5 64.6; https://llm-stats.com/models/claude-fable-5-2 and https://llm-stats.com/models/claude-mythos-5-2 (Mythos 5.2 is the same model, verification-only); ECI 173.44 (Epoch)
+- Gemini 4 Carbon — https://artificialanalysis.ai/models/gemini-4-carbon (Gemini 4 Carbon (High)); v5 60; https://llm-stats.com/models/gemini-4-carbon (GA 2026-11-10; introductory $2/$10 to 2026-11-30, standard $4/$20 from 2026-12-01; AA lists the standard price); ECI 169.76 (Epoch)
+- GPT-6.1 Terra — https://artificialanalysis.ai/models/gpt-6-1-terra (GPT-6.1 Terra (Max)); v5 51.3; ECI 167.67 (Epoch)
+- Inkling 2 Small — https://artificialanalysis.ai/models/inkling-2-small (Inkling 2 Small); v5 30.6; size 594B/17B active from AA; article /articles/inkling-2-small; weights not released yet per /articles/inkling-2-small (AA lists it as proprietary, no weights link), so marked closed; context is AA's 1,024,000 (the model card says up to 1M; Tinker sells 64K and 256K variants)
+- JT-4.1 Flash 236B A21B — https://artificialanalysis.ai/models/jt-4-1-flash-236b-a21b (JT-4.1 Flash 236B A21B); v5 19; size 236B/21B active from AA; a new release dated 2026-11-11; AA lists the July version as the separate `jt-4-1-flash-236b-a21b-0709` (left out in October); null: price (AA lists none), speed/latency (AA has no measurement)
+- Kimi K3.1 Pro — https://artificialanalysis.ai/models/kimi-k3-1-pro (Kimi K3.1 Pro); v5 46.5; weights https://huggingface.co/moonshotai/Kimi-K3.1-Pro (Kimi K3.1-Pro Licence); size 2800B/104B active from AA; article /articles/kimi-k3-1-pro; https://llm-stats.com/models/kimi-k3.1-pro (released 2026-10-23); HF repo created 2026-11-02; ECI 161.37 (Epoch)
+- Ling 3.1 Flash 1019 — https://artificialanalysis.ai/models/ling-3-1-flash-1019 (Ling 3.1 Flash 1019); v5 29.6; weights https://huggingface.co/inclusionAI/Ling-3.1-flash-1019 (MIT); size 560B/25B active from AA; article /articles/ling-3-1-flash; null: speed/latency (AA has no measurement)
+- MiniMax M3.1 Flash — https://artificialanalysis.ai/models/minimax-m3-1-flash (MiniMax-M3.1-Flash); v5 29.1; weights https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash (MINIMAX COMMUNITY LICENSE); size 428B/23B active from AA; article /articles/minimax-m3-1-flash
+- Mistral Large 4 — https://artificialanalysis.ai/models/mistral-large-4 (Mistral Large 4 (High)); v5 26.1; weights https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B (Mistral Ecosystem Open-Weight License); size 1050B/52B active from AA; article /articles/mistral-le-chonk; weights released 2026-10-29 per /articles/mistral-le-chonk; the preview row stays as AA's deprecated `mistral-large-4-preview`; AA moved the `mistral-large-4` slug from the preview to this release; ECI 154.62 (Epoch)
+- Muse Ember — https://artificialanalysis.ai/models/muse-ember (Muse Ember (Max)); v5 36; article /articles/muse-ember
+- Muse Spark Open — https://artificialanalysis.ai/models/muse-spark-open (Muse Spark Open (Xhigh)); v5 24.9; weights https://huggingface.co/meta-models/Muse-Spark-Open-816B-A42B (Muse Model License); size 816B/42B active from AA; article /articles/muse-spark-open; ECI 155.42 (Epoch)
+- Muse Wonder — https://artificialanalysis.ai/models/muse-wonder (Muse Wonder (Max)); v5 43.6; article /articles/muse-wonder; ECI 161.68 (Epoch)
+- Muse Wonder Full — https://artificialanalysis.ai/models/muse-wonder-full (Muse Wonder Full (Max)); v5 50.1; article /articles/muse-wonder; AA lists no price, speed or latency; null: price (AA lists none), speed/latency (AA has no measurement)
+- Nanbeige4.3-33B — https://artificialanalysis.ai/models/nanbeige4-3-33b (Nanbeige4.3-33B); v5 20.4; weights https://huggingface.co/Nanbeige/Nanbeige4.3-33B (Apache 2.0); size 33B from AA; article /articles/nanbeige-4-3-33b; null: price (AA lists none), speed/latency (AA has no measurement)
+- Nemotron 3 Nano 4B — https://artificialanalysis.ai/models/nvidia-nemotron-3-nano-4b (NVIDIA Nemotron 3 Nano 4B); v5 1.8; weights https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 (Nvidia Nemotron Open Model License); size 3.97B from AA; released 2026-03-16; first scored by AA on v5; null: price (AA lists none), speed/latency (AA has no measurement)
+- Nemotron 3.5 Bolt 74B-A9B — https://artificialanalysis.ai/models/nemotron-3-5-bolt-74b-a9b (Nemotron 3.5 Bolt 74B-A9B); no v5 score; weights https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 (OpenMDW-1.1); size 74B/9B active from AA; AA lists it with no score yet; null: price (AA lists none), speed/latency (AA has no measurement)
+- Nemotron 3.5 Bolt E4B — https://artificialanalysis.ai/models/nemotron-3-5-bolt-e4b-4gb (Nemotron 3.5 Bolt E4B 4GB (Reasoning)); no v5 score; weights https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB (OpenMDW-1.1); size 8B/4B active from AA; article /articles/nemotron-3-5-bolt; AA lists it with no score yet; null: price (AA lists none), speed/latency (AA has no measurement)
+- Nemotron 3.5 Super VL — https://artificialanalysis.ai/models/nemotron-3-5-super-vl (Nemotron 3.5 Super VL); v5 13.6; weights https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 (OpenMDW-1.1); size 120B/12B active from AA; article /articles/nemotron-3-5-super-vl
+- Tencent Hy4 — https://artificialanalysis.ai/models/tencent-hy4 (Tencent Hy4); v5 34.6; article /articles/hy4; no weights on Hugging Face or ModelScope per /articles/hy4; size left null (no checkpoint published); the open Aug preview is the separate "Hy4 preview" row
 
-## Added from other sources, not on AA (4)
+## Added from other sources, not on AA (14)
 
-- IQuest-Q1 — https://huggingface.co/IQuestLab/IQuest-Q1 (320B total, 15B active, 524,288 ctx, IQuest-Q1 licence = modified MIT; repo created 2026-09-28); article /articles/iquest-q1; origin "Other" (not stated by the source); null: intelligence/speed/latency (not on AA), price (none published)
-- Kolibri-1 — https://huggingface.co/Aleph-Alpha/kolibri-1 (78.1B/3.46B active, Apache-2.0; context 262,144 from config.json `max_position_embeddings`, 1M is Aleph Alpha's extrapolation claim); released 2026-10-03 per the article; article /articles/kolibri-1; null: intelligence/speed/latency (not on AA), price (none published)
-- Mellum2.1 — https://huggingface.co/JetBrains/Mellum2.1-12B-A2.5B-Thinking (12B/2.5B active, Apache-2.0, 131,072 ctx), https://blog.jetbrains.com/ai/2026/10/mellum2-1-gets-to-work-a-fast-open-model-for-coding-agents/ (released 2026-10-08); not on llm-stats; null: intelligence/speed/latency (not on AA), price (none published)
-- Naive-N0.5-Flash — https://huggingface.co/NaiveAI/Naive-N0.5-Flash (309B/15.5B active, MIT, 1,048,576 ctx; repo created 2026-09-27), https://naive.ai/en/research/; article /articles/naive-n05-flash; origin "Other" (not stated by the source); null: intelligence/speed/latency (not on AA), price (none published)
+- ERNIE 5.5 Flash Preview — https://llm-stats.com/models/ernie-5.5-flash-preview (280B/14B active, 1,048,576 ctx, Qianfan intl. $0.28/$1.13, released 2026-11-11, weights promised under Apache 2.0); base model https://huggingface.co/baidu/ERNIE-5.5-Flash-Base; marked closed until the post-trained weights ship; null: intelligence/speed/latency (not on AA)
+- Flint — https://huggingface.co/RecursiveSI/flint (39,785,287,456 params, 262,144 ctx, Apache-2.0; created 2026-10-21); article /articles/flint; origin "Other" (not stated by the source); null: intelligence/speed/latency (not on AA)
+- GPT-6 Cyber — https://llm-stats.com/models/gpt-6-cyber (OpenAI list $20/$100 short-context, 1.05M ctx, Daybreak Red gated, released 2026-11-05); null: intelligence/speed/latency (not on AA)
+- GPT-6 Rosalind — https://llm-stats.com/models/gpt-6-rosalind (OpenAI pricing page $15/$75 short-context, trusted access, released 2026-10-30; no context window published); null: intelligence/speed/latency (not on AA)
+- LFM2.5-24B-A2B — https://huggingface.co/LiquidAI/LFM2.5-24B-A2B (23,971,585,280 params, max_position_embeddings 131,072, LFM Open License; announced 2026-10-13 per the article); article /articles/lfm2-5-24b-a2b; null: intelligence/speed/latency (not on AA)
+- LFM3-1.7B — https://huggingface.co/LiquidAI/LFM3-1.7B (1,728,801,536 params, 262,144 ctx), https://llm-stats.com/models/lfm3-1.7b (released 2026-10-27, LFM Open License v1.0); article /articles/lfm3; null: intelligence/speed/latency (not on AA)
+- LongCat-2.5 — https://llm-stats.com/models/longcat-2.5 (~1.6T/48B active per Meituan, LongCat API $0.30/$1.20 launch discount, 1M ctx, released 2026-11-01); weights https://huggingface.co/meituan-longcat/LongCat-2.5 (MIT, repo created 2026-11-04; HF counts 1,779,752,648,320 stored); null: intelligence/speed/latency (not on AA)
+- Mercury 3 — https://llm-stats.com/models/mercury-3 (Inception API $0.10/$0.35, 1M ctx, released 2026-10-19; 1,068 tok/s is Inception's claim, so speedTps stays null); article /articles/mercury-3; null: intelligence/speed/latency (not on AA)
+- Nemotron Labs Dory 1.0 4B — https://huggingface.co/nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16 (3,975,229,440 params, 262,144 ctx, OpenMDW; created 2026-10-16), https://llm-stats.com/models/nemotron-labs-dory-1.0-4b; article /articles/nemotron-dory; null: intelligence/speed/latency (not on AA)
+- Nex-N2.6 — https://huggingface.co/nex-agi/Nex-N2.6 (321,323,031,390 params, text max_position_embeddings 1,048,576, Apache-2.0; created 2026-11-10); article /articles/nex-n2-6; no hosted price found; null: intelligence/speed/latency (not on AA)
+- Qwen4-Max-Preview — https://llm-stats.com/models/qwen4-max-preview (1M ctx; Token Plan only, no per-token price; preview 2026-11-11 to 2026-11-25); null: intelligence/speed/latency (not on AA)
+- Raon-1 nano — https://huggingface.co/KRAFTON/Raon-1-nano (Apache-2.0, max_position_embeddings 262,144; main repo created 2026-10-29, GGUF/MLX builds 2026-11-10; released November per the article); 3.13B main model per /articles/raon-1-nano (the Hub's 3.53B adds a second copy of the tied embedding); null: intelligence/speed/latency (not on AA)
+- Ripple-65B Preview — https://huggingface.co/ricursiveAI/Ripple-65B-Preview (64,782,689,360 params, max_position_embeddings 2,097,152, Apache-2.0; released 2026-11-04); article /articles/ripple-65b (US per the launch claim it quotes); null: intelligence/speed/latency (not on AA)
+- Spark-X2.6-1.7B — https://huggingface.co/XHToken/Spark-X2.6-1.7B (1,707,657,216 params, 1,048,576 ctx, Apache-2.0; created 2026-10-19); provider iFlytek per the licence named in /articles/spark-x2-6-1-7b; null: intelligence/speed/latency (not on AA)
 
 ## Removed/renamed
 
-- Nothing removed: every model that carried an AA score in September is still on AA.
-- MiMo-V2.6-Flash moved from the non-AA list to AA (above).
-- AA renamed its variants (e.g. "Claude Opus 5.5 (Adaptive Reasoning, Max Effort, Default Fallback)" is now "Claude Opus 5.5 (Max, Default Fallback)"); notes use the new names. Rows keep their names.
-- AA re-split two releases: "Kimi K2.6" and "EXAONE 4.5 33B" are now "(Reasoning)" variants of the same release. "o3-mini" is now shown as AA's "o3-mini (High)", the highest-effort variant the method calls for (the September row used AA's default-effort "o3-mini").
-- Qwen3.8 Max: AA's variant slug `qwen3-8-max` is the 0902 version (release `qwen3-8-max-0902`), while its release slug `qwen3-8-max` is the 0803 version (variant `qwen3-8-max-0803`). Rows are matched by variant, so both read the same versions as in September.
+- Nothing removed. Every AA row from October is still in AA's payload; 147 of them have no v5 score yet and now show `intelligence: null`.
+- Kimi K3: AA has re-run only its Low variant on v5 (17.4); the Max variant the method uses has no v5 score, so the row is null rather than borrowing the Low score.
+- Mistral Large 4 Preview: AA reassigned the `mistral-large-4` slug to the open-weight GA release; the preview row now reads `mistral-large-4-preview` (deprecated) and the GA is a new row.
+- Open weights flipped on AA's weights link, checked on Hugging Face: Ling 3.1 Flash (https://huggingface.co/inclusionAI/Ling-3.1-flash, MIT, created 2026-10-13) and Step 5 Preview (https://huggingface.co/stepfun-ai/Step-5-Preview, StepFun Model License 1.0, created 2026-09-20).
+- Notes now start "AA Nov 2026:"; the "Index estimated by AA" wording is gone because AA's v5 payload has no estimated flag.
+- Gemini 4 Argon: re-read today on https://llm-stats.com/models/gemini-4-argon (GA on the Gemini API since 2026-10-13, introductory $2/$10 to 2026-11-30, standard $4/$20 from 2026-12-01); AA now lists the standard price and measures its speed. Mistral Large 4 Preview keeps 1.05T (Mistral docs via llm-stats); AA lists 1.0T/49B.
+- Articles linked on existing rows: Step 5 Preview → /articles/step-5-preview, Ling 3.1 Flash → /articles/ling-3-1-flash, Atria Dawn Preview → /articles/atria-dawn.
 
-## Not on AA, ECI added (3)
+## Epoch ECI
 
-- Command R+ (08-2024) — Epoch ECI 119.34; nothing else changed
-- Falcon-180B — Epoch ECI 112.13; nothing else changed
-- Mistral NeMo 12B — Epoch ECI 118.68; nothing else changed
+- New matches: Beam 1.0, DeepSeek V4.1 Flash 1017, Fable 5.2, Gemini 4 Argon, Gemini 4 Carbon, GPT-6.1 Terra, Haiku 5.5, Kimi K3.1 Pro, Mistral Large 4, Mistral Large 4 Preview, Muse Spark Open, Muse Wonder.
+- Dropped (no longer in eci_scores.csv): Command R+ (08-2024), DeepSeek-R1-Distill-Qwen-32B, GPT-5.3 Codex, Mistral Small 3.2, Nova Pro.
+- Version matches: Qwen3.8 Max ← "Qwen3.8 Max (0902)", Qwen3.8 Max (0803) ← "Qwen 3.8 Max" (dated 2026-08-02), Gemini 2.5 Pro ← "Gemini 2.5 Pro (Jun 2025)", Grok 4.20 ← "Grok 4.20" (as in October).
+- Left out as before: Grok 4.3 (Epoch scores the April beta), Gemini 2.5 Flash and Flash-Lite (several dated previews), GPT-5.5 Instant (Epoch has none), Yi-1.5-34B.
 
-## Unchanged non-AA (58)
+## Unchanged non-AA (64, plus Atria Dawn Preview)
 
-These were never AA-scored and AA still does not list them, so nothing was re-read: Agents-A1, Apple On-Device Foundation, Atria Dawn Preview, Audex, Bonsai 27B, Codestral Mamba 7B, Command R7B, Cosmos 3, ERNIE 5.1, Falcon-H1-34B, Gemini 3.5 Flash Cyber, Gemini 3.8 Flash Cyber, Gemma 4, GPT-5.6 Cyber, Hy4 preview, iFlytek Spark X1, iLLaDA, Intern-S2, KAT-Coder-V2.5, Kimi K2.8 Preview, Laguna M.1, Laguna S 2.1, Leanstral 1.5, LFM2.5-VL-3B, Llama 4 Behemoth, LOTUS, Mach-Mind-4-Flash, MAI-1-preview, MAI-Code-1.1-Flash, MAI-Thinking-1, Monolith 1.0, Motif 2.6B, MusaCoder, Nemotron NVFP4, Nemotron TwoTower, Nemotron-H 56B, North Micro Vision Instruct, Palmyra X5, Phi-3.5-MoE, Phi-4-reasoning-plus, Qwen-Audio-3.0-TTS, Qwen3.8-Omni-Flash, Ring-Zero, Sakana Fugu, Sakana Namazu, SmolLM3-3B, SOLAR-10.7B, Soofi S, SWE-1.7, TabFM, Tapered LM, Tinfield 1, Un-0, VideoChat3, Yi-1.5-34B, Yi-Lightning, Zamba2-7B, ZUNA 1.1.
-
-## ECI matches left out
-
-Epoch scores a different version than the row, so `eci` stays null: GPT-5.5 Instant (Epoch's is the May release; the row is AA's June 2026 version), Grok 4.3 (Epoch scores the April beta), Gemini 2.5 Flash and Gemini 2.5 Flash-Lite (Epoch has several dated previews; AA's row does not say which), Yi-1.5-34B (Epoch has Yi-34B, a different model). New releases Epoch has not scored yet: Haiku 5.5, Gemini 4 Argon, Mistral Large 4 Preview and others.
+Never AA-scored and still not on AA; only ECI re-read (Atria Dawn Preview also gained its article link, above): Agents-A1, Apple On-Device Foundation, Audex, Bonsai 27B, Codestral Mamba 7B, Command R+ (08-2024), Command R7B, Cosmos 3, ERNIE 5.1, Falcon-180B, Falcon-H1-34B, Gemini 3.5 Flash Cyber, Gemini 3.8 Flash Cyber, Gemma 4, GPT-5.6 Cyber, Hy4 preview, iFlytek Spark X1, iLLaDA, Intern-S2, IQuest-Q1, KAT-Coder-V2.5, Kimi K2.8 Preview, Kolibri-1, Laguna M.1, Laguna S 2.1, Leanstral 1.5, LFM2.5-VL-3B, Llama 4 Behemoth, LOTUS, Mach-Mind-4-Flash, MAI-1-preview, MAI-Code-1.1-Flash, MAI-Thinking-1, Mellum2.1, Mistral NeMo 12B, Monolith 1.0, Motif 2.6B, MusaCoder, Naive-N0.5-Flash, Nemotron NVFP4, Nemotron TwoTower, Nemotron-H 56B, North Micro Vision Instruct, Palmyra X5, Phi-3.5-MoE, Phi-4-reasoning-plus, Qwen-Audio-3.0-TTS, Qwen3.8-Omni-Flash, Ring-Zero, Sakana Fugu, Sakana Namazu, SmolLM3-3B, SOLAR-10.7B, Soofi S, SWE-1.7, TabFM, Tapered LM, Tinfield 1, Un-0, VideoChat3, Yi-1.5-34B, Yi-Lightning, Zamba2-7B, ZUNA 1.1.
 
 ## Considered and left out
 
-- GPT-6 Sol (Daybreak Blue, max) — a separate AA release (`gpt-6-sol-daybreak-blue`, 2026-09-22) with no Intelligence Index, speed or latency yet; a deployment variant of GPT-6 Sol, not a new model.
-- interfaze-1-lite — a bundle, not a model: 76 of its 79 large files are byte-identical to eight public checkpoints (Qwen3.8-27B-FP8, Chandra OCR 2, Whisper large-v3 turbo, SAM 2.1, PaddleOCR…) wired together with a tool loop (/articles/interfaze-1-lite). Its LLM is already the Qwen3.8 27B row.
-- Ember-1 (Fireworks AI, llm-stats `ember-1`, 2026-09-23) — a research-preview post-train of Kimi K3 that shortens reasoning traces; a derivative, same convention as the community fine-tunes below.
-- GPT-Rosalind (llm-stats `gpt-rosalind-research`) — a trusted-access life-sciences model first released in April 2026; the Sep 11 change is general availability in that program, not a new model.
-- MiMo-V2.6-Pro-MOPD / -Flash-MOPD (2026-09-27) — MOPD checkpoint upgrades of the same MiMo-V2.6 weights (https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-MOPD); folded into the existing rows. MiMo-V2.6-Distill-Qwen-9B is a distillation into Qwen, left out.
-- Marin 535B-A23B (/articles/marin-535b) — a training run past its halfway mark, not a release.
-- Spark-X2.5-4B (/articles/spark-x2-5-4b), Hunyuan-A13B (/articles/hunyuan-a13b), LensVLM-9B, Limite 1B Violetto — covered by articles since September, but released before this window (Spark-X in August, Hunyuan-A13B in 2025) or not general LLMs (LensVLM is a document VLM built on Qwen3.5; Violetto is a 1B math model).
-- Decision models (Open d1, Jev and its alternatives) — not general LLMs; the page has no convention for them.
-- AA releases from June–August not on the page (Qwen3.7 Plus, Nex-N2-Pro, DiffusionGemma 26B A4B, Kimi K2.7 Code, JT-4.1 Flash, Motif 3 Beta) — dated before September and not taken in the September curation; not re-litigated here.
-- Community fine-tunes and quants the site has covered (Qwen3.8-2B-Distill, ThinkingCap-Qwen3.8-27B, Whittle MoE 27B, Penjing-27B, GLM-5.3-Flash-MLX / -Uncensored, altar-1, Project Maya and kaggle-tpu-320b which run GLM-5.3-Flash) — derivatives or deployments, not releases. Tinfield 1 stays the one exception.
-- Checked and already on the page from September, so only re-read: Kimi K3, MiniMax M3, DeepSeek V4.1 Flash, GLM-5.3 and GLM-5.3 Flash, Muse Glimmer, Nemotron 3.5 Lightning (NVIDIA has released no other Nemotron 3.5 LLM size), MAI-Code-1.1-Flash (still not on AA), the Gemma 4 sizes (no new Gemma since June), and the Qwen3.8 sizes (Hugging Face has no Qwen3.8 weights beyond 2.4T-A95B, 27B and Flash-Next).
-- Not found anywhere as of 2026-10-08: no GPT-6.1 Astra or Luna (only GPT-6.1 Sol), no Grok after 4.7, no Gemini 4 model besides Argon and no Gemma 5, on AA or llm-stats. Provider model pages were not re-read this time; the sweep used AA, llm-stats and Hugging Face.
+- Particle-1 (https://llm-stats.com/models/particle-1) and SWE-2 Flash (https://llm-stats.com/models/swe-2-flash): closed post-trains of DeepSeek V4.1 Flash and Inkling-Small, the derivative convention.
+- GLM-5.3-FlashX-Legal (llm-stats, 2026-10-12): a domain fine-tune.
+- Claude Mythos 5.2: the same model as Fable 5.2, folded into that row's note (as Mythos 5.1 is for Fable 5.1).
+- MAI-Base-2 (/articles/mai-2): a finished pre-training run, not a released model.
+- Clover-35B-A3B (/articles/clover-35b-a3b), Comet 60B, Kimi K3.1 Pro pruned75, Bonsai 2, Ultramarine 1 Flash, Underdog Saluki 27B, Arete-27B, Alpie Seed 9B: conversions, prunes, quants or post-trains of existing models; weights not out (Ultramarine).
+- Raon-1 mini preview, Spark-X2.6-4B, LFM3-VL-2B: siblings of rows added here; only the model the site covers is listed.
+- Qwen4-27B (/articles/qwen4-27b-vllm-xpu): a leak from a kernel PR, not a release.
+- GPT-6 Sol (Daybreak Blue, max) and Agnes 2.5 Pro Beta: AA lists them with no score; a deployment variant and a superseded beta.
+- AA releases already on the page are re-read only; no GPT-6.1 Astra or Luna, no Grok after 4.7 and no Gemma 5 exist on AA or llm-stats as of 2026-11-12.
