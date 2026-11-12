@@ -1367,6 +1367,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "skaling-law/coupling-knob": () => import("@/components/articles/skaling-law/coupling-knob"),
   "skaling-law/estimate-spread": () => import("@/components/articles/skaling-law/estimate-spread"),
   "skaling-law/grid-strategy": () => import("@/components/articles/skaling-law/grid-strategy"),
+  "sketchpad-exact-arithmetic/tape-adder": () => import("@/components/articles/sketchpad-exact-arithmetic/tape-adder"),
+  "sketchpad-exact-arithmetic/view-table": () => import("@/components/articles/sketchpad-exact-arithmetic/view-table"),
   "skill2env/reward-tension": () => import("@/components/articles/skill2env/reward-tension"),
   "skill2env/skill-compiler": () => import("@/components/articles/skill2env/skill-compiler"),
   "skill2env/skill-fidelity": () => import("@/components/articles/skill2env/skill-fidelity"),
