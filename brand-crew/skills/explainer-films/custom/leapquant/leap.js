@@ -34,7 +34,7 @@ BESPOKE.define((() => {
   const VMIN = 3.5, VMAX = 11.5
 
   return {
-    stampAt: k => [1250, Math.max(k.top + 20, 250)],
+    stampAt: k => [1230, 905],
     plan: () => ({
       min: [4, 4.6, 4.8, 4],
       events: [
@@ -63,7 +63,7 @@ BESPOKE.define((() => {
         const ky = Y0 - 56
         k.push(); k.alpha(a)
         k.seed('key' + str.length); k.line([[kx, ky], [kx + 40, ky]], sw, col)
-        const m = k.text(str, kx + 52, ky + 8, { role: 'label', size: 22, min: 12, maxW: 290, lines: 1, col })
+        const m = k.text(str, kx + 52, ky + 8, { role: 'label', size: 26, min: 12, maxW: 290, lines: 1, col })
         k.pop()
         kx += 52 + m.w + 36
       }

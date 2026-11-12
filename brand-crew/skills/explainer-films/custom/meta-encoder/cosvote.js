@@ -13,7 +13,7 @@
 // params: { query, options: [3 strings], legend: [4 strings], cold, hot }
 BESPOKE.define((() => {
   // toy angles in degrees: the request, then three options
-  const QA = 20, OA = [34, 128, 214]
+  const QA = -10, OA = [34, 128, 234]
   const rad = d => (d * Math.PI) / 180
   const cosv = OA.map(a => Math.cos(rad(a - QA)))
   const soft = tau => {
@@ -39,7 +39,7 @@ BESPOKE.define((() => {
       const opts = p.options || []
       const at = (st, d, delay) => (k.thumb ? 1 : k.p(st, d, delay))
       const TOP = Math.max(k.top + 40, 250)
-      const CX = 400, CY = TOP + 300, R = 230
+      const CX = 400, CY = TOP + 300, R = 260
       const tip = (a, r) => [CX + r * Math.cos(rad(a)), CY - r * Math.sin(rad(a))]
       const colOpt = [k.P.b, k.mix(k.P.a, k.ink, .2), k.mix(k.P.light || k.P.b, k.ink, .45)]
 
@@ -59,9 +59,9 @@ BESPOKE.define((() => {
         k.seed('opt' + j); k.arrow([[CX, CY], tip(OA[j], R * g)], colOpt[j], lit ? 1.4 : 1, 1)
         if (opts[j] && g > .6) {
           const [tx, ty] = tip(OA[j], R + 34)
-          const m = k.measure(opts[j], { role: 'label', size: 26, min: 14, maxW: 220, lines: 1 })
-          const ax = Math.cos(rad(OA[j])) < -.2 ? tx - m.w : Math.cos(rad(OA[j])) > .2 ? tx : tx - m.w / 2
-          k.text(opts[j], ax, ty + 8, { role: 'label', size: 26, min: 14, maxW: 220, lines: 1, col: lit ? k.ink : k.dim })
+          const m = k.measure(opts[j], { role: 'label', size: 30, min: 14, maxW: 220, lines: 1 })
+          const ax = Math.max(110, Math.cos(rad(OA[j])) < -.2 ? tx - m.w : Math.cos(rad(OA[j])) > .2 ? tx : tx - m.w / 2)
+          k.text(opts[j], ax, ty - 4, { role: 'label', size: 30, min: 14, maxW: 220, lines: 1, col: lit ? k.ink : k.dim })
         }
         k.pop()
       }
@@ -69,8 +69,8 @@ BESPOKE.define((() => {
       if (qg > 0) {
         k.seed('query'); k.arrow([[CX, CY], tip(QA, R * qg)], k.P.hi, 1.6, 1)
         if (p.query && qg > .6) {
-          const [tx, ty] = tip(QA, R + 30)
-          k.text(p.query, tx + 6, ty + 14, { role: 'label', size: 26, min: 14, maxW: 170, lines: 2, col: k.ink })
+          const [tx, ty] = tip(QA, R + 24)
+          k.text(p.query, tx - 10, ty + 40, { role: 'label', size: 28, min: 13, maxW: 190, lines: 2, col: k.ink })
         }
       }
       // step 1: the angle between the request and the closest option
@@ -82,7 +82,7 @@ BESPOKE.define((() => {
       }
 
       // steps 2-3: softmax bars, cold then hot
-      const BX = 860, BW = 440, BH = 46, BY = TOP + 150
+      const BX = 910, BW = 420, BH = 46, BY = TOP + 150
       if (i >= 2) {
         const show = k.easeOut(at(2, .8, .1))
         const mixT = i >= 3 ? k.easeOut(at(3, 1.6, .2)) : 0
@@ -104,8 +104,8 @@ BESPOKE.define((() => {
 
       // legend for the beat
       const leg = p.legend && p.legend[i]
-      if (leg && i < 2) k.text(leg, 860, TOP + 160, { role: 'head', size: 36, min: 18, maxW: 480, lines: 4 })
-      if (leg && i >= 2) k.text(leg, 860, TOP + 30, { role: 'head', size: 30, min: 16, maxW: 480, lines: 2 })
+      if (leg && i < 2) k.text(leg, 910, TOP + 160, { role: 'head', size: 36, min: 18, maxW: 480, lines: 4 })
+      if (leg && i >= 2) k.text(leg, 910, TOP + 30, { role: 'head', size: 30, min: 16, maxW: 480, lines: 2 })
 
       k.point = i < 2 ? tip(QA, R) : [BX + BW, BY + BH / 2]
       k.mood = i === 3 ? 'happy' : i === 1 ? 'thinking' : 'neutral'

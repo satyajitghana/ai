@@ -55,9 +55,9 @@ BESPOKE.define((() => {
         if (r === 2) k.text(thickVal, CX + 270, y + 10, { role: 'body', size: 32, maxW: 120 })
         // the ledger cell: recorded for start and end, empty for thickness and values
         const recorded = r < 2
-        const lx = CX + CW - 200, lw = 170
+        const lx = CX + CW - 215, lw = 195
         k.seed('cell' + r); k.shape(k.rrect(lx, y - 30, lw, 56, 12), { fill: recorded ? k.tone('light') : k.paper, op: recorded ? .9 : .6, sw: .8 })
-        k.text(recorded ? marks[0] : marks[1], lx + lw / 2, y + 8, { role: 'label', size: 22, maxW: lw - 20, align: 'center', col: recorded ? k.ink : k.dim })
+        k.text(recorded ? marks[0] : marks[1], lx + lw / 2, y + 8, { role: 'label', size: 27, min: 14, maxW: lw - 16, align: 'center', col: recorded ? k.ink : k.dim })
         k.pop()
       })
 

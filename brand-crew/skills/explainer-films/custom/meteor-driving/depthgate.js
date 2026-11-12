@@ -17,7 +17,7 @@
 //        camera agrees, weighted average
 // params: { legend: [5], depthLabel, gateLabel, camA, camB }
 BESPOKE.define((() => {
-  const ROWS = 10, COLS = 9, C = 46
+  const ROWS = 10, COLS = 9, C = 41
   const RAY_COL = 4, CAR_ROW = 3
   // toy depth distribution along the forward ray, nearest cell first (d = 0 is row 9)
   const P = [0.01, 0.01, 0.02, 0.03, 0.06, 0.17, 0.44, 0.17, 0.06, 0.03]
@@ -26,7 +26,7 @@ BESPOKE.define((() => {
   const FLOOR = 0.05
   const PEAK = 0.44 + FLOOR
   return {
-    stampAt: k => [1250, Math.max(k.top + 40, 250) + 500],
+    stampAt: k => [1240, Math.max(k.top + 40, 250) - 30],
     plan: () => ({
       min: [3.6, 4.2, 4, 4.4, 4.6],
       events: [
@@ -121,7 +121,7 @@ BESPOKE.define((() => {
 
       // legend for the beat
       const lg = p.legend && p.legend[i]
-      if (lg) k.text(lg, 230, Math.min(cy(ROWS) + 120, 910), { role: 'head', size: 30, min: 16, maxW: 1120, lines: 1 })
+      if (lg) k.text(lg, 230, Math.min(cy(ROWS) + 128, 915), { role: 'head', size: 30, min: 16, maxW: 1120, lines: 1 })
 
       k.point = i >= 2 && i <= 3 ? [BX + 6.5 * (BW / P.length), BY + BH - 200] : [cx(RAY_COL) + C / 2, cy(CAR_ROW) + C / 2]
       k.mood = i === 1 ? 'surprised' : i === 3 ? 'happy' : i === 4 ? 'proud' : 'thinking'

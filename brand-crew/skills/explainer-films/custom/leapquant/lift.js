@@ -92,7 +92,7 @@ BESPOKE.define((() => {
           const fh = k.lerp(h, 110, lk)
           k.seed('lift' + j); k.shape(k.rect(fx, fy, BW, fh), { fill: k.P.hi, op: .9, sw: .7 })
         })
-        if (p.fp16) k.text(p.fp16, BX + BWID / 2, BY + BH + 40, { role: 'label', size: 22, min: 12, maxW: BWID + 20, lines: 2, align: 'center' })
+        if (p.fp16) k.text(p.fp16, BX + BWID / 2, BY + BH + 40, { role: 'label', size: 27, min: 12, maxW: BWID + 30, lines: 2, align: 'center' })
         k.pop()
       }
 
@@ -104,16 +104,16 @@ BESPOKE.define((() => {
           const a = k.thumb ? 1 : k.backOut(k.p(3, .5, .2 + .7 * n))
           if (a <= 0) return
           const lab = (p.stages || [])[n] || ''
-          const w = Math.max(k.measure(r, { role: 'head', size: 36 }).w, k.measure(lab, { role: 'label', size: 20, maxW: 300 }).w) + 40
+          const w = Math.max(k.measure(r, { role: 'head', size: 36 }).w, k.measure(lab, { role: 'label', size: 24, maxW: 300 }).w) + 40
           k.push(); k.alpha(Math.min(1, a))
           k.seed('chip' + n); k.shape(k.rrect(x, y, w, 96, 14), { fill: n === 2 ? k.P.a : k.mix(k.paper, k.P.b, .35), op: .9, sw: .8 })
           k.text(r, x + w / 2, y + 40, { role: 'head', size: 36, min: 18, maxW: w - 20, align: 'center', col: n === 2 ? k.textOn(k.P.a) : k.ink })
-          if (lab) k.text(lab, x + w / 2, y + 78, { role: 'label', size: 20, min: 11, maxW: w - 16, align: 'center', col: n === 2 ? k.textOn(k.P.a) : k.dim })
+          if (lab) k.text(lab, x + w / 2, y + 78, { role: 'label', size: 24, min: 11, maxW: w - 16, align: 'center', col: n === 2 ? k.textOn(k.P.a) : k.dim })
           k.pop()
           if (n < p.ratios.length - 1) { k.seed('chev' + n); k.arrow([[x + w + 10, y + 48], [x + w + 46, y + 48]], k.ink, 1, a) }
           x += w + 60
         })
-        if (p.paper) k.text(p.paper, x + 10, y + 52, { role: 'label', size: 22, min: 12, maxW: 1340 - x, lines: 2, col: k.dim })
+        if (p.paper) k.text(p.paper, x + 10, y + 52, { role: 'label', size: 26, min: 12, maxW: 1360 - x, lines: 3, col: k.dim })
       } else if (p.legend && p.legend[i]) {
         k.text(p.legend[i], X0, BASE + 90, { role: 'head', size: 30, min: 16, maxW: 1150, lines: 2 })
       }

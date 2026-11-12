@@ -113,7 +113,7 @@ BESPOKE.define((() => {
         k.shape(k.rrect(x - size / 2, y - hgt / 2, size, hgt, 12), { fill, op: running ? .9 : .7, sw: .8 })
         if (running && t > .8 && p.running) {
           k.push(); k.alpha((t - .8) / .2)
-          k.text(p.running, x, y + 9, { role: 'mono', size: 22, maxW: size - 20, align: 'center', col: k.textOn(fill) })
+          k.text(p.running, x, y + 10, { role: 'mono', size: 26, min: 12, maxW: size - 20, align: 'center', col: k.textOn(fill) })
           k.pop()
         }
       }
