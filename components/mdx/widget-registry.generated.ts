@@ -868,6 +868,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "minicpm5-2b/vram-budget-explorer": () => import("@/components/articles/minicpm5-2b/vram-budget-explorer"),
   "minimal-ml-engineering-agent/harness-ladder": () => import("@/components/articles/minimal-ml-engineering-agent/harness-ladder"),
   "minimal-ml-engineering-agent/interval-explorer": () => import("@/components/articles/minimal-ml-engineering-agent/interval-explorer"),
+  "minimax-h3-image/offload-planner": () => import("@/components/articles/minimax-h3-image/offload-planner"),
+  "minimax-h3-image/token-budget": () => import("@/components/articles/minimax-h3-image/token-budget"),
   "minimax-h3/territory-checker": () => import("@/components/articles/minimax-h3/territory-checker"),
   "minimax-m3-1-flash/budget": () => import("@/components/articles/minimax-m3-1-flash/budget"),
   "minimax-m3-1-flash/card-table": () => import("@/components/articles/minimax-m3-1-flash/card-table"),

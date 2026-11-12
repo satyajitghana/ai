@@ -1,0 +1,267 @@
+---
+title: "MiniMax-H3-Image: 16 megapixels is 16,384 tokens, and minutes on a 3080"
+description: "MiniMax open-weighted H3-Image, a 33.1B single-stream diffusion transformer that generates 4096×4096 images directly in six distilled steps and edits with up to 16 reference images. I read the configs, the safetensors headers and the diffusers code. A 4096² canvas is 16,384 transformer rows, and attention grows from 5% of a step's arithmetic at 1 MP to 39% at 16 MP. References are extra rows held at t = 0.999. The 'runs on an RTX 3080 with offloading' claim came from a third-party post: the arithmetic says offloading is nearly free at 16 MP and the compute is not: three to four and a half minutes an image, and nobody has timed one. The licence excludes the US, EU, UK and Korea, and its commercial threshold fell from $20 million to $1 million."
+date: 2026-11-12
+tags:
+  - image-generation
+  - diffusion
+  - flow-matching
+  - distillation
+  - offloading
+  - licensing
+draft: false
+featured: false
+cover: /articles/minimax-h3-image/fig2.jpg
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Counts H3-Image's 16 MP token and FLOP bill from its config and headers, prices the 3080 offload claim, and diffs the licence against H3's."
+topic: generative-media
+kind: model
+level: practitioner
+runsOn: consumer-gpu
+licence: custom
+---
+
+import { TokenBudget } from "@/components/articles/minimax-h3-image/token-budget"
+import { OffloadPlanner } from "@/components/articles/minimax-h3-image/offload-planner"
+
+On 10 November MiniMax put the weights of [MiniMax-H3-Image](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image) on Hugging Face: an image generator and editor carved out of the [MiniMax H3](/articles/minimax-h3) video model. MiniMax's launch post on X led with "16 million pixel. 10-20 seconds. Open weights." A post by @0x0SojalSec, carrying a screen recording of that launch video, added the claim that travelled: "You can now run locally the best Open-source image model On an RTX 3080 (10GB or 12GB VRAM) with offloading," with a list of four features. A 33B DiT. Direct 4096×4096 generation. Multi-image-reference editing in one checkpoint. Strong instruction following.
+
+The first reply asked the right question: "33B DiT on a 10GB 3080 with offloading sounds great until you time it. How many seconds per 4K image on that card, versus renting an H100?" Nobody answered it. This piece does, with arithmetic rather than a run, and on the way it explains how a diffusion transformer makes a 16-megapixel picture, why that is expensive, and what MiniMax changed to make it workable.
+
+<Video
+  src="/articles/minimax-h3-image/clip1"
+  poster="/articles/minimax-h3-image/clip1-poster.jpg"
+  alt="A screen recording of MiniMax's launch post: a pink jellyfish printed on paper on a wooden desk, then the same jellyfish in sunset, harbour and city-skyline variations, an aerial shot of it over city blocks, and a dancer whose dress becomes its tentacles."
+  caption="The opening of MiniMax's launch reel, a jellyfish carried through a dozen variations. These are MiniMax's picks for a reel, not a random sample (video from @MiniMax_AI's launch post, as screen-recorded in @0x0SojalSec's post on X)."
+/>
+
+What I did for this: read the model card, both licences, the configs, the safetensors headers of every shard (by HTTP range request, no weights downloaded), the diffusers transformer and modular pipeline, ComfyUI's tutorial and repackaged checkpoints, LightX2V's guide, vLLM-Omni's deployment recipe and SGLang's cookbook. I did not run the model. Every timing below is either someone else's measurement, named as such, or my arithmetic on the published sizes.
+
+<ModelCard repo="MiniMaxAI/MiniMax-H3-Image" />
+
+## From noise to a picture in six steps
+
+Start with what any modern image generator of this family does. It never works on pixels. A variational autoencoder (VAE) squeezes an image into a smaller grid of latent vectors; the generator learns to produce those latents; the VAE's decoder turns them back into pixels.
+
+H3-Image's VAE downsamples by 16 in each direction (`spatial_downsample_factors` of 2, 2, 2, 2, 1, 1 in `vae_diffusers/config.json`) and keeps 24 channels per latent position. A 4096×4096 image becomes a 256×256×24 latent. The encoder is a CNN; the decoder is a 24-layer 2D ViT, 16 heads of 64 dimensions, which MiniMax trained after the encoder to cut decoding cost.
+
+The generator is trained with flow matching. Pick a clean latent $x_0$ and Gaussian noise $\epsilon$, and draw the straight line between them. In H3's convention $t = 1$ is clean:
+
+$$
+x_t = t\,x_0 + (1-t)\,\epsilon
+$$
+
+The network $v_\theta(x_t, t, c)$ is trained to predict the velocity along that line, $x_0 - \epsilon$, given the noisy latent, the time and the conditioning $c$ (the prompt). Sampling starts from pure noise and takes Euler steps along the predicted velocity:
+
+$$
+x_{t_{k+1}} = x_{t_k} + (t_{k+1} - t_k)\,v_\theta(x_{t_k}, t_k, c)
+$$
+
+A base model needs 30 to 50 such steps, and usually two network calls per step for classifier-free guidance. H3-Image ships distilled to six, with guidance fixed at 1 so there is one call per step. `pdd_config.json` pins the noise levels, $1-t$, that sampling walks down: 1.0, 0.9675, 0.8875, 0.75, 0.5328, 0.2320 and 0. The scheduler is told not to shift them, and the server returns HTTP 400 if you ask for any step count other than 6.
+
+The distillation leaves a mark in the weights. The diffusers transformer has `num_pdd_heads: 6` and six separate output projections, `pdd_proj_out.0` through `.5`, each 96×5376 in FP32. Its docstring calls the method Parallel Decoding Distillation and says the checkpoint "keeps one output head per step, so `forward` takes the index of the step it is running." The trunk is shared — each of the six steps reads the last hidden state through its own head. In the original-format checkpoint these live in a separate 12 MB file, `pdd_fused_heads.safetensors`. MiniMax has published no description of PDD beyond that, so I can say what the weights are, not how they were trained.
+
+## Turning a latent into tokens
+
+A transformer wants a sequence. The latent is cut into 2×2 patches (`patch_size: [1, 2, 2]`), and each patch's 2 × 2 × 24 = 96 numbers are projected to the model's width of 5,376. One token, or row, covers a 32×32 block of pixels. So the row count of an image is
+
+$$
+N_\text{img} = \frac{W}{32}\cdot\frac{H}{32}
+$$
+
+and for 4096×4096 that is 128 × 128 = 16,384 rows. A 1024×1024 image is 1,024 rows. The 21:9 size, 6272×2688, is 196 × 84 = 16,464.
+
+The prompt joins the same sequence. H3-Image's text encoder is the Qwen3-VL-32B of MiniMax H3, unchanged; the DiT reads the hidden state after its 50th decoder layer, projects it from 5,120 to 5,376 wide, and runs it through two plain "token refiner" blocks. Then text rows and image rows are packed into one sequence and every one of the 50 blocks runs full self-attention over all of it. There is no cross-attention and no separate text stream, which is what "single-stream" means here.
+
+<Figure
+  src="/articles/minimax-h3-image/fig1.png"
+  alt="MiniMax H3-Base architecture. Condition encoding: a text prompt into the H3 Encoder (Qwen3-VL-32B, layer-50 features); a visual condition into both the H3 Encoder and the Visual VAE Encoder (f16t4d24, temporally causal, 2x2x1 patchify); an audio condition into the Audio VAE Encoder. These form a packed in-context sequence of visual semantic tokens, text tokens, visual reference latents and audio reference latents, followed by the generation targets, noisy audio and noisy video latents. The H3 Omni Transformer (33B dense, single stream) has modality-specific input and output heads and AdaLN around a shared DiT backbone of 50 blocks, and its outputs go to the visual and audio VAE decoders."
+  caption="The parent model's diagram. H3-Image is this with the audio branch removed and a single image frame as the target; the image card's source has only a placeholder comment where its own figure is meant to go (MiniMax-H3 model card, architecture figure)."
+/>
+
+Reading block 0 of the safetensors headers fills in what the config only implies. The query, key and value projection is one 21,504×5,376 matrix: three slices of 7,168, because 56 heads × 128 dimensions is wider than the 5,376-wide residual stream. The diffusers docstring flags it too: the attention width is "*larger* than `hidden_size`." The feed-forward's first matrix is 28,672×5,376, two halves of 14,336, which is a gated SwiGLU. Queries and keys are RMS-normalised per head.
+
+## Where the 33.1 billion parameters sit
+
+Summing every tensor shape in the 12 shards of `transformer/` gives 33,122,643,440 parameters, of which 16,872,688 are FP32 (the patch embedding, timestep MLP and output head) and the rest BF16. The card's "33.1B" is right. How they divide is the useful part:
+
+| Group | Parameters | Share |
+|---|---|---|
+| Attention and feed-forward, 50 blocks | 19,267,584,000 | 58.2% |
+| AdaLN modulation projections, 50 blocks | 13,010,457,600 | 39.3% |
+| Token refiner, 2 blocks | 770,725,376 | 2.3% |
+| Text projection, timestep MLP, final layer, norms | 73,876,464 | 0.2% |
+
+Each block's `adaln_proj` maps a 2,688-wide timestep embedding to 96,768 numbers. That is 18 vectors of 5,376: a shift, a scale and a gate for the attention and for the feed-forward, six in all, for each of three modalities. The diffusers source names them: "0 = video, 1 = text, 2 = audio. MiniMax-H3-Image keeps the three-way table, with image rows tagged as video and no audio rows." Every row of the sequence picks its modulation by its timestep and its modality tag, so text and image rows are normalised differently while sharing every attention and feed-forward weight.
+
+The input to those projections is the timestep and nothing else. With six fixed timesteps, the modulation is six fixed tables, and the 13 billion parameters that produce them never have to be loaded. MiniMax's own H3 card says as much, and [FreeVideo's H3 port](/articles/freevideo-minimax-h3) built its 8 GB plan on it. The ComfyUI repackaging of H3-Image does the same thing. In `minimax_h3_image_pruned_bf16.safetensors`, block 0's `adaln_proj.linear.weight` is 96,768×8 in FP16 where the original is 96,768×2,688. Eight columns in place of a 2,688-wide input reads as one column per precomputed timestep, though I did not trace ComfyUI's loader to confirm the indexing. LightX2V does the same thing explicitly: its configs enable an AdaLN cache by default, stored per schedule under a directory named for the six sigmas. The file holds 20,113,672,082 parameters, the original count minus the AdaLN projections, plus 87 MB of tables.
+
+So the real size of what a sampler must run is about 20 billion parameters, and the 19.27 billion in attention and feed-forward are the ones every row touches. That number drives everything below.
+
+## Why 4096×4096 is hard
+
+A transformer block does two kinds of work. The matrix multiplies cost about 2 FLOPs per weight per row, so they grow linearly with $N$. Attention compares every row with every other row, once to score ($QK^\top$) and once to mix ($AV$), so it grows with $N^2$. Per sampling step, for H3-Image:
+
+$$
+\text{FLOPs}_\text{step} \approx 50\left(2N \cdot 385{,}351{,}680 \;+\; 4N^2 \cdot 7168\right)
+$$
+
+where 385,351,680 is one block's attention and feed-forward weights and 7,168 is the attention width.
+
+At 4096×4096 with a 512-token prompt (an assumption; the prompt length is yours), $N = 16{,}896$. The linear term is 651 TFLOP and the attention term 409 TFLOP: 1,061 TFLOP a step, about 6.4 PFLOP for the six steps. A 1024² image with the same prompt is 1,536 rows and 63 TFLOP a step. The 16 MP canvas has 11× the rows, since the prompt does not grow with the picture, and 17× the arithmetic, because attention is 5% of a step at 1,536 rows, 15% at 2048² and 39% at 4096².
+
+Memory is the other wall. Stored naively, one layer's attention scores at 16,896 rows are $16{,}896^2 \times 56$ heads × 2 bytes, about 32 GB. Nothing at this size runs without a fused attention kernel that streams the scores through on-chip memory and never writes the matrix out.
+
+<TokenBudget />
+
+The widget does the same sum for any canvas, prompt length and number of references. Two details in it come from the pipeline code and change the answer at small sizes.
+
+First, the pipeline will not generate small. `min_generation_area` defaults to 4,194,304 pixels, 2048². Ask for 1024×1024 and it generates a 2048×2048 canvas of 4,096 rows and resizes the result down with LANCZOS. vLLM-Omni's recipe says the same, and its timings show it: on 4×H200, a 1024² request took 0.77 s and a 2048² one 0.88 s. You pay for 4 MP whatever you ask for, unless you pass `min_generation_area=1024`.
+
+Second, positions are normalised to the canvas. H3's 3D rotary embedding gives every row a (t, h, w) coordinate. For an image, `_spatial_position_grid` spreads the rows over "the unit interval, scaled up by 32", after dividing by the square root of the latent area. A square canvas spans the coordinates 0 to 32 whether it is 64 rows across or 128. At 4096² neighbouring rows sit 0.25 apart; at 1024² they sit 1.0 apart. The model sees the same positional range at every size, only sampled more finely, which is one standard way to let a model trained mostly at lower resolution generate at higher resolution without positions it has never seen. MiniMax does not say how much of the training was at 16 MP, so I cannot tell you how much work this trick is doing. The rotary embedding covers 96 of each head's 128 channels (16 frequencies × 3 axes, doubled); the other 32 pass through unrotated.
+
+There is no tiling of the generation, no upscaler and no two-stage pass in the code. The parent H3 model reaches 2K video by regenerating its own 768p output in context, a module MiniMax has not released. H3-Image does not do that. It runs the whole canvas through the transformer at once, and the arithmetic above is the price.
+
+The VAE decode is the last cost, and the one I could not price. The config enables tiled decoding (`vae_tile_size: 256`, `vae_tile_overlap_min: 64`) without saying what the units are, and how long a 24-layer ViT takes over a 256×256 latent depends on how the decoder groups it.
+
+## Multi-reference editing is more rows
+
+Editing does not use a separate model or an adapter. The same checkpoint takes up to 16 reference images, addressed in the prompt as `<Picture 1>`, `<Picture 2>` and so on, and the pipeline turns each into rows of the same sequence. `build_layout` in the diffusers modular pipeline lays it out as `[text | reference images | generated image]`.
+
+Each reference goes in twice:
+
+1. **As pixels-in-latent.** It is resized to a short edge between 1,024 and 2,048 px, encoded by the VAE, patchified like the target and placed before it. These reference rows are not perfectly clean. The pipeline mixes in a little noise, to $t = 0.999$ in H3's convention where 1 is clean, "just short of clean", and holds them there for all six steps while the target's $t$ climbs from 0 (noise) to 1. Since the AdaLN tables are indexed by timestep, reference rows get their own modulation, distinct from the target's at every step.
+2. **As meaning.** A second copy, resized to a 1,024 px short edge, goes through Qwen3-VL's vision tower with the prompt. At 16 px patches merged 2×2, that is one token per 32×32 pixels, so a square reference adds 1,024 tokens to the text stream, tagged as image rather than text for the AdaLN lookup.
+
+On the rotary clock each image is one frame. The text rows count up from 0, each reference takes the next integer time slot, and the generated image takes the slot after the last reference. To the transformer, an edit with three references looks like a four-frame video whose last frame is being denoised. This is the H3 video model's own reference-to-video layout with time reinterpreted as "which picture".
+
+The cost follows from the row counts. One 1024² reference adds 2,048 rows (1,024 latent plus 1,024 vision). Sixteen of them at 1,024 px take a 16 MP edit from 16,896 rows to 49,664 and from 1,061 TFLOP a step to about 5,450, five times the text-to-image cost; at a 2,048 px edge the same sixteen push it to 98,816 rows and 17× the cost, because attention is quadratic. vLLM measured a one-reference 2048² edit at 1.35 s on 4×H200, against 0.88 s for text-to-image at the same size. The recipe does not give the reference's size; by my count a 1024² reference adds 54% to a 2048² step's arithmetic and a 2048² one adds 146%, so the measurement fits the smaller case better, and that is as far as it goes.
+
+<Figure
+  src="/articles/minimax-h3-image/fig3.jpg"
+  alt="Top row: ten reference images, a photo of an empty sunlit room with a rust-coloured wall and wooden floor, then nine pieces of furniture on white: a striped ottoman, a cream sofa, a lounge chair with leather-strap armrests, a red oval coffee table, a travertine side table, a rattan sideboard, a wooden desk, a green bentwood chair and a blue shelf. Below: the same room furnished as a living room with all nine pieces in place, sunlight falling across the floor from the window on the right."
+  caption="Ten references in one edit: an empty room and nine catalogue shots composed into one interior. MiniMax's own example (MiniMax-H3-Image model card, showcase)."
+/>
+
+<Video
+  src="/articles/minimax-h3-image/clip3"
+  poster="/articles/minimax-h3-image/clip3-poster.jpg"
+  alt="Three frames in turn: sixteen people in different outfits posed on a white background; a file browser window showing the sixteen reference photos as a grid of thumbnails; and the same sixteen people as sticker-like cut-outs arranged on an orange wall."
+  caption="Sixteen photos of people as references, the maximum, and the same sixteen in new scenes. The animation is MiniMax's, slowed down here (MiniMax-H3-Image GitHub repository, showcase/multi-reference.md)."
+/>
+
+The model card's worked example is a single-reference edit run two ways, through MiniMax's API and through a local SGLang server with the same expanded prompt. They agree closely, which is the point of the example: local weights reproduce the hosted model when the prompt is expanded the same way.
+
+<Figure
+  src="/articles/minimax-h3-image/fig4.jpg"
+  alt="Left: a reference photo of two podcast hosts at a desk, the man wearing headphones, with a MONEY TALKS sign behind them. Middle: the local SGLang edit. Right: the MiniMax API edit. In both edits the headphones are gone and the two hosts bump fists above the sign."
+  caption="Reference (left), local SGLang result (middle) and MiniMax API result (right), both at 4096×4096 from the same expanded prompt (MiniMax-H3-Image model card, case-Edit)."
+/>
+
+That expansion matters more than the card's headline admits. The model "expects a detailed English description of the whole image." MiniMax's hosted service rewrites short prompts with H3-Image-Context-IR, which is API-only. The open substitute, MiniMax-H3-Image-PE, is a 17.9 GB NVFP4 model derived from Qwen3.8-27B. ComfyUI's templates use a Qwen3.5 9B W4A8 build instead, "so the expander fits beside the 21 GB diffusion model on one GPU." A local setup is three models — encoder, expander and DiT — not one.
+
+## Pricing the 3080 claim
+
+Nothing from MiniMax mentions a 3080, or any consumer card. The card lists vLLM-Omni, SGLang, diffusers, LightX2V and ComfyUI. vLLM's recipe sizes its profiles from H200 runs. SGLang's cookbook offers "derived" recipes for "listed 12–48 GB cards" with layerwise offload and says each "has no hardware latency measurement or capacity guarantee"; the 3080 is not on its list. The 3080 line is @0x0SojalSec's. Is it true?
+
+Start with what has to fit, and where.
+
+**Weights.** The original transformer is 66.28 GB in BF16. ComfyUI's repackaged, AdaLN-pruned files are 40.23 GB (BF16), 20.98 GB (INT8) and 12.55 GB (W4A8). None fits in 10 or 12 GB of VRAM, so the blocks have to stream: each of the 50 is copied from system RAM to the GPU just before it runs, every step.
+
+**Text encoder.** It runs once per image, before the transformer, so it can load, run and leave. It still has to sit somewhere. ComfyUI's INT8 file has 25,756,705,120 parameters: the first 50 of Qwen3-VL's 64 layers, the embeddings and the vision tower, and no language-model head, since the DiT reads layer 50 and nothing after it. That trims 6.83B layer parameters and the 0.78B head from the 33.36B MiniMax ships. On disk it is 27.14 GB; the NVFP4 build is 15.69 GB.
+
+**Host memory.** So the floor is system RAM for one 12.55 to 40 GB transformer file plus a 15.69 to 27.14 GB encoder, loaded one after the other. A 3080 box with 16 GB of RAM reads weights off the disk every step. One with 32 GB can hold the W4A8 transformer, and the encoder if it is unloaded first. SGLang's offload recipes, at native precision, "assume a 256 GB-class host and local NVMe."
+
+**GPU memory.** The best evidence is SGLang's capacity check: on a B300 with its allocator capped at 8 GiB, "native 2K/4K generation and editing, including two-reference 4K, passed" with "a 10.01 GiB measured whole-GPU peak." That is layerwise offload with the AdaLN tables precomputed, and the cookbook is explicit that "it is not a latency measurement on the listed consumer GPUs." So 16 MP in about 10 GB of VRAM has been shown on a datacenter card pretending to be small. vLLM's one-H200 offload profile peaked higher, at 14.7 GiB for 2048², which shows how much the runtime matters.
+
+**Copies.** A 3080 sits on PCIe 4.0 ×16, 32 GB/s nominal. Call it 25 GB/s in practice. Streaming the whole W4A8 file once per step is 0.50 s; INT8 is 0.84 s; the pruned BF16 file 1.61 s.
+
+**Compute.** This is the term that matters. NVIDIA's GA102 whitepaper lists the 3080 10 GB at 59.5 TFLOPS of dense BF16 tensor math with FP32 accumulation. Ampere has no FP8 or FP4 tensor cores, so a W4A8 or FP8 file buys memory, not speed, unless a kernel uses its INT8 path, and I found no claim that ComfyUI's does on this model. A 4096² step is 1,061 TFLOP. At 40% of peak, 44.6 s a step.
+
+Where does 40% come from? The H200's dense BF16 peak is 989 TFLOPS (NVIDIA lists 1,979 with sparsity). vLLM's recipe has one H200 running a 2048² request in 3.2 s with the transformer resident: six steps there are 1.25 PFLOP, so even if the encoder and VAE took no time, the transformer sustained at least 390 TFLOPS, 40% of peak. SGLang's cookbook has one H200 at 4736×3552 in 10.133 s with AdaLN precomputed, which by the same sum is at least 631 TFLOPS, 64%. Those are lower bounds for a datacenter card with tuned kernels. For a 3080 I take 40% as the pessimistic case and 60% as the hopeful one. vLLM's numbers also check the scaling: on 4×H200, the 4736×3552 request took 3.84 s against 0.88 s for 2048², a ratio of 4.36 where my FLOP count says 5.10. Fixed costs that do not grow with the canvas, the encoder and a decode that tiles, would pull a measured ratio below the FLOP ratio in exactly that direction.
+
+<OffloadPlanner />
+
+Put together, for a 3080 at 4096² with the W4A8 file: 44.6 s of compute and 0.50 s of copying per step at 40%. With one block of prefetch, the copy hides behind the compute and offloading costs about 1%. Six steps make roughly 4.5 minutes for the transformer alone, or about 3 minutes at 60%, before the text encoder and the decode. At ComfyUI's default 4 MP canvas, about 52 s at 40%. On memory, the largest transient tensors of one block at 16,896 rows come to about 2.7 GB in BF16 by my count, beside two 251 MB W4A8 blocks; real runtimes hold more than that, which is why I lean on SGLang's 10.01 GiB rather than my own sum.
+
+So the claim is plausible as stated and misleads as read — a distinction the reply on X was right to push on. A 10 GB 3080 with plenty of system RAM should be able to run H3-Image at 16 MP, though nobody has shown it on that card, and if it does, offloading is not what makes it slow. The card's arithmetic throughput is. That is the opposite of the usual offloading story, where small images leave the GPU idle and waiting on PCIe. At 16 MP each block has 16,896 rows of work to do, which buries its copy time. vLLM's H200 numbers show the other end: layer offload took a 2048² request from 3.2 s to 8.3 s. At 4 MP an H200 finishes each block quickly, so per-block copies have little compute to hide behind; the recipe does not say which part of the extra 5.1 s is copying.
+
+The 4090 is the only consumer card I found any report for. vLLM's recipe records a community deployment on one 24 GB 4090 that "successfully served 1024x1024 and 6272x2688 (21:9) text-to-image requests" with layerwise offload of the transformer and the text encoder, and says plainly that it does not "establish RTX 4090 peak memory, throughput, or image-editing support." No timing. At the 165.2 TFLOPS NVIDIA's Ada whitepaper lists and the same 40%, my sum gives about 16 s a step at 16 MP, a minute and a half an image. Treat it as a forecast to check, not a number.
+
+MiniMax's "10-20 seconds" for 16 MP names no hardware. SGLang measured one H200 at 10.133 s and one RTX PRO 6000 Blackwell at 18.544 s for 4736×3552; vLLM measured 4×H200 at 3.84 s. The claim is consistent with a single datacenter or workstation GPU. It is not a claim about anything you own.
+
+## A licence that got stricter
+
+H3-Image ships under the "MiniMax-H3-Image Community License Agreement", dated 10 November 2026. It is not a copy of the [H3 licence I wrote about in August](/articles/minimax-h3). I diffed the two. The territory clause is identical: the grant covers the world "excluding the Excluded Territories", which are "the European Union, the United Kingdom, the Republic of Korea and the United States of America", and the acceptable use policy repeats it as item 1. Use outside the territory covers outputs too.
+
+What changed is section IV, the commercial gate:
+
+| | MiniMax H3 (August) | MiniMax-H3-Image (November) |
+|---|---|---|
+| Written authorization needed when | commercial products and services make more than \$20 million a year | "Annualized Revenue of you and/or your affiliates exceeds 1 Million USD" |
+| Hosting it for others | not a trigger | "or, you provide Hosted Service(s) to any Third Parties" |
+| Hosted Service means | services via APIs, web or other remote means | a service through which the model's "functionality is made available to Third Parties" |
+| Prompt expander | no mention | PE model, "derived from Qwen3.8-27B licensed under Apache 2.0", is "subject to this Agreement" |
+
+So the revenue threshold fell twentyfold, it now counts affiliates' revenue rather than the product's, and any service that lets third parties generate with the model needs MiniMax's written permission regardless of revenue. A free hobby site counts. The H3 licence's note that its encoder "uses Qwen3-VL-32B, which is licensed under Apache 2.0" is gone, though the H3-Image repo now ships that same encoder: its 14 text-encoder shards have the same hashes as H3's. Section V.3 forbids using the model "or any of their Outputs" to improve any other AI model. ComfyUI's mirror flagged the difference in its README before I did.
+
+For a hobbyist outside the four territories, generating images on their own machine, none of this bites. For anyone in them, the weights are not licensed at all — whatever card they own.
+
+## What the card shows, and what it does not
+
+There is no technical report for H3-Image, and I found no benchmark in the model card, the GitHub README, its showcase pages or the H3 card. "Strongest instruction following among open-source models" has no number behind it in any of them. What MiniMax offers instead is a gallery, and the gallery is good.
+
+<Figure
+  src="/articles/minimax-h3-image/fig2.jpg"
+  alt="A grid of fifteen generated images in landscape and portrait formats: a 3D fantasy battle, a blue-green landscape painting, a tree frog, an indigo-dyed rabbit, a 3D white-haired girl, a portrait among flowers, a sci-fi city, dumplings, a highland cow, a mirror portrait, a 3D otter and sheep, a pixel-art cat, a jewel beetle, giant cherries and a fisheye selfie."
+  caption="Fifteen text-to-image results, downscaled from about 16 MP. Curated by MiniMax (MiniMax-H3-Image model card, showcase)."
+/>
+
+The most interesting showcase is text rendering under constraint: two logic puzzles, one in Chinese and one in English, laid out as boards with the conditions, the reasoning and the answer. MiniMax says they are "solved correctly on the board." That leans on the 32B Qwen3-VL encoder, whose layer-50 features carry a lot of language understanding into the DiT. Whether it holds across a hundred puzzles rather than two is exactly what a benchmark would say.
+
+<Figure
+  src="/articles/minimax-h3-image/fig5.jpg"
+  alt="Two generated puzzle boards. Left: a Chinese candidate-selection puzzle with five conditions written out and the derived answer. Right: an English case board titled CONFIDENTIAL FILE MISSING with six suspects, TRUE and FALSE stamps and a verification table."
+  caption="Text rendering with reasoning, two puzzles generated as boards. Two curated examples, not a measured rate (MiniMax-H3-Image model card, showcase)."
+/>
+
+<Video
+  src="/articles/minimax-h3-image/clip2"
+  poster="/articles/minimax-h3-image/clip2-poster.jpg"
+  alt="A sequence of generated jellyfish designs in settings: a poster titled Drift In in a gallery, a framed print reading Wait for the tide, a Jellyfish Drift poster in a museum, a presentation on a large screen, a monitor in a lab, scientific diagrams and infographics on a desk, a fantasy scene of a giant jellyfish over a warrior, and a scatter of printed images."
+  caption="The second half of the launch reel: one subject as posters, slides, diagrams and illustration. MiniMax's selection, with its own captions (video from @MiniMax_AI's launch post, as screen-recorded in @0x0SojalSec's post on X)."
+/>
+
+## Next to the other open image models here
+
+| Model | Denoiser parameters | Editing | Licence |
+|---|---|---|---|
+| MiniMax-H3-Image | 33,122,643,440 (about 20.1B without AdaLN), 16 MP native | up to 16 references | custom; excludes US, EU, UK, Korea |
+| [Qwen-Image-2.1](/articles/qwen-image-2-1) | 7,115,124,736 | unified with generation | non-commercial research |
+| [FLUX 3 Image Klein](/articles/flux-3-image-klein) | 5,548,681,984 | up to 10 references | custom |
+| [Ming-Image-0.1-Design](/articles/ming-image-0-1-design) | 6,154,901,056 (Z-Image's DiT) | design-focused | MIT |
+| [Mage-Flow](/articles/mage-flow) | about 4B | instruction editing | MIT |
+
+H3-Image is the largest denoiser in this table by a factor of four and the only one in it that treats 16 MP as its home size rather than a stretch. It also sits in the same family as Qwen-Image-2.1 in one structural way: both moved to a single stream with a shared modulation scheme, and both make editing a matter of putting references into the sequence. The difference is scale. Qwen-Image-2.1's whole denoiser is smaller than H3-Image's AdaLN projections.
+
+The [few-step Qwen-Image-2.1 students](/articles/qwen-image-2-1-few-step) are a useful contrast on distillation. Those are DMD LoRAs bolted onto a base model; H3-Image ships only the distilled six-step checkpoint, with per-step heads and a fixed schedule, and no base model to fine-tune from. LoRAs on attention and feed-forward should still work with the AdaLN tables. Anything that changes the timesteps will not.
+
+## Is it worth running?
+
+On a 3080, for 16 MP, I would not. Three to four and a half minutes an image by my arithmetic, after a 27 GB encoder pass, on a card whose fans will tell you about it, buys a picture you could get from MiniMax's API in seconds, provided the licence covers you at all. At 4 MP on the same card the arithmetic says under a minute, which is a reasonable local workflow and probably what most people who try it will settle on.
+
+On a 24 GB card with 64 GB of RAM it should be a serious tool, at around a minute and a half by my arithmetic. None of the other open models in the table targets single-pass 16 MP, the multi-reference editing is the H3 video model's reference machinery applied to stills, and the design is clean: one stream, one sequence, references as rows, positions normalised to the canvas.
+
+The parts I do not buy are the evidence and the terms. "Strongest instruction following" with no benchmark is a slogan. A licence that tightened its commercial gate twentyfold between August and November, on the same family, tells you the gate can move again. If you are building on it, pin the revision, and read section IV before you put it behind a URL.
+
+## What was read and what was computed
+
+Read directly: the model card, `LICENSE` at two revisions, the MiniMax H3 licence, every config in the repo, the safetensors headers of all 12 transformer shards, the 14 text-encoder shards and four ComfyUI files (by range request), the Hub file hashes of both repos' encoder shards, the diffusers `transformer_minimax_h3_image.py` and the `minimax_h3_image` modular pipeline, ComfyUI's tutorial, LightX2V's guide, vLLM-Omni's recipe, SGLang's cookbook and NVIDIA's GA102 and Ada whitepapers and H200 page. The H200, B300 and RTX PRO 6000 timings are vLLM's and SGLang's measurements. The 3080 and 4090 timings are my arithmetic on spec-sheet throughput with an assumed 40 to 60% efficiency, and I found no published measurement on either card to check them against. If someone times a 3080 at 4096², I would like to see the number.
