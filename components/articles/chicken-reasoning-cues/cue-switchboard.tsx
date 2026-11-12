@@ -31,7 +31,7 @@ type MixData = {
 const MIXES: Record<Mix, MixData> = {
   base: {
     label: "Base mix",
-    edit: "The released 10B-token mid-training mix, unedited. 83% of its synthetic reasoning traces open with “Okay”.",
+    edit: "The released 10B-token mid-training mix, unedited. “Okay” opens 82.5% of its 148,607 synthetic reasoning traces.",
     acc: { none: 13.8, okay: 31.9, chicken: 2.4, hmm: 30.4, alright: 30.9 },
     cues: {
       okay: {
