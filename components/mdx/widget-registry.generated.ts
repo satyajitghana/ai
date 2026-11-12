@@ -33,6 +33,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "aes-circuits-lean/gate-depth-chart": () => import("@/components/articles/aes-circuits-lean/gate-depth-chart"),
   "aes-circuits-lean/relay-cabinet": () => import("@/components/articles/aes-circuits-lean/relay-cabinet"),
   "agent-3d-bim-tools/commit-race": () => import("@/components/articles/agent-3d-bim-tools/commit-race"),
+  "agent-3d-bim-tools/house-viewer": () => import("@/components/articles/agent-3d-bim-tools/house-viewer"),
   "agent-3d-bim-tools/pack-explorer": () => import("@/components/articles/agent-3d-bim-tools/pack-explorer"),
   "agent-3d-bim-tools/pipeline-map": () => import("@/components/articles/agent-3d-bim-tools/pipeline-map"),
   "agent-desktop/loop-cost": () => import("@/components/articles/agent-desktop/loop-cost"),

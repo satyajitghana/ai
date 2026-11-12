@@ -19,6 +19,7 @@ export const TOPS = ["thumbs", "films", "articles", "projects"]
 export const MEDIA_EXT = new Set([
   ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif",
   ".mp4", ".webm", ".mov", ".m4a", ".mp3", ".wav",
+  ".glb",
 ])
 
 export const isMediaPath = (path: string) =>
