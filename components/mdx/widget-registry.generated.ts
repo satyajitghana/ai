@@ -1449,6 +1449,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "speech-cpp/stream-budget": () => import("@/components/articles/speech-cpp/stream-budget"),
   "speech-to-speech/backend-matrix": () => import("@/components/articles/speech-to-speech/backend-matrix"),
   "speech-to-speech/smart-turn": () => import("@/components/articles/speech-to-speech/smart-turn"),
+  "spirula-studio/sphere-split": () => import("@/components/articles/spirula-studio/sphere-split"),
   "splash-engine/bandwidth-roof": () => import("@/components/articles/splash-engine/bandwidth-roof"),
   "splash-engine/decode-step": () => import("@/components/articles/splash-engine/decode-step"),
   "splat-walk/gait-bob": () => import("@/components/articles/splat-walk/gait-bob"),
