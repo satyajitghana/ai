@@ -999,6 +999,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "neutrino-1/block-scale": () => import("@/components/articles/neutrino-1/block-scale"),
   "neutrino-1/rounding-cliff": () => import("@/components/articles/neutrino-1/rounding-cliff"),
   "neutrino-1/sparsity-depth": () => import("@/components/articles/neutrino-1/sparsity-depth"),
+  "nex-n2-6/repetition-detector": () => import("@/components/articles/nex-n2-6/repetition-detector"),
+  "nex-n2-6/selection-funnel": () => import("@/components/articles/nex-n2-6/selection-funnel"),
   "next-latent-world-models/compactness-explorer": () => import("@/components/articles/next-latent-world-models/compactness-explorer"),
   "next-latent-world-models/objective-bottleneck": () => import("@/components/articles/next-latent-world-models/objective-bottleneck"),
   "nfsmw-online/login-wall": () => import("@/components/articles/nfsmw-online/login-wall"),
