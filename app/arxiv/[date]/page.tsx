@@ -6,6 +6,7 @@ import { AgentChip } from "@/components/site/agent-chip"
 import { PageShell } from "@/components/site/page-shell"
 import { ShareButtons } from "@/components/site/share-buttons"
 import { getArxivDigest, getArxivDigests } from "@/lib/content"
+import { seo } from "@/lib/seo"
 
 // Unknown slugs still 404 via notFound() below; `true` (a static literal, as
 // Next requires) lets newly-added content resolve in dev without a restart.
@@ -23,11 +24,11 @@ export async function generateMetadata({
   const { date } = await params
   const digest = getArxivDigest(date)
   if (!digest) return {}
-  return {
-    title: `arXiv digest — ${digest.date}`,
-    description: digest.papers.map((p) => p.title).join(" · "),
-    alternates: { canonical: `/arxiv/${date}` },
-  }
+  // seo(): og:url and twitter tags, the .md twin, and the paper titles cut to a
+  // snippet instead of a ~300-character run-on
+  return seo(`/arxiv/${date}`, `arXiv digest — ${digest.date}`, digest.papers.map((p) => p.title).join(" · "), {
+    markdown: true,
+  })
 }
 
 export default async function Page({

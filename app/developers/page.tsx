@@ -11,7 +11,8 @@ import { absoluteUrl, siteUrl, PERSON_ID } from "@/lib/site"
 // a name-based search ("Satyajit Ghana API") actually surfaces it.
 
 export const metadata: Metadata = {
-  title: "Developers — Satyajit Ghana site API, MCP server & llms.txt",
+  // absolute: the name is already in it, so the layout's " · Satyajit Ghana" would only push it past 60
+  title: { absolute: "Developers — Satyajit Ghana site API, MCP server & llms.txt" },
   description:
     "Developer documentation for ai.satyajit.si: a public read-only JSON API, an MCP server over Streamable HTTP, markdown twins of every page, llms.txt, and an OpenAPI 3.1 spec. No auth, no keys, RFC 9457 errors and RFC 9331 rate-limit headers.",
   alternates: { canonical: "/developers" },

@@ -15,7 +15,7 @@ import { absoluteUrl } from "@/lib/site"
 // links to it, and the machine-readable form is at /developers/versioning.json.
 
 export const metadata: Metadata = {
-  title: "API versioning & deprecation policy — Satyajit Ghana site API",
+  title: { absolute: "API versioning & deprecation policy — Satyajit Ghana site API" },
   description:
     "How the ai.satyajit.si JSON API is versioned and how deprecation is announced: URL-path versioning at /api/v1, a minimum 180-day sunset window, and RFC 9745 Deprecation plus RFC 8594 Sunset headers on every superseded response.",
   alternates: { canonical: "/developers/versioning" },

@@ -25,7 +25,15 @@ export async function generateMetadata({
   const { slug } = await params
   const log = getLog(slug)
   if (!log) return {}
-  return seo(`/logs/${slug}`, log.title ?? `Log — ${log.date}`)
+  // The log's opening lines as its description: a log has no frontmatter one,
+  // and a page with none gets whatever snippet the engine picks.
+  const text = log.body
+    .replace(/^(import|export) .*$/gm, "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[#*_`>]/g, "")
+  return seo(`/logs/${slug}`, log.title ?? `Log — ${log.date}`, text.trim() ? text : undefined, { markdown: true })
 }
 
 export default async function Page({
