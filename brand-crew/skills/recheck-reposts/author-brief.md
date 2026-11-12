@@ -1,99 +1,57 @@
-# Author brief: one flagship article for ai.satyajit.si
+# Author brief: one flagship article for ai.satyajit.si (shared checkout)
 
 <!-- Handed to each parallel author by the recheck-reposts skill, together with a
-     subject message naming the slug, worktree, scratch cap, sources, related
-     articles, a component idea and the storyboard host. Replace <TODAY>. -->
+     subject message naming the slug, sources, related articles, a component
+     idea, the storyboard host and a SCRATCH directory. Replace <TODAY> and
+     <REPO>. Revised 2026-11-12: shared checkout (no worktrees), human voice,
+     clips, story-format storyboards. -->
 
-You are writing ONE flagship article for ai.satyajit.si. It is an AI-native Next.js site whose articles are rigorous, receipt-driven explainers of new AI work. Your task message names the slug, the subject and the sources. It also names your WORKTREE (a git worktree on branch `art/<slug>`, with node_modules symlinked and public/films and public/thumbs excluded) and your SCRATCH directory.
-
-Work ONLY inside your worktree and scratch. Never touch /home/user/ai.
+You are writing ONE flagship article for ai.satyajit.si, an AI-native Next.js site whose articles are rigorous explainers of new AI work. Your task message names the slug, the subject, the sources, the storyboard host and your SCRATCH directory.
 
 TODAY is <TODAY>. Use `date: <TODAY>`.
 
-## The machine is shared
-- It has 4 CPU cores, and five other authors are working at the same time.
-- Prefix every pnpm, npx, node, python or ffmpeg command with `nice -n 19`.
-- Never kill a process you did not start.
-- Disk is tight: check `df -h /`; it is shared by every author. Keep your scratch under the cap in your task message, and delete it at the end.
+## You share ONE checkout with other agents
+The repo is `<REPO>`. Several authors edit it at the same time. There are no worktrees: disk is tight.
+- Create or edit ONLY:
+  - `content/articles/<slug>.mdx`
+  - `components/articles/<slug>/**`
+  - `public/articles/<slug>/**` (media; gitignored, the lead pushes it to R2)
+  - `data/films/<slug>.json`
+  - an existing article only if your task message names it.
+- Never run a git command that writes (`commit`, `add`, `checkout`, `stash`, `reset`). Read-only git is fine. The lead commits.
+- Never run `pnpm media:push`, `gen:widgets`, `fetch:models`, `fetch:repos`, `reposts`, `build`, `dev`, `build.mjs` or `render.mjs`. Never edit `data/.generated/*`, `lib/media-map.json`, the widget registry, `pronounce.json`, the film engine, shared components or other articles.
+- A corpus-wide check may fail on another author's half-written file. Fix only failures that name your files; report the rest.
+- Prefix heavy commands with `nice -n 10`. Never kill a process you did not start.
+- Keep SCRATCH under 2 GB and delete clones and downloads when you finish. Don't download model weights: read configs and safetensors headers with HTTP range requests.
 
-## Read first (in the worktree)
-- `CLAUDE.md`. It covers the content contract, the "Article production standard", explainer films, and the MDX/JSX guardrails: escape a bare `<` and `$`; put spaces at JSX boundaries with `{" "}`; route DOM numbers through `lib/dmath`.
-- `brand-crew/brand/voice.md`, `brand-crew/skills/new-article/SKILL.md` and `brand-crew/agents/articles-author.md`.
-- The exemplars named in your task message, plus `components/articles/ui/range.tsx`.
-- `brand-crew/skills/explainer-films/SKILL.md`, for the storyboard.
+## Read first
+- `CLAUDE.md`: the content contract, "Article production standard" and the MDX/JSX guardrails (escape a bare `<` as `&lt;` and `$` as `\$`; `{" "}` at JSX boundaries; DOM numbers through `lib/dmath`).
+- `brand-crew/brand/voice.md`, all of it, especially "Sound like a person, not a pipeline".
+- `brand-crew/skills/new-article/SKILL.md`, one or two recent articles near your topic and their components, `components/articles/ui/range.tsx`.
+- `brand-crew/skills/explainer-films/SKILL.md`, "Story format (long films)", and `data/films/latent-sparse-attention.json` as the model storyboard.
+- `lib/content/rating.ts` and `data/taxonomy.ts`. Rate stingily.
 
-## Deliverables (in the worktree)
-1. **`content/articles/<slug>.mdx`**
-   - Frontmatter: `title` (`Subject: hook` form), `description`, `date: <TODAY>`, `tags` (reuse existing tags; grep `content/articles` for them).
-   - 1,800–3,200 words.
-   - Explain the mechanism from first principles, then check the claims against the primary sources.
-   - Label every number: **measured** (you computed it from a file or run), **reported** (the publisher's figure, not re-run), or **reasoned** (your arithmetic on the other two).
-   - Link related site articles; grep `content/articles` and `content/architectures`.
-2. **At least one ORIGINAL interactive component** in `components/articles/<slug>/`.
-   - `"use client"`, SSR-safe, no new dependencies.
-   - Dual-native: the prose must carry every idea the widget shows.
-   - Run `nice -n 19 npx eslint components/articles/<slug>`.
-3. **Real figures from the source**: at least the method diagram and the headline result, where they exist.
-   - Save to `public/articles/<slug>/figN.png` (or `.jpg` for photos), then `pnpm media:push` and commit `lib/media-map.json` (the image itself is gitignored; it lives in R2).
-   - Flatten transparent images onto white and cap width at 1600px.
-   - Embed with `<Figure src alt caption />`. Each caption ends with an attribution such as `(… paper, Figure N).` or `(… model card).`
-   - Never hotlink.
-4. **Storyboard `data/films/<slug>.json`**, using the style, host species, name and hat in your task message; the rest of the look is your choice, but it must be unique.
-   - Every digit a viewer sees or hears must appear in the MDX.
-   - Diagram layout: keep connected nodes well apart. The checker fails an edge whose arrow would be drawn backwards, which happens when two boxes sit too close along the edge. Keep wide nodes between x 12 and 84.
-   - Pass `nice -n 19 pnpm validate:films --storyboards --only=<slug>`.
-   - Run `nice -n 19 python3 brand-crew/skills/explainer-films/audio.py words --films data/films`. If a word of yours is flagged, reword the narration rather than editing `pronounce.json`.
-   - Do NOT run `build.mjs`; the lead renders the thumbnail.
+## Deliverables
+1. **`content/articles/<slug>.mdx`**, detailed: 2,500–4,500 words (a roundup ~600–900 per item).
+   - Frontmatter per the schema: `title` as `Subject: hook`, `description`, `date`, existing `tags`, `rating`, `topic`, `kind`, `level`, `runsOn`.
+   - Explain the mechanism from first principles (the problem, why the old way fails, how this works, the math where it helps), then check the claims against the primary sources.
+   - Know where every number comes from: one you computed, the publisher's, or your arithmetic on those. Say it in the sentence ("the paper's Table 2 reports", "on the safetensors headers I count"), not with a "(reported)" tag on each number; at most three such tags per article. One short note at the end can list what you ran versus read.
+   - Link related site articles; cite primary sources inline (arXiv abs pages, GitHub, Hugging Face feed the JSON-LD citation graph).
+2. **One or two original interactive components** in `components/articles/<slug>/`: `"use client"`, SSR-safe, no new dependencies. The prose carries every idea the widget shows. `npx eslint components/articles/<slug>`.
+3. **Real figures**: the method diagram and the headline result. `public/articles/<slug>/figN.png` (`.jpg` for photos), flattened onto white, ≤1600 px wide, `<Figure src alt caption />`, captions ending `(… paper, Figure N).` Never hotlink. arXiv HTML `https://arxiv.org/html/<id>v1/…` or ar5iv; repos by `git clone --depth 1` into SCRATCH.
+4. **More visuals, including video.** Project-page and README images, result grids, screenshots, and clips: project-page or Hugging Face demos, or the X post's own video (`curl -s https://api.fxtwitter.com/2/status/<POST_ID>` lists `media.videos[].url`; credit "video from @handle's post on X", as `content/articles/aa-3d.mdx` does). Cut to ≤15 s of the part that shows the mechanism or result, no audio, ≤960 px wide: `ffmpeg -an -c:v libx264 -crf 30 -preset slow -pix_fmt yuv420p -movflags +faststart` → `clipN.mp4`, `-c:v libvpx-vp9 -crf 42 -b:v 0` → `clipN.webm`, plus `clipN-poster.jpg`; ≤1.5 MB each. `<Video src="/articles/<slug>/clipN" poster alt caption />`. Aim for 4–8 visuals where the sources have them.
+5. **Storyboard `data/films/<slug>.json` in the story format** (`"format": "story"`), with the host and style from your task message. Hook, chapters, several mechanism scenes, the article's figures and clips, 400–750 words. Every digit a viewer sees or hears must appear in the MDX. Pass `pnpm validate:films --storyboards --only=<slug>`. Pronunciation: `~/.cache/explainer-films/kvenv/bin/python brand-crew/skills/explainer-films/audio.py words --films data/films`; reword flagged words, and list unavoidable names in your report. The lead's film pass adds bespoke scenes and renders.
 
-## Read the post's thread for sources
-The X post your article is based on often keeps its real source and extra explanation in the **thread** (the author's follow-up posts) and the **replies** — "repo in the post below 👇", a 🧵 whose later posts carry the paper, or "source in the replies". Read them through the fxtwitter mirror (no auth):
-- author's continuation posts: `curl -s "https://api.fxtwitter.com/2/thread/<POST_ID>"` → its `thread` array
-- first page of replies: `curl -s "https://api.fxtwitter.com/2/conversation/<POST_ID>"` → its `replies` array
-
-Each post object has `text`, `raw_text.facets` (t.co links expanded to `replacement`), and `quote`. Pull paper/repo links (arxiv.org, github.com, huggingface.co, `*.github.io`, openreview, modelscope) from there. A link someone **else** replied with is a lead to confirm, not a source to trust. Your task message already lists the sources the lead found this way; read the thread yourself if any is thin.
+## Sources
+Read the X post's thread and replies through the fxtwitter mirror when a source is thin: `https://api.fxtwitter.com/2/thread/<POST_ID>`, `…/2/conversation/<POST_ID>`. A link someone else replied with is a lead, not a source.
 
 ## Rules
-- Verify every number against the paper, code, config or card. Never invent one.
-- If a claim cannot be checked, say so in the article.
-- Do not execute code from third-party repositories. Reading it is fine, and cloning with `git clone --depth 1` is fine.
-  - curl to github.com is blocked, but `git clone` and `raw.githubusercontent.com` work.
-  - Hugging Face works with curl and HTTP range requests, e.g. read safetensors headers without downloading the weights.
-  - Any exception is stated in your task message.
-- Do not edit `data/.generated/*`, other articles, the engine, shared components or `pronounce.json`.
-- `<ModelCard repo=…>` and `<RepoCard repo=…>` are allowed.
-  - To check a card, run `nice -n 19 pnpm fetch:models <id>`, or `pnpm fetch:repos <owner/name> --clone-only --clones-dir=<dir>`.
-  - Then revert `data/.generated/` with `git checkout data/.generated` before committing. The lead fetches the cards.
+- Verify every number against the paper, code, config or card. Never invent one; if a claim can't be checked, say so.
+- Don't execute code from third-party repositories unless your task message grants it (and Satyajit did). Reading and cloning are fine.
+- `<ModelCard repo>` / `<RepoCard repo>` are fine; name the ids in your report.
 
-## Validate
-All of these must pass:
-- `pnpm typecheck`
-- `pnpm validate:content`
-- `pnpm validate:mdx`
-- `pnpm validate:math`
-- `pnpm validate:placeholders`
-- `pnpm validate:links`
-- `pnpm validate:assets`
-- `pnpm validate:media`
-- `pnpm validate:films --storyboards --only=<slug>`
-- eslint on your component folder
-- `pnpm check:links:external --internal-only`
-
-Do not run `pnpm build` or `pnpm dev`.
-
-`validate:models` / `check:models` / `check:repos` will say a new card is missing from the snapshot; that is expected, so name it in your report.
-
-## Commit
-Commit on `art/<slug>` with a message ending in:
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhELW9PoZpU2rQ7AcDGuQV
-
-Do not push.
+## Validate (fix what is yours)
+`pnpm typecheck`, `validate:content`, `validate:mdx`, `validate:math`, `validate:placeholders`, `validate:links`, `validate:ratings`, `check:tells <slug>`, `validate:films --storyboards --only=<slug>`, eslint on your folder, `check:links:external --internal-only`. `validate:assets`, `validate:media` and `validate:widgets` complain until the lead pushes media and regenerates the registry.
 
 ## Report back (concise)
-- Slug and title.
-- 5–8 findings, each labelled measured, reported or reasoned.
-- Figures and their sources.
-- Components.
-- Any ModelCard/RepoCard ids to fetch.
-- Validation results.
-- Anything unverified.
+Slug and title; word count; 5–8 key findings, each saying where its number comes from; figures and clips with sources; components; card ids; names the voice may mispronounce; validation results; anything unverified; the exact files you created or edited.

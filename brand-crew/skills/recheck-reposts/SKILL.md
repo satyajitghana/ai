@@ -95,18 +95,12 @@ If a planned slug changes while writing, record the post again with the final sl
 
 **One article:** use the **new-article** skill.
 
-**A batch of more than two:** run parallel authors, one per article, each in its own sparse worktree. That keeps the main checkout clean and lets each author validate alone.
+**A batch of more than two:** run parallel authors in the **shared checkout**, one per article. No git worktrees: Satyajit's disk is tight. The brief gives each author a fixed set of paths it may write (its article, components, media folder and storyboard) and forbids git writes, so the lead commits each article by explicit path when it reports. Corpus-wide checks can fail on another author's half-written file; authors fix only their own failures.
 
-```bash
-S=<scratchpad>; slug=<slug>
-git worktree add -q --no-checkout -b art/$slug $S/art/$slug HEAD
-git -C $S/art/$slug sparse-checkout set --no-cone '/*' '!/public/films/' '!/public/thumbs/'
-git -C $S/art/$slug checkout -q art/$slug
-ln -s "$PWD/node_modules" $S/art/$slug/node_modules
-```
+The lead owns everything shared: `lib/media-map.json` (`pnpm media:push /articles/<slug>`), the widget registry (stage a copy filtered to files that are committed, so each commit builds), `data/.generated/*` (`fetch:models` / `fetch:repos` for the new ids only), `pronounce.json`, the ledger and the changelog. Delete each author's scratch (clones, downloads) once its article is committed.
 
 Brief each author with [`author-brief.md`](author-brief.md) (the shared contract), plus a subject message containing:
-- slug, worktree and scratch cap;
+- slug and scratch directory;
 - the primary sources;
 - what to explain, and which claims to check;
 - the related site articles to read and link;
@@ -118,8 +112,8 @@ Brief each author with [`author-brief.md`](author-brief.md) (the shared contract
 **Permitted exceptions to "never execute third-party code"** (running published weights through an official runtime, or stable-diffusion.cpp, which Satyajit asked for) must be granted explicitly in the subject message, with the limits.
 
 **Limits on concurrency:**
-- At most about 6 authors at once on the 4-core box, all at `nice -n 19`.
-- Watch disk (`df -h /`): about 330 MB per worktree, plus whatever an author downloads.
+- About 6–8 authors at once, all at `nice -n 10`.
+- Watch disk (`df -h /`); authors keep scratch under 2 GB and delete it when done.
 - If a container restart kills a run, resume the author by message rather than relaunching; its files survive.
 
 ## 5. Review, merge, ship
@@ -127,14 +121,14 @@ Brief each author with [`author-brief.md`](author-brief.md) (the shared contract
 For each author report:
 - **Re-check what it lists as unverified**, and spot-check 2 or 3 headline numbers yourself against the source. Recompute arithmetic.
 - Two errors have come up before: a model-derived figure presented as measured (e.g. "2.4% per step" that was a multiply-add estimate), and units mixed (GB vs GiB).
-- **Merge** its branch (`git merge --no-edit art/<slug>`), then remove the worktree and branch.
+- **Commit** its files by explicit path, with its media pushed and the filtered widget registry.
 - **Cards:** fetch only the new ids. A full `pnpm fetch:models` re-dates every existing card.
 
   ```bash
   pnpm fetch:models <owner/name> …
   pnpm fetch:repos <owner/name> --clone-only --clones-dir=<dir>
   ```
-- **Thumbnail:** `node brand-crew/skills/explainer-films/build.mjs --thumbs <slug> <slug> …` (space-separated). **Look at each one.**
+- **Film and thumbnail:** storyboards are in the story format; a film pass adds bespoke scenes (SKILL.md) and renders `build.mjs <slug>` then `build.mjs --thumbs <slug>`, one render at a time. On a Mac set `NODE_PATH` and `EXPLAINER_PYTHON` as SKILL.md says. **Look at each one.**
   - A bare equation or an empty grid is a weak cover.
   - Point it at a mechanism scene with `"thumb": { "scene": N }`, inserted as one line after `"palette"`. Never reformat the JSON; that rewrites the whole file and changes the storyboard hash.
 - Then:
