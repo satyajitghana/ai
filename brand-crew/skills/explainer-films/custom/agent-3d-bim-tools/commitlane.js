@@ -3,15 +3,19 @@
 // The article's CommitRace widget, animated: MutinyBIM's planCommit() for an
 // agent command built on an older revision. Two lanes (Priya's session and
 // the agent's), a base and a head on a revision axis, and the model server
-// that re-runs the agent's command and compares the field it writes with what
-// other sessions wrote since the base. Same field, other value: refused, by
-// name. A different field: commits, rebased. Every label drawn is a storyboard
-// string; positions are geometry. No numbers are shown, and the wall and edit
-// are a toy, so the runtime stamps it Illustrative.
+// that re-runs the agent's command and compares only the fields the command
+// records as authored. Corrected 2026-11-12 to the hands-on run
+// (/articles/mutiny-bim): a move records start/end, so a second move of the
+// same wall is refused by name; a thickness edit records nothing, so two of
+// them both commit and the later one wins, silently. Every label drawn is a
+// storyboard string; positions are geometry. No numbers are shown, and the
+// wall is a toy, so the runtime stamps it Illustrative.
 //
-// steps: 0 lanes, base, the agent's edit · 1 Priya's edit lands at the head ·
-//        2 the server re-runs and compares: refused · 3 Priya changed another field: commits
-// params: { lanes[2], base, head, server, serverSub, agentEdit, priyaEdit[4], compare[2], outcome[2] }
+// steps: 0 lanes, base, the agent's move · 1 Priya's move lands at the head ·
+//        2 the server re-runs and compares: refused ·
+//        3 both set the thickness instead: no field recorded, last write wins
+// params: { lanes[2], base, head, server, serverSub, agentEdit (string or per-step array),
+//           priyaEdit[4], compare[2], outcome[2] }
 BESPOKE.define((() => {
   const LX0 = 150, LX1 = 900, YA = 430, YB = 690, XB = 330, XH = 640
   const SX = 980, SY = 380, SW = 390, SH = 380
@@ -43,11 +47,12 @@ BESPOKE.define((() => {
       }
       // the agent's edit, built on the base
       const ak = k.thumb ? 1 : k.easeOut(k.p(0, .6, .3))
+      const agentLabel = Array.isArray(p.agentEdit) ? (p.agentEdit[i] || p.agentEdit[0] || '') : (p.agentEdit || '')
       const agentX = XB - 120, agentW = 260
       if (ak > 0) {
         k.push(); k.alpha(ak)
-        k.seed('agent'); k.shape(k.rrect(agentX, YB - 40, agentW, 80, 14), { fill: k.tone('light'), op: .9, sw: .9 })
-        k.text(p.agentEdit || '', agentX + agentW / 2, YB + 10, { role: 'body', size: 28, maxW: agentW - 24, align: 'center' })
+        k.seed('agent' + (i === 3 ? 'b' : 'a')); k.shape(k.rrect(agentX, YB - 40, agentW, 80, 14), { fill: k.tone('light'), op: .9, sw: .9 })
+        k.text(agentLabel, agentX + agentW / 2, YB + 10, { role: 'body', size: 28, maxW: agentW - 24, align: 'center' })
         k.pop()
       }
       // Priya's edit, landing at the head
@@ -56,8 +61,9 @@ BESPOKE.define((() => {
         const label = (p.priyaEdit || [])[i] || ''
         const px = XH - 150, pw = 300
         k.push(); k.alpha(Math.min(1, pk))
-        k.seed('priya' + (i === 3 ? 'b' : 'a')); k.shape(k.rrect(px, YA - 40, pw, 80, 14), { fill: i === 3 ? k.P.a : k.P.hi, op: .85, sw: .9 })
-        k.text(label, px + pw / 2, YA + 10, { role: 'body', size: 28, maxW: pw - 24, align: 'center', col: k.textOn(i === 3 ? k.P.a : k.P.hi) })
+        const pc = i === 3 ? k.P.b : k.P.hi
+        k.seed('priya' + (i === 3 ? 'b' : 'a')); k.shape(k.rrect(px, YA - 40, pw, 80, 14), { fill: pc, op: .85, sw: .9 })
+        k.text(label, px + pw / 2, YA + 10, { role: 'body', size: 28, maxW: pw - 24, align: 'center', col: k.textOn(pc) })
         k.pop()
       }
       // the server
@@ -78,14 +84,15 @@ BESPOKE.define((() => {
         if (ck > 0) {
           k.push(); k.alpha(ck)
           k.text((p.compare || [])[ok ? 1 : 0] || '', SX + SW / 2, SY + 190, { role: 'body', size: 28, maxW: SW - 40, align: 'center' })
-          const col = ok ? k.P.a : k.P.hi
+          // step 2: refused (the rule working); step 3: committed, silently overwritten
+          const col = ok ? k.P.b : k.P.a
           k.seed('out' + (ok ? 'b' : 'a')); k.shape(k.rrect(SX + 30, SY + 240, SW - 60, 100, 14), { fill: col, op: .9, sw: 1 })
           k.text((p.outcome || [])[ok ? 1 : 0] || '', SX + SW / 2, SY + 300, { role: 'head', size: 30, min: 20, maxW: SW - 90, lines: 2, align: 'center', col: k.textOn(col) })
           k.pop()
         }
       }
       k.point = i >= 2 ? [SX + SW / 2, SY + 290] : i === 1 ? [XH, YA] : [XB, YB]
-      k.mood = i === 2 ? 'surprised' : i === 3 ? 'happy' : 'thinking'
+      k.mood = i === 2 ? 'proud' : i === 3 ? 'surprised' : 'thinking'
     },
   }
 })())
