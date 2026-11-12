@@ -1,0 +1,413 @@
+---
+title: "SteerDistill: quantizing an agent by teaching it its own fixes"
+description: "SteerDistill (Tsinghua AIR) recovers what 4-bit weights cost an LLM agent. During training a frozen BF16 teacher finds the first turn where the quantized student's environment state diverges from a successful reference, writes a structured hint, and lets the student retry from the restored state until an execution check passes; the verified turn is then distilled back with forward KL to the hinted student and reverse KL to the teacher elsewhere, so the student runs alone. I derive why one bad turn sinks a multi-turn task, read the verifier and loss in the released code, and recompute Table 1: the W4A16 averages sit 0.36, 0.73 and 0.82 points under BF16 against GPTQ's 7.18 to 7.47, while two of fifteen per-benchmark cells miss the one-point line and the margin over QeRL shrinks to 0.13 on tau2-Bench without the GRPO start."
+date: 2026-11-12
+tags:
+  - quantization
+  - distillation
+  - agents
+  - tool-calling
+  - post-training
+  - qwen
+  - benchmarks
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Why low-bit agents fail per turn, the steer-verify-distill loop read from the code, and Table 1 recomputed cell by cell, with where the one-point claim bends."
+topic: quantization
+kind: paper
+level: research
+runsOn: datacenter
+licence: MIT
+---
+
+import { CompoundToy } from "@/components/articles/steerdistill/compound-toy"
+import { RecoveryTable } from "@/components/articles/steerdistill/recovery-table"
+
+A 4-bit copy of an agent model is cheap to run and often fine on a single question. Give it a twelve-turn task with
+tools, and it starts doing small wrong things: reading a file from the wrong directory, booking a train before asking
+where the user wants to go, writing a CSS file's contents into `index.html`. Each mistake is one turn. The task fails
+anyway.
+
+[SteerDistill](https://arxiv.org/abs/2611.13410), from Tsinghua's Institute for AI Industry Research, is a training
+method aimed at exactly those turns. During training, a frozen full-precision copy of the model finds the turn where the
+quantized student went wrong, writes it a short hint, and makes the student fix the turn itself, checking each attempt by
+executing it. Then it trains the hint away, so the deployed student acts without any teacher. The headline: with INT4
+weights on three models and five agent benchmarks, the average score stays within one point of BF16. The code is
+released at [air-embodied-brain/SteerDistill](https://github.com/air-embodied-brain/SteerDistill) under MIT, and I read
+it at commit `937744a` to see what "steering" and "local verification" actually are.
+
+<Video
+  src="/articles/steerdistill/clip1"
+  poster="/articles/steerdistill/clip1-poster.jpg"
+  alt="An animated diagram on a white page titled Closed-loop teacher steering: three circles labelled Teacher guidance, Student retry and Local verification. Verification first shows a red cross and a curved arrow labelled Refine guidance loops back to the teacher; on the next pass it shows a tick, and a bar below reads Distill, then Act without guidance. The page then cuts to a line chart titled Faster recovery of success against training GPU hours, where the SteerDistill curve rises to just under the dashed BF16 line by 32 hours while QeRL and On-Policy QAD climb more slowly."
+  caption="The loop in motion, then the training-cost curve. The animation is the authors' summary; the measured numbers are in the table and figures below (video from @HuggingPapers's post on X)."
+/>
+
+## What W4A16 does to the weights
+
+The paper's main setting is W4A16: 4-bit integer weights, 16-bit (BF16) activations. Only the weight matrices of the
+linear layers are compressed. Activations, attention, norms and the KV cache stay in 16 bits.
+
+The weights are quantized in groups. Take 64 consecutive weights $w_1, \dots, w_{64}$ from one row of a matrix. Find
+their range, map it onto the 16 levels a 4-bit code can hold, and store one scale $s$ and one zero point $z$ for the
+group:
+
+$$
+s = \frac{\max_i w_i - \min_i w_i}{15}, \qquad
+z = \operatorname{round}\!\left(-\frac{\min_i w_i}{s}\right), \qquad
+q_i = \operatorname{clamp}\big(\operatorname{round}(w_i / s) + z,\ 0,\ 15\big)
+$$
+
+and at inference each weight comes back as $\hat w_i = (q_i - z)\,s$. That is the asymmetric quantizer in
+`src/steerdistill/quantization/quantizer.py`, with group size 64, FP16 scales and a clipping step borrowed from
+BitDistiller that shrinks the range before rounding so one outlier doesn't waste all 16 levels. Counting an FP16 scale and
+a 4-bit zero point per group (the exporter packs `qzeros` at 4 bits), that is $4 + 20/64 \approx 4.31$ bits per weight, against 16 for BF16: about 3.7 times less
+memory traffic per decoded token on the quantized layers, which is where a [memory-bound
+decode](/articles/how-llm-inference-works) spends its time.
+
+GPTQ and AWQ are two smarter ways to choose the codes. GPTQ rounds one column at a time and pushes each rounding error
+onto the columns not yet quantized, using second-order statistics from calibration data ([I derived it
+here](/articles/llm-compressor-0-14)). AWQ rescales the channels that see large activations before rounding, so
+the weights that matter most lose least. Both are post-training: no gradient step, a few minutes of calibration. In this
+paper GPTQ is the post-training baseline. AWQ is not a baseline at all; the repo uses AWQ's *packing* format to export the
+student to vLLM's fast 4-bit kernels, and the converter's docstring says plainly that it "does not run AWQ calibration".
+So if you came here asking how much plain AWQ loses on these agents, this paper does not answer it.
+
+What GPTQ loses is in Table 1, and it is large. Averaged over the five benchmarks, GPTQ at W4A16 sits 7.18 points under
+BF16 on Qwen3-8B, 7.46 on Qwen3.5-4B and 7.47 on Gemma 4 12B-it (my subtraction from the paper's rows). The largest
+drops on Qwen3-8B are WebShop and ALFWorld, at 9.34 and 8.60 points.
+
+## Why one bad turn sinks the task
+
+The paper never compares against single-turn benchmarks, so what follows is my reasoning, not its result. Treat each turn
+of an agent's task as a step that goes right with probability $p$. If the task needs $k$ turns and any wrong one sinks
+it, the task succeeds with probability
+
+$$
+P(\text{task}) = p^{\,k}.
+$$
+
+A single-turn benchmark measures $p$. An agent benchmark measures $p^k$. The same small drop in $p$ is multiplied $k$
+times:
+
+| per-turn $p$ | 1 turn | 5 turns | 10 turns | 20 turns |
+|---|---|---|---|---|
+| 0.99 | 99.0% | 95.1% | 90.4% | 81.8% |
+| 0.97 | 97.0% | 85.9% | 73.7% | 54.4% |
+| 0.95 | 95.0% | 77.4% | 59.9% | 35.8% |
+| 0.90 | 90.0% | 59.0% | 34.9% | 12.2% |
+
+Going from 0.99 to 0.97 per turn is a two-point loss on a single-turn eval and a 27-point loss at twenty turns. Real
+tasks are kinder than this (some wrong turns are recoverable, which the paper's own case studies show) and crueller
+(errors are correlated: a model that misreads the task at turn two misreads it again at turn six). The shape still holds.
+Weight quantization nudges a lot of logits by a little, a long trajectory gives that nudge many chances to pick the wrong
+tool or argument, and the first wrong pick changes the environment everything after it has to live with.
+
+The paper's word for that first wrong pick is a **behavioral divergence**: quantized agents "overlook task
+requirements or environmental conditions" and produce an environment transition the full-precision model would not
+have produced. Its case studies are mundane in a way I find convincing. On the train-booking task in Figure 5, BF16 asks
+for the missing cities, while On-Policy QAD invents Boston to New York and GPTQ invents San Francisco to Los Angeles.
+
+<Figure
+  src="/articles/steerdistill/fig5.png"
+  alt="A table titled Clarifying the route before booking. Task: book train tickets for March 8, 2023, with no departure or destination given. Rows: BF16 and SteerDistill reply asking for the cities. On-Policy QAD calls FindTrains from Boston, MA to New York, NY, then GetTrainTickets for the invented route. QeRL searches with blank endpoints, then asks. BitDistiller requests tickets for Boston to New York. EfficientQAT calls FindTrains with only the date and replies that the tickets have been booked. GPTQ invents San Francisco to Los Angeles, then asks the user to confirm."
+  caption="One inference case across all seven models: the BF16 model and SteerDistill ask for the route; five quantized baselines invent one, search with blanks, or claim a booking that never happened (paper, Figure 5)."
+/>
+
+Drag the toy to see both halves of the argument. The left number is what a deployed agent lives with. The repair modes
+are what the training loop below can do with a failing rollout, using the paper's own repair rates.
+
+<CompoundToy />
+
+### Why ordinary recovery misses these turns
+
+The standard fixes for quantization loss all supply training signal, and the paper's point is that none of it lands on
+the divergent turn. Quantization-aware training (EfficientQAT) and offline distillation (BitDistiller) learn from data
+collected without the student, so they rarely see the context the student actually gets itself into. On-policy
+distillation (NVIDIA's NeMo-RL QAD workflow) and RL with verifiable rewards (QeRL) do run the student, but in the
+contexts where it fails it almost never produces a correct action to learn from. The paper measures that directly: on
+BFCL V4 multi-turn, four unguided retries of the student from the same pre-error state produce a correct action at only
+9.6% of divergent turns.
+
+## A teacher that writes a hint, and checks it
+
+Write $\pi_T$ for the frozen BF16 teacher and $\pi_\theta$ for the quantized student, both from the same checkpoint
+(here a task-specific GRPO checkpoint the authors train first). Training runs in cycles. In cycle $k$ a frozen snapshot
+$\pi_{\theta_k}$ of the student generates rollouts, and every failed one goes through revision.
+
+**Find a reference.** The teacher runs the same task from the same initial state. The repo tries up to four teacher
+rollouts (`--counterfactual-attempts`, default 4) and takes the first success as a fixed reference. No success, no
+revision: the failed rollout is kept as is.
+
+**Find the first divergence by state, not by action.** Student and reference are aligned turn by turn on the
+environment state each action produces. In the tool-use tasks that state is a SQLite database; in ALFWorld it is world
+facts and admissible actions; in WebShop the product selection, page type and clickable choices. Two different actions
+that produce the same state change count as the same. The first student turn whose transition has no match, $t^\star$,
+is where the intervention happens. This matters more than it sounds: the ablation in Table 2 shows that intervening at
+the first *action* mismatch instead scores 1.83 points lower on BFCL V4, because many mismatched actions were fine and
+"fixing" them puts unnecessary edits into the training data. Intervening at a random eligible turn scores 43.52, below
+plain On-Policy QAD's 44.43.
+
+**Write a steering prompt.** "Steering" in this paper is text in the student's context. No logits or activations are
+touched. The teacher reads the failed turn and the reference and writes a prompt $G$ with four fields. In
+`src/steerdistill/analysis.py` the schema is fixed:
+
+```python
+STEER_FIELDS = {
+    "precondition", "decision_rule", "expected_transition", "recovery_check"
+}
+```
+
+and the analyzer's system prompt tells the teacher: "Do not copy the full answer or the exact expected tool call." The
+student has to produce the action. Figure 11 shows a real one: the student tried `cat("project_analysis.txt")` from
+`/alex`, the reading tool only sees the current directory, and the hint says to navigate to `workspace` first.
+
+<Figure
+  src="/articles/steerdistill/fig4.png"
+  alt="A worked training case titled Finding the directory before reading the file. Left, the original rollout calls cat on project_analysis.txt and gets No such file or directory. Right, the revised rollout calls pwd, which returns /alex, then cd into workspace, then cat, which returns the initial analysis content. Below, the teacher's steering prompt in four rows: precondition, file not found in the current directory; decision rule, navigate to the workspace directory before attempting to access the file; expected transition, the working directory changes to /alex/workspace; recovery check, call the cat tool after confirming the directory transition. At the bottom, the execution check: directory /alex to /alex/workspace, and the returned text matches the file with files unchanged."
+  caption="One steering prompt and the check that accepted it. The student writes pwd, cd and cat itself; the prompt gives the rule and the expected state change, never the call (paper, Figure 11)."
+/>
+
+**Retry from the restored state.** The history and environment before $t^\star$ are restored, the frozen student samples
+$y_{t^\star} \sim \pi_{\theta_k}(\cdot \mid h_{t^\star}, G)$, and the action executes.
+
+**Verify locally.** The new turn is accepted only if executing it moves the environment the way the reference's turn
+did. In the tool-use benchmarks this is `compare_transition` in `src/steerdistill/transition_verifier.py`, which
+snapshots the database before and after the turn on both trajectories and compares them table by table (rows as a
+multiset, with columns like generated timestamps projected out by a per-task policy):
+
+```python
+if error_observation(actual):
+    return False, "environment_error"
+# Only generated clock metadata proved unused by this task's verifier and
+# environment logic is projected out. All other state and side effects stay.
+if before != expected_before:
+    return False, "precondition_state_mismatch"
+if after != expected_after:
+    return False, "postcondition_state_mismatch"
+if expected_before != expected_after:
+    return True, "verified_state_transition"
+if not actual or not expected:
+    return False, "read_evidence_missing"
+if actual != expected:
+    return False, "read_result_mismatch"
+return True, "verified_read_transition"
+```
+
+A turn that changes state must change it identically. A read-only turn, where the database does not move, must return the
+same observation the reference got. Any error message in the tool output fails it outright. For ALFWorld, WebShop and
+Search QA the paper's Appendix A loosens this: a candidate passes if its resulting state matches the reference *or* both
+executions finish the task, which lets two different winning paths both count.
+
+**Refine and retry.** On a failed check, the teacher gets the attempt, the student's tool calls and the verifier's
+reason, and rewrites $G$. The student tries again from the same restored state. The budget is $R = 4$ attempts per
+intervention. On a pass, the corrected turn replaces the old one, the old suffix is thrown away, and the student
+continues *without* the prompt. If the task still fails, the loop realigns and fixes the next divergence. With teacher
+steering, turn-level Pass@4 on that BFCL diagnostic goes from 9.6% to 82.3%.
+
+**Keep verified turns even when the task fails.** This is a choice the ablation backs. Removing local verification
+altogether drops BFCL V4 from 46.84 to 42.18; keeping only corrections from trajectories that also succeed end to end
+gives 46.30. A verified fix of turn four is a good example of turn four whatever happens at turn nine.
+
+<Figure
+  src="/articles/steerdistill/fig2.png"
+  alt="The method diagram. Top: the student snapshot acts in the environment, producing original rollouts, some failed with red dots; revision turns them into revised trajectories that succeed. Middle, labelled teacher-steered trajectory revision: the frozen teacher's successful reference y1 to y6 on a blue band; the student's failed rollout below diverges at y4, marked behavioral divergence. A steering prompt G from the frozen teacher leads to a retry from y3: one y4 attempt is red with a cross and an arrow labelled local failure, refine and retry; the next y4 is green with a tick labelled local pass, retain correction, and continues to y5 and y6. Bottom: the revised trajectory y1 to y6 feeds two boxes: forward KL at corrected turns, target the steered snapshot given c and G, learner the student given c; reverse KL at other turns, target the frozen teacher given c, learner the student given c. A dashed arrow returns the updated student to the next training cycle."
+  caption="One training cycle: find the divergence against the teacher's reference, steer and verify the retry, then distill with a different target on corrected turns and on the rest (paper, Figure 2)."
+/>
+
+## Distilling the hint away
+
+The revised trajectories are training data, but the corrected turns were produced with $G$ in context, and the deployed
+student will never see $G$. So the loss gives the learner the same context minus the prompt, and asks it to behave as if
+the prompt were there. That is context distillation; I wrote about a close cousin, where [the reference answer sits only in
+the teacher's context](/articles/on-policy-self-training).
+
+Let $c$ be the history plus the response prefix with every steering prompt removed. At a corrected turn the target is the
+frozen student snapshot *with* the hint; everywhere else it is the BF16 teacher:
+
+$$
+\ell_{\text{FKL}}(c, G; \theta) = D_{\text{KL}}\!\big(\pi_{\theta_k}(\cdot \mid c, G)\ \big\|\ \pi_\theta(\cdot \mid c)\big),
+\qquad
+\ell_{\text{RKL}}(c; \theta) = D_{\text{KL}}\!\big(\pi_\theta(\cdot \mid c)\ \big\|\ \pi_T(\cdot \mid c)\big).
+$$
+
+The per-token loss is $\ell_{\text{FKL}}$ on turns in the corrected set and $\ell_{\text{RKL}}$ on the rest, averaged
+over every assistant token, KL over the full vocabulary. I like two choices here. The corrected-turn target is the *student's
+own* distribution under the hint, not the teacher's, so it is something a 4-bit model has already shown it can produce.
+And the two directions suit their jobs. Forward KL is mode-covering: the learner must put mass wherever the hinted
+student does, which is what you want when copying a specific corrected action. Reverse KL is mode-seeking on the
+learner's own samples, the usual on-policy distillation choice, which keeps the rest of the trajectory close to the
+teacher without forcing the small model to spread over everything the teacher might say. The ablation agrees: this
+routing beats reverse KL everywhere by 1.55 points, forward KL everywhere by 2.26, and swapping the two directions costs
+2.56.
+
+In `src/steerdistill/training/mytrainer.py` the routing is a mode id per row (the repo's agent guide explains that a
+`skill` is the code's older name for a stored steering prompt):
+
+```python
+mode_specs = (
+    (0, "ordinary_reverse", True),
+    (1, "skill_forward", False),
+    (2, "rescue_forward", False),
+    (3, "steer_forward", False),
+)
+```
+
+and the KL itself is two calls to `F.kl_div` with the arguments swapped:
+
+```python
+if reverse:
+    total = total + F.kl_div(reference_lp, student_lp, reduction="sum", log_target=True)
+else:
+    total = total + F.kl_div(student_lp, reference_lp, reduction="sum", log_target=True)
+```
+
+PyTorch's `kl_div(input, target)` computes $D_{\text{KL}}(\text{target} \,\|\, \text{input})$, so the reverse branch is
+$D_{\text{KL}}(\pi_\theta \,\|\, \pi_{\text{ref}})$ and the forward branch is $D_{\text{KL}}(\pi_{\text{ref}} \,\|\,
+\pi_\theta)$, matching the paper's equations. The learner itself keeps BF16 master weights, runs fake-quantized in the
+forward pass, and gets gradients through a straight-through estimator, the same arrangement as any
+[quantization-aware distillation](/articles/nvidia-model-optimizer). Modes 1 and 3 both take the steered frozen-student
+target; mode 2 is a teacher-rescue ablation path, and the agent guide warns not to enable it just because it exists.
+
+The rest of Table 2 tests the steering itself. From the same restored state, teacher steering beats unguided retries by
+2.38 points and a direct teacher takeover (the teacher writes the turn, the student continues) by 1.78. The structured
+four-field prompt beats a free-form one by 2.06. And the hint's author matters: the same structured prompt written by
+the student itself scores 5.10 points lower, and written by GPT-5.6-Sol 1.57 lower. The paper gives no reason for the
+takeover result. My guess: a teacher-written turn is off the student's distribution, and every turn after it is the
+student's again. This is close to the hint-then-strip loop in [KAT-Coder's data
+flywheel](/articles/kat-coder-agentic-training), but with the hint removed by the loss rather than by a hint-free
+replay that throws data away.
+
+## Checking the one-point claim
+
+<Figure
+  src="/articles/steerdistill/fig1.png"
+  alt="The paper's overview figure. Top: a rollout task, read file in the workspace folder, where the cat tool reads only the current directory. The frozen teacher's successful reference runs pwd and cd workspace, then cat file. The student snapshot's failed rollout calls cat file directly and errors, marked behavioral divergence. A steering prompt from the teacher, navigate to workspace before reading file, leads through closed-loop teacher steering (execute, verify, feedback, retry; locally verified) to a revised trajectory that runs pwd and cd workspace, then cat file, distilled into the student to act without guidance. Bottom left: mean score on five benchmarks for Qwen3-8B at W4A16, BF16 53.54, GPTQ 46.36, EfficientQAT 47.87, BitDistiller 48.49, On-Policy QAD 50.38, QeRL 51.00, Ours 53.18. Bottom right: tau2-Bench Pass@1 during training against cumulative GPU hours, Ours reaching 31.68% at 32 hours, QeRL 29.84% at 96 hours, QAD 28.75% at 40 hours, under a BF16 line at 32.64%."
+  caption="The paper's one-figure summary: the directory example as a trajectory, the five-benchmark means for Qwen3-8B at W4A16, and the training curve (paper, Figure 1). Note the bar axis starts at 44, which makes GPTQ's gap look larger than its 7.18 points."
+/>
+
+Here is the whole of Table 1. Switch settings, and flip between raw scores and the gap to BF16.
+
+<RecoveryTable />
+
+I recomputed every Avg column from its five cells: all 33 rows match the paper to the hundredth. For scale, the
+five-benchmark average for Qwen3-8B at W4A16 is 53.54 for BF16, 46.36 for GPTQ, 51.00 for QeRL and 53.18 for
+SteerDistill. Then the claims:
+
+- **"Within one point of BF16" holds on the average, at W4A16.** SteerDistill's average is 0.36 points under BF16 on
+  Qwen3-8B, 0.73 on Qwen3.5-4B and 0.82 on Gemma 4 12B-it. Against GPTQ's 7.18, 7.46 and 7.47 that recovers 95%, 90% and
+  89% of what post-training quantization lost.
+- **Per benchmark, two of fifteen cells miss the line.** On Gemma 4 12B-it, WebShop is 1.03 under and ALFWorld 1.01.
+  The other thirteen are within a point; the worst on Qwen3-8B is τ²-Bench at 0.85.
+- **It is a W4A16 claim only.** At W4A8 the gap is 1.92 points, and at W2A16 it is 10.57. The 2-bit result is still the
+  best row by 3.39 points over On-Policy QAD, and GPTQ at 2 bits collapses to 18.86 from 53.54. BitDistiller beats it on
+  Search QA at 2 bits, 34.22 to 34.05, which the paper reports itself.
+- **"1.67 to 2.18 points over the strongest baseline" checks out.** The strongest baseline at W4A16 is QeRL for all three
+  models, and the margins are 2.18, 1.71 and 1.67.
+
+The video's bar chart below is that table, with its own framing.
+
+<Video
+  src="/articles/steerdistill/clip2"
+  poster="/articles/steerdistill/clip2-poster.jpg"
+  alt="A grouped bar chart on white headed Sub-4-bit LLM agents with a W4A16 tag. Five groups labelled Tool use, Service tasks, Shopping, Household tasks and Search; in each, a red BF16 bar, grey baseline bars and a blue SteerDistill bar. The bars grow from zero and the chart switches between Qwen3-8B, Qwen3.5-4B and Gemma 4 12B-it tabs."
+  caption="Table 1 as animated bars. The heading says sub-4-bit while the tag and the data are W4A16, which is 4-bit weights; the 2-bit results are a separate Qwen3-8B row (video from @HuggingPapers's post on X)."
+/>
+
+Some things the table cannot tell you:
+
+- **No error bars.** Table 1 is one number per cell. WebShop, ALFWorld and Search QA are sampled at temperature 0.7,
+  BFCL at 0.001 and τ²-Bench at 0, and the only variance the paper shows is Figure 3's shading over four τ²-Bench
+  evaluation runs. I'd bet margins of 1.7 to 2.2 points on a five-benchmark average are real, since every row orders the
+  same way, but without the spread that is a bet.
+- **The W4A8 rows are coarser.** All 30 per-benchmark W4A8 cells end in 0 or 5 in the second decimal (35.90, 27.85,
+  75.55, …), while the W4A16 and W2A16 cells show no such pattern. I don't know why, and the paper doesn't say.
+- **The baselines were moved.** The reference configurations for NeMo-RL's QAD and for QeRL use NVFP4 on Hopper or
+  Blackwell. The authors adapted both to group-wise INT4 on A100s. That is the fair thing to do for a like-for-like
+  comparison, and also the place a baseline is most likely to lose a point or two to tuning.
+- **The GRPO start does a lot of work.** Every main result starts from a task-specific GRPO checkpoint. Appendix C.1
+  repeats Qwen3-8B without it: SteerDistill still wins, but over QeRL by 0.82 on BFCL V4 (39.67 against 38.85) and 0.13 on
+  τ²-Bench (29.05 against 28.92). It is still within a point of BF16 there (40.40 and 30.00 on BFCL and τ²-Bench), and
+  QeRL sits 1.08 under on τ²-Bench.
+
+## What it costs to train, and what it saves at inference
+
+<Figure
+  src="/articles/steerdistill/fig3.png"
+  alt="Two panels. Left, Higher success with less training: tau2-Bench Pass@1 against cumulative GPU hours from 0 to about 112. The SteerDistill curve rises steeply to 31.68% at 32 hours and stays flat near 31.8%, under a dashed BF16 line at 32.64%. QeRL rises slowly to 29.84% at 96 hours; On-Policy QAD flattens at 28.75% around 40 hours. Shaded bands show plus or minus one standard deviation. Right, Higher success with fewer tokens: Pass@1 against output tokens per successful task; BF16 at about 3.9K and 32.6%, SteerDistill at 4.0K tokens and 31.79%, then QeRL, On-Policy QAD, BitDistiller, EfficientQAT and GPTQ moving down and to the right, GPTQ near 5.2K tokens and 26.9%."
+  caption="Training cost and output length on τ²-Bench, Qwen3-8B at W4A16. GPU hours count wall-clock time times eight A100s, including teacher steering and verification (paper, Figure 3)."
+/>
+
+**Training.** On τ²-Bench, SteerDistill's checkpoint at 32 GPU hours scores 31.68% Pass@1; QeRL reaches 29.84% at 96
+GPU hours. That is the "67% fewer GPU hours" in the abstract (32 is a third of 96). All runs use eight A100 80GB GPUs, so
+32 GPU hours is four hours of wall clock on one node. The paper says the count includes teacher steering and
+verification. It does not include the GRPO run that produced the starting checkpoint, which every method shares. One
+small inconsistency: the figure labels On-Policy QAD's plateau 28.75%, while the text's "2.91 percentage points" gap is
+computed from Table 1's 28.77.
+
+**Inference.** On the same benchmark, successful tasks average 4.0K output tokens for SteerDistill against 3.9K for BF16
+and 4.1K to 5.2K for the quantized baselines (Table 7), with 11.6 interaction steps against BF16's 11.4 and GPTQ's 13.8,
+and 192K input tokens against GPTQ's 270K. These are averages over each method's own successful tasks, so the subsets
+differ, but the direction is the one the compounding argument predicts: a quantized agent that takes wrong turns and
+recovers spends more turns doing it, and every extra turn re-reads the whole context.
+
+What the paper does not measure is latency or throughput. The W4A16 export uses vLLM's existing 4-bit kernels, so the
+speedup is whatever those kernels give you on your GPU. The W4A8 and W2A16 runs go through a reference backend that, in
+the repo's own words in `docs/training/precision.md`, implements "the numerical quantization schemes, not fused INT2 or
+W4A8 GEMM acceleration". Those two rows are accuracy results, not speed results.
+
+## What it needs from your environment
+
+The appendix lists the requirements, and they are the real cost of the method:
+
+1. **A successful teacher reference for the failing task.** If the BF16 model can't solve it in four tries, the student
+   gets no correction there. SteerDistill can only pull the student up to the teacher, and only on tasks the teacher
+   already solves.
+2. **Restorable state.** Every retry restarts from the exact pre-error history and environment. The repo does this by
+   snapshotting a SQLite database at every turn, with a checksum in a manifest that the verifier re-checks before
+   trusting it.
+3. **A verifier that can say a single turn was right.** Here that is state equality against the reference. The
+   limitations section is candid that local verification "does not guarantee eventual task success" and that
+   environments without state restoration or reliable local verification are untested.
+
+For an agent whose tools write to a database you own, all three are buildable: snapshot the store per turn, as the repo
+does, and diff it. For an agent whose tools send emails, call third-party APIs or move money, you cannot restore the world and retry turn
+four, and you would need a full simulator first. The paper's tool-use training tasks come from AgentWorldModel, whose
+executable environments make that possible.
+
+There is also nothing to download yet. The README's checkpoints entry is still a placeholder with no links, and the reference setup
+is eight A100 80GB GPUs per run, with separate environments for training, vLLM inference and each benchmark.
+
+## Worth building where the environment can be snapshotted
+
+I think the core move is right and will outlive this paper: when you compress an agent, spend the recovery budget on the
+turns where the compressed model's environment state first departs from the full model's, and make the compressed model
+produce the fix itself. Everything in the ablations points the same way. Locate by state, not by action. Hint, don't take
+over. Verify the turn by executing it, and keep the verified turn even when the task fails. The loss design that turns a
+hinted turn into an unhinted one is clean and cheap.
+
+The one-point headline is true as stated, for the average, at W4A16, starting from a GRPO checkpoint. It bends at the
+edges: two benchmark cells over a point, nearly two points at W4A8, ten at W2A16, and a thin margin over QeRL without the
+GRPO start. If I were compressing an agent tomorrow, I would still run GPTQ or AWQ first, measure the multi-turn drop on
+my own tasks, and only build this machinery if that drop is several points and my environment can be snapshotted. Most
+agent environments I know can't be, yet. That, more than the method, is what decides whether you can use it.
+
+Some sibling reading on this site: [Deletion Tuning and closed-form weight edits](/articles/weight-edits-without-finetuning),
+today's other piece on changing a model's weights cheaply, and [LittleBit](/articles/littlebit-0-1-bit), where
+distillation carries a model down to a tenth of a bit.
+
+<Callout type="note">
+**How I checked.** I read the paper (arXiv HTML and PDF, v1) and the repository at commit `937744a`: the verifier,
+the steering schema and analyzer prompt, the retry loop in `stream_repair.py`, the KL routing in `mytrainer.py`, the
+quantizer and the AWQ-format exporter. I recomputed every Avg in Table 1 and every gap and margin quoted here from the
+printed cells, and the p-to-the-k table is plain arithmetic. I ran none of the training or evaluation code; there are no
+checkpoints to run it from.
+</Callout>

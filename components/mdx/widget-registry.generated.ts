@@ -1472,6 +1472,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "stablegen-rigged-characters/run-stages": () => import("@/components/articles/stablegen-rigged-characters/run-stages"),
   "stablegen-rigged-characters/twist-split": () => import("@/components/articles/stablegen-rigged-characters/twist-split"),
   "steadysplats/variance-ray": () => import("@/components/articles/steadysplats/variance-ray"),
+  "steerdistill/compound-toy": () => import("@/components/articles/steerdistill/compound-toy"),
+  "steerdistill/recovery-table": () => import("@/components/articles/steerdistill/recovery-table"),
   "step-5-preview/sparse-gqa-explorer": () => import("@/components/articles/step-5-preview/sparse-gqa-explorer"),
   "steve-desktop-cad/float-trap": () => import("@/components/articles/steve-desktop-cad/float-trap"),
   "steve-desktop-cad/mesh-vs-exact": () => import("@/components/articles/steve-desktop-cad/mesh-vs-exact"),
