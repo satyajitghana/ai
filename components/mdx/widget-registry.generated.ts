@@ -1239,6 +1239,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "qwenputer/gdn-ram": () => import("@/components/articles/qwenputer/gdn-ram"),
   "qwenputer/machine-trace": () => import("@/components/articles/qwenputer/machine-trace"),
   "qwenputer/model-map": () => import("@/components/articles/qwenputer/model-map"),
+  "raon-1-nano/expert-picker": () => import("@/components/articles/raon-1-nano/expert-picker"),
+  "raon-1-nano/ple-budget": () => import("@/components/articles/raon-1-nano/ple-budget"),
   "rea-reverse-engineer-anything/dxball-timeline": () => import("@/components/articles/rea-reverse-engineer-anything/dxball-timeline"),
   "rea-reverse-engineer-anything/function-layers": () => import("@/components/articles/rea-reverse-engineer-anything/function-layers"),
   "rea-reverse-engineer-anything/minify-probe": () => import("@/components/articles/rea-reverse-engineer-anything/minify-probe"),
