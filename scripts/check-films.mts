@@ -644,6 +644,8 @@ for (const slug of files) {
 if (!only && !sbOnly) {
   for (const slug of Object.keys(manifest.films)) if (!files.includes(slug)) fail(slug, "in the film manifest but has no storyboard")
   for (const slug of Object.keys(thumbs.thumbs)) if (!files.includes(slug)) fail(slug, "in the thumbnail manifest but has no storyboard")
+  // Folders under public/thumbs that are not film thumbnails (pages: the home page's explore-card screenshots)
+  const NON_FILM_THUMB_DIRS = new Set(["pages"])
   // every file, the top level and one directory per namespace, named by its key
   const listed = (dir: string) => {
     const out: string[] = []
@@ -652,6 +654,8 @@ if (!only && !sbOnly) {
       else if (NAMESPACES.includes(d.name)) out.push(...readdirSync(join(dir, d.name)).map((f) => `${d.name}/${f}`))
       // public/films/math holds the math reels: their own manifest and checker (validate:reels)
       else if (dir.endsWith(join("public", "films")) && d.name === "math") continue
+      // public/thumbs/pages holds screenshots of the special pages for the home page's explore cards, not film thumbnails
+      else if (dir.endsWith(join("public", "thumbs")) && NON_FILM_THUMB_DIRS.has(d.name)) continue
       else fail(d.name, `${dir.slice(ROOT.length + 1)}/${d.name}/ is not a film namespace`)
     }
     return out

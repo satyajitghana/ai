@@ -1,100 +1,131 @@
 import Link from "next/link"
-import {
-  GithubLogoIcon,
-  LinkedinLogoIcon,
-  XLogoIcon,
-} from "@phosphor-icons/react/dist/ssr"
 
 import { profile } from "@/data/profile"
 import { PERSON_URL } from "@/lib/site"
 
-const footerLinks = [
-  { href: "/models", label: "models" },
-  { href: "/architectures", label: "architectures" },
-  { href: "/math", label: "ai in maths" },
-  { href: "/publications", label: "publications" },
-  { href: "/patents", label: "patents" },
-  { href: "/health", label: "health" },
-  { href: "/snippets", label: "snippets" },
-  { href: "/notes", label: "notes" },
-  { href: "/now", label: "now" },
-  { href: "/uses", label: "uses" },
-  { href: "/reading", label: "reading" },
-  { href: "/github", label: "github" },
-  { href: "/changelog", label: "changelog" },
-  { href: "/developers", label: "developers" },
-  { href: "/contact", label: "contact" },
-  { href: "/privacy", label: "privacy" },
-  { href: "/colophon", label: "colophon" },
-  { href: "/feed.xml", label: "rss" },
-] as const
+// The full sitemap, grouped. Every page renders this, so it stays a server
+// component with plain markup, and its links do not prefetch: thirty
+// viewport-prefetched routes on every page view would be thirty uncached
+// requests to Vercel for pages most readers never open. Files and endpoints
+// (`raw`) are plain anchors, since they are not routes the router can render.
+type Item = { href: string; label: string; raw?: boolean }
+
+const groups: { title: string; items: Item[] }[] = [
+  {
+    title: "read",
+    items: [
+      { href: "/articles", label: "articles" },
+      { href: "/blog", label: "blog" },
+      { href: "/notes", label: "notes" },
+      { href: "/snippets", label: "snippets" },
+      { href: "/logs", label: "logs" },
+      { href: "/arxiv", label: "arxiv digest" },
+      { href: "/reading", label: "reading" },
+    ],
+  },
+  {
+    title: "explore",
+    items: [
+      { href: "/lab/neuron-lab", label: "neuron lab" },
+      { href: "/models", label: "models" },
+      { href: "/math", label: "ai in maths" },
+      { href: "/architectures", label: "architectures" },
+      { href: "/articles/scoring", label: "how we score" },
+      { href: "/search", label: "search" },
+    ],
+  },
+  {
+    title: "data & api",
+    items: [
+      { href: "/developers", label: "developers" },
+      { href: "/llms.txt", label: "llms.txt", raw: true },
+      { href: "/openapi.json", label: "openapi.json", raw: true },
+      { href: "/feed.xml", label: "rss", raw: true },
+      { href: "/changelog", label: "changelog" },
+      { href: "/github", label: "github stats" },
+    ],
+  },
+  {
+    title: "about",
+    items: [
+      { href: "/about", label: "about" },
+      { href: "/resume", label: "resume" },
+      { href: "/projects", label: "projects" },
+      { href: "/publications", label: "publications" },
+      { href: "/patents", label: "patents" },
+      { href: "/now", label: "now" },
+      { href: "/uses", label: "uses" },
+      { href: "/health", label: "health" },
+      { href: "/contact", label: "contact" },
+    ],
+  },
+  {
+    title: "elsewhere",
+    items: [
+      { href: profile.links.github, label: "github", raw: true },
+      { href: profile.links.x, label: "x", raw: true },
+      { href: profile.links.linkedin, label: "linkedin", raw: true },
+      { href: profile.links.scholar, label: "scholar", raw: true },
+    ],
+  },
+]
+
+// Link hover styles are set once on each container ([&_a]) rather than on
+// forty links: the footer is in every page's HTML and its RSC payload twice
+// over. Focus rings are the global outline-ring default.
+const links = "[&_a]:transition-colors [&_a:hover]:text-foreground [&_a:focus-visible]:text-foreground"
 
 export function SiteFooter() {
   return (
     // pb-24 on mobile clears the terminal launcher, which is fixed 16px off the
-    // bottom-right at 48px square. At pb-10 the last line of the colophon ran
-    // underneath it and the tail of "agent-readable: llms.txt" was unreadable
-    // and untappable. Above sm: the column is centred and the button sits well
-    // clear of the text, so the original spacing stands.
+    // bottom-right at 48px square; without it the last line ran underneath it.
     <footer className="mx-auto w-full max-w-3xl px-6 pt-20 pb-24 sm:pb-10">
-      <div className="flex flex-wrap gap-x-4 gap-y-1 border-t pt-6 font-mono text-xs text-muted-foreground">
-        {footerLinks.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className="transition-colors hover:text-foreground"
-          >
-            {item.label}
-          </Link>
+      <nav
+        aria-label="Site map"
+        className={`grid grid-cols-2 gap-x-6 gap-y-8 border-t pt-8 font-mono text-xs sm:grid-cols-3 md:grid-cols-5 ${links}`}
+      >
+        {groups.map((g) => (
+          <div key={g.title}>
+            <h2 className="text-foreground">{g.title}</h2>
+            <ul className="mt-3 space-y-2 text-muted-foreground">
+              {g.items.map((item) => (
+                <li key={item.href}>
+                  {item.raw ? (
+                    <a href={item.href}>
+                      {item.label}
+                    </a>
+                  ) : (
+                    <Link href={item.href} prefetch={false}>
+                      {item.label}
+                    </Link>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
         ))}
-      </div>
-      <div className="mt-6 flex flex-wrap items-center justify-between gap-3 font-mono text-xs text-muted-foreground">
-        <span className="flex items-center gap-3">
-          <span>
-            © {new Date().getFullYear()}{" "}
-            {/* His home page: the visible link that ties this site to satyajit.si */}
-            <a
-              href={PERSON_URL}
-              rel="me"
-              className="underline-offset-2 transition-colors hover:text-foreground hover:underline"
-            >
-              {profile.name}
-            </a>
-          </span>
-          <a
-            href={profile.links.github}
-            className="flex items-center transition-colors hover:text-foreground"
-            aria-label="GitHub"
-          >
-            <GithubLogoIcon size={16} weight="fill" />
-          </a>
-          <a
-            href={profile.links.x}
-            className="flex items-center transition-colors hover:text-foreground"
-            aria-label="X (Twitter)"
-          >
-            <XLogoIcon size={16} weight="fill" />
-          </a>
-          <a
-            href={profile.links.linkedin}
-            className="flex items-center transition-colors hover:text-foreground"
-            aria-label="LinkedIn"
-          >
-            <LinkedinLogoIcon size={16} weight="fill" />
+      </nav>
+      <div className={`mt-10 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t pt-6 font-mono text-xs text-muted-foreground ${links}`}>
+        <span>
+          © {new Date().getFullYear()}{" "}
+          {/* His home page: the visible link that ties this site to satyajit.si */}
+          <a href={PERSON_URL} rel="me">
+            {profile.name}
           </a>
         </span>
-        <span className="flex items-center gap-1.5">
+        <span>
           managed by{" "}
           <Link
             href="/colophon"
-            className="underline decoration-foreground/30 underline-offset-4 transition-colors hover:text-foreground"
+            prefetch={false}
+            className="underline decoration-foreground/30 underline-offset-4"
           >
             claude
           </Link>{" "}
-          · agent-readable:{" "}
-          <a href="/llms.txt" className="transition-colors hover:text-foreground">
-            llms.txt
-          </a>
+          ·{" "}
+          <Link href="/privacy" prefetch={false}>
+            privacy
+          </Link>
         </span>
       </div>
     </footer>

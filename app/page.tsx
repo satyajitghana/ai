@@ -3,6 +3,7 @@ import Link from "next/link"
 import { StarIcon } from "@phosphor-icons/react/dist/ssr"
 
 import { ChatConsole } from "@/components/chat/chat-console"
+import { ExploreCards } from "@/components/site/explore-cards"
 import { PageShell } from "@/components/site/page-shell"
 import { profile } from "@/data/profile"
 import { getArticles, getBlogPosts, getLogs, getProjects } from "@/lib/content"
@@ -219,6 +220,9 @@ export default function Page() {
           ) : null}
         </>
       ) : null}
+
+      {/* The special pages — tools and collections, each shown as itself */}
+      <ExploreCards rated={ratedAll.length} />
 
       {/* Browse by topic */}
       {topics.length ? (
