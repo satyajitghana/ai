@@ -592,6 +592,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "invaria-point-clouds/density-toy": () => import("@/components/articles/invaria-point-clouds/density-toy"),
   "invaria-point-clouds/shift-curves": () => import("@/components/articles/invaria-point-clouds/shift-curves"),
   "iquest-q1/kv-stack": () => import("@/components/articles/iquest-q1/kv-stack"),
+  "iris-z/absrel-lab": () => import("@/components/articles/iris-z/absrel-lab"),
+  "iris-z/task-switcher": () => import("@/components/articles/iris-z/task-switcher"),
   "jacobian-lens/lens-tangent": () => import("@/components/articles/jacobian-lens/lens-tangent"),
   "jacobian-lens/unembed-readout": () => import("@/components/articles/jacobian-lens/unembed-readout"),
   "jais-3/fertility-comparator": () => import("@/components/articles/jais-3/fertility-comparator"),
