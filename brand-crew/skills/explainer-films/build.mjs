@@ -41,11 +41,14 @@
 // public/films/architectures/transformer.mp4.
 // The site cut ships at 1280x720, the size the lite tier paints at, so nothing
 // is resampled; type stays as sharp as the painting.
+// Story films ("format": "story" in the storyboard; SKILL.md, "Story format")
+// go through story/render.mjs instead of render.mjs, in the lite tier, with
+// their own encoder settings (STORY_FLAGS); everything else here is shared.
 import { spawn, spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, renameSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
-import { SKILL_DIR, ROOT, articleDate, filmSha, storyboardKeys } from './hash.mjs'
+import { SKILL_DIR, ROOT, articleDate, filmSha, storyboardKeys, isStory } from './hash.mjs'
 
 const args = process.argv.slice(2)
 const opt = Object.fromEntries(args.filter(a => a.startsWith('--')).map(a => { const [k, ...v] = a.slice(2).split('='); return [k, v.join('=') || true] }))
@@ -65,6 +68,16 @@ if (opt.live && opt.p5) throw new Error('--live or --p5, not both')
 const live = !!(opt.live || opt.p5), tier = opt.p5 ? 'p5' : live ? 'live' : 'lite'
 const liveFlag = opt.p5 ? ['--p5'] : live ? ['--live'] : []
 export const VOICE = 'af_heart'
+// The renderer a storyboard paints through: the story engine for the story
+// format, the frozen legacy one for everything else.
+const RENDER = join(SKILL_DIR, 'render.mjs'), STORY_RENDER = join(SKILL_DIR, 'story', 'render.mjs')
+const rendererOf = sb => (isStory(sb) ? STORY_RENDER : RENDER)
+// The story path's encode: 1280x720 like every film, x264 -tune animation at
+// a CRF a notch higher than the legacy 34, because a story film is two to
+// three times as long and its budget is ~8 MB, not ~3. Measured on the pilot
+// (latent-sparse-attention, sumi, 4 min 49 s): 7.1 MB at 36, small mono type
+// still legible.
+const STORY_FLAGS = ['--scale=1280', '--crf264=36']
 
 const all = storyboardKeys()
 // scratch files are flat; a namespaced key's slash would make them a directory
@@ -86,6 +99,7 @@ if (opt.all) slugs = all
 else if (opt.stale) slugs = all.filter(s => manifest.films[s] && stale(s))
 for (const s of slugs) if (!all.includes(s)) throw new Error(`no storyboard: data/films/${s}.json`)
 if (!slugs.length) { if (keep) save(); console.log('nothing to render'); process.exit(0) }
+if (live && slugs.some(s => isStory(load(s)))) throw new Error('the story format renders in the lite tier only (no --live, no --p5)')
 
 const tmp = join(tmpdir(), `explainer-${process.pid}`), frames = join(tmp, 'video')
 mkdirSync(frames, { recursive: true }); mkdirSync(OUT, { recursive: true }); mkdirSync(CACHE, { recursive: true })
@@ -97,9 +111,13 @@ const run = (cmd, a) => { const r = spawnSync(cmd, a, { encoding: 'utf8', maxBuf
 
 // 1-2. lines, then voice
 console.log(`[1/3] narration for ${slugs.length} film(s)`)
-const lr = spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'lines', ...slugs.map(sbPath), ...liveFlag], { encoding: 'utf8', maxBuffer: 1 << 28 })
-if (lr.status !== 0) throw new Error(lr.stderr)
-const lines = JSON.parse(lr.stdout.trim().split('\n').pop())
+// each renderer reads its own storyboards' lines (the story engine knows scene types the legacy one doesn't)
+const lines = {}
+for (const [r, group] of groups(slugs)) {
+  const lr = spawnSync(process.execPath, [r, 'lines', ...group.map(sbPath), ...(r === RENDER ? liveFlag : [])], { encoding: 'utf8', maxBuffer: 1 << 28 })
+  if (lr.status !== 0) throw new Error(lr.stderr)
+  Object.assign(lines, JSON.parse(lr.stdout.trim().split('\n').pop()))
+}
 writeFileSync(join(tmp, 'lines.json'), JSON.stringify(lines))
 const tts = spawnSync(PY, [join(SKILL_DIR, 'audio.py'), 'tts', '--in', join(tmp, 'lines.json'), '--out', join(CACHE, 'voice'), '--voice', VOICE], { stdio: ['ignore', 'inherit', 'pipe'], encoding: 'utf8' })
 if (tts.status !== 0) throw new Error('tts failed: ' + (tts.stderr || '').split('\n').slice(-6).join('\n'))
@@ -114,23 +132,37 @@ console.log(`[2/3] painting ${slugs.length} film(s) on ${opt.workers || 3} page(
 // --noblur: drawings on twos everywhere and no shutter smear (render.mjs film --noblur),
 // several times faster in the brush tiers. The live/p5 cut is CRF 33: brush texture costs bits.
 const flags = [...(social ? ['--crf264=28'] : live ? ['--scale=1280', '--crf264=33'] : ['--scale=1280', '--crf264=34']), ...(opt.noblur ? ['--noblur'] : [])]
-const child = spawn(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'film', ...slugs.map(sbPath), `--out=${frames}`, `--workers=${opt.workers || 3}`, ...flags, ...liveFlag], { stdio: ['ignore', 'pipe', 'inherit'] })
-let buf = '', n = 0
-child.stdout.on('data', d => {
-  buf += d
-  let i
-  while ((i = buf.indexOf('\n')) >= 0) {
-    const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1)
-    if (!line.startsWith('{')) { if (line) console.log(line); continue }
-    try { finish(JSON.parse(line)) } catch (e) { console.error(`  ${JSON.parse(line).slug}: ${e.message.split('\n')[0]}`) }
-  }
+const storyFlags = [...(social ? ['--crf264=30'] : STORY_FLAGS), ...(opt.noblur ? ['--noblur'] : [])]
+let n = 0, failed = 0
+// one renderer at a time: legacy films first, then story films
+const paint = (r, group) => new Promise(res => {
+  const child = spawn(process.execPath, [r, 'film', ...group.map(sbPath), `--out=${frames}`, `--workers=${opt.workers || 3}`, ...(r === RENDER ? [...flags, ...liveFlag] : storyFlags)], { stdio: ['ignore', 'pipe', 'inherit'] })
+  let buf = ''
+  child.stdout.on('data', d => {
+    buf += d
+    let i
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1)
+      if (!line.startsWith('{')) { if (line) console.log(line); continue }
+      try { finish(JSON.parse(line)) } catch (e) { console.error(`  ${JSON.parse(line).slug}: ${e.message.split('\n')[0]}`) }
+    }
+  })
+  child.on('close', code => { if (code) failed = code; res() })
 })
-child.on('close', code => {
+;(async () => {
+  for (const [r, group] of groups(slugs)) await paint(r, group)
   if (keep) save()
   rmSync(tmp, { recursive: true, force: true })
   console.log(`[3/3] done: ${n}/${slugs.length}`)
-  process.exit(code || (n === slugs.length ? 0 : 1))
-})
+  process.exit(failed || (n === slugs.length ? 0 : 1))
+})()
+
+// storyboards grouped by the renderer that paints them, legacy first
+function groups(list) {
+  const m = new Map([[RENDER, []], [STORY_RENDER, []]])
+  for (const s of list) m.get(rendererOf(load(s))).push(s)
+  return [...m].filter(([, g]) => g.length)
+}
 
 function finish(r) {
   const slug = r.slug
@@ -154,6 +186,7 @@ function finish(r) {
     scenes: r.scenes.length,
     style: r.style,
     tier,
+    ...(isStory(load(slug)) ? { format: 'story' } : {}),
     width: r.style === 'pixel' && !social ? 640 : 1280,
     height: r.style === 'pixel' && !social ? 360 : 720,
     mascot: r.mascot?.name,
@@ -177,9 +210,12 @@ function thumbs(list) {
   mkdirSync(out, { recursive: true }); mkdirSync(tmp, { recursive: true })
   const man = existsSync(TMAN) ? JSON.parse(readFileSync(TMAN, 'utf8')) : { thumbs: {} }
   for (const slug of list) if (!all.includes(slug)) throw new Error(`no storyboard: data/films/${slug}.json`)
-  const files = list.map(slug => { dirFor(out, slug); const f = join(tmp, `${flat(slug)}.json`); writeFileSync(f, JSON.stringify({ ...load(slug), date: articleDate(slug) })); return f })
   const failed = []
-  const paint = batch => spawnSync(process.execPath, [join(SKILL_DIR, 'render.mjs'), 'thumb', ...batch, `--out=${out}`, `--workers=${opt.workers || 3}`, ...liveFlag], { encoding: 'utf8', maxBuffer: 1 << 26 })
+  // each storyboard through its own renderer: legacy ones first, then story ones
+  for (const [r, group] of groups(list)) {
+  const files = group.map(slug => { dirFor(out, slug); const f = join(tmp, `${flat(slug)}.json`); writeFileSync(f, JSON.stringify({ ...load(slug), date: articleDate(slug) })); return f })
+  if (r === STORY_RENDER && live) throw new Error('the story format renders in the lite tier only (no --live, no --p5)')
+  const paint = batch => spawnSync(process.execPath, [r, 'thumb', ...batch, `--out=${out}`, `--workers=${opt.workers || 3}`, ...(r === RENDER ? liveFlag : [])], { encoding: 'utf8', maxBuffer: 1 << 26 })
   for (let i = 0; i < files.length; i += 40) {
     let outs = []
     const r = paint(files.slice(i, i + 40))
@@ -197,6 +233,7 @@ function thumbs(list) {
       man.thumbs[j.slug] = { sha: shaOf(j.slug), bytes: j.bytes, style: j.style, scene: j.scene, mascot: j.mascot, tier }
       console.log(`  ${j.slug}  ${j.style}  ${(j.bytes / 1024).toFixed(0)} KB`)
     }
+  }
   }
   const sorted = {}
   for (const k of Object.keys(man.thumbs).sort()) if (all.includes(k)) sorted[k] = man.thumbs[k]

@@ -34,6 +34,20 @@
 // across every namespace. Every doc that exists in a namespace needs a
 // storyboard and a thumbnail, as every article does.
 //
+// The story format. A storyboard with "format": "story" is a long film told
+// in chapters (SKILL.md, "Story format"): 10-24 scenes, 400-750 words of
+// narration, an arc (a cold open, then the problem, the idea, the mechanism in
+// depth, the evidence, the limits, the takeaway), and six scene types only it
+// may use: chapter, hook, chart, trace, code and inset. Any of its beats may
+// carry a `term` lower-third. Everything above holds for it, with its own
+// limits; every digit those new scenes draw (a chart's points and ticks, a
+// trace's values) is held to the article like any other, and a code scene's
+// lines must each be the article's own.
+//
+// --file=<path.json> checks one storyboard that is not in data/films yet (a
+// draft) as if it were there, under the key in its slug field. Shape, layout
+// and facts only.
+//
 // It cannot tell whether an explanation is right. That part is the author's,
 // and SKILL.md says how.
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
@@ -41,7 +55,7 @@ import { join } from "node:path"
 
 import { MEDIA_MAP, mediaExists } from "./media-files"
 import { z } from "zod"
-import { NAMESPACES, articleDate, filmSha, fontsSha, sourceOf, splitKey, storyboardKeys } from "../brand-crew/skills/explainer-films/hash.mjs"
+import { NAMESPACES, articleDate, filmSha, fontsSha, isStory, sourceOf, splitKey, storyboardKeys } from "../brand-crew/skills/explainer-films/hash.mjs"
 
 const ROOT = process.cwd()
 const SB_DIR = join(ROOT, "data", "films")
@@ -49,9 +63,12 @@ const FILMS = join(ROOT, "public", "films")
 const THUMBS = join(ROOT, "public", "thumbs")
 const MAN = join(ROOT, "data", ".generated", "films.json")
 const TMAN = join(ROOT, "data", ".generated", "thumbs.json")
-const only = process.argv.find((a) => a.startsWith("--only="))?.slice(7).split(",")
+// --file: a draft storyboard outside data/films, checked under its own slug
+const draftPath = process.argv.find((a) => a.startsWith("--file="))?.slice(7)
+const draft = draftPath ? (JSON.parse(readFileSync(draftPath, "utf8")) as { slug: string }) : null
+const only = draft ? [draft.slug] : process.argv.find((a) => a.startsWith("--only="))?.slice(7).split(",")
 // --storyboards: shape, explanation and facts only, for authoring before anything is rendered
-const sbOnly = process.argv.includes("--storyboards")
+const sbOnly = process.argv.includes("--storyboards") || !!draft
 
 const words = (s: string) => String(s).split(/\s+/).filter(Boolean).length
 const str = (n: number) => z.string().min(1).refine((s) => words(s) <= n, `≤ ${n} words`)
@@ -100,24 +117,33 @@ const MASCOT = z.object({
 
 const KINDS = ["box", "pill", "stack", "db", "op", "grid", "doc", "chip", "user", "cloud"] as const
 const PATTERN = /^(dense|none|causal|diagonal|quant|sliding:\d+|block:\d+|sparse:0?\.\d+|topk:\d+|pages:\d+|rows:[\d,]+|cols:[\d,]+)$/
-const Scene = z.discriminatedUnion("type", [
+// The scenes, as a factory: the legacy schema is exactly what it always was
+// (story: false), and the story format's (story: true) adds `term` to every
+// beat, allows a few more steps and words, and adds its own scene types.
+type Lim = { story: boolean }
+function sceneTypes({ story }: Lim) {
+  const say = str(story ? 40 : 34).optional()
+  const sayReq = str(story ? 40 : 34)
+  const term = story ? { term: str(10).refine((t) => !t.includes(":") || words(t.split(":")[0]) <= 3, "a term is \"Word: what it means\", the word part ≤ 3 words").optional() } : {}
+  const more = (legacy: number, longer: number) => (story ? longer : legacy)
+  return [
   z.object({ type: z.literal("title"), punch: z.array(str(4)).max(3).optional(), headline: str(10), sub: str(14).optional(), say }).strict(),
-  z.object({ type: z.literal("idea"), label: str(5).optional(), text: str(28), mark: z.string().optional(), say }).strict(),
+  z.object({ type: z.literal("idea"), label: str(5).optional(), text: str(28), mark: z.string().optional(), say, ...term }).strict(),
   z.object({
     type: z.literal("diagram"), title: str(8),
-    nodes: z.array(z.object({ id, label: str(5), sub: str(5).optional(), kind: z.enum(KINDS).optional(), tone, at: z.tuple([pct, pct]) }).strict()).min(2).max(9),
-    edges: z.array(z.object({ from: id, to: id, label: str(3).optional(), dashed: z.boolean().optional(), bend: z.number().min(-1).max(1).optional() }).strict()).max(12).optional(),
+    nodes: z.array(NODE).min(2).max(more(9, 10)),
+    edges: z.array(EDGE).max(more(12, 14)).optional(),
     groups: z.array(z.object({ label: str(4), nodes: z.array(id).min(1), tone }).strict()).max(3).optional(),
-    steps: z.array(z.object({ show: z.array(z.string()).optional(), flow: z.array(z.string()).optional(), focus: z.array(id).optional(), highlight: z.array(id).optional(), note, say: sayReq }).strict()).min(1).max(6),
+    steps: z.array(z.object({ show: z.array(z.string()).optional(), flow: z.array(z.string()).optional(), focus: z.array(id).optional(), highlight: z.array(id).optional(), note, say: sayReq, ...term }).strict()).min(1).max(more(6, 8)),
   }).strict(),
   z.object({
     type: z.literal("stack"), title: str(10), input: str(3).optional(), output: str(3).optional(),
     layers: z.array(z.object({ label: str(5), tone }).strict()).min(2).max(7),
     repeat: z.object({ from: z.number().int().min(0), to: z.number().int().min(0), label: z.string().min(1).max(8) }).strict().optional(),
     side: z.object({ label: str(6), to: z.number().int().min(0) }).strict().optional(),
-    steps: z.array(z.object({ show: z.number().int().min(1).optional(), highlight: z.array(z.number().int().min(0)).optional(), side: z.boolean().optional(), flow: z.boolean().optional(), note, say: sayReq }).strict()).min(1).max(5),
+    steps: z.array(z.object({ show: z.number().int().min(1).optional(), highlight: z.array(z.number().int().min(0)).optional(), side: z.boolean().optional(), flow: z.boolean().optional(), note, say: sayReq, ...term }).strict()).min(1).max(more(5, 6)),
   }).strict(),
-  z.object({ type: z.literal("steps"), title: str(8), say, items: z.array(z.object({ text: str(7), sub: str(5).optional(), say }).strict()).min(2).max(5) }).strict(),
+  z.object({ type: z.literal("steps"), title: str(8), say, items: z.array(z.object({ text: str(7), sub: str(5).optional(), say, ...term }).strict()).min(2).max(more(5, 6)) }).strict(),
   z.object({
     type: z.literal("compare"), title: str(8).optional(),
     left: z.object({ title: str(5), items: z.array(str(10)).min(1).max(3), say }).strict(),
@@ -125,34 +151,75 @@ const Scene = z.discriminatedUnion("type", [
   }).strict(),
   z.object({
     type: z.literal("grid"), title: str(8), rows: z.number().int().min(2).max(16), cols: z.number().int().min(2).max(16), rowLabel: str(2).optional(), colLabel: str(2).optional(),
-    steps: z.array(z.object({ pattern: z.string().regex(PATTERN, "a grid pattern (see SKILL.md)"), label: str(10).optional(), note, say: sayReq }).strict()).min(1).max(5),
+    steps: z.array(z.object({ pattern: z.string().regex(PATTERN, "a grid pattern (see SKILL.md)"), label: str(10).optional(), note, say: sayReq, ...term }).strict()).min(1).max(more(5, 6)),
   }).strict(),
-  z.object({ type: z.literal("equation"), title: str(8).optional(), text: z.string().min(3).max(48), say, parts: z.array(z.object({ match: z.string().min(1), note: str(12), say }).strict()).min(1).max(4) }).strict(),
+  z.object({ type: z.literal("equation"), title: str(8).optional(), text: z.string().min(3).max(48), say, ...term, parts: z.array(z.object({ match: z.string().min(1), note: str(12), say, ...term }).strict()).min(1).max(more(4, 5)) }).strict(),
   z.object({
     type: z.literal("figure"), title: str(8).optional(),
     src: z.string().regex(new RegExp(`^/(${["articles", ...NAMESPACES].join("|")})/[^\\s"]+$`), "a path under /articles/ (or a namespace's /<kind>/) that the article itself shows"),
     credit: str(10), clip: z.tuple([z.number().min(0), z.number().min(0)]).optional(),
-    steps: z.array(z.object({ focus: z.tuple([pct, pct, pct, pct]).optional(), note, say: sayReq }).strict()).min(1).max(4),
+    steps: z.array(z.object({ focus: z.tuple([pct, pct, pct, pct]).optional(), note, say: sayReq, ...term }).strict()).min(1).max(more(4, 5)),
   }).strict(),
-  z.object({ type: z.literal("stat"), value: z.string().min(1).max(20), label: str(14), note, stamp, say }).strict(),
+  z.object({ type: z.literal("stat"), value: z.string().min(1).max(20), label: str(14), note, stamp, say, ...term }).strict(),
   z.object({ type: z.literal("bars"), title: str(10), unit: z.string().max(4).optional(), items: z.array(z.object({ label: str(5), value: numeric, hl: z.boolean().optional() }).strict()).min(2).max(5), note, stamp, say }).strict(),
   z.object({ type: z.literal("tally"), label: str(10), of: z.number().int().min(2).max(300), rows: z.array(z.object({ label: str(6), n: z.number().int().min(0) }).strict()).min(1).max(3), note, say }).strict(),
   z.object({ type: z.literal("quote"), quote: str(30), label: str(4).optional(), source: str(5).optional(), mark: z.string().optional(), stamp, say }).strict(),
   z.object({ type: z.literal("takeaway"), label: str(4).optional(), text: str(22), mark: z.string().optional(), say }).strict(),
   z.object({ type: z.literal("end"), recap: z.array(str(10)).min(2).max(3), say }).strict(),
-])
-const Storyboard = z.object({
+  ] as const
+}
+const NODE = z.object({ id, label: str(5), sub: str(5).optional(), kind: z.enum(KINDS).optional(), tone, at: z.tuple([pct, pct]) }).strict()
+const EDGE = z.object({ from: id, to: id, label: str(3).optional(), dashed: z.boolean().optional(), bend: z.number().min(-1).max(1).optional() }).strict()
+const Scene = z.discriminatedUnion("type", [...sceneTypes({ story: false })])
+
+// ---- the story format's own scenes ----
+const sayS = str(40), termS = str(10).refine((t) => !t.includes(":") || words(t.split(":")[0]) <= 3, "a term is \"Word: what it means\", the word part ≤ 3 words").optional()
+const AXIS = z.object({
+  label: str(5), ticks: z.array(z.number()).max(8).optional(), tickLabels: z.array(z.string().min(1).max(8)).max(8).optional(),
+  log: z.boolean().optional(), zero: z.boolean().optional(),
+}).strict()
+const StoryOnly = [
+  z.object({ type: z.literal("chapter"), title: str(6), sub: str(14).optional(), say: sayS.optional() }).strict(),
+  z.object({ type: z.literal("hook"), text: str(24), mark: z.string().optional(), sub: str(14).optional(), say: sayS.optional() }).strict(),
+  z.object({
+    type: z.literal("chart"), title: str(8), kind: z.enum(["line", "scatter"]).optional(), x: AXIS, y: AXIS,
+    series: z.array(z.object({ label: str(5), points: z.array(z.tuple([z.number(), z.number()])).min(2).max(24), hl: z.boolean().optional(), dashed: z.boolean().optional() }).strict()).min(1).max(4),
+    illustrative: z.boolean().optional(), stamp,
+    steps: z.array(z.object({ show: z.array(z.number().int().min(0)).optional(), mark: z.object({ series: z.number().int().min(0), point: z.number().int().min(0), label: str(6) }).strict().optional(), note, say: sayS, term: termS }).strict()).min(1).max(5),
+  }).strict(),
+  z.object({
+    type: z.literal("trace"), title: str(8),
+    stages: z.array(z.object({ label: str(4), sub: str(5).optional() }).strict()).min(2).max(6),
+    steps: z.array(z.object({ at: z.number().int().min(0), value: z.string().min(1).max(32).refine((v) => words(v) <= 6, "≤ 6 words"), note, say: sayS, term: termS }).strict()).min(2).max(8),
+  }).strict(),
+  z.object({
+    type: z.literal("code"), title: str(8).optional(), credit: str(10).optional(),
+    code: z.array(z.string().max(64, "≤ 64 characters a line")).min(2).max(14),
+    steps: z.array(z.object({ lines: z.tuple([z.number().int().min(1), z.number().int().min(1)]), note, say: sayS, term: termS }).strict()).min(1).max(5),
+  }).strict(),
+  z.object({
+    type: z.literal("inset"), title: str(8), open: id,
+    nodes: z.array(NODE).min(2).max(8), edges: z.array(EDGE).max(12).optional(),
+    groups: z.array(z.object({ label: str(4), nodes: z.array(id).min(1), tone }).strict()).max(3).optional(),
+    inner: z.object({ title: str(6).optional(), nodes: z.array(NODE).min(2).max(8), edges: z.array(EDGE).max(12).optional() }).strict(),
+    steps: z.array(z.object({ inner: z.boolean().optional(), show: z.array(z.string()).optional(), flow: z.array(z.string()).optional(), highlight: z.array(id).optional(), note, say: sayS, term: termS }).strict()).min(2).max(9),
+  }).strict(),
+] as const
+const StoryScene = z.discriminatedUnion("type", [...sceneTypes({ story: true }), ...StoryOnly])
+const base = {
   slug: z.string(),
   kicker: str(6),
   style: z.enum(Object.keys(STYLES) as [string, ...string[]]),
   palette: z.string().optional(),
   mascot: MASCOT,
   thumb: z.object({ scene: z.number().int().min(0) }).strict().optional(),
-  scenes: z.array(Scene).min(5).max(12),
-}).strict()
-type SB = z.infer<typeof Storyboard>
+}
+const Legacy = z.object({ ...base, scenes: z.array(Scene).min(5).max(12) }).strict()
+const Story = z.object({ ...base, format: z.literal("story"), scenes: z.array(StoryScene).min(10).max(24) }).strict()
+type SB = z.infer<typeof Story>
 type Sc = SB["scenes"][number]
 const MECH = new Set(["diagram", "stack", "steps", "grid", "equation", "compare"])
+const MECH_STORY = new Set([...MECH, "trace", "inset", "code"])
 const NUMERIC = new Set(["stat", "bars", "tally"])
 
 // ---- the article, normalised for comparison ----
@@ -178,8 +245,9 @@ const prose = (s: string) =>
 
 // Only what a viewer sees or hears is a fact. Layout (`at`, `bend`, layer
 // indices, grid sizes, patterns), ids and the mascot are not.
-const TEXT_KEYS = new Set(["kicker", "headline", "sub", "say", "text", "label", "note", "quote", "source", "mark", "title", "value", "unit", "input", "output", "match", "colLabel", "rowLabel", "of", "n", "credit"])
-const TEXT_ARRAYS = new Set(["punch", "recap", "items"])
+// (`term`, `tickLabels` and `code` are the story format's; a legacy storyboard cannot have them)
+const TEXT_KEYS = new Set(["kicker", "headline", "sub", "say", "text", "label", "note", "quote", "source", "mark", "title", "value", "unit", "input", "output", "match", "colLabel", "rowLabel", "of", "n", "credit", "term"])
+const TEXT_ARRAYS = new Set(["punch", "recap", "items", "tickLabels", "code"])
 const SKIP = new Set(["mascot", "style", "palette", "type", "kind", "tone", "pattern", "at", "bend", "from", "to", "show", "flow", "focus", "highlight", "hl", "dashed", "id", "thumb", "rows", "cols", "side", "repeat", "slug", "nodes", "src", "clip"])
 function strings(v: unknown, key = "", out: string[] = []): string[] {
   if (v == null) return out
@@ -230,9 +298,14 @@ function beatLines(sc: Sc): string[] {
     case "quote": return [sc.say ?? `${sc.source ?? "The claim"} says: ${sc.quote}`]
     case "idea": case "takeaway": return [sc.say ?? sc.text]
     case "end": return [sc.say ?? `To recap: ${sc.recap.join("; ")}.`, "Every source is in the full article. I'm Name. Bye!"]
+    case "chapter": return [sc.say ?? sc.title]
+    case "hook": return [sc.say ?? sc.text]
+    case "chart": case "trace": case "code": case "inset": return sc.steps.map((s) => s.say)
   }
 }
 const BUDGET = 280   // narration words: about 90 s of speech at Kokoro 1.1x, a film of ~105 s
+// the story format: about 2.5 to 4.5 minutes of speech, a film of 3 to 5 minutes
+const STORY_BUDGET = [400, 750] as const
 
 // ---- diagram geometry (mirrors engine/explainer.js layoutDiagram) ----
 // Text is sized from each style's real glyph advances (metrics.json, written
@@ -302,8 +375,57 @@ function guessBox(n: { label: string; sub?: string; kind?: string }, cx: number,
 const errors: string[] = []
 const fail = (slug: string, msg: string) => errors.push(`${slug}: ${msg}`)
 
+// A diagram's ids, its steps' references, and its layout: nodes inside the
+// area and clear of the host, no two overlapping, no arrow drawn backwards.
+// (An inset is two diagrams, each held to the same.)
+type DNode = z.infer<typeof NODE>
+type DEdge = z.infer<typeof EDGE>
+type DStep = { show?: string[]; flow?: string[]; highlight?: string[]; focus?: string[] }
+function diagramChecks(slug: string, at: string, style: string, nodes: DNode[], edges: DEdge[], groups: { label: string; nodes: string[] }[], steps: DStep[]) {
+      const ids = new Set(nodes.map((n) => n.id))
+      if (ids.size !== nodes.length) fail(slug, `${at}: duplicate node id`)
+      const keys = new Set(edges.map((e) => `${e.from}>${e.to}`))
+      for (const e of edges) if (!ids.has(e.from) || !ids.has(e.to)) fail(slug, `${at}: edge ${e.from}>${e.to} names a missing node`)
+      for (const g of groups) for (const x of g.nodes) if (!ids.has(x)) fail(slug, `${at}: group "${g.label}" names missing node ${x}`)
+      for (const s of steps) {
+        for (const x of s.show ?? []) if (!ids.has(x) && !keys.has(x)) fail(slug, `${at}: step shows "${x}", which is neither a node nor an edge`)
+        for (const x of s.flow ?? []) if (!keys.has(x)) fail(slug, `${at}: flow "${x}" is not an edge (write from>to)`)
+        for (const x of [...(s.highlight ?? []), ...(s.focus ?? [])]) if (!ids.has(x)) fail(slug, `${at}: "${x}" is not a node`)
+      }
+      const boxes = nodes.map((n) => ({ id: n.id, ...nodeBox(style, n) }))
+      for (const b of boxes) {
+        if (b.x0 < 100 || b.x1 > 1420 || b.y0 < 240 || b.y1 > 950) fail(slug, `${at}: node "${b.id}" runs off the diagram area (x 0-100 and y 0-100 are node centres; wide nodes need room, and the host stands right of x ~1420)`)
+      }
+      for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i], b = boxes[j]
+        if (a.x0 < b.x1 + 24 && b.x0 < a.x1 + 24 && a.y0 < b.y1 + 24 && b.y0 < a.y1 + 24) fail(slug, `${at}: nodes "${a.id}" and "${b.id}" overlap; move them apart`)
+      }
+      // An edge runs from 12px outside its source box to 12px outside its target
+      // (engine/explainer.js edgePath). Two boxes close together along the edge
+      // put those two points past each other, and the line then runs backwards:
+      // the arrowhead lands on the source, pointing the wrong way.
+      const byId = new Map(nodes.map((n, i) => [n.id, { ...boxes[i], op: n.kind === "op" }]))
+      for (const e of edges) {
+        const A = byId.get(e.from), B = byId.get(e.to)
+        if (!A || !B) continue
+        const ax = (A.x0 + A.x1) / 2, ay = (A.y0 + A.y1) / 2, bx = (B.x0 + B.x1) / 2, by = (B.y0 + B.y1) / 2
+        const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1, bend = (e.bend ?? 0) * L * 0.35
+        const Cx = (ax + bx) / 2 - (dy / L) * bend, Cy = (ay + by) / 2 + (dx / L) * bend
+        const end = (N: typeof A, x: number, y: number) => {
+          const tx = Cx - x, ty = Cy - y, d = Math.hypot(tx, ty) || 1, ux = tx / d, uy = ty / d
+          const t = N.op ? (N.x1 - N.x0) / 2 + 10 : Math.min(Math.abs(ux) > 1e-6 ? ((N.x1 - N.x0) / 2 + 12) / Math.abs(ux) : 1e9, Math.abs(uy) > 1e-6 ? ((N.y1 - N.y0) / 2 + 12) / Math.abs(uy) : 1e9)
+          return [x + ux * t, y + uy * t]
+        }
+        const [p0x, p0y] = end(A, ax, ay), [p2x, p2y] = end(B, bx, by)
+        const run = ((p2x - p0x) * dx + (p2y - p0y) * dy) / L
+        // A short run still reads (the head sits in the gap); a negative one never does.
+        if (run < 0) fail(slug, `${at}: edge ${e.from}>${e.to} runs ${Math.round(run)}px, so its arrow is drawn backwards; move the two nodes further apart along it, or bend it`)
+      }
+}
+
 // every storyboard key: article slugs, then `<kind>/<slug>` for each namespace
 const files = storyboardKeys()
+if (draft && !files.includes(draft.slug)) files.push(draft.slug)
 // a directory under data/films that is not a namespace would be silently skipped
 for (const d of readdirSync(SB_DIR, { withFileTypes: true })) if (d.isDirectory() && !NAMESPACES.includes(d.name)) fail(d.name, `data/films/${d.name}/ is not a film namespace (${NAMESPACES.join(", ")})`)
 type Man = { films: Record<string, { sha: string; duration: number; mp4Bytes: number; posterBytes: number; vttBytes?: number }> }
@@ -314,7 +436,7 @@ const names = new Map<string, string>(), outfits = new Map<string, string>()
 let checked = 0, unrendered = 0
 for (const slug of files) {
   let raw: unknown
-  try { raw = JSON.parse(readFileSync(join(SB_DIR, `${slug}.json`), "utf8")) } catch (e) { fail(slug, `not JSON: ${(e as Error).message}`); continue }
+  try { raw = draft && slug === draft.slug ? draft : JSON.parse(readFileSync(join(SB_DIR, `${slug}.json`), "utf8")) } catch (e) { fail(slug, `not JSON: ${(e as Error).message}`); continue }
   // mascots are unique across the whole set, so read every one even under --only
   const m0 = (raw as { mascot?: z.infer<typeof MASCOT> }).mascot
   if (m0?.name) { const o = names.get(m0.name); if (o && (!only || only.includes(slug) || only.includes(o))) fail(slug, `mascot name "${m0.name}" is already ${o}'s`); names.set(m0.name, slug) }
@@ -323,26 +445,55 @@ for (const slug of files) {
   checked++
   const mdxPath = sourceOf(slug)
   if (!existsSync(mdxPath)) { fail(slug, splitKey(slug).ns ? `no doc ${mdxPath.slice(ROOT.length + 1)}` : "no article content/articles/" + slug + ".mdx"); continue }
-  const parsed = Storyboard.safeParse(raw)
+  const story = isStory(raw)
+  const parsed = (story ? Story : Legacy).safeParse(raw)
   if (!parsed.success) {
     for (const i of parsed.error.issues.slice(0, 8)) fail(slug, `${i.path.join(".") || "(root)"}: ${i.message}`)
     continue
   }
-  const sb = parsed.data
+  const sb = parsed.data as SB
   if (sb.slug !== slug) fail(slug, `slug field is "${sb.slug}"; it must be the film's key, "${slug}"`)
   if (sb.palette && !STYLES[sb.style].includes(sb.palette)) fail(slug, `palette "${sb.palette}" is not one of ${sb.style}'s: ${STYLES[sb.style].join(", ")}`)
-  const types = sb.scenes.map((s) => s.type)
-  if (types[0] !== "title") fail(slug, "first scene must be title")
-  if (types[types.length - 1] !== "end" || types.filter((t) => t === "end").length !== 1) fail(slug, "end must be the last scene, once")
-  if (types.filter((t) => t === "title").length !== 1) fail(slug, "exactly one title")
-  if (!types.some((t) => MECH.has(t))) fail(slug, "no mechanism scene: an explainer needs a diagram, stack, steps, grid, equation or compare")
-  if (types.filter((t) => t === "takeaway").length !== 1) fail(slug, "exactly one takeaway")
-  if (types.filter((t) => t === "quote").length > 1) fail(slug, "at most one quote")
-  if (types.filter((t) => NUMERIC.has(t)).length > 3) fail(slug, "more than three number scenes: explain, don't tabulate")
-  if (types.filter((t) => t === "figure").length > 2) fail(slug, "at most two figure scenes")
+  const types: string[] = sb.scenes.map((s) => s.type)
+  const count = (t: string) => types.filter((x) => x === t).length
+  if (!story) {
+    if (types[0] !== "title") fail(slug, "first scene must be title")
+    if (types[types.length - 1] !== "end" || count("end") !== 1) fail(slug, "end must be the last scene, once")
+    if (count("title") !== 1) fail(slug, "exactly one title")
+    if (!types.some((t) => MECH.has(t))) fail(slug, "no mechanism scene: an explainer needs a diagram, stack, steps, grid, equation or compare")
+    if (count("takeaway") !== 1) fail(slug, "exactly one takeaway")
+    if (count("quote") > 1) fail(slug, "at most one quote")
+    if (types.filter((t) => NUMERIC.has(t)).length > 3) fail(slug, "more than three number scenes: explain, don't tabulate")
+    if (count("figure") > 2) fail(slug, "at most two figure scenes")
+  } else {
+    // the arc: an optional cold open, the title, chapters, the mechanism in depth, one takeaway, the end
+    const t0 = types[0] === "hook" ? 1 : 0
+    if (types[t0] !== "title") fail(slug, "the title comes first, or second after a hook (the cold open)")
+    if (count("hook") > 1 || (count("hook") === 1 && types[0] !== "hook")) fail(slug, "a hook is the cold open: at most one, and only as the first scene")
+    if (types[types.length - 1] !== "end" || count("end") !== 1) fail(slug, "end must be the last scene, once")
+    if (count("title") !== 1) fail(slug, "exactly one title")
+    const mech = types.filter((t) => MECH_STORY.has(t))
+    if (mech.length < 3 || new Set(mech).size < 2) fail(slug, `a story film explains in depth: at least three mechanism scenes of at least two kinds (${[...MECH_STORY].join(", ")}); this has ${mech.length}`)
+    if (count("takeaway") !== 1) fail(slug, "exactly one takeaway")
+    if (count("quote") > 2) fail(slug, "at most two quotes")
+    if (types.filter((t) => NUMERIC.has(t) || t === "chart").length > 4) fail(slug, "more than four number scenes (stat, bars, tally, chart): explain, don't tabulate")
+    if (count("figure") > 4) fail(slug, "at most four figure scenes")
+    const ch = types.flatMap((t, i) => (t === "chapter" ? [i] : []))
+    if (ch.length === 1 || ch.length > 6) fail(slug, `chapters: none, or two to six (this has ${ch.length})`)
+    if (ch.length && ch[0] !== t0 + 1) fail(slug, "the first chapter card comes right after the title")
+    for (const i of ch) if (types[i + 1] === "chapter" || types[i + 1] === "end" || types[i + 1] === "takeaway") fail(slug, `scene ${i} (chapter): a chapter card needs a scene of its own after it`)
+    // a lower-third and a caption would sit in the same place
+    sb.scenes.forEach((sc, si) => {
+      const steps = (sc as { steps?: { note?: string; term?: string }[] }).steps ?? (sc as { items?: { note?: string; term?: string }[] }).items ?? (sc as { parts?: { note?: string; term?: string }[] }).parts ?? []
+      steps.forEach((st, j) => { if (st.note && st.term) fail(slug, `scene ${si} (${sc.type}) step ${j}: note or term, not both (they share the bottom of the frame)`) })
+      const own = sc as { note?: string; term?: string }
+      if (own.note && own.term) fail(slug, `scene ${si} (${sc.type}): note or term, not both (they share the bottom of the frame)`)
+    })
+  }
   if (sb.thumb && sb.thumb.scene >= sb.scenes.length) fail(slug, `thumb.scene ${sb.thumb.scene} is past the last scene`)
   const narration = sb.scenes.flatMap(beatLines).reduce((a, l) => a + words(l), 0)
-  if (narration > BUDGET) fail(slug, `narration is ${narration} words; the budget is ${BUDGET} (about 105 s of film). Cut words, not scenes`)
+  if (!story && narration > BUDGET) fail(slug, `narration is ${narration} words; the budget is ${BUDGET} (about 105 s of film). Cut words, not scenes`)
+  if (story && (narration < STORY_BUDGET[0] || narration > STORY_BUDGET[1])) fail(slug, `narration is ${narration} words; a story film's budget is ${STORY_BUDGET[0]}-${STORY_BUDGET[1]} (about 3 to 5 minutes of film)`)
 
   const src = readFileSync(mdxPath, "utf8")
   const nums = articleNumbers(src)
@@ -386,46 +537,43 @@ for (const slug of files) {
       for (const s of sc.steps) { for (const h of s.highlight ?? []) if (h >= n) fail(slug, `${at}: highlight ${h} is not a layer`); if (s.show && s.show > n) fail(slug, `${at}: show ${s.show} > ${n} layers`) }
       if (sc.steps.some((s) => s.side) && !sc.side) fail(slug, `${at}: a step shows the side component but there is none`)
     }
-    if (sc.type === "diagram") {
-      const ids = new Set(sc.nodes.map((n) => n.id))
-      if (ids.size !== sc.nodes.length) fail(slug, `${at}: duplicate node id`)
-      const keys = new Set((sc.edges ?? []).map((e) => `${e.from}>${e.to}`))
-      for (const e of sc.edges ?? []) if (!ids.has(e.from) || !ids.has(e.to)) fail(slug, `${at}: edge ${e.from}>${e.to} names a missing node`)
-      for (const g of sc.groups ?? []) for (const x of g.nodes) if (!ids.has(x)) fail(slug, `${at}: group "${g.label}" names missing node ${x}`)
-      for (const s of sc.steps) {
-        for (const x of s.show ?? []) if (!ids.has(x) && !keys.has(x)) fail(slug, `${at}: step shows "${x}", which is neither a node nor an edge`)
-        for (const x of s.flow ?? []) if (!keys.has(x)) fail(slug, `${at}: flow "${x}" is not an edge (write from>to)`)
-        for (const x of [...(s.highlight ?? []), ...(s.focus ?? [])]) if (!ids.has(x)) fail(slug, `${at}: "${x}" is not a node`)
+    if (sc.type === "diagram") diagramChecks(slug, at, sb.style, sc.nodes, sc.edges ?? [], sc.groups ?? [], sc.steps)
+    // ---- the story format's scenes ----
+    if (sc.type === "hook") inside(sc.mark, sc.text, "hook")
+    if (sc.type === "chart") {
+      // every digit it draws: the points' values, the ticks (or their labels; those are text, checked above)
+      // a value matches the article's number however it is written: 2.3 is the article's "2.30"
+      const asNum = new Set([...nums].map(Number))
+      const has = (v: number) => asNum.has(Math.abs(v)) || numTokens(String(v)).every((n) => nums.has(n))
+      for (const [ax, name] of [[sc.x, "x"], [sc.y, "y"]] as const) {
+        if (ax.tickLabels && ax.tickLabels.length !== (ax.ticks ?? []).length) fail(slug, `${at}: ${name}.tickLabels must match ${name}.ticks one for one`)
+        ;(ax.ticks ?? []).forEach((v, i) => { if (!ax.tickLabels?.[i] && !has(v)) fail(slug, `${at}: ${name} tick ${v} is drawn as a number the article does not have; give it a tickLabel from the article`) })
+        if (ax.log && [...(ax.ticks ?? []), ...sc.series.flatMap((s) => s.points.map((p) => p[name === "x" ? 0 : 1]))].some((v) => v <= 0)) fail(slug, `${at}: a log ${name} axis needs positive values`)
       }
-      const boxes = sc.nodes.map((n) => ({ id: n.id, ...nodeBox(sb.style, n) }))
-      for (const b of boxes) {
-        if (b.x0 < 100 || b.x1 > 1420 || b.y0 < 240 || b.y1 > 950) fail(slug, `${at}: node "${b.id}" runs off the diagram area (x 0-100 and y 0-100 are node centres; wide nodes need room, and the host stands right of x ~1420)`)
+      const xt = new Set(sc.x.ticks ?? [])
+      if (!sc.illustrative) for (const se of sc.series) for (const [x, y] of se.points) {
+        if (!has(y)) fail(slug, `${at}: series "${se.label}" plots ${y}, which the article does not have (mark the chart illustrative if the shape is the point, not the numbers)`)
+        if (!xt.has(x) && !has(x)) fail(slug, `${at}: series "${se.label}" sits at x = ${x}, neither an x tick nor a number in the article`)
       }
-      for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
-        const a = boxes[i], b = boxes[j]
-        if (a.x0 < b.x1 + 24 && b.x0 < a.x1 + 24 && a.y0 < b.y1 + 24 && b.y0 < a.y1 + 24) fail(slug, `${at}: nodes "${a.id}" and "${b.id}" overlap; move them apart`)
-      }
-      // An edge runs from 12px outside its source box to 12px outside its target
-      // (engine/explainer.js edgePath). Two boxes close together along the edge
-      // put those two points past each other, and the line then runs backwards:
-      // the arrowhead lands on the source, pointing the wrong way.
-      const byId = new Map(sc.nodes.map((n, i) => [n.id, { ...boxes[i], op: n.kind === "op" }]))
-      for (const e of sc.edges ?? []) {
-        const A = byId.get(e.from), B = byId.get(e.to)
-        if (!A || !B) continue
-        const ax = (A.x0 + A.x1) / 2, ay = (A.y0 + A.y1) / 2, bx = (B.x0 + B.x1) / 2, by = (B.y0 + B.y1) / 2
-        const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1, bend = (e.bend ?? 0) * L * 0.35
-        const Cx = (ax + bx) / 2 - (dy / L) * bend, Cy = (ay + by) / 2 + (dx / L) * bend
-        const end = (N: typeof A, x: number, y: number) => {
-          const tx = Cx - x, ty = Cy - y, d = Math.hypot(tx, ty) || 1, ux = tx / d, uy = ty / d
-          const t = N.op ? (N.x1 - N.x0) / 2 + 10 : Math.min(Math.abs(ux) > 1e-6 ? ((N.x1 - N.x0) / 2 + 12) / Math.abs(ux) : 1e9, Math.abs(uy) > 1e-6 ? ((N.y1 - N.y0) / 2 + 12) / Math.abs(uy) : 1e9)
-          return [x + ux * t, y + uy * t]
-        }
-        const [p0x, p0y] = end(A, ax, ay), [p2x, p2y] = end(B, bx, by)
-        const run = ((p2x - p0x) * dx + (p2y - p0y) * dy) / L
-        // A short run still reads (the head sits in the gap); a negative one never does.
-        if (run < 0) fail(slug, `${at}: edge ${e.from}>${e.to} runs ${Math.round(run)}px, so its arrow is drawn backwards; move the two nodes further apart along it, or bend it`)
-      }
+      sc.steps.forEach((st, j) => {
+        for (const i of st.show ?? []) if (i >= sc.series.length) fail(slug, `${at} step ${j}: shows series ${i}, and there are ${sc.series.length}`)
+        if (st.mark && !sc.series[st.mark.series]?.points[st.mark.point]) fail(slug, `${at} step ${j}: mark names a point that does not exist`)
+      })
+      if (sc.illustrative && sc.stamp) fail(slug, `${at}: an illustrative chart is stamped Illustrative; drop the stamp`)
+    }
+    if (sc.type === "trace") sc.steps.forEach((st, j) => { if (st.at >= sc.stages.length) fail(slug, `${at} step ${j}: at ${st.at} is not a stage (0-${sc.stages.length - 1})`) })
+    if (sc.type === "code") {
+      // quoted code: every line is the article's own, as a quote is
+      for (const line of sc.code) if (line.trim() && !src.includes(line.trim())) fail(slug, `${at}: code line is not in the article: "${line.trim()}"`)
+      sc.steps.forEach((st, j) => { const [a, b] = st.lines; if (a > b || b > sc.code.length) fail(slug, `${at} step ${j}: lines [${a}, ${b}] must run forward within 1-${sc.code.length}`) })
+    }
+    if (sc.type === "inset") {
+      if (!sc.nodes.some((n) => n.id === sc.open)) fail(slug, `${at}: open "${sc.open}" is not a node of the outer diagram`)
+      if (sc.steps[0].inner) fail(slug, `${at}: the first step shows the outside; open the node on a later one`)
+      if (!sc.steps.some((st) => st.inner)) fail(slug, `${at}: no step goes inside "${sc.open}" (inner: true)`)
+      const outer = sc.steps.map((st) => (st.inner ? { say: st.say } : st)), inner = sc.steps.map((st) => (st.inner ? st : { say: st.say }))
+      diagramChecks(slug, `${at} outside`, sb.style, sc.nodes, sc.edges ?? [], sc.groups ?? [], outer)
+      diagramChecks(slug, `${at} inside`, sb.style, sc.inner.nodes, sc.inner.edges ?? [], [], inner)
     }
   })
 

@@ -1,8 +1,11 @@
 ---
 name: explainer-films
 description: >-
-  Write and render an explainer film for an article: a 90-125 second animated,
-  narrated explanation of how the thing the article is about works — its
+  Write and render an explainer film for an article. New films use the story
+  format: a 3-5 minute narrated explanation told in chapters (cold open,
+  problem, idea, the mechanism in depth with worked examples and charts, the
+  paper's own figures, limits, takeaway). Older films are a 90-125 second
+  animated, narrated explanation of how the thing the article is about works — its
   architecture, its technique, what is new about it — presented by a mascot
   (cat, dog, fox, bunny, capybara or fish) who is different in every film, in
   one of eighteen drawn styles (watercolour, crayon, pastel, ballpoint,
@@ -38,7 +41,165 @@ data/.generated/films.json        manifests with a hash that goes stale when the
 data/.generated/thumbs.json       storyboard, the article date or the engine changes
 ```
 
-### Namespaces: films for other kinds
+## Story format (long films)
+
+**New films use the story format.** Add `"format": "story"` to the
+storyboard and you get a film of three to five minutes, told as a story in
+chapters, with six scene types the short format does not have. Everything else
+on this page (the host, the styles, the truth rules, figures, diagrams)
+applies to it unchanged. The short format stays for the films already made and
+for a thumbnail-only storyboard; do not convert an existing storyboard unless
+you mean to re-render its film and thumbnail.
+
+```
+"format": "story"        opt-in, per storyboard
+scenes                   10-24 (chapter cards count)
+narration                400-750 words (the checker enforces both ends); each beat ≤ 40 words
+renders through          story/render.mjs → story/studio.html → story/explainer.js + story/scenes.js
+```
+
+**Why it is separate.** Every legacy film and thumbnail is hashed against the
+engine (`hash.mjs`), so editing `engine/explainer.js`, `render.mjs`,
+`studio.html`, `audio.py`, or adding any file to `engine/` or `fonts/`, stales
+all of them. The story engine lives in `story/`: a fork of `explainer.js`
+(`story/explainer.js`), its new scenes (`story/scenes.js`), its page and its
+renderer, on top of the same painter, styles, host, fonts and sound. A story
+storyboard's hash is the legacy engine's for its style plus every file in
+`story/` (`storyEngineSha`); a legacy storyboard never reaches that code, so its
+hash is what it always was. Change the story engine freely: it stales only
+story films. Treat `engine/explainer.js` as frozen; improvements go in
+`story/`.
+
+### The arc
+
+A story film is not a longer slideshow. It answers a question:
+
+1. **Hook** (optional, scene 0): the cold open. A concrete question or
+   situation, before the title. It plays over silence; the score starts on
+   the title's punches.
+2. **Title**, then **chapters**. Two to six `chapter` cards ("The hidden
+   bill", "Buckets instead of keys", "Does it hold up?"), the first right after
+   the title. The folio names the current chapter and the progress bar is cut
+   into chapters.
+3. **The problem, and why the usual way fails**: a `diagram` of the usual
+   way, a `chart` of where the cost goes, the paper's figure that shows it.
+4. **The idea** (`idea`).
+5. **The mechanism, in depth**, over several scenes: a `trace` that walks one
+   concrete thing through it with the article's real numbers, an `inset` that
+   opens one part, a `code` scene with the article's own lines, an `equation`.
+   The checker wants at least three mechanism scenes of at least two kinds.
+6. **Evidence**: the paper's own figures (up to four `figure` scenes) and
+   at most four number scenes (`stat`, `bars`, `tally`, `chart`).
+7. **Limits**: what the article found does not hold (`steps` or `compare`
+   titled for it, or a `quote` with its stamp). One scene, in the article's
+   words, not a jab.
+8. **Takeaway** (exactly one) and **end**.
+
+### Story-only scenes
+
+| type | fields | notes |
+|---|---|---|
+| `chapter` | `title` (≤ 6 w), `sub?` (≤ 14), `say?` | A chapter card: "Chapter Two" (in words: the engine draws no digit), dots for where we are, the name set large. Keep `say` short ("Chapter two. Buckets instead of keys."). Not two in a row, not right before the takeaway or end. |
+| `hook` | `text` (≤ 24 w), `mark?`, `sub?` (≤ 14), `say?` | The cold open. Only as scene 0, with the title next. A question, typed on as it is said, over a big painted question mark. |
+| `chart` | `title`, `x` / `y` `{label ≤ 5 w, ticks?: number[], tickLabels?: string[], log?, zero?}`, `series[]` (1-4, `{label ≤ 5 w, points: [[x, y]] 2-24, hl?, dashed?}`), `kind?` (`line` / `scatter`), `illustrative?`, `stamp?`, `steps[]` (1-5, `{show?: [series index], mark?: {series, point, label ≤ 6 w}, note?, term?, say}`) | A plot that draws itself: axes draw on, each series traces left to right on the step that `show`s it (none listed: all at step 0), a `mark` rings one point with a callout. Series are labelled at their ends, no legend. Ticks and their labels are exactly yours; the engine computes none. A log axis suits context lengths (`ticks: [128, 512, 1000, 10000]`, `tickLabels: ["128k", "512k", "1M", "10M"]`). |
+| `trace` | `title`, `stages[]` (2-6, `{label ≤ 4 w, sub? ≤ 5 w}`), `steps[]` (2-8, `{at: stage index, value ≤ 32 chars / 6 w, note?, term?, say}`) | The worked example. One concrete thing walks the stages; at each the big card under the current stage says what it has become ("512 keys" → "128 pool keys" → "64 buckets"). Values already passed stay under their stages, so the whole computation is on screen at the end. Steps may stay on a stage or skip one. |
+| `code` | `title?`, `credit?` (≤ 10 w, e.g. the file path), `code[]` (2-14 lines, ≤ 64 chars), `steps[]` (1-5, `{lines: [from, to] 1-based, note?, term?, say}`) | The article's own code on a card, a range highlighted per step, the rest dimmed. Light syntax colour (keywords, strings, comments). No line numbers. **Every line must appear verbatim in the article** (a code fence or inline code), as a quote must. |
+| `inset` | `title`, `nodes` (2-8), `edges?`, `groups?`, `open` (a node id), `inner {title? ≤ 6 w, nodes (2-8), edges?}`, `steps[]` (2-9, `{inner?: bool, show?, flow?, highlight?, note?, term?, say}`) | A diagram, then one node opened: the camera dives in, the node's box grows into a frame, and the inner diagram builds inside it. Steps with `inner: true` name inner ids; the first step is outside; a later step without `inner` comes back out. Both diagrams use the diagram rules below (positions, overlap, arrows); keep the inner title to one line. |
+
+### Lower-thirds: `term`
+
+In a story film any beat may carry `term`: `"Word: what it means"` (≤ 10
+words, the word part ≤ 3). It slides in at the bottom-left a beat after its
+line starts and leaves before the next: the viewer has the new word on screen
+while the picture explains it. Use it the first time a term of art appears
+(Indexer, Centroid, Prefill), not on every step. It shares the bottom of the
+frame with `note`, so a step has one or the other. Where it goes: `steps[]`
+of diagram, stack, grid, figure, chart, trace, code, inset; `items[]` of
+steps; `parts[]` of equation; or the scene itself for idea and stat.
+
+### Limits that change in the story format
+
+Diagrams take up to 10 nodes, 14 edges and 8 steps; stacks, steps and grids
+up to 6 steps or items; equations 5 parts; figures 5 steps; a beat's `say`
+40 words. Quotes: two; figures: four; number scenes: four.
+
+### Truth, for the new scenes
+
+The checker holds them to the article like any other scene:
+
+- A chart's every point (`y`, and `x` unless it sits on an x tick) must be a
+  number the article has (2.3 matches the article's "2.30"). A chart whose
+  shape is the point and whose numbers are not the article's sets
+  `"illustrative": true` and is stamped Illustrative; its points are then not
+  checked, its labels and ticks still are. A tick drawn without a label must be
+  in the article; a tick label's digits must be.
+- A trace's values, a chart's labels and tick labels, a term, a chapter title:
+  their digits must be in the article, like every visible field.
+- Code lines are verbatim. Number words in `say` are not checked, so do not
+  invent one.
+
+### Writing one
+
+- Write the **beats first**, as a script, chapter by chapter; then choose the
+  picture for each. 550-700 words reads well; at Kokoro's pace that is 3.5 to
+  4.5 minutes.
+- Explain one mechanism properly rather than three in passing: the build-up
+  (diagram), the worked example with real numbers (trace), the zoom into the
+  hard part (inset or equation), then the evidence.
+- Every chapter needs at least one picture that moves (a diagram building, a
+  trace, a chart drawing). Two text cards in a row (idea, takeaway, quote) is
+  a sign of a slideshow.
+- Check and look, exactly as for a short film:
+  `pnpm validate:films --storyboards --only=<key>` (or `--file=<draft.json>`
+  for a draft outside `data/films`), then
+  `node brand-crew/skills/explainer-films/story/render.mjs sheet <storyboard.json> --every=3 --cols=8 --w=320 --out=/tmp/<slug>.jpg`
+  and `--at=48,78,99 --cols=2 --w=960` to read individual frames.
+- Render through `build.mjs` as for any film (it routes by `format`):
+  `node brand-crew/skills/explainer-films/build.mjs --thumbs <key>` and
+  `node brand-crew/skills/explainer-films/build.mjs <key>`. Preview first with
+  `--preview --out=<scratch dir>`.
+
+**Pilot:** `data/films/latent-sparse-attention.json` (sumi): a hook, three
+chapters, a diagram, two charts, two traces, an inset into the tree search,
+two of the paper's figures, the limits as steps; 17 scenes, 725 words of
+narration, 4 min 49 s. Rendered at 1280x720, x264 CRF 36 `-tune animation`
+(`STORY_FLAGS` in `build.mjs`; the legacy path stays at 34): 7.1 MB, small mono
+type (tick labels, trace sub-labels) still crisp. Painted in about 200 s on an
+M1 Max with 4 pages, about 280 s end to end with the voice cached.
+
+### Rendering on a Mac
+
+`story/render.mjs` paints WebGL on the machine's own GPU through ANGLE's
+Metal backend on macOS (checked, not assumed); on Linux it uses the same
+Xvfb/llvmpipe path as `render.mjs`. The legacy `render.mjs` has no Mac path
+(it throws "no GPU: Mesa llvmpipe" there), which is one more reason new films
+use the story format. The renderer needs Playwright (with its Chromium) and
+`build.mjs` needs Kokoro; neither is a dependency of the site, so point at them:
+
+```
+NODE_PATH=<dir with node_modules/playwright>       # or PLAYWRIGHT_PATH=<path to playwright's index.js>
+EXPLAINER_PYTHON=<venv python with kokoro, soundfile, numpy, scipy>
+EXPLAINER_CACHE=<scratch dir for voiced lines>      # default ~/.cache/explainer-films
+```
+
+On Satyajit's Mac both are installed in `~/.cache/explainer-films` (outside any
+session's scratch, so they persist):
+
+```
+export NODE_PATH=~/.cache/explainer-films/node_modules
+export EXPLAINER_PYTHON=~/.cache/explainer-films/kvenv/bin/python
+```
+
+To rebuild them: `npm i playwright@1.65.0` there (it matches the cached
+chromium-1254), a venv with `pip install kokoro soundfile numpy scipy`, and
+`brew install espeak-ng`. The same Python runs the pronunciation check:
+`$EXPLAINER_PYTHON brand-crew/skills/explainer-films/audio.py words`.
+
+Kokoro's English front end (misaki) falls back to espeak-ng; the
+`espeakng-loader` wheel on macOS has a broken built-in data path, so link its
+`libespeak-ng.dylib` and `espeak-ng-data` to Homebrew's `espeak-ng`.
+
+## Namespaces: films for other kinds
 
 Articles are keyed by their bare slug. Architecture explainers
 (`content/architectures/<slug>.mdx`, one per `data/architectures.ts` entry that

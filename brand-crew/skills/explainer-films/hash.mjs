@@ -118,8 +118,31 @@ function lexiconFor(sb) {
   return LEX.filter(([k]) => new RegExp(`(?<![\\w.])${esc(k)}(?![\\w])`).test(said)).sort(([a], [b]) => (a < b ? -1 : 1))
 }
 
+// The story format (a storyboard with "format": "story") renders through its
+// own engine in story/: a fork of explainer.js, its new scenes, its page and
+// its renderer, on top of the same painter, styles, host, fonts and sound. Its
+// hash is the legacy engine's for the style plus every file in story/. A
+// legacy storyboard never reaches this, so its hash is exactly what it was
+// before the story format existed; and since engine/explainer.js and
+// render.mjs are frozen, changing the story engine stales only story films.
+export const isStory = sb => !!sb && sb.format === 'story'
+export function storyFiles() {
+  return readdirSync(join(SKILL_DIR, 'story')).filter(f => /\.(js|mjs|html)$/.test(f)).sort().map(f => `story/${f}`)
+}
+const storyCached = new Map()
+export function storyEngineSha(style) {
+  if (storyCached.has(style)) return storyCached.get(style)
+  const h = createHash('sha256')
+  h.update('story\0' + engineSha(style) + '\0')
+  for (const f of storyFiles()) { h.update(f + '\0'); h.update(readFileSync(join(SKILL_DIR, f))); h.update('\0') }
+  const sha = h.digest('hex')
+  storyCached.set(style, sha)
+  return sha
+}
+
 export function filmSha(sb, date) {
-  return createHash('sha256').update(engineSha(sb.style) + '\n' + date + '\n' + canon(sb) + '\n' + JSON.stringify(lexiconFor(sb))).digest('hex').slice(0, 16)
+  const engine = isStory(sb) ? storyEngineSha(sb.style) : engineSha(sb.style)
+  return createHash('sha256').update(engine + '\n' + date + '\n' + canon(sb) + '\n' + JSON.stringify(lexiconFor(sb))).digest('hex').slice(0, 16)
 }
 
 // what metrics.json was measured from: the type code, the fonts, and the
