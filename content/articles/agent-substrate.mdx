@@ -1,0 +1,234 @@
+---
+title: "Agent Substrate: the 10x density is your agents' idle time"
+description: "Agent Substrate, the Kubernetes runtime that NVIDIA is promoting this week and that Google's engineers wrote, keeps a small pool of warm gVisor or microVM workers and swaps stateful agents in and out of them as memory snapshots. I read the code at e472ffb to see how an idle agent becomes cheap, what 'zero-trust' means in the egress gateway and the identity layer, and where '10x higher density than standard containers' comes from. The multiple is not a property of the runtime but of the duty cycle: a suspended actor holds no worker memory, so density approaches one over the fraction of time agents are running, and only at fleet scale. No benchmark setup for the 10x is checked in, nothing in this commit suspends an agent on its own, and the flagship Claude Code demo hands its API key to the sandbox in plain env."
+date: 2026-11-12
+tags:
+  - agents
+  - infrastructure
+  - security
+  - sandboxing
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Reads Agent Substrate's scheduler, snapshot and egress code to derive where '10x density' comes from, who suspends an agent, and what zero-trust covers today."
+topic: agents
+kind: tool
+level: practitioner
+runsOn: cpu
+licence: Apache-2.0
+---
+
+import { DensityCalculator } from "@/components/articles/agent-substrate/density-calculator"
+import { ActorLifecycle } from "@/components/articles/agent-substrate/actor-lifecycle"
+
+NVIDIA's AI infrastructure account opened its post on Wednesday with a line every agent operator recognises: "AI agents sit idle most of the time. You're still paying for every second." The fix it offered was **Agent Substrate**, "an open-source, zero-trust runtime, now in the @CloudNativeFdn Sandbox, running millions of agents at 10x the density of standard containers." The replies asked what I wanted to know. One wanted the baseline and workload mix behind the 10x. Another asked whether the isolation boundary is a shared kernel or something closer to a microVM. A third asked how fast an idle agent wakes up.
+
+I cloned [agent-substrate/substrate](https://github.com/agent-substrate/substrate) at commit `e472ffb` (12 November 2026, a week after `v1.0.0`) and read it. I did not deploy it. This piece explains the runtime from the bottom: why agents idle, what has to sit inside the wall, how a snapshot makes an idle agent cheap, and where a density multiple like 10x actually comes from. Then it checks the zero-trust claims against the code.
+
+<RepoCard repo="agent-substrate/substrate" />
+
+## Whose runtime this is
+
+The post reads as an NVIDIA launch. The repository says otherwise. `MAINTAINERS.md` lists nineteen maintainers: sixteen from Google and three from Solo. The CNCF sandbox application ([cncf/sandbox#523](https://github.com/cncf/sandbox/issues/523)) was filed in September. The automated pre-review flagged the repository as younger than the six-month minimum (created 13 May 2026), and the TOC moved it forward anyway as "a fast moving area." The vote passed on 28 September with eight in favour, none against, three not voting. Onboarding then waited on a contribution agreement between Google and the CNCF. It is open as [cncf/sandbox#542](https://github.com/cncf/sandbox/issues/542).
+
+NVIDIA's part is upstream work, and it is real. [NVIDIA's technical blog post](https://developer.nvidia.com/blog/agent-substrate-advancing-kubernetes-for-agents-at-scale/), by Ekin Karabulut and Omer Yahud, lists request parking in the router ([#221](https://github.com/agent-substrate/substrate/pull/221), authored by Yahud, and its follow-up [#1229](https://github.com/agent-substrate/substrate/pull/1229)), per-container CPU and memory limits for microVM sandboxes ([#859](https://github.com/agent-substrate/substrate/pull/859)), and a device-per-container design on Kubernetes Dynamic Resource Allocation for GPUs ([#752](https://github.com/agent-substrate/substrate/issues/752), still open). The "10x" sentence in the post is the project README's own, word for word: "engineered to safely run millions of agents and tools with 10x higher density than standard containers." So whatever the 10x is, it is the project's claim, which NVIDIA repeats. NVIDIA's post also still contains the line "Guide link placeholder – add when supplied" where its getting-started guide should be.
+
+This site has met Substrate before, one layer up. [Google's `ax` agent runtime](/articles/google-ax) is a client of Substrate's control API, and that article took Substrate's isolation and snapshots as given. This one opens them.
+
+<Figure
+  src="/articles/agent-substrate/fig1.png"
+  alt="The project's hero diagram: a grid of 250 agents, most of them dark (suspended) with a few lit, feeds into an Agent Substrate box labelled atenet router, suspend when idle, resume on request, which feeds 8 warm worker pods, each holding several coloured agent tiles in their own sandboxes."
+  caption="The project's own pitch: 250 agents, mostly suspended, routed onto 8 warm worker pods that each hold several sandboxes. The counts are the demo's, not a benchmark (Agent Substrate README, hero figure)."
+/>
+
+## An agent is a process that mostly waits
+
+Take one turn of a coding agent. It sends the conversation to a model and waits for tokens. The reply asks for a tool: `rg` over the repository, a test run, a file edit. The tool takes milliseconds to a few seconds. The output goes back to the model, and the agent waits again. Between turns it waits for a human, and humans take minutes or hours. An approval gate can take a day.
+
+The sandbox holding that agent does useful work only while a tool runs. During the model call it is a process blocked on a socket. During the human wait it is a process blocked on nothing at all. But its state matters: the cloned repository, the build cache, the shell's working directory, a language server's index, whatever the harness keeps in memory. Throw that away and the next turn starts from a cold clone.
+
+Kubernetes gives you two bad options for this. Keep one Pod per session, and you pay for memory the session holds while it does nothing. Delete Pods between turns, and every turn pays what NVIDIA's post lists as a trip through the API server, admission, etcd, the scheduler, the kubelet, an image pull and network setup. That takes seconds and loses the state. [DeepSeek's DSec](/articles/dsec-agent-sandbox) measured the first option on its RL fleet: about 90% of sandboxes drew under 5% of their requested CPU. It packed CPU past 50x and kept memory resident, because memory is the thing a running process cannot give back.
+
+Substrate goes after the memory. Its bet is that a waiting agent does not need to be a process at all.
+
+## What has to sit inside the wall
+
+An agent runs code it wrote, against inputs an attacker may have written. A runtime for it has to contain four things.
+
+- **Execution.** The agent's processes must not reach the host kernel's full syscall surface, or each other.
+- **Network.** Outbound traffic is how a prompt-injected agent exfiltrates data, so egress must be default-deny with an allowlist.
+- **Secrets.** If the API key is in the sandbox, the agent can read it, print it, or send it anywhere egress allows.
+- **State at rest.** Once you snapshot memory, the snapshot holds everything the process held, including secrets, so storage becomes part of the boundary.
+
+The usual isolation choices trade these against cost.
+
+| Boundary | What separates the agent from the host | Can it snapshot a running process? |
+|---|---|---|
+| Process sandbox (bubblewrap, seccomp, Landlock) | Namespaces and syscall filters on the shared kernel | Not natively |
+| Plain container (runc) | Namespaces and cgroups on the shared kernel | CRIU, with many exceptions |
+| gVisor (`runsc`) | A user-space kernel, the Sentry, intercepts syscalls | Yes: `runsc checkpoint` / `runsc restore` |
+| microVM (Firecracker, Cloud Hypervisor) | A KVM guest kernel behind a small VMM | Yes: VM memory snapshots |
+| WebAssembly | A bytecode VM with no POSIX underneath | Trivially, but it cannot run `git` or `node` |
+
+Process sandboxes are what Claude Code uses locally ([its `bwrap` argv and seccomp program](/articles/claude-code-sandbox-internals)), and NVIDIA's own [OpenShell](/articles/openshell) moves the boundary into Landlock and a seccomp supervisor. They are cheap, and they share a kernel with every other tenant. Substrate refuses that outright: "Plain Linux containers are not supported." It runs every actor under gVisor or under Kata Containers on Cloud Hypervisor. Both have a native way to freeze a running sandbox to bytes and thaw it later, and that property, not isolation alone, is why these two were chosen. WebAssembly snapshots for free but cannot run the binaries a coding agent shells out to.
+
+## Actors, workers and a snapshot in between
+
+Substrate splits the agent from the machine. An **actor** is a stateful instance of a workload: a record in PostgreSQL, a snapshot in object storage, and a state (`SUSPENDED`, `RESUMING`, `RUNNING`, `SUSPENDING`). A **worker** is a pre-started Kubernetes Pod in a `WorkerPool`, a sandbox host waiting for work. Kubernetes manages the workers, which change slowly. Substrate's own control plane, `ate-api-server`, manages the actors, which change constantly. The docs are blunt about why: the Kubernetes API server "is not designed to handle millions of resources."
+
+<Figure
+  src="/articles/agent-substrate/fig2.png"
+  alt="The project's architecture diagram. An application calls atenet-router (B1), which asks ate-api-server to resume the actor (B2). ate-api-server, backed by PostgreSQL and OpenFGA, tells the atelet DaemonSet on the worker node to restore the actor (B3); atelet fetches the snapshot from the bucket (B4) and starts the sandbox in the worker pod (B5). The router forwards the request to ateworker plus atunnel (B6), which delivers it to Actor A in its gVisor or microVM sandbox (B7). When the actor calls a tool (B8), atunnel forwards it as this actor to atenet-egress (B9), which gets a credential from k8s-credential-provider (B10) and calls the external service (B11)."
+  caption="The request path, numbered: route, resume, restore from the snapshot bucket, deliver, then egress through the gateway that holds the credentials. Two actors share one worker pod, each in its own sandbox (Agent Substrate docs, actor call diagram)."
+/>
+
+The path of one request, as the code runs it:
+
+1. An application sends HTTP to `atenet-router` (Envoy with an `ext_proc` processor), naming the actor in an `ate-target-actor: <atespace>/<actor>` header.
+2. The processor calls `ResumeActor`. In `workflow_resume.go`, a running actor returns immediately, before any lock, because the router calls this on every request. A suspended one takes a per-actor lease in PostgreSQL, then gets a worker.
+3. The scheduler (`scheduling.go`) filters workers with room, samples two at random and takes the less loaded: the power of two choices. Load is the higher of slot use and memory or CPU use.
+4. `atelet`, a DaemonSet on that node, restores the actor's latest snapshot into the worker's sandbox, from a node-local copy if it still has one, otherwise from GCS or S3 through an object-store plugin sidecar. A wakeup probe confirms the process is answering.
+5. The router opens an mTLS `CONNECT` tunnel to `atunnel` on the worker, which forwards into the actor's own network namespace.
+
+A worker is not one agent. Each `ateworker` hosts up to `--max-actors` actors at once (default `1000`), each in its own gVisor sandbox or microVM. That is why the hero figure can show 250 agents on 8 pods: a pod is a host for sandboxes, not a sandbox.
+
+<Video
+  src="/articles/agent-substrate/clip1"
+  poster="/articles/agent-substrate/clip1-poster.jpg"
+  alt="The Claude multiplex demo dashboard: three Claude Code agents named luna, mars and orion share two worker pods. A task list shows one agent running and others completed, the worker pods panel shows two running pods, and a caption reads that a suspended agent is paused mid-thought and can be resumed where it left off."
+  caption="Three Claude Code agents on two worker pods. The dashboard resumes an agent when it gets a task and suspends it when the task ends, so the third agent waits for a pod (the project's Claude Code multiplex walkthrough video, cut to 15 seconds)."
+/>
+
+### What a suspend writes
+
+A snapshot has three fidelities, set per `ActorTemplate`, each including the one before:
+
+- `VOLUMES`: the contents of `DurableDir` volumes.
+- `ROOTFS`: plus every file written to the container's root filesystem since boot.
+- `MEMORY` (the default): plus the running process tree and its RAM.
+
+`MEMORY` is what makes "resume where it left off" true. On gVisor the worker runs `runsc checkpoint` with `-image-path` for the memory image and `-fs-checkpoint-paths` for the filesystem bundles, and restores with `runsc restore -background` (from the worker's `internal_flags.json`), which keeps loading pages after the sandbox is already running. The architecture doc notes the gVisor path still needs a `runsc` with `--allow-connected-on-save`, a workaround for a networking bug on resume. On microVMs, Cloud Hypervisor takes a VM memory snapshot, and the root filesystem's writable layer lives on the host behind virtio-fs, so it ships as a tar rather than as guest RAM.
+
+The fast path for a new actor is the **golden snapshot**. When you create an `ActorTemplate`, Substrate boots it once, lets it warm up, checkpoints it, and keeps that image. Every actor created from the template starts by restoring it, so no actor ever pays a cold boot on its first request. A cold container start becomes a memory restore.
+
+Suspends are asynchronous by default. `SuspendActor` returns once the checkpoint is written on the node's disk. `atelet` uploads it after `--snapshot-upload-delay` (5 minutes by default) and drops the local copy after `--snapshot-detach-delay` (30 minutes). An actor that wakes inside half an hour on the same node skips the download entirely. The docs state the risk plainly: an asynchronous suspend can lose state if the node dies before the upload.
+
+<ActorLifecycle />
+
+The restore mode on microVMs shows how much of this is still being tuned. Cloud Hypervisor can restore guest memory on demand through `userfaultfd`, faulting pages in as the guest touches them, so an idle restored guest holds only its working set. `prefault.go` explains why Substrate does not use that today: from Cloud Hypervisor 53, the `userfaultfd` handler prefaults every page in the background, and "the prefault storm starves" the guest until it fails its wakeup probe. On those versions, and on any version it cannot parse, the worker falls back to an eager copy of the whole snapshot. The `ate-setup` installer assembles its local microVM assets from `defaultCloudHypervisorVersion = "v53.0"`; the GKE `SandboxConfig` template pins its assets by hash, so I cannot tell its version from the repository. On assets built from that default, a restore reads the full memory image up front.
+
+## Nothing in this commit decides an agent is idle
+
+The README's hero says "suspend when idle." I looked for the code that decides an actor is idle and could not find it. There is no idle timer, no TTL and no reaper in `ate-api-server`, `atelet` or the router. The architecture doc says it in passing: hibernation is "Triggered by an explicit `SuspendActor` call." Every caller of `SuspendActor` in the tree is a client (`kubectl ate`, the benchmark load generators, the template reconciler building golden snapshots) or the worker-side path below.
+
+That worker path is half built. `internal/ateworker/suspend` lets a worker ask, through `atelet`, for an actor it hosts to be suspended, and the control plane authorises it by checking the caller's node identity against its own records. The comments describe the intended trigger: "an actor that pushes an idleness signal does not necessarily push it again." But nothing in `cmd/` constructs a `Requester` at this commit. The plumbing exists; the signal does not.
+
+So in practice your harness decides. In the [`ax` article](/articles/google-ax), `ax` suspends the actor when a turn closes. In the Claude Code demo, the dashboard suspends an agent when its task timer ends. The demo video's own caption says "After a short idle window, substrate suspends the agent again", which the demo's README contradicts: the dashboard does it.
+
+This is where NVIDIA's [Dynamo](https://github.com/ai-dynamo/dynamo) pitch fits. Its blog describes Dynamo returning "projected time to first token" and GPU-pool saturation so Substrate could "suspend it during a longer inference wait, or resume it as the model response approaches completion." That is exactly the missing decision: if the next token is twenty seconds away, checkpoint now; if it is two hundred milliseconds away, stay resident. The blog itself says "parts of the Dynamo agent integration are experimental." At `e472ffb`, it is a direction.
+
+The same reading answers a question the `ax` article left open: whether Substrate refuses a second activation of an actor that is already running. It does not. `ResumeActor` on a running actor returns that actor, and the lease serialises state transitions, not callers. Two replicas of a harness can both "resume" one actor and both get it back as running. I did not read the router or `atunnel` for a per-actor request limit, but nothing in the resume path refuses the second caller. Exclusion over a conversation is still the harness's job, so the `ax` article's framing stands.
+
+## Where 10x comes from
+
+Start with what a running actor costs. The scheduler's `Booking` charges a worker the actor's memory limit, plus the runtime's declared overhead. The microVM worker declares 4 MiB plus 8 MiB per GiB of limit, for Cloud Hypervisor, `virtiofsd` and the host page tables (`actorOverhead` in `cmd/ateworker-microvm/run.go`). The gVisor worker declares none. There is no memory overcommit among running actors: the limit is reserved whether the agent uses it or not.
+
+A suspended actor costs no worker memory at all. It costs a snapshot in object storage.
+
+So compare a fleet of $N$ agents, each with memory limit $M$, each running a fraction $a$ of the time.
+
+$$
+\text{one sandbox per agent: } N M \qquad \text{multiplexed: } S\,(M + o)
+$$
+
+where $S$ is the number of worker slots you need and $o$ is the per-actor overhead. If agents were perfectly staggered, $S = aN$, and the ratio is $1/a$: an agent that runs 10% of the time gives you 10x, and one that runs a third of the time gives you 3x. The README's own range, "10x–30x Oversubscription", corresponds to agents running between about 10% and about 3% of the time. That is the whole source of the multiple. It is a statement about the workload. Two runtimes holding the same agents would get the same ratio if both could swap them out.
+
+Perfect staggering is the generous case. Requests arrive when they arrive, and you size the pool for a tail, not a mean. If agents run independently, the number running at once is binomial, with mean $aN$ and standard deviation $\sqrt{N a (1-a)}$. Sizing for the 99th percentile adds $2.326$ standard deviations. On my arithmetic:
+
+| Fleet | Running share | Mean running | Slots at p99 | Density |
+|---|---|---|---|---|
+| 250 agents | 10% | 25 | 37 | 6.8x |
+| 10,000 agents | 10% | 1,000 | 1,070 | 9.3x |
+| 1,000,000 agents | 10% | 100,000 | 100,698 | 9.9x |
+| 10,000 agents | 30% | 3,000 | 3,107 | 3.2x |
+
+At the demo's scale, a 10% duty cycle gives you under 7x. The 10x shows up only when the fleet is large enough for bursts to average out, which is why "millions of agents" and "10x" travel together in the pitch. Correlated traffic (a batch of RL rollouts dispatched at once, everyone opening their laptop at nine) needs more headroom than the independent model gives. Request parking is the other lever: a router that holds a request for up to `--parked-request-budget` (5 seconds by default, with at most `1024` parked) lets you run nearer the mean and pay in queueing delay instead of idle slots.
+
+<DensityCalculator />
+
+For the demo's own sandbox, a 2 GiB Claude Code template, 250 agents in pods of their own hold 500 GiB. Thirty-seven microVM slots at 2,068 MiB each hold about 75 GiB. That is real money saved, but it is 6.8x, not 10x, and it ignores the price of the swap: object storage for every suspended actor, a checkpoint write on every suspend, and a restore read on every wake.
+
+Is there a measured 10x anywhere? Not in the repository. The benchmarking guide documents a Locust harness that writes `actors_per_node`, `actors_per_vcpu` and `actors_per_gb_ram` for each run, then says "none of them are checked into the repository." It is careful about its own numbers: actors are "derived, not counted" (peak users times actors per user), and "a workload that creates and deletes actors as it goes never holds them all at the same time, so its real density is lower than reported." The only run reports checked in measure the `atunnel` proxy's CPU per request, not density. The architecture doc lists north-star targets (100 ms resume at p95, a billion agents per cluster, 1000 wakeups per second) next to the README's present-tense "less than 500ms" and "more than 500 activations per second." I could not find the setup behind the 10x at `e472ffb`, so read it as the project's estimate for mostly-idle agents. The `ax` article said Substrate ships a `benchmarking/` directory to reproduce its numbers. The harness is there. The results are not.
+
+The same guide is frank about what breaks under load. A pause-and-resume cycle under load takes "tens of seconds." A restore wave onto a node whose sandboxes are burning CPU makes the wakeup probe time out and crashes the actor, and "Substrate does not steer restores away from busy nodes." Above about a thousand sandboxes per host, the kernel's ARP neighbour table overflows unless you raise `gc_thresh3`. Above a few hundred per node, the kubelet's heartbeat starves and the taint manager evicts the whole node. Every one of those is the price of density, written down by the people paying it.
+
+## Zero trust, read from the code
+
+"Zero-trust" is a phrase that usually means nothing. Here it has a definite shape, and the security doc grades each part as Met, In Progress or Future, which is more honesty than most projects offer.
+
+<Figure
+  src="/articles/agent-substrate/fig3.png"
+  alt="Security boundaries diagram. Your application authenticates end users and invokes actors through the ingress gateway (boundary 2) or manages them through the Substrate API in the control plane (boundary 3). On the worker node, Actor A and Actor B each sit in their own sandbox (boundary 1) with no credentials and send outbound traffic only to the egress gateway (boundary 2), which applies destination policy and injects credentials before calling external services. A node supervisor moves snapshots to snapshot storage (boundary 4) with per-actor credentials on GCS."
+  caption="The four boundaries: sandbox, gateways, control plane and snapshot storage. Actors hold no credentials; the egress gateway injects them (Agent Substrate security guide, boundary diagram)."
+/>
+
+**Identity.** Every running actor gets a short-lived X.509 certificate with a SPIFFE ID of the form `spiffe://<trust.domain>/actor/<atespace>/<name>` (the format is in `internal/resources/spiffe.go`; the security guide gives the lifetime as an hour). The egress gateway can also mint a JWT for the actor on demand. Actors also carry a UID, so the docs promise that an actor deleted and recreated under the same name can be told apart from the old one.
+
+**Egress.** An actor's outbound connections leave its network namespace through `atunnel` to `atenet-egress`. The gateway authenticates the actor by its certificate, looks up its `EgressPolicy`, and denies anything no rule allows. The code fails closed in the places that matter (`cmd/atenet/internal/router/egress/egress.go`): a policy with no rules gets a 403 ("Can authorize nothing, so the same posture as having no policy"), and if the actor-identity CA or the policy lookup fails, the answer is a 503. DNS goes through a relay filtered against the policy's hostnames, and non-TCP traffic is dropped.
+
+**Secrets.** For an `https` rule, the gateway terminates the actor's TLS (the actor trusts a projected gateway CA) and applies `replaceHeaders` effects. The actor sends `Authorization: placeholder`; the gateway asks a credential provider for the secret named by `credentialUri`, swaps it in, and re-originates TLS to the real host.
+
+```yaml
+rules:
+- https:
+    hostnames: ["api.example.com"]
+    effects:
+      replaceHeaders:
+      - header: Authorization
+        prefix: "Bearer "
+        credentialUri: ate-secret://k8s.io/default/ns1/example-api/token
+```
+
+The key never enters the sandbox, so it never enters a snapshot. [Perplexity's SPACE](/articles/perplexity-space) and OpenShell arrived at the same design, which is a good sign that it is the right one. What it does not stop is use: a prompt-injected agent cannot read the key, but it can still call `api.example.com` with it, as often as the policy allows. The policy is the boundary, so write it per endpoint, not per host.
+
+**What the security doc itself marks unfinished**: worker pods still run as root with `SYS_ADMIN` and `NET_ADMIN` (In Progress); per-actor snapshot encryption and re-authorising a tenant before a restore (Future); per-actor storage tokens on S3, where GCS has them (Future); actor-to-actor authorisation (Future); quotas and anti-DoS throttling (Future). None of that is hidden. It is the table in `docs/security/security.md`.
+
+### The flagship demo puts the key in the sandbox
+
+The demo that shows Claude Code multiplexing does not use any of this. Each of its three `ActorTemplate`s sets the key as an ordinary environment variable:
+
+```yaml
+  - name: ANTHROPIC_API_KEY
+    value: "${ANTHROPIC_API_KEY}"
+...
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+```
+
+The template's comment says the key "is substituted into the container env as a plain value." The egress policy for `api.anthropic.com:443` passes TLS through, so the gateway never sees the request it could have injected into. With `MEMORY` fidelity, the process environment is part of what a checkpoint captures. By my reading that puts the key in the golden snapshot and in every suspend after it, in a bucket that per-actor encryption does not yet cover. I did not inspect a snapshot to confirm it. The security table marks "Zero Ambient Credentials" as Met, and for the runtime that is fair: the gateway can do it. The demo most people will copy shows the opposite pattern.
+
+The fix is one `https` rule with a `replaceHeaders` effect on `x-api-key` and a placeholder in the template. If you deploy this for real, do that first.
+
+## What NVIDIA adds
+
+Separate from the press language, NVIDIA's contributions point at the right problems. Request parking turns a pool saturated for a few hundred milliseconds into a short wait instead of a `503`, which is what lets anyone run near the mean in the table above. Per-container limits on microVMs stop a runaway sidecar from killing the agent beside it; gVisor still runs every container in one Sentry and ignores per-container limits (`docs/reference/sandbox-classes.md`). GPU sandboxes are the hard one. A GPU checkpoint can usually be restored only onto the same GPU model, sometimes only with the same driver, so the proposed design records device properties with each snapshot and falls back to a cold start when no matching device is free. That design is on DRA and is not merged.
+
+The larger idea is the Dynamo feedback loop above. An agent's longest waits are on the model, and the inference server is the only component that knows how long a wait will be. Wiring that into the suspend decision is what would turn "suspend when idle" from a slogan in a figure into a policy.
+
+## Would I run it
+
+For sessions shaped like the hero figure (long human gaps, short bursts of tool calls, state that is expensive to rebuild), on Kubernetes, with untrusted code, Substrate is the most complete open design I have read. gVisor or a microVM per agent, memory snapshots, a golden image per template, an egress gateway that holds the keys, and a separate control plane because the Kubernetes API server was never going to hold a million actors.
+
+I would not take the 10x into a capacity plan. Measure your own duty cycle first. Log, per session, the seconds it spends executing against the seconds it spends waiting, and put the ratio into the calculator above. If your agents run more than a third of the time, the multiple is near 3x and every suspend costs a checkpoint. If your fleet is in the hundreds, bursts eat a third of your slots. And you will write the idle policy yourself, because at this commit nothing else does.
+
+Two things I would check before production. First, that your harness never puts a secret in an actor template, whatever the demo does. Second, the restore path on your node pool: on Cloud Hypervisor 53 and later, microVM restores are eager copies, and the benchmarking guide's own failure list (probe timeouts on busy nodes, neighbour-table overflow, kubelet starvation) is the list of things you will hit first.
+
+### What I read
+
+Everything here comes from reading, not running: the repository at `e472ffb` (README, `docs/concepts/architecture.md`, `docs/security/security.md`, `docs/guides/benchmarking.md`, `docs/guides/egress-credential-injection.md`, `docs/reference/sandbox-classes.md`, the scheduler, `workflow_resume.go`, the `ateworker-gvisor` and `ateworker-microvm` restore code, `internal/ateworker/suspend`, the egress gateway, and the `claude-code-multiplex` demo), the CNCF sandbox issues, NVIDIA's blog post and the X post with its replies. The slot and density table, the 500 GiB and 75 GiB figures, and the calculator are my arithmetic on the scheduler's booking rule under an independence assumption, not measurements. I did not deploy Substrate, run its benchmarks or open a snapshot.

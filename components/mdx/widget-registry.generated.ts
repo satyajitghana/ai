@@ -42,6 +42,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "agent-harness/harness-loop": () => import("@/components/articles/agent-harness/harness-loop"),
   "agent-memory-repo/entry-parser": () => import("@/components/articles/agent-memory-repo/entry-parser"),
   "agent-memory-repo/memory-merge-lab": () => import("@/components/articles/agent-memory-repo/memory-merge-lab"),
+  "agent-substrate/actor-lifecycle": () => import("@/components/articles/agent-substrate/actor-lifecycle"),
+  "agent-substrate/density-calculator": () => import("@/components/articles/agent-substrate/density-calculator"),
   "agent-tools-week/probe-act-verify": () => import("@/components/articles/agent-tools-week/probe-act-verify"),
   "agents-a1/agent-loop": () => import("@/components/articles/agents-a1/agent-loop"),
   "agents-a1/distill-network": () => import("@/components/articles/agents-a1/distill-network"),
