@@ -856,6 +856,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "meta-encoder/one-tower": () => import("@/components/articles/meta-encoder/one-tower"),
   "meta-rebalancer/local-search-lab": () => import("@/components/articles/meta-rebalancer/local-search-lab"),
   "meta-rebalancer/model-size": () => import("@/components/articles/meta-rebalancer/model-size"),
+  "meteor-driving/compute-ledger": () => import("@/components/articles/meteor-driving/compute-ledger"),
+  "meteor-driving/stack-explorer": () => import("@/components/articles/meteor-driving/stack-explorer"),
   "metrictrail/ablation-ladder": () => import("@/components/articles/metrictrail/ablation-ladder"),
   "metrictrail/drift-lab": () => import("@/components/articles/metrictrail/drift-lab"),
   "metrictrail/huber-factor": () => import("@/components/articles/metrictrail/huber-factor"),
