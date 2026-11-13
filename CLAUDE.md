@@ -159,6 +159,7 @@ What none of this fixes is **backlinks**, which come from other people citing th
       print(f'{t/1048576:8.1f} MB  {nft}')" | sort -rn | head -5
   ```
   Two rules keep it down: content routes pair their template-literal `import()` with **`dynamicParams = false`** (the pattern the Next.js MDX guide documents), and **nothing reads `public/` with `fs` on a path the tracer can't resolve** — that pulls the whole directory into every function reachable from it.
+- **A prerendered response over 20 MB fails the deploy, not the build.** Vercel refuses it at "Deploying outputs" (`FALLBACK_BODY_TOO_LARGE`), after `pnpm build` has passed locally. `/api/articles` (which carried every body) and `/llms-full.txt` both crossed it at 740 articles: the API now lists a `markdown` path instead of bodies, and `llms-full.txt` stops at a 16 MB budget and links the rest. After a build, `find .next/server/app -type f -size +15M` should print nothing but that file.
 - **Never post to social without explicit approval.** `/amplify` only drafts into `drafts/<date>/`; Satyajit reviews and approves before anything is posted.
 - **No PDFs stored for papers** — paper links are derived from `arxivId`.
 - **MDX prose: escape a bare `<`.** In MDX a `<` starts a JSX tag, so `<2%`, `x < 3`, `<0.5` etc. in prose break the build (`validate:content` only checks frontmatter — `validate:mdx` catches these). Write `&lt;`, or wrap the expression in `` `code` `` or `$math$`.

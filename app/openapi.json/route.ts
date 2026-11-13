@@ -130,6 +130,7 @@ const S = {
           "An article with its editorial metadata and the signals computed from it. Every field below is present on every record; it is null while an article is unrated. `kind` stays the content kind (\"articles\"); the article's own kind is `articleKind`.",
         properties: {
           featured: { type: "boolean" },
+          markdown: { type: "string", description: "Path of the article's .md twin, which holds its body." },
           rating: {
             type: ["object", "null"],
             description: "Eight rubric dimensions scored 0–3 (3 is rare; corpus means sit near 1.5) and a one-line `why`.",

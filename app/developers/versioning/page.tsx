@@ -201,6 +201,14 @@ export default function Page() {
             carry the old fields. Read <code className="font-mono text-xs">tier</code>{" "}and the
             top-level <code className="font-mono text-xs">score</code>{" "}instead.
           </li>
+          <li>
+            <span className="font-mono text-xs text-foreground">2026-11 · corrected</span>{" "}—{" "}
+            <code className="font-mono text-xs">/api/articles</code>{" "}no longer carries each
+            article&apos;s raw <code className="font-mono text-xs">body</code>. The schema never
+            listed it, and with it the response had grown past 20 MB. Every item now has{" "}
+            <code className="font-mono text-xs">markdown</code>, the path of its{" "}
+            <code className="font-mono text-xs">.md</code>{" "}twin, which is where a body is.
+          </li>
         </ul>
       </Section>
 

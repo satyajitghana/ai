@@ -9,11 +9,17 @@ export const dynamic = "force-static"
 // agent can filter and order exactly as /articles does. Unrated articles carry
 // nulls. `signal` is the older 1–5 level, kept for existing clients: derived
 // from the tier when rated, else from the deprecated interest + helpful.
+//
+// No bodies. With them this response passed 20 MB at 740 articles, which is
+// Vercel's limit for a prerendered response: the deployment is refused. Each
+// item carries `markdown`, the path of its .md twin, which is where a body is.
 export function GET() {
   return Response.json(
-    getArticles().map((a) => {
-      const fields = articleApiFields(a)
-      return { ...a, ...fields, signal: articleSignal(a, fields) }
+    getArticles().map((article) => {
+      const fields = articleApiFields(article)
+      const signal = articleSignal(article, fields)
+      const { body: _body, ...a } = article
+      return { ...a, ...fields, signal, markdown: `/articles/${a.slug}.md` }
     }),
   )
 }
