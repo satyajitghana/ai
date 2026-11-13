@@ -694,6 +694,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "kimi-k3/reward-cliffs": () => import("@/components/articles/kimi-k3/reward-cliffs"),
   "kimi-k3/scaling-efficiency": () => import("@/components/articles/kimi-k3/scaling-efficiency"),
   "kimi-k3/training-cost": () => import("@/components/articles/kimi-k3/training-cost"),
+  "klm-1-6/byte-budget": () => import("@/components/articles/klm-1-6/byte-budget"),
+  "klm-1-6/erase-write": () => import("@/components/articles/klm-1-6/erase-write"),
   "kolc-3dgs-bim/build-pipeline": () => import("@/components/articles/kolc-3dgs-bim/build-pipeline"),
   "kolc-3dgs-bim/cut-fill": () => import("@/components/articles/kolc-3dgs-bim/cut-fill"),
   "kolibri-1/kv-cache": () => import("@/components/articles/kolibri-1/kv-cache"),
