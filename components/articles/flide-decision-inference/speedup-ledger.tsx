@@ -77,7 +77,7 @@ const BASE = "oklch(0.66 0.13 60)"
 const FLIDE = "oklch(0.58 0.16 255)"
 const NAIVE = "oklch(0.60 0.17 25)"
 
-const f1 = (x: number) => (x >= 100 ? Math.round(x).toLocaleString() : x.toFixed(1))
+const f1 = (x: number) => (x >= 100 ? Math.round(x).toLocaleString("en-US") : x.toFixed(1))
 
 export function SpeedupLedger() {
   const [wid, setWid] = useState("qlall")
@@ -134,7 +134,7 @@ export function SpeedupLedger() {
       {custom && (
         <div className="grid gap-3 px-3 pt-3 sm:grid-cols-3 sm:px-4">
           <label className="block font-mono text-[11px] text-muted-foreground">
-            state P = {P.toLocaleString()} tokens
+            state P = {P.toLocaleString("en-US")} tokens
             <Range min={100} max={16000} step={100} value={P} onChange={(e) => setP(Number(e.target.value))} className="mt-1 w-full" />
           </label>
           <label className="block font-mono text-[11px] text-muted-foreground">
@@ -150,7 +150,7 @@ export function SpeedupLedger() {
 
       <div className="space-y-2 p-3 font-mono text-[11px] sm:p-4">
         <div className="text-muted-foreground">
-          P = {Math.round(st).toLocaleString()}, n = {nn}, q̄ = {qbar.toFixed(1)} · forking computes {ratio.toFixed(2)}x fewer tokens than one
+          P = {Math.round(st).toLocaleString("en-US")}, n = {nn}, q̄ = {qbar.toFixed(1)} · forking computes {ratio.toFixed(2)}x fewer tokens than one
           sequence per question
         </div>
         {[
@@ -166,7 +166,7 @@ export function SpeedupLedger() {
           <div key={r.l}>
             <div className="flex justify-between gap-2 text-muted-foreground">
               <span>{r.l}</span>
-              <span className="text-foreground">{Math.round(r.v).toLocaleString()}</span>
+              <span className="text-foreground">{Math.round(r.v).toLocaleString("en-US")}</span>
             </div>
             <div className="mt-0.5 h-2.5 rounded-sm bg-muted/40">
               <div className="h-2.5 rounded-sm" style={{ width: bar(r.v), background: r.c }} />

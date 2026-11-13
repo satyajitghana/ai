@@ -118,7 +118,7 @@ export function OneTower() {
             <Range min={1} max={32} step={1} value={frames} onChange={(e) => setFrames(Number(e.target.value))} className="mt-1 w-full" />
           </label>
           <label className="block font-mono text-[11px] text-muted-foreground">
-            text tokens = {text.toLocaleString()}
+            text tokens = {text.toLocaleString("en-US")}
             <Range min={0} max={8000} step={20} value={text} onChange={(e) => setText(Number(e.target.value))} className="mt-1 w-full" />
           </label>
         </div>
@@ -129,10 +129,10 @@ export function OneTower() {
           </div>
           <div className="mt-1 flex flex-wrap justify-between gap-2 text-muted-foreground">
             <span>
-              {pr.w ? `${per.gw} × ${per.gh} = ${per.t.toLocaleString()} tokens per image × ${used}` : "no image"} · text + header ≈ {(text + 60).toLocaleString()}
+              {pr.w ? `${per.gw} × ${per.gh} = ${per.t.toLocaleString("en-US")} tokens per image × ${used}` : "no image"} · text + header ≈ {(text + 60).toLocaleString("en-US")}
             </span>
             <span className={over ? "text-red-500" : "text-foreground"}>
-              ≈ {total.toLocaleString()} of 16,384 trained
+              ≈ {total.toLocaleString("en-US")} of 16,384 trained
             </span>
           </div>
           {over && <div className="mt-1 text-red-500">Longer than any training sequence. The wrapper warns and never truncates, since that would cut off the pooled token.</div>}

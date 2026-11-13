@@ -226,7 +226,7 @@ export function ForkMask() {
           {two && qt.job === 0 && qt.branch !== 0 ? " The second request's state sits between them in the stream and is skipped." : ""}
         </div>
         <div>
-          visible pairs in the whole mask: {pairs.toLocaleString()} of {(m.T * m.T).toLocaleString()} · dots mark the last token of each
+          visible pairs in the whole mask: {pairs.toLocaleString("en-US")} of {(m.T * m.T).toLocaleString("en-US")} · dots mark the last token of each
           question, the only rows the output head reads
         </div>
         <div>
