@@ -1618,6 +1618,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "unsloth-train-a-decision-model/vram-budget": () => import("@/components/articles/unsloth-train-a-decision-model/vram-budget"),
   "usd-brep-nurbs-kernel/nurbs-curve": () => import("@/components/articles/usd-brep-nurbs-kernel/nurbs-curve"),
   "usd-brep-nurbs-kernel/topology-explorer": () => import("@/components/articles/usd-brep-nurbs-kernel/topology-explorer"),
+  "vercel-ui-sdk/act-simulator": () => import("@/components/articles/vercel-ui-sdk/act-simulator"),
+  "vercel-ui-sdk/ref-resolver": () => import("@/components/articles/vercel-ui-sdk/ref-resolver"),
   "verifier-frontier/dataset-construction": () => import("@/components/articles/verifier-frontier/dataset-construction"),
   "verifier-frontier/frontier-chart": () => import("@/components/articles/verifier-frontier/frontier-chart"),
   "verifier-frontier/knows-cant-say": () => import("@/components/articles/verifier-frontier/knows-cant-say"),
