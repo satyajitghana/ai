@@ -449,6 +449,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "gaussian-splat-to-blender-with-claude/tool-surface": () => import("@/components/articles/gaussian-splat-to-blender-with-claude/tool-surface"),
   "gaussian-splat-to-blender-with-claude/two-servers": () => import("@/components/articles/gaussian-splat-to-blender-with-claude/two-servers"),
   "gdp-ts/will-it-typecheck": () => import("@/components/articles/gdp-ts/will-it-typecheck"),
+  "gem-4d/same-pixels": () => import("@/components/articles/gem-4d/same-pixels"),
+  "gem-4d/task-success": () => import("@/components/articles/gem-4d/task-success"),
   "gemma-4/attn-strip": () => import("@/components/articles/gemma-4/attn-strip"),
   "gemma-4/kv-budget": () => import("@/components/articles/gemma-4/kv-budget"),
   "gemma-argon-vllm/fast-prefill-stack": () => import("@/components/articles/gemma-argon-vllm/fast-prefill-stack"),
