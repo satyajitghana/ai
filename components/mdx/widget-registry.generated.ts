@@ -251,6 +251,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "cross-model-kv-transfer/cost-curve": () => import("@/components/articles/cross-model-kv-transfer/cost-curve"),
   "cross-model-kv-transfer/retention-chart": () => import("@/components/articles/cross-model-kv-transfer/retention-chart"),
   "csfm-flow-matching/source-flow": () => import("@/components/articles/csfm-flow-matching/source-flow"),
+  "csfm-flow-matching/variance-split": () => import("@/components/articles/csfm-flow-matching/variance-split"),
   "cua-spaces/latency-chart": () => import("@/components/articles/cua-spaces/latency-chart"),
   "cua-spaces/space-map": () => import("@/components/articles/cua-spaces/space-map"),
   "cuda-rust/aliasing-compare": () => import("@/components/articles/cuda-rust/aliasing-compare"),
