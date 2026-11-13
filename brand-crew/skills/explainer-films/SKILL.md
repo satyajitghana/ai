@@ -1,10 +1,11 @@
 ---
 name: explainer-films
 description: >-
-  Write and render an explainer film for an article. New films use the story
-  format: a 3-5 minute narrated explanation told in chapters (cold open,
-  problem, idea, the mechanism in depth with worked examples and charts, the
-  paper's own figures, limits, takeaway). Older films are a 90-125 second
+  Write and render an explainer film for an article. New films use Story v2
+  ("format": "story2"): a film whose shape and length fit the article, built
+  around recordings of the article's own widgets, clips and figures played
+  full-frame, with a host that moves or leaves the frame. Films made before
+  it are the story format (3-5 minutes, told in chapters) or, older still, a 90-125 second
   animated, narrated explanation of how the thing the article is about works — its
   architecture, its technique, what is new about it — presented by a mascot
   (cat, dog, fox, bunny, capybara or fish) who is different in every film, in
@@ -43,7 +44,10 @@ data/.generated/thumbs.json       storyboard, the article date or the engine cha
 
 ## Story format (long films)
 
-**New films use the story format.** Add `"format": "story"` to the
+**Superseded for new films by Story v2 (the section after this one), which
+has every scene described here.** What follows is still the reference for
+those scenes, for bespoke modules, and for the ~45 films rendered in this
+format. Add `"format": "story"` to the
 storyboard and you get a film of three to five minutes, told as a story in
 chapters, with six scene types the short format does not have. Everything else
 on this page (the host, the styles, the truth rules, figures, diagrams)
@@ -328,6 +332,187 @@ chromium-1254), a venv with `pip install kokoro soundfile numpy scipy`, and
 Kokoro's English front end (misaki) falls back to espeak-ng; the
 `espeakng-loader` wheel on macOS has a broken built-in data path, so link its
 `libespeak-ng.dylib` and `espeak-ng-data` to Homebrew's `espeak-ng`.
+
+## Story v2 (new films use this)
+
+**From 13 November 2026 a new film is `"format": "story2"`.** The story format
+made about 45 films that feel like one film: the same skeleton at the same
+four to five minutes, the host always at the right edge pointing left at a
+box, a chapter card every few scenes, the real thing shown once and small on
+a card, one kind of motion. Story v2 has every scene the story format has and
+adds what was missing: the article's own footage full-frame, a host that
+moves or leaves, a shape and length chosen per film, and two more ways for a
+picture to move. Films already made stay as they are; do not convert one
+unless you mean to re-render it.
+
+```
+"format": "story2"       opt-in, per storyboard
+scenes                   5-24
+narration                120-750 words; each beat ≤ 40 words
+chapter cards            optional (none, or up to six); with none, the progress bar is one line
+mechanism                at least one mechanism scene of any kind (pan and sort count; so does a bespoke scene with mechanism: true)
+renders through          story2/render.mjs → story2/studio.html → story2/explainer.js + scenes.js + bespoke.js + stage.js
+voice                    build.mjs voices it with --allow-guess: a name the voice does not know is guessed, not refused
+```
+
+**Why it is separate, again.** Every story film hashes all of `story/`, so
+that directory is frozen like `engine/`. `story2/` is a fork of it, hashed
+only into story2 films (`hash.mjs`: `isStory2`, `story2EngineSha`). Change
+`story2/` freely: it stales story2 films and nothing else. `isStory` is still
+exactly `"format": "story"`, so no legacy or story hash moved when this was
+added. Do not add `pronounce.json` entries for a story2 film: an entry stales
+every storyboard that contains the word, and the voice's guess is allowed here.
+
+### The variety rules
+
+These are the point of the format. Before writing a storyboard, look at the
+two or three films rendered most recently and make this one differ from them
+in all three.
+
+1. **Shape and length fit the article.** A 90-second cut for one idea
+   (5-8 scenes, 150-220 words), a two to three minute mechanism or data film
+   (9-14 scenes, 280-450 words), a longer deep dive only when the article has
+   that much mechanism. No fixed arc: a film may open cold on footage, have no
+   idea card, no chapter cards, no limits scene.
+2. **Real footage first.** If the article has a widget, a viewer, a demo clip
+   or a figure, the film is built around recordings of it (`footage`,
+   `split`), and the drawn scenes are what connects them. A drawn diagram of
+   something the article can show running is the wrong picture.
+3. **Staging changes.** No more than two scenes in a row with the host in the
+   same place. Use `"host": "left"`, `"corner"` and `"off"`; footage is
+   `off` by default.
+4. **Pacing changes.** Short lines over footage, a `hold` after a reveal, a
+   quote in the second voice, a run of fast cuts and then one long scene.
+   Not every scene needs a `term`, a `note` or a stamp.
+5. **More than one kind of motion.** A film that only fades parts in is a
+   slideshow. Use a `pan` for a process, a `sort` for a count that regroups,
+   a clip that plays, a still the camera moves across, a bespoke scene.
+
+### Staging and pacing, on any scene
+
+| field | |
+|---|---|
+| `host` | `"right"` (default), `"left"` (the host mirrored at the left edge, the scene's content moved right), `"corner"` (a small host bottom right, content centred), `"off"` (no host, content centred). `footage` and `split` default to `off` and take only `off` or `corner`; `pan` defaults to `corner` |
+| `hold` | seconds (≤ 6) the scene stays after its last line, with no narration: a breath after a reveal |
+| `voice` | `"b"` gives the line to the second voice (`VOICE2` in `build.mjs`, Kokoro `am_michael`): a quote, a critic's verdict, an aside. On `title`, `idea`, `stat`, `bars`, `tally`, `quote`, `takeaway`, `chapter`, `hook`, `compare`, `steps`, `equation` it is the whole scene; on `footage`, `split`, `pan`, `sort` and `custom` it goes on a step. Sparingly: one or two lines a film |
+
+A film may open cold on a `footage` or `split` scene instead of a `hook`: the
+title is then scene 1.
+
+### Story v2 scenes
+
+| type | fields | notes |
+|---|---|---|
+| `footage` | `src`, `credit` (≤ 10 w), `title?` (≤ 6 w, a chip on the picture, or the heading of a framed one), `tone?`, `layout?` (`full` / `frame`), `shape?` `[w, h]`, `steps[]` (1-8, `{say?, hold?, clip? [from, to], at?, focus? [x, y, w, h], from? [x, y, w, h], drift?, caption? ≤ 14 w, term?, voice?}`) | The article's own clip or picture, big. `full` (default) fills the frame, cropped to 16:9; `frame` shows it large inside a frame drawn in the film's medium, nothing cropped unless a step asks. See "Footage" below. Up to twelve `footage` and `split` scenes a film. |
+| `split` | `panes[]` (2-4, `{src, label ≤ 4 w, clip?, at?, focus?, tone?}`), `credit`, `title?`, `steps[]` (1-8, `{say?, hold?, seek?, solo?, caption?, term?, voice?}`) | The same thing two, three or four ways, side by side on one clock. Every clip plays from its `clip` start as the scene runs; a step with `seek` cuts all panes to that second (counted from each pane's `clip` start); a step with `solo: i` widens pane i and dims the rest while the line is about it. Record the panes with the same actions at the same times and they stay in step. |
+| `pan` | `title?`, `stations[]` (2-7, `{label ≤ 4 w, value? ≤ 14 chars, sub? ≤ 10 w, tone?}`), `steps[]` (2-8, `{at: station index, say, note?, term?, voice?}`) | A wide canvas and a camera that travels it without stopping: stations stand along a path, each step sends the camera on to one with a marker running ahead, and between arrivals it keeps drifting. For a process, a pipeline, a worked example whose stages are few words each. A mechanism scene. |
+| `sort` | `title`, `of` (2-240), `unit?` (≤ 4 w), `states[]` (1-5, `{bins[] (1-6, {label ≤ 5 w, n, rest?, tone?}), say, note?, term?, voice?}`) | A counted set, regrouped: `of` dots stand in bins, and between states every dot travels its own arc to the bin it belongs to next. Each state's bins must hold exactly `of`. A bin's `n` is drawn over it and must be the article's; mark the remainder `rest: true` and its count is not drawn (and not checked), since 40 minus 28 is your arithmetic, not the article's number. A mechanism scene. |
+
+All four are in `story2/stage.js`. A footage or split step without `say` is a
+**hold**, not a beat: the picture plays for `hold` seconds (or its clip's
+length) and nobody speaks. A scene needs at least one spoken step.
+
+### Footage
+
+- **Only what the article shows.** `src` is a path the article's MDX itself
+  embeds with `<Video>` or `<Figure>` (the checker reads the MDX), on disk or
+  pushed. To use a recording of a widget, record it (below), embed it in the
+  article with a caption, then use it.
+- **Cut each line to its own span.** `clip: [from, to]` is seconds of the
+  clip. The span is retimed between 0.6x and 1.7x so it ends as the line
+  does, then holds its last frame; a step with no `clip` carries on from
+  where the step before stopped; `at` freezes one moment. Write spans from
+  the cue list the capture tool writes, and keep a span within about 1.5x of
+  its line's length.
+- **Stills move.** On a picture, each step eases slowly from the last
+  `focus` (or `from`) to its own across the whole step, and a still with no
+  regions gets a slow push. On a clip, a `focus` reframes in a second and the
+  clip plays in it; `drift: true` asks a clip for the slow move.
+- **Captions are lower-thirds.** `caption` is a plate over the bottom of the
+  picture for the length of its step: what the viewer is looking at, in a few
+  words. A step has a `caption`, a `term` or neither.
+- **Numbers in the narration are the article's prose, not the widget's
+  readout.** The checker reads the MDX, not `components/articles/**`. Drive a
+  widget to the settings the article discusses and say only what the article
+  prints.
+- **No pixel style.** Its frame is 320 px wide; the checker refuses footage in it.
+- **Look at the encoded film, not the sheet.** A film with footage is encoded
+  without `-tune animation` at CRF 33 (`STORY2_FLAGS`; 31 cost a third more file for no visible gain on interface text). Pull frames from the
+  mp4 (`ffmpeg -ss <t> -i film.mp4 -frames:v 1 x.png`) to judge interface text.
+
+### Recording a widget: `capture.mjs`
+
+```
+NEXT_PUBLIC_MEDIA_BASE=http://localhost:3457 PORT=3457 pnpm dev      # the site, serving its media from public/
+node brand-crew/skills/explainer-films/capture.mjs brand-crew/skills/explainer-films/shots/<slug>.json [--only=name] [--out=<scratch>]
+```
+
+A shot list (`shots/<slug>.json`) names the page, and for each clip the
+element to film and the actions to perform: `click`, `hover`, `drag`,
+`slide` (a range input), `select`, `key` (held), `wheel`, `wait`. The head of
+`capture.mjs` has the whole format; `shots/` has three worked lists (a 3D
+viewer walked through, a chart filtered, a playground played). It writes
+`public/articles/<slug>/<name>.mp4`, `.webm` and `-poster.jpg`, and
+`shots/cues/<slug>.<name>.json` with the second each action started at.
+
+- Time is virtual: the page's clock is advanced 1/24 s per screenshot, so a
+  WebGL viewer never drops a frame and an action lands on the frame its cue
+  says. Wall time is about 2-3x the clip.
+- `NEXT_PUBLIC_MEDIA_BASE` matters. Without it the page links its media from
+  the CDN, which refuses a localhost referer, and you record broken images.
+  The tool prints every failed request; read that list.
+- Do not edit `content/` while a capture runs against `pnpm dev`: Fast
+  Refresh reloads the page under the camera.
+- A clip keeps the widget's own shape unless the shot gives `size`. A tall
+  widget is filmed tall, and the film crops into it with `focus`.
+  `"fit": "cover"` with `"size": [1280, 720]` films a 16:9 window of a canvas.
+- Use new file names. R2 keys by path; never overwrite a published clip.
+- Then embed each clip in the article with `<Video>` and a caption that says
+  what is being done in it, run `pnpm media:push`, and commit the shot list
+  and cues with the storyboard.
+
+### Motion for bespoke modules
+
+The kit a module draws with (`story2/bespoke.js`) has everything in the
+table above, plus:
+
+| | |
+|---|---|
+| `k.arc(p0, p1, lift, t)` | where a thing is, t of the way from p0 to p1 along an arc `lift` px high: elements that travel |
+| `k.morph(a, b, t, n?)` | a path t of the way from path a to path b, both resampled to n points: one shape becoming another |
+| `k.travel(pts, t, len?)` | the stretch of a path a traveller has just covered, head at t, tail `len` px behind |
+| `k.cam(cx, cy, z?)` | inside `push()`/`pop()`: look at a point of a canvas wider than the frame. Move it a little every frame (with `motion: 'all'` in `plan`) and the scene is one continuous shot |
+| `k.shift`, `k.stage` | how far the engine slid the content for this scene's `host`, and which staging it is |
+
+A module is laid out for a host on the right (content in x 110-1380); the
+engine slides it for `left`, `corner` and `off`.
+
+### Checking and rendering
+
+Exactly as for a story film, through `story2/render.mjs`:
+
+```
+pnpm validate:films --file=<draft.json>                     # or --storyboards --only=<key>
+node brand-crew/skills/explainer-films/story2/render.mjs sheet <sb.json> --every=4 --cols=8 --w=320 --out=<sheet.jpg>
+node brand-crew/skills/explainer-films/build.mjs <key> --preview --out=<scratch dir>
+node brand-crew/skills/explainer-films/build.mjs <key> && node brand-crew/skills/explainer-films/build.mjs --thumbs <key>
+```
+
+A sheet made without the voice pass is timed to guesses, and footage spans
+are cut to the voice: check sync on a `--preview`, at several timestamps,
+before the final render. Set `"thumb": { "scene": i }` to the scene that
+says most about the film: usually a drawn one (a bespoke scene, a sort, a
+pan), so the thumbnail is in the film's medium, or a footage scene when the
+footage is the film (its last step's framing is the still).
+A film's hash covers the storyboard, the engine and its modules, not the
+bytes of a clip: re-record a clip and the film that plays it has to be
+re-rendered by hand.
+
+**The first three:** `beach-house-three-models` (riso; opens cold on three
+recorded walkthroughs side by side, mostly footage), `full-attention-census`
+(engraving; a fast data film around the recorded census chart and KV
+calculator) and `e-means` (chalkboard; a mechanism film around the authors'
+clips, the bespoke race and the recorded playground).
 
 ## Namespaces: films for other kinds
 

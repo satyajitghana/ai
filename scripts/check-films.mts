@@ -44,6 +44,16 @@
 // trace's values) is held to the article like any other, and a code scene's
 // lines must each be the article's own.
 //
+// Story v2. A storyboard with "format": "story2" (SKILL.md, "Story v2") is
+// the format new films use: every scene the story format has, plus footage
+// and split (the article's own clips and pictures, full-frame), pan and sort
+// (two more ways for a picture to move), a `host` placement and a `hold` on
+// any scene, and a second voice on a beat. Its shape is the article's choice,
+// so the story format's floors go: 5-24 scenes, 120-750 words, no chapter
+// cards required, one mechanism scene of any kind. The truth rules do not
+// change: every digit seen or heard is the article's, quotes and code are
+// verbatim, and a clip or picture is one the article itself shows.
+//
 // --file=<path.json> checks one storyboard that is not in data/films yet (a
 // draft) as if it were there, under the key in its slug field. Shape, layout
 // and facts only.
@@ -55,7 +65,7 @@ import { join } from "node:path"
 
 import { MEDIA_MAP, mediaExists } from "./media-files"
 import { z } from "zod"
-import { NAMESPACES, articleDate, customModules, filmSha, fontsSha, isStory, sourceOf, splitKey, storyboardKeys } from "../brand-crew/skills/explainer-films/hash.mjs"
+import { NAMESPACES, articleDate, customModules, filmSha, fontsSha, isStory, isStory2, sourceOf, splitKey, storyboardKeys } from "../brand-crew/skills/explainer-films/hash.mjs"
 
 const ROOT = process.cwd()
 const SB_DIR = join(ROOT, "data", "films")
@@ -226,10 +236,51 @@ const base = {
 }
 const Legacy = z.object({ ...base, scenes: z.array(Scene).min(5).max(12) }).strict()
 const Story = z.object({ ...base, format: z.literal("story"), scenes: z.array(StoryScene).min(10).max(24) }).strict()
-type SB = z.infer<typeof Story>
-type Sc = SB["scenes"][number]
+
+// ---- Story v2: its own scenes, and staging and pacing on every scene ----
+const mediaSrc = z.string().regex(new RegExp(`^/(${["articles", ...NAMESPACES].join("|")})/[^\\s"]+$`), "a path under /articles/ (or a namespace's /<kind>/) that the article itself shows")
+const region = z.tuple([pct, pct, pct, pct])
+const span = z.tuple([z.number().min(0), z.number().min(0)])
+const voice = z.enum(["a", "b"]).optional()
+const caption = str(14).optional()
+// a footage step: a line over the picture, or (no `say`) a hold with no voice
+const footStep = { say: sayS.optional(), hold: z.number().min(0).max(8).optional(), caption, term: termS, voice }
+const V2Only = [
+  z.object({
+    type: z.literal("footage"), src: mediaSrc, credit: str(10), title: str(6).optional(), tone,
+    layout: z.enum(["full", "frame"]).optional(), shape: z.tuple([z.number().positive(), z.number().positive()]).optional(),
+    steps: z.array(z.object({ ...footStep, clip: span.optional(), at: z.number().min(0).optional(), focus: region.optional(), from: region.optional(), drift: z.boolean().optional() }).strict()).min(1).max(8),
+  }).strict(),
+  z.object({
+    type: z.literal("split"), title: str(8).optional(), credit: str(10),
+    panes: z.array(z.object({ src: mediaSrc, label: str(4), clip: span.optional(), at: z.number().min(0).optional(), focus: region.optional(), tone }).strict()).min(2).max(4),
+    steps: z.array(z.object({ ...footStep, solo: z.number().int().min(0).optional(), seek: z.number().min(0).optional() }).strict()).min(1).max(8),
+  }).strict(),
+  z.object({
+    type: z.literal("pan"), title: str(8).optional(),
+    stations: z.array(z.object({ label: str(4), value: z.string().min(1).max(14).optional(), sub: str(10).optional(), tone }).strict()).min(2).max(7),
+    steps: z.array(z.object({ at: z.number().int().min(0), say: sayS, note, term: termS, voice }).strict()).min(2).max(8),
+  }).strict(),
+  z.object({
+    type: z.literal("sort"), title: str(8), of: z.number().int().min(2).max(240), unit: str(4).optional(),
+    states: z.array(z.object({ bins: z.array(z.object({ label: str(5), n: z.number().int().min(0), rest: z.boolean().optional(), tone, hl: z.boolean().optional() }).strict()).min(1).max(6), say: sayS, note, term: termS, voice }).strict()).min(1).max(5),
+  }).strict(),
+] as const
+// where the host is while a scene plays, a silent hold at its end, and the second voice
+const staging = { host: z.enum(["right", "left", "corner", "off"]).optional(), hold: z.number().min(0).max(6).optional(), voice }
+const stagingStepless = { host: staging.host, hold: staging.hold }
+const HAS_SCENE_VOICE = new Set(["title", "idea", "stat", "bars", "tally", "quote", "takeaway", "chapter", "hook", "compare", "steps", "equation"])
+const V2Scenes = [...sceneTypes({ story: true }), ...StoryOnly, ...V2Only].map((o) => {
+  const t = (o.shape.type as z.ZodLiteral<string>).value
+  return (o as unknown as z.ZodObject<z.ZodRawShape>).extend(HAS_SCENE_VOICE.has(t) ? staging : stagingStepless)
+})
+const Story2Scene = z.discriminatedUnion("type", V2Scenes as never)
+const Story2 = z.object({ ...base, format: z.literal("story2"), scenes: z.array(Story2Scene).min(5).max(24) }).strict()
+type SB = { slug: string; kicker: string; style: string; palette?: string; thumb?: { scene: number }; scenes: Sc[] }
+type Sc = z.infer<typeof StoryScene> | z.infer<(typeof V2Only)[number]>
 const MECH = new Set(["diagram", "stack", "steps", "grid", "equation", "compare"])
 const MECH_STORY = new Set([...MECH, "trace", "inset", "code"])
+const MECH_V2 = new Set([...MECH_STORY, "pan", "sort"])
 const NUMERIC = new Set(["stat", "bars", "tally"])
 
 // ---- the article, normalised for comparison ----
@@ -256,9 +307,10 @@ const prose = (s: string) =>
 // Only what a viewer sees or hears is a fact. Layout (`at`, `bend`, layer
 // indices, grid sizes, patterns), ids and the mascot are not.
 // (`term`, `tickLabels` and `code` are the story format's; a legacy storyboard cannot have them)
-const TEXT_KEYS = new Set(["kicker", "headline", "sub", "say", "text", "label", "note", "quote", "source", "mark", "title", "value", "unit", "input", "output", "match", "colLabel", "rowLabel", "of", "n", "credit", "term"])
+const TEXT_KEYS = new Set(["kicker", "headline", "sub", "say", "text", "label", "note", "quote", "source", "mark", "title", "value", "unit", "input", "output", "match", "colLabel", "rowLabel", "of", "n", "credit", "term", "caption"])
 const TEXT_ARRAYS = new Set(["punch", "recap", "items", "tickLabels", "code"])
-const SKIP = new Set(["mascot", "style", "palette", "type", "kind", "tone", "pattern", "at", "bend", "from", "to", "show", "flow", "focus", "highlight", "hl", "dashed", "id", "thumb", "rows", "cols", "side", "repeat", "slug", "nodes", "src", "clip"])
+// (`host`, `hold`, `voice`, `layout`, `shape`, `seek`, `solo`, `drift` are Story v2's staging and pacing)
+const SKIP = new Set(["mascot", "style", "palette", "type", "kind", "tone", "pattern", "at", "bend", "from", "to", "show", "flow", "focus", "highlight", "hl", "dashed", "id", "thumb", "rows", "cols", "side", "repeat", "slug", "nodes", "src", "clip", "host", "hold", "voice", "layout", "shape", "seek", "solo", "drift"])
 function strings(v: unknown, key = "", out: string[] = []): string[] {
   if (v == null) return out
   if (typeof v === "string" || typeof v === "number") { if (TEXT_KEYS.has(key)) out.push(String(v)); return out }
@@ -266,6 +318,7 @@ function strings(v: unknown, key = "", out: string[] = []): string[] {
   if (typeof v === "object") for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
     if (k === "rows" && Array.isArray(x)) { strings(x, "", out); continue }            // tally rows are shown; grid rows are a size
     if (k === "nodes" && Array.isArray(x) && x.length && typeof x[0] === "object") { strings(x, "", out); continue }
+    if (k === "bins" && Array.isArray(x)) { for (const b of x as { rest?: boolean; label?: string; n?: number }[]) { out.push(String(b.label ?? "")); if (!b.rest) out.push(String(b.n ?? "")) } continue }   // a `rest` bin's count is never shown
     if (k === "side" || k === "repeat") { if (x && typeof x === "object") out.push(String((x as { label?: string }).label ?? "")); continue }
     if (SKIP.has(k)) continue
     strings(x, k, out)
@@ -310,12 +363,17 @@ function beatLines(sc: Sc): string[] {
     case "end": return [sc.say ?? `To recap: ${sc.recap.join("; ")}.`, "Every source is in the full article. I'm Name. Bye!"]
     case "chapter": return [sc.say ?? sc.title]
     case "hook": return [sc.say ?? sc.text]
-    case "chart": case "trace": case "code": case "inset": case "custom": return sc.steps.map((s) => s.say)
+    case "chart": case "trace": case "code": case "inset": case "custom": case "pan": return sc.steps.map((s) => s.say)
+    // a footage step without `say` is a hold, not a beat
+    case "footage": case "split": return sc.steps.flatMap((s) => (s.say ? [s.say] : []))
+    case "sort": return sc.states.map((s) => s.say)
   }
 }
 const BUDGET = 280   // narration words: about 90 s of speech at Kokoro 1.1x, a film of ~105 s
 // the story format: about 2.5 to 4.5 minutes of speech, a film of 3 to 5 minutes
 const STORY_BUDGET = [400, 750] as const
+// Story v2: from a 90-second cut to a five-minute deep dive; the article decides
+const STORY2_BUDGET = [120, 750] as const
 
 // ---- diagram geometry (mirrors engine/explainer.js layoutDiagram) ----
 // Text is sized from each style's real glyph advances (metrics.json, written
@@ -455,13 +513,15 @@ for (const slug of files) {
   checked++
   const mdxPath = sourceOf(slug)
   if (!existsSync(mdxPath)) { fail(slug, splitKey(slug).ns ? `no doc ${mdxPath.slice(ROOT.length + 1)}` : "no article content/articles/" + slug + ".mdx"); continue }
-  const story = isStory(raw)
-  const parsed = (story ? Story : Legacy).safeParse(raw)
+  const v2 = isStory2(raw)
+  // a v2 storyboard is checked as a story one wherever the rules are shared
+  const story = isStory(raw) || v2
+  const parsed = (v2 ? Story2 : story ? Story : Legacy).safeParse(raw)
   if (!parsed.success) {
     for (const i of parsed.error.issues.slice(0, 8)) fail(slug, `${i.path.join(".") || "(root)"}: ${i.message}`)
     continue
   }
-  const sb = parsed.data as SB
+  const sb = parsed.data as unknown as SB
   if (sb.slug !== slug) fail(slug, `slug field is "${sb.slug}"; it must be the film's key, "${slug}"`)
   if (sb.palette && !STYLES[sb.style].includes(sb.palette)) fail(slug, `palette "${sb.palette}" is not one of ${sb.style}'s: ${STYLES[sb.style].join(", ")}`)
   const types: string[] = sb.scenes.map((s) => s.type)
@@ -475,6 +535,34 @@ for (const slug of files) {
     if (count("quote") > 1) fail(slug, "at most one quote")
     if (types.filter((t) => NUMERIC.has(t)).length > 3) fail(slug, "more than three number scenes: explain, don't tabulate")
     if (count("figure") > 2) fail(slug, "at most two figure scenes")
+  } else if (v2) {
+    // Story v2: the shape is the article's. What stays: a title (after an
+    // optional cold open), an end, one takeaway, and something that explains.
+    // The cold open may be a hook or the real thing: a footage or split scene.
+    const t0 = ["hook", "footage", "split"].includes(types[0]) ? 1 : 0
+    if (types[t0] !== "title") fail(slug, "the title comes first, or second after a cold open (a hook, or a footage or split scene)")
+    if (count("hook") > 1 || (count("hook") === 1 && types[0] !== "hook")) fail(slug, "a hook is the cold open: at most one, and only as the first scene")
+    if (types[types.length - 1] !== "end" || count("end") !== 1) fail(slug, "end must be the last scene, once")
+    if (count("title") !== 1) fail(slug, "exactly one title")
+    if (!sb.scenes.some((sc) => MECH_V2.has(sc.type) || (sc.type === "custom" && sc.mechanism))) fail(slug, `no mechanism scene: an explainer needs one of ${[...MECH_V2].join(", ")}, or a bespoke scene with mechanism: true`)
+    if (count("takeaway") !== 1) fail(slug, "exactly one takeaway")
+    if (count("quote") > 2) fail(slug, "at most two quotes")
+    if (types.filter((t) => NUMERIC.has(t) || t === "chart").length > 4) fail(slug, "more than four number scenes (stat, bars, tally, chart): explain, don't tabulate")
+    if (count("figure") > 4) fail(slug, "at most four figure scenes")
+    if (count("footage") + count("split") > 12) fail(slug, "more than twelve footage and split scenes")
+    if (count("chapter") > 6) fail(slug, "at most six chapter cards")
+    const ch = types.flatMap((t, i) => (t === "chapter" ? [i] : []))
+    for (const i of ch) if (types[i + 1] === "chapter" || types[i + 1] === "end" || types[i + 1] === "takeaway") fail(slug, `scene ${i} (chapter): a chapter card needs a scene of its own after it`)
+    if ((count("footage") || count("split")) && sb.style === "pixel") fail(slug, "footage and split scenes are not drawn in the pixel style (its frame is 320 px wide); pick another style")
+    // the bottom of the frame holds one thing at a time
+    sb.scenes.forEach((sc, si) => {
+      const steps = ((sc as { steps?: unknown[] }).steps ?? (sc as { items?: unknown[] }).items ?? (sc as { parts?: unknown[] }).parts ?? (sc as { states?: unknown[] }).states ?? []) as { note?: string; term?: string; caption?: string }[]
+      steps.forEach((st, j) => { if ([st.note, st.term, st.caption].filter(Boolean).length > 1) fail(slug, `scene ${si} (${sc.type}) step ${j}: one of note, term or caption (they share the bottom of the frame)`) })
+      const own = sc as { note?: string; term?: string }
+      if (own.note && own.term) fail(slug, `scene ${si} (${sc.type}): note or term, not both (they share the bottom of the frame)`)
+      const st = (sc as { host?: string }).host
+      if (st && (sc.type === "footage" || sc.type === "split") && (st === "left" || st === "right")) fail(slug, `scene ${si} (${sc.type}): the picture fills the frame, so its host is "off" (the default) or "corner"`)
+    })
   } else {
     // the arc: an optional cold open, the title, chapters, the mechanism in depth, one takeaway, the end
     const t0 = types[0] === "hook" ? 1 : 0
@@ -505,7 +593,8 @@ for (const slug of files) {
   if (sb.thumb && sb.thumb.scene >= sb.scenes.length) fail(slug, `thumb.scene ${sb.thumb.scene} is past the last scene`)
   const narration = sb.scenes.flatMap(beatLines).reduce((a, l) => a + words(l), 0)
   if (!story && narration > BUDGET) fail(slug, `narration is ${narration} words; the budget is ${BUDGET} (about 105 s of film). Cut words, not scenes`)
-  if (story && (narration < STORY_BUDGET[0] || narration > STORY_BUDGET[1])) fail(slug, `narration is ${narration} words; a story film's budget is ${STORY_BUDGET[0]}-${STORY_BUDGET[1]} (about 3 to 5 minutes of film)`)
+  if (story && !v2 && (narration < STORY_BUDGET[0] || narration > STORY_BUDGET[1])) fail(slug, `narration is ${narration} words; a story film's budget is ${STORY_BUDGET[0]}-${STORY_BUDGET[1]} (about 3 to 5 minutes of film)`)
+  if (v2 && (narration < STORY2_BUDGET[0] || narration > STORY2_BUDGET[1])) fail(slug, `narration is ${narration} words; a Story v2 film's budget is ${STORY2_BUDGET[0]}-${STORY2_BUDGET[1]} (about 1 to 5 minutes of film)`)
 
   const src = readFileSync(mdxPath, "utf8")
   const nums = articleNumbers(src)
@@ -613,6 +702,30 @@ for (const slug of files) {
         each(sc.params, "")
       }
     }
+    // ---- Story v2's scenes ----
+    if (sc.type === "footage" || sc.type === "split") {
+      // the article's own clips and pictures, as a figure's must be
+      const srcs = sc.type === "footage" ? [{ src: sc.src, clips: sc.steps.flatMap((st) => (st.clip ? [st.clip] : [])), stills: sc.steps.some((st) => st.at != null) }] : sc.panes.map((p) => ({ src: p.src, clips: p.clip ? [p.clip] : [], stills: p.at != null }))
+      for (const m of srcs) {
+        const video = !/\.(png|jpe?g|webp|gif|avif)$/i.test(m.src), base = m.src.replace(/\.(mp4|webm|mov)$/i, "")
+        const exists = video && base === m.src ? [".mp4", ".webm"].some((e) => mediaExists(m.src + e)) : mediaExists(m.src)
+        if (!exists) fail(slug, `${at}: ${m.src} is neither pushed to R2 nor on disk (pnpm media:push)`)
+        if (![m.src, base].some((p) => src.includes(`"${p}"`))) fail(slug, `${at}: the article does not show ${m.src}; a film uses only the article's own figures and clips`)
+        for (const c of m.clips) if (!video || c[1] <= c[0]) fail(slug, `${at}: clip is [from, to] seconds of a video`)
+        if (m.stills && !video) fail(slug, `${at}: "at" picks a moment of a video; ${m.src} is a still`)
+      }
+      const regions = sc.type === "footage" ? sc.steps.flatMap((st) => [st.focus, st.from]) : sc.panes.map((p) => p.focus)
+      for (const f of regions) if (f) { const [x, y, w, h] = f; if (w < 8 || h < 8 || x + w > 100.01 || y + h > 100.01) fail(slug, `${at}: region [${f}] must lie inside the picture (x+w, y+h ≤ 100) and be at least 8 wide and tall`) }
+      if (!sc.steps.some((st) => st.say)) fail(slug, `${at}: no step is narrated; a scene needs at least one line`)
+      sc.steps.forEach((st, j) => { if (!st.say && (st.term || st.voice)) fail(slug, `${at} step ${j}: a silent step has no term and no voice`) })
+      if (sc.type === "split") sc.steps.forEach((st, j) => { if (st.solo != null && st.solo >= sc.panes.length) fail(slug, `${at} step ${j}: solo ${st.solo} is not a pane`) })
+    }
+    if (sc.type === "pan") sc.steps.forEach((st, j) => { if (st.at >= sc.stations.length) fail(slug, `${at} step ${j}: at ${st.at} is not a station (0-${sc.stations.length - 1})`) })
+    if (sc.type === "sort") sc.states.forEach((st, j) => {
+      const sum = st.bins.reduce((a, b) => a + b.n, 0)
+      if (sum !== sc.of) fail(slug, `${at} state ${j}: its bins hold ${sum}, not ${sc.of}; every dot stands somewhere in every state`)
+      for (const b of st.bins) if (!b.rest) keyed([String(b.n)], b.label, sc.title, sc.unit)
+    })
     if (sc.type === "inset") {
       if (!sc.nodes.some((n) => n.id === sc.open)) fail(slug, `${at}: open "${sc.open}" is not a node of the outer diagram`)
       if (sc.steps[0].inner) fail(slug, `${at}: the first step shows the outside; open the node on a later one`)

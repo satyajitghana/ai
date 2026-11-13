@@ -140,6 +140,30 @@ export function storyEngineSha(style) {
   return sha
 }
 
+// Story v2 (a storyboard with "format": "story2"; SKILL.md, "Story v2") is
+// the same move again: story/ is frozen for the films rendered through it, so
+// the engine that adds footage scenes, staging, pacing and new motion lives in
+// story2/, a fork of story/. A story2 film hashes the legacy engine for its
+// style plus every file in story2/; `isStory` stays exactly "format": "story",
+// so no legacy or story storyboard ever reaches this and their hashes are
+// what they were.
+export const isStory2 = sb => !!sb && sb.format === 'story2'
+export function story2Files() {
+  return readdirSync(join(SKILL_DIR, 'story2')).filter(f => /\.(js|mjs|html)$/.test(f)).sort().map(f => `story2/${f}`)
+}
+const story2Cached = new Map()
+export function story2EngineSha(style) {
+  if (story2Cached.has(style)) return story2Cached.get(style)
+  const h = createHash('sha256')
+  h.update('story2\0' + engineSha(style) + '\0')
+  for (const f of story2Files()) { h.update(f + '\0'); h.update(readFileSync(join(SKILL_DIR, f))); h.update('\0') }
+  const sha = h.digest('hex')
+  story2Cached.set(style, sha)
+  return sha
+}
+// the format a storyboard renders through: 'story2', 'story' or '' (legacy)
+export const formatOf = sb => (isStory2(sb) ? 'story2' : isStory(sb) ? 'story' : '')
+
 // A story film's bespoke scenes are drawn by its own modules,
 // custom/<key>/<module>.js. They are part of that film's engine and of no
 // other's: a film with none hashes exactly as before, and editing one film's
@@ -149,10 +173,11 @@ export function customModules(sb) {
   return names.map(n => ({ name: n, file: join(SKILL_DIR, 'custom', sb.slug, `${n}.js`) }))
 }
 function filmEngine(sb) {
-  if (!isStory(sb)) return engineSha(sb.style)
+  if (!isStory(sb) && !isStory2(sb)) return engineSha(sb.style)
+  const base = isStory2(sb) ? story2EngineSha(sb.style) : storyEngineSha(sb.style)
   const mods = customModules(sb)
-  if (!mods.length) return storyEngineSha(sb.style)
-  const h = createHash('sha256').update('bespoke\0' + storyEngineSha(sb.style) + '\0')
+  if (!mods.length) return base
+  const h = createHash('sha256').update('bespoke\0' + base + '\0')
   for (const m of mods) { h.update(m.name + '\0'); h.update(existsSync(m.file) ? readFileSync(m.file) : 'missing'); h.update('\0') }
   return h.digest('hex')
 }

@@ -45,10 +45,10 @@
 // go through story/render.mjs instead of render.mjs, in the lite tier, with
 // their own encoder settings (STORY_FLAGS); everything else here is shared.
 import { spawn, spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, renameSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, renameSync, statSync, copyFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
-import { SKILL_DIR, ROOT, articleDate, filmSha, storyboardKeys, isStory } from './hash.mjs'
+import { SKILL_DIR, ROOT, articleDate, filmSha, storyboardKeys, isStory, isStory2, formatOf } from './hash.mjs'
 
 const args = process.argv.slice(2)
 const opt = Object.fromEntries(args.filter(a => a.startsWith('--')).map(a => { const [k, ...v] = a.slice(2).split('='); return [k, v.join('=') || true] }))
@@ -71,13 +71,23 @@ export const VOICE = 'af_heart'
 // The renderer a storyboard paints through: the story engine for the story
 // format, the frozen legacy one for everything else.
 const RENDER = join(SKILL_DIR, 'render.mjs'), STORY_RENDER = join(SKILL_DIR, 'story', 'render.mjs')
-const rendererOf = sb => (isStory(sb) ? STORY_RENDER : RENDER)
+const STORY2_RENDER = join(SKILL_DIR, 'story2', 'render.mjs')
+const rendererOf = sb => (isStory2(sb) ? STORY2_RENDER : isStory(sb) ? STORY_RENDER : RENDER)
 // The story path's encode: 1280x720 like every film, x264 -tune animation at
 // a CRF a notch higher than the legacy 34, because a story film is two to
 // three times as long and its budget is ~8 MB, not ~3. Measured on the pilot
 // (latent-sparse-attention, sumi, 4 min 49 s): 7.1 MB at 36, small mono type
 // still legible.
 const STORY_FLAGS = ['--scale=1280', '--crf264=36']
+// Story v2 ("format": "story2"; SKILL.md, "Story v2") goes through
+// story2/render.mjs. Its films carry real footage (recorded widgets, the 3D
+// viewer), which is not flat art: story2/render.mjs picks its own x264 tune,
+// and the CRF is a notch lower so interface text in a recording stays legible.
+// Its narration is voiced with --allow-guess (a name the voice does not know
+// is guessed, not refused: no pronounce.json entry, which would stale every
+// storyboard that says the word), and a beat may be given to a second voice.
+const STORY2_FLAGS = ['--scale=1280', '--crf264=33']
+export const VOICE2 = 'am_michael'
 
 const all = storyboardKeys()
 // scratch files are flat; a namespaced key's slash would make them a directory
@@ -99,7 +109,7 @@ if (opt.all) slugs = all
 else if (opt.stale) slugs = all.filter(s => manifest.films[s] && stale(s))
 for (const s of slugs) if (!all.includes(s)) throw new Error(`no storyboard: data/films/${s}.json`)
 if (!slugs.length) { if (keep) save(); console.log('nothing to render'); process.exit(0) }
-if (live && slugs.some(s => isStory(load(s)))) throw new Error('the story format renders in the lite tier only (no --live, no --p5)')
+if (live && slugs.some(s => isStory(load(s)) || isStory2(load(s)))) throw new Error('the story format renders in the lite tier only (no --live, no --p5)')
 
 const tmp = join(tmpdir(), `explainer-${process.pid}`), frames = join(tmp, 'video')
 mkdirSync(frames, { recursive: true }); mkdirSync(OUT, { recursive: true }); mkdirSync(CACHE, { recursive: true })
@@ -119,9 +129,38 @@ for (const [r, group] of groups(slugs)) {
   Object.assign(lines, JSON.parse(lr.stdout.trim().split('\n').pop()))
 }
 writeFileSync(join(tmp, 'lines.json'), JSON.stringify(lines))
-const tts = spawnSync(PY, [join(SKILL_DIR, 'audio.py'), 'tts', '--in', join(tmp, 'lines.json'), '--out', join(CACHE, 'voice'), '--voice', VOICE], { stdio: ['ignore', 'inherit', 'pipe'], encoding: 'utf8' })
-if (tts.status !== 0) throw new Error('tts failed: ' + (tts.stderr || '').split('\n').slice(-6).join('\n'))
+// legacy and story films are voiced as they always were; story2 films in a
+// second call that lets the voice guess a name it does not know
+const speak = (file, out, voice, extra = []) => {
+  const tts = spawnSync(PY, [join(SKILL_DIR, 'audio.py'), 'tts', '--in', file, '--out', out, '--voice', voice, ...extra], { stdio: ['ignore', 'inherit', 'pipe'], encoding: 'utf8' })
+  if (tts.status !== 0) throw new Error('tts failed: ' + (tts.stderr || '').split('\n').slice(-6).join('\n'))
+}
+const is2 = s => isStory2(load(s)), old = slugs.filter(s => !is2(s)), v2 = slugs.filter(is2)
+const pick = list => Object.fromEntries(list.map(s => [s, lines[s]]))
+if (old.length) { writeFileSync(join(tmp, 'lines-old.json'), JSON.stringify(pick(old))); speak(join(tmp, 'lines-old.json'), join(CACHE, 'voice'), VOICE) }
+if (v2.length) { writeFileSync(join(tmp, 'lines-v2.json'), JSON.stringify(pick(v2))); speak(join(tmp, 'lines-v2.json'), join(CACHE, 'voice'), VOICE, ['--allow-guess']) }
 const durs = JSON.parse(readFileSync(join(CACHE, 'voice', 'durations.json'), 'utf8'))
+// A story2 beat may be spoken by the second voice (a quote, an aside): the
+// renderer says which (`voices` mode), those lines are voiced again by VOICE2
+// into their own cache, and the film gets a voice directory of its own with
+// each line's wav from the voice that speaks it. Films without one are untouched.
+const voiceDir = {}
+if (v2.length) {
+  const vr = spawnSync(process.execPath, [STORY2_RENDER, 'voices', ...v2.map(sbPath)], { encoding: 'utf8', maxBuffer: 1 << 26 })
+  if (vr.status !== 0) throw new Error(vr.stderr)
+  const alt = JSON.parse(vr.stdout.trim().split('\n').pop()), need = v2.filter(s => (alt[s] || []).length)
+  if (need.length) {
+    writeFileSync(join(tmp, 'lines-alt.json'), JSON.stringify(Object.fromEntries(need.map(s => [s, alt[s].map(i => lines[s][i])]))))
+    speak(join(tmp, 'lines-alt.json'), join(CACHE, 'voice2'), VOICE2, ['--allow-guess'])
+    const d2 = JSON.parse(readFileSync(join(CACHE, 'voice2', 'durations.json'), 'utf8'))
+    for (const s of need) {
+      const dir = join(tmp, 'voice', flat(s)); mkdirSync(dir, { recursive: true })
+      const sec = [...durs[s].sec]
+      lines[s].forEach((_, i) => { const j = alt[s].indexOf(i); copyFileSync(j < 0 ? join(CACHE, 'voice', s, `${i}.wav`) : join(CACHE, 'voice2', s, `${j}.wav`), join(dir, `${i}.wav`)); if (j >= 0) sec[i] = d2[s].sec[j] })
+      durs[s] = { ...durs[s], sec }; voiceDir[s] = dir
+    }
+  }
+}
 for (const slug of slugs) {
   const sb = JSON.parse(readFileSync(sbPath(slug), 'utf8'))
   writeFileSync(sbPath(slug), JSON.stringify({ ...sb, _voice: durs[slug].sec }))
@@ -133,10 +172,11 @@ console.log(`[2/3] painting ${slugs.length} film(s) on ${opt.workers || 3} page(
 // several times faster in the brush tiers. The live/p5 cut is CRF 33: brush texture costs bits.
 const flags = [...(social ? ['--crf264=28'] : live ? ['--scale=1280', '--crf264=33'] : ['--scale=1280', '--crf264=34']), ...(opt.noblur ? ['--noblur'] : [])]
 const storyFlags = [...(social ? ['--crf264=30'] : STORY_FLAGS), ...(opt.noblur ? ['--noblur'] : [])]
+const story2Flags = [...(social ? ['--crf264=27'] : STORY2_FLAGS), ...(opt.noblur ? ['--noblur'] : [])]
 let n = 0, failed = 0
 // one renderer at a time: legacy films first, then story films
 const paint = (r, group) => new Promise(res => {
-  const child = spawn(process.execPath, [r, 'film', ...group.map(sbPath), `--out=${frames}`, `--workers=${opt.workers || 3}`, ...(r === RENDER ? [...flags, ...liveFlag] : storyFlags)], { stdio: ['ignore', 'pipe', 'inherit'] })
+  const child = spawn(process.execPath, [r, 'film', ...group.map(sbPath), `--out=${frames}`, `--workers=${opt.workers || 3}`, ...(r === RENDER ? [...flags, ...liveFlag] : r === STORY2_RENDER ? story2Flags : storyFlags)], { stdio: ['ignore', 'pipe', 'inherit'] })
   let buf = ''
   child.stdout.on('data', d => {
     buf += d
@@ -159,7 +199,7 @@ const paint = (r, group) => new Promise(res => {
 
 // storyboards grouped by the renderer that paints them, legacy first
 function groups(list) {
-  const m = new Map([[RENDER, []], [STORY_RENDER, []]])
+  const m = new Map([[RENDER, []], [STORY_RENDER, []], [STORY2_RENDER, []]])
   for (const s of list) m.get(rendererOf(load(s))).push(s)
   return [...m].filter(([, g]) => g.length)
 }
@@ -168,7 +208,7 @@ function finish(r) {
   const slug = r.slug
   const film = join(tmp, `${flat(slug)}.film.json`), m4a = join(tmp, `${flat(slug)}.m4a`), vtt = join(OUT, `${slug}.vtt`)
   writeFileSync(film, JSON.stringify(r))
-  run(PY, [join(SKILL_DIR, 'audio.py'), 'mix', '--film', film, '--voice', join(CACHE, 'voice', slug), '--out', m4a, '--vtt', vtt])
+  run(PY, [join(SKILL_DIR, 'audio.py'), 'mix', '--film', film, '--voice', voiceDir[slug] || join(CACHE, 'voice', slug), '--out', m4a, '--vtt', vtt])
   const out = join(OUT, `${slug}.mp4`)
   run(FF, ['-v', 'error', '-y', '-i', join(frames, `${slug}.mp4`), '-i', m4a, '-map', '0:v', '-map', '1:a', '-c', 'copy', '-shortest', '-movflags', '+faststart', out])
   renameSync(join(frames, `${slug}-poster.webp`), join(OUT, `${slug}-poster.webp`))
@@ -186,7 +226,7 @@ function finish(r) {
     scenes: r.scenes.length,
     style: r.style,
     tier,
-    ...(isStory(load(slug)) ? { format: 'story' } : {}),
+    ...(formatOf(load(slug)) ? { format: formatOf(load(slug)) } : {}),
     width: r.style === 'pixel' && !social ? 640 : 1280,
     height: r.style === 'pixel' && !social ? 360 : 720,
     mascot: r.mascot?.name,
@@ -214,7 +254,7 @@ function thumbs(list) {
   // each storyboard through its own renderer: legacy ones first, then story ones
   for (const [r, group] of groups(list)) {
   const files = group.map(slug => { dirFor(out, slug); const f = join(tmp, `${flat(slug)}.json`); writeFileSync(f, JSON.stringify({ ...load(slug), date: articleDate(slug) })); return f })
-  if (r === STORY_RENDER && live) throw new Error('the story format renders in the lite tier only (no --live, no --p5)')
+  if (r !== RENDER && live) throw new Error('the story format renders in the lite tier only (no --live, no --p5)')
   const paint = batch => spawnSync(process.execPath, [r, 'thumb', ...batch, `--out=${out}`, `--workers=${opt.workers || 3}`, ...(r === RENDER ? liveFlag : [])], { encoding: 'utf8', maxBuffer: 1 << 26 })
   for (let i = 0; i < files.length; i += 40) {
     let outs = []
