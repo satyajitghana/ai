@@ -780,6 +780,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "liquid-d1-ultra/threshold-gate": () => import("@/components/articles/liquid-d1-ultra/threshold-gate"),
   "liquid-open-d1/latency-explorer": () => import("@/components/articles/liquid-open-d1/latency-explorer"),
   "liquid-open-d1/readout-compare": () => import("@/components/articles/liquid-open-d1/readout-compare"),
+  "liquidcodec/quantizer-lab": () => import("@/components/articles/liquidcodec/quantizer-lab"),
+  "liquidcodec/token-budget": () => import("@/components/articles/liquidcodec/token-budget"),
   "lithos-metal/decode-budget": () => import("@/components/articles/lithos-metal/decode-budget"),
   "littlebit-0-1-bit/bpw-calculator": () => import("@/components/articles/littlebit-0-1-bit/bpw-calculator"),
   "littlebit-0-1-bit/init-error": () => import("@/components/articles/littlebit-0-1-bit/init-error"),
