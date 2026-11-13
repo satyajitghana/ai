@@ -119,6 +119,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "ax-k2/moe-scale": () => import("@/components/articles/ax-k2/moe-scale"),
   "ax-k2/precision-ladder": () => import("@/components/articles/ax-k2/precision-ladder"),
   "ax-k2/sga-path": () => import("@/components/articles/ax-k2/sga-path"),
+  "beach-house-three-models/matched-views": () => import("@/components/articles/beach-house-three-models/matched-views"),
   "bend-2/interaction-net": () => import("@/components/articles/bend-2/interaction-net"),
   "bend-2/perf-chart": () => import("@/components/articles/bend-2/perf-chart"),
   "big-moe-one-3090/miss-split": () => import("@/components/articles/big-moe-one-3090/miss-split"),
