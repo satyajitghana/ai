@@ -20,8 +20,12 @@ type WebMcpTool = {
   execute: (args: Record<string, unknown>) => Promise<{ content: { type: "text"; text: string }[] }>
 }
 
+// The draft moved: as of November 2026 tools are registered one at a time with
+// `document.modelContext.registerTool`. Earlier drafts (and origin-trial builds)
+// exposed `navigator.modelContext.provideContext({ tools })`. Support both.
 type ModelContext = {
-  provideContext: (ctx: { tools: WebMcpTool[] }) => void | Promise<void>
+  registerTool?: (tool: WebMcpTool) => unknown
+  provideContext?: (ctx: { tools: WebMcpTool[] }) => void | Promise<void>
 }
 
 const text = (value: unknown) => ({
@@ -85,11 +89,14 @@ const TOOLS: WebMcpTool[] = [
 
 export function WebMcp() {
   useEffect(() => {
-    const nav = navigator as Navigator & { modelContext?: ModelContext }
-    if (!nav.modelContext?.provideContext) return
+    const ctx =
+      (document as Document & { modelContext?: ModelContext }).modelContext ??
+      (navigator as Navigator & { modelContext?: ModelContext }).modelContext
+    if (!ctx) return
 
     try {
-      void nav.modelContext.provideContext({ tools: TOOLS })
+      if (ctx.registerTool) for (const tool of TOOLS) void ctx.registerTool(tool)
+      else if (ctx.provideContext) void ctx.provideContext({ tools: TOOLS })
     } catch {
       // A page that fails to register tools should still be a working page.
     }
