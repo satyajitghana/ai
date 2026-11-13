@@ -1316,6 +1316,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "restore-and-relight-loras/lora-budget": () => import("@/components/articles/restore-and-relight-loras/lora-budget"),
   "retrieve-for-train/judge-vs-humans": () => import("@/components/articles/retrieve-for-train/judge-vs-humans"),
   "retrieve-for-train/speedup-curve": () => import("@/components/articles/retrieve-for-train/speedup-curve"),
+  "rf-detr/knob-explorer": () => import("@/components/articles/rf-detr/knob-explorer"),
   "rf-detr/latency-frontier": () => import("@/components/articles/rf-detr/latency-frontier"),
   "rigel-hybrid-mamba/eval-gap": () => import("@/components/articles/rigel-hybrid-mamba/eval-gap"),
   "rigel-hybrid-mamba/flops-ledger": () => import("@/components/articles/rigel-hybrid-mamba/flops-ledger"),
