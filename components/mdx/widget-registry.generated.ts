@@ -1403,6 +1403,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "sglang/jump-forward": () => import("@/components/articles/sglang/jump-forward"),
   "sglang/lpm-queue": () => import("@/components/articles/sglang/lpm-queue"),
   "sglang/radix-tree": () => import("@/components/articles/sglang/radix-tree"),
+  "shadcn-improve/review-gates": () => import("@/components/articles/shadcn-improve/review-gates"),
+  "shadcn-improve/split-cost": () => import("@/components/articles/shadcn-improve/split-cost"),
   "shaders-webgpu/pass-planner": () => import("@/components/articles/shaders-webgpu/pass-planner"),
   "siamjepa/shuffle-teacher": () => import("@/components/articles/siamjepa/shuffle-teacher"),
   "siglip-2-coreml/byte-ledger": () => import("@/components/articles/siglip-2-coreml/byte-ledger"),
