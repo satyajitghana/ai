@@ -74,7 +74,8 @@ async function main() {
   const { R2_ACCESS_KEY_ID: id, R2_SECRET_ACCESS_KEY: secret } = process.env
   const r2 = ep && id && secret ? new AwsClient({ accessKeyId: id, secretAccessKey: secret, service: "s3", region: "auto" }) : null
   // No S3 keys: fall back to a logged-in Cloudflare CLI (`cf r2 objects put`), as on Satyajit's machine.
-  // It cannot set cache-control; the media zone's cache rule and the ?v=<hash> URLs carry the caching.
+  // It cannot set cache-control: the edge still caches for a year (zone rule), but browsers get
+  // max-age=14400 instead of a year. Re-put with S3 keys to fix the header.
   const cf = r2 ? null : await promisify(execFile)("cf", ["r2", "buckets", "list", "-q"]).then(() => "cf", () => null)
   if (!r2 && !cf) {
     console.error(
