@@ -12,7 +12,7 @@
 //        3 Fable's run · 4 what the blind judges said
 // params: { lanes[3], ends[3], verdicts { no, close, yes }, judged[3], axis }
 BESPOKE.define((() => {
-  const X0 = 360, X1 = 1100, MAXMIN = 95
+  const X0 = 510, X1 = 1110, MAXMIN = 95, MINGAP = 70
   // minutes after launch of each critic verdict, and of the finished file
   const RUNS = [
     { marks: [[21, 'no'], [26, 'no'], [42, 'yes']], end: 42 },                              // Sonnet
@@ -20,6 +20,12 @@ BESPOKE.define((() => {
     { marks: [[42, 'no'], [60, 'no'], [74, 'no'], [83, 'yes'], [93, 'yes']], end: 93 },      // Fable
   ]
   const xOf = (m) => X0 + (m / MAXMIN) * (X1 - X0)
+  // largest size (down to 14) at which a string fits maxW on one line, in this style's own type
+  const fit = (k, str, role, size, maxW) => {
+    let s = size
+    while (s > 14 && k.measure(str || '', { role, size: s }).w > maxW) s -= 1
+    return s
+  }
 
   return {
     stampAt: (k) => [1240, k.top + 10],
@@ -40,19 +46,19 @@ BESPOKE.define((() => {
       const ends = p.ends || ['', '', '']
       const judged = p.judged || ['', '', '']
       const V = p.verdicts || { no: 'no', close: 'close', yes: 'yes' }
-      const y0 = k.top + 110, gap = 210
+      const y0 = k.top + 100, gap = 195
 
       // the clock
       const ak = k.thumb ? 1 : k.easeOut(k.p(0, .8))
-      k.seed('axis'); k.line(k.partial([[X0, y0 + 2 * gap + 150], [X1, y0 + 2 * gap + 150]], ak), .7, k.dim)
-      k.text(p.axis || '', X1, y0 + 2 * gap + 190, { role: 'mono', size: 24, col: k.dim, align: 'right' })
+      k.seed('axis'); k.line(k.partial([[X0, y0 + 2 * gap + 142], [X1, y0 + 2 * gap + 142]], ak), .7, k.dim)
+      k.text(p.axis || '', X1, y0 + 2 * gap + 174, { role: 'mono', size: 24, col: k.dim, align: 'right' })
 
       for (let j = 0; j < 3; j++) {
         const y = y0 + j * gap
         const run = RUNS[j]
         const nk = k.thumb ? 1 : k.easeOut(k.p(0, .6, .2 + j * .15))
         k.push(); k.alpha(nk)
-        k.text(lanes[j], X0 - 30, y + 12, { role: 'head', size: 34, align: 'right', maxW: 230 })
+        k.text(lanes[j], 110, y + 11, { role: 'head', size: 30 })
         k.seed('ghost' + j); k.line([[X0, y], [X1, y]], .5, k.dim, { dash: [6, 10] })
         k.pop()
 
@@ -61,26 +67,36 @@ BESPOKE.define((() => {
         if (!k.thumb && i < step) continue
         const dur = j === 2 ? 3.0 : 2.2
         const rk = k.thumb ? 1 : k.p(step, dur, .2)
-        const nowMin = run.end * rk
+        // marks sit at their minute, pushed right to keep MINGAP between neighbours
+        const xs = []
+        for (const [at] of run.marks) xs.push(Math.max(xOf(at), xs.length ? xs[xs.length - 1] + MINGAP : X0))
+        const endX = Math.max(xOf(run.end), xs[xs.length - 1])
+        // the lane reaches its end at 80% of the step; each mark pops as the lane passes it
+        const lk = Math.min(1, rk / .8)
         const col = j === 2 ? k.P.a : j === 1 ? k.P.b : k.P.hi
-        k.seed('lane' + j); k.line([[X0, y], [xOf(nowMin), y]], 1.3, col)
+        k.seed('lane' + j); k.line([[X0, y], [X0 + (endX - X0) * lk, y]], 1.3, col)
 
         for (let m = 0; m < run.marks.length; m++) {
-          const [at, v] = run.marks[m]
-          if (nowMin < at) continue
-          const pop = k.thumb ? 1 : k.backOut(k.clamp((nowMin - at) / 6, 0, 1))
-          const x = xOf(at), yes = v === 'yes', close = v === 'close'
+          const v = run.marks[m][1], x = xs[m]
+          const frac = (x - X0) / (endX - X0)
+          const pop = k.thumb ? 1 : k.backOut(k.clamp((rk - .8 * frac) / .12, 0, 1))
+          if (pop <= 0) continue
+          const yes = v === 'yes', close = v === 'close'
           const fill = yes ? k.P.b : close ? k.P.light : k.paper
           k.push(); k.alpha(Math.min(1, pop))
-          k.seed('mark' + j + '-' + m); k.shape(k.circle(x, y, 14 * Math.min(1.15, pop)), { fill, op: .95, sw: .9 })
-          // labels alternate above and below the lane so neighbours 4 minutes apart do not collide
-          const ly = m % 2 === 0 ? y - 30 : y + 50
-          k.text(V[v] || '', x, ly, { role: 'mono', size: 20, align: 'center', col: yes ? k.ink : k.dim })
+          k.seed('mark' + j + '-' + m); k.shape(k.circle(x, y, 17 * Math.min(1.15, pop)), { fill, op: .95, sw: .9 })
+          // labels alternate above and below the lane, clear of the line
+          const ly = m % 2 === 0 ? y - 34 : y + 58
+          k.text(V[v] || '', x, ly, { role: 'mono', size: 27, align: 'center', col: yes ? k.ink : k.dim })
           k.pop()
         }
-        if (rk >= 1) {
-          k.text(ends[j], xOf(run.end) + 40, y + 10, { role: 'body', size: 26, maxW: 220 })
-          if (i === step) { k.point = [xOf(run.end), y]; k.mood = j === 0 ? 'surprised' : 'thinking' }
+        if (rk >= .92 || k.thumb) {
+          // totals in their own column right of the clock, off every line
+          const ek = k.thumb ? 1 : k.easeOut(k.clamp((rk - .92) / .08, 0, 1))
+          k.push(); k.alpha(ek)
+          k.text(ends[j], X1 + 50, y + 10, { role: 'body', size: fit(k, ends[j], 'body', 26, 190) })
+          k.pop()
+          if (i === step) { k.point = [endX, y]; k.mood = j === 0 ? 'surprised' : 'thinking' }
         }
       }
 
@@ -92,8 +108,8 @@ BESPOKE.define((() => {
           const y = y0 + j * gap
           k.push(); k.alpha(jk)
           const w = k.measure(judged[j], { role: 'body', size: 28 }).w + 36
-          k.seed('judged' + j); k.hl(X0 + 10, y + 70, w, 46, j === 2 ? k.P.hi : k.P.light, jk)
-          k.text(judged[j], X0 + 28, y + 102, { role: 'body', size: 28 })
+          k.seed('judged' + j); k.hl(X0 + 10, y + 80, w, 46, j === 2 ? k.P.hi : k.P.light, jk)
+          k.text(judged[j], X0 + 28, y + 112, { role: 'body', size: 28 })
           k.pop()
         }
         if (!k.thumb) { k.point = [X0 + 200, y0 + 2 * gap + 50]; k.mood = 'proud' }
