@@ -923,6 +923,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "multi-token-prediction/mtp-heads": () => import("@/components/articles/multi-token-prediction/mtp-heads"),
   "multi-token-prediction/mtp-speedup": () => import("@/components/articles/multi-token-prediction/mtp-speedup"),
   "multi-token-prediction/mtp-training": () => import("@/components/articles/multi-token-prediction/mtp-training"),
+  "multiset-vps-robotcar/demo-vs-board": () => import("@/components/articles/multiset-vps-robotcar/demo-vs-board"),
+  "multiset-vps-robotcar/pnp-ransac": () => import("@/components/articles/multiset-vps-robotcar/pnp-ransac"),
   "muon-optimizer/muon-step": () => import("@/components/articles/muon-optimizer/muon-step"),
   "muon-optimizer/spectrum-collapse": () => import("@/components/articles/muon-optimizer/spectrum-collapse"),
   "musacoder-gpu-kernels/mirror-pop": () => import("@/components/articles/musacoder-gpu-kernels/mirror-pop"),
