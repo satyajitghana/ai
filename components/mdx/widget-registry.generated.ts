@@ -1151,6 +1151,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "paint-with-code/redundant-rubric": () => import("@/components/articles/paint-with-code/redundant-rubric"),
   "paint-with-code/reward-mix-ablation": () => import("@/components/articles/paint-with-code/reward-mix-ablation"),
   "paint-with-code/training-loop": () => import("@/components/articles/paint-with-code/training-loop"),
+  "painted-valley-patch/hatch-shading": () => import("@/components/articles/painted-valley-patch/hatch-shading"),
+  "painted-valley-patch/paint-stages": () => import("@/components/articles/painted-valley-patch/paint-stages"),
   "panst3r/lift-cost": () => import("@/components/articles/panst3r/lift-cost"),
   "panst3r/merge-lab": () => import("@/components/articles/panst3r/merge-lab"),
   "paper-rewriter-finetune/finetune-cost": () => import("@/components/articles/paper-rewriter-finetune/finetune-cost"),
