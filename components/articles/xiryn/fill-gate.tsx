@@ -12,6 +12,7 @@
 // "not checked" rows are things the code does not look at, not things it gets wrong.
 
 import { useState } from "react"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 type Verdict = "pass" | "fail" | "none"
 
@@ -198,13 +199,14 @@ export function FillGate() {
         </span>
       </div>
 
-      <div className="flex flex-wrap gap-1.5 border-b px-4 py-3" role="tablist" aria-label="Scenario">
+      <div className="flex flex-wrap gap-1.5 border-b px-4 py-3" role="tablist" onKeyDown={tablistKeys()} aria-label="Scenario">
         {SCENARIOS.map((s) => (
           <button
             key={s.id}
             type="button"
             role="tab"
             aria-selected={s.id === id}
+            tabIndex={s.id === id ? 0 : -1}
             onClick={() => setId(s.id)}
             className={
               s.id === id

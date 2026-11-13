@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // The three channel classes the cpu-chat post names, as a defender sees them. This is a conceptual map and it is
 // REASONED from how shared CPU resources work, plus what the post REPORTS. It contains no procedure: no sizes,
@@ -55,13 +56,14 @@ export function ChannelClasses() {
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
         three channel classes · conceptual map for defenders, no procedure
       </div>
-      <div className="flex flex-wrap gap-1.5 border-b px-4 py-2.5" role="tablist">
+      <div className="flex flex-wrap gap-1.5 border-b px-4 py-2.5" role="tablist" onKeyDown={tablistKeys()}>
         {CLASSES.map((x) => (
           <button
             key={x.id}
             type="button"
             role="tab"
             aria-selected={x.id === id}
+            tabIndex={x.id === id ? 0 : -1}
             onClick={() => setId(x.id)}
             className={cn(
               "rounded border px-2.5 py-1 font-mono text-[11px] transition-colors",

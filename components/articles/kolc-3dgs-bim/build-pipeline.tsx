@@ -7,6 +7,7 @@
 // pages. Licences are as read, not legal advice. SSR-safe: plain state only.
 
 import { useState } from "react"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 type Stage = {
   key: string
@@ -117,7 +118,7 @@ export function BuildPipeline() {
         <span className="text-muted-foreground/60">licences as read in each repo</span>
       </div>
       <div className="p-4 sm:p-5">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Pipeline stage">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Pipeline stage">
           {STAGES.map((st, k) => {
             const on = k === i
             return (
@@ -126,6 +127,7 @@ export function BuildPipeline() {
                 type="button"
                 role="tab"
                 aria-selected={on}
+                tabIndex={on ? 0 : -1}
                 onClick={() => setI(k)}
                 className={
                   "rounded-md border px-2.5 py-1 font-mono text-xs transition-colors " +

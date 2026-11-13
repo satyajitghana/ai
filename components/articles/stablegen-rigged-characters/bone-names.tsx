@@ -7,6 +7,7 @@
 // Mixamo bone list (MEASURED). SSR-safe: plain state.
 
 import { useState } from "react"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 type Row = { chain: string; bones: string[]; bad?: number[] }
 type Case = { id: string; label: string; note: string; result: string; rows: Row[] }
@@ -75,13 +76,14 @@ export function BoneNames() {
         <span className="text-muted-foreground/70">real functions, mock armatures</span>
       </div>
       <div className="p-4 sm:p-5">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Rig naming case">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Rig naming case">
           {CASES.map((k) => (
             <button
               key={k.id}
               type="button"
               role="tab"
               aria-selected={k.id === id}
+              tabIndex={k.id === id ? 0 : -1}
               onClick={() => setId(k.id)}
               className={"rounded-md border px-2.5 py-1 font-mono text-xs " + (k.id === id ? "bg-foreground text-background" : "bg-background/50 text-muted-foreground hover:text-foreground")}
             >

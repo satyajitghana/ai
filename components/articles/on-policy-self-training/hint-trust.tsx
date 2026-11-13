@@ -5,6 +5,7 @@ import { useState } from "react"
 import { Range } from "@/components/articles/ui/range"
 
 import { PAPER_BASE_MMLU, PAPER_WRONG, TRUST, WRONG } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Two views of one claim: conditioning the teacher on a candidate answer is not
 // the same as training on it. Left, MEASURED in the toy (30 seeds): how much
@@ -123,12 +124,13 @@ export function HintTrust() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">context versus target · toy measured, paper reported</span>
-        <div role="tablist" className="flex gap-1 font-mono text-xs">
+        <div role="tablist" onKeyDown={tablistKeys()} className="flex gap-1 font-mono text-xs">
           {([["trust", "teacher's trust"], ["wrong", "wrong labels"]] as const).map(([id, label]) => (
             <button
               key={id}
               role="tab"
               aria-selected={tab === id}
+              tabIndex={tab === id ? 0 : -1}
               onClick={() => setTab(id)}
               className={`rounded-md border px-2.5 py-1 ${tab === id ? "bg-foreground text-background" : "text-muted-foreground"}`}
             >

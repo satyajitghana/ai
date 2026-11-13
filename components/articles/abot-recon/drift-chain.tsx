@@ -5,6 +5,7 @@ import { useState } from "react"
 import { cn } from "@/lib/utils"
 
 import { RUN } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Tab 1-2 MEASURED: toy.py composes 4,661 adjacent SE(3) increments (1.094 m per step, a KITTI-02-sized drive with
 // 12 random 90-degree turns), adds Gaussian noise to each increment, then Sim(3)-aligns to ground truth as the
@@ -60,13 +61,14 @@ export function DriftChain() {
           ? "reported · paper Table 8 · average ATE in metres, no loop closure"
           : `measured · toy.py · ${RUN.drift.frames.toLocaleString("en-US")} composed steps of ${RUN.drift.metres_per_frame} m · Sim(3)-aligned`}
       </div>
-      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" aria-label="View">
+      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" onKeyDown={tablistKeys()} aria-label="View">
         {TABS.map((t) => (
           <button
             key={t.id}
             type="button"
             role="tab"
             aria-selected={tab === t.id}
+            tabIndex={tab === t.id ? 0 : -1}
             onClick={() => setTab(t.id)}
             className={cn(
               "rounded border px-2.5 py-1 font-mono text-xs transition-colors",

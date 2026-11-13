@@ -21,6 +21,7 @@
 import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 const ASSETS = [
   { key: "jaguar", label: "Jaguar E-Type", leaves: 103, nodes: 139, depth: 5 },
@@ -61,7 +62,7 @@ export function CriticalPath() {
       </div>
 
       <div className="space-y-4 p-4 sm:p-5">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Assembly">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Assembly">
           {ASSETS.map((x) => {
             const on = x.key === key
             return (
@@ -70,6 +71,7 @@ export function CriticalPath() {
                 type="button"
                 role="tab"
                 aria-selected={on}
+                tabIndex={on ? 0 : -1}
                 onClick={() => setKey(x.key)}
                 className={
                   "rounded-md border px-2.5 py-1 font-mono text-xs transition-colors " +

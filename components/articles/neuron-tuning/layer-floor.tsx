@@ -6,6 +6,7 @@ import { mlog10 } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
 
 import { DOMAIN_LABEL, FLOOR_ARMS, MATCHED, SETS, type Target } from "./deep-data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Second CPU run (measured): three ways of choosing 8 neurons, each retrained at three learning rates and read at
 // the same held-out cross-entropy. Bars: F per domain (log), interpolated per domain along each arm's curve.
@@ -28,13 +29,14 @@ export function LayerFloor() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">measured · which 8 neurons · F per domain</span>
-        <div className="flex gap-1" role="tablist" aria-label="Strength target">
+        <div className="flex gap-1" role="tablist" onKeyDown={tablistKeys()} aria-label="Strength target">
           {(["0.5", "0.3"] as Target[]).map((v) => (
             <button
               key={v}
               type="button"
               role="tab"
               aria-selected={v === t}
+              tabIndex={v === t ? 0 : -1}
               onClick={() => setT(v)}
               className={cn(
                 "cursor-pointer rounded-full border px-2.5 py-1 font-mono text-[10px] transition-colors",

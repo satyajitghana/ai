@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Table 2 of the paper (arXiv 2610.28954): 300 coarse control videos (100 game renders, 100 geometry blockouts,
 // 100 stylized animations), every score averaged over 300 videos per method. Numbers are copied from the paper's
@@ -47,12 +48,13 @@ export function TableExplorer() {
   const ours = rank.get(6) ?? 0
   return (
     <figure className="not-prose my-8 rounded-lg border border-border p-4">
-      <div className="mb-3 flex flex-wrap gap-1.5" role="tablist" aria-label="Metric">
+      <div className="mb-3 flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Metric">
         {METRICS.map((x, i) => (
           <button
             key={x.id}
             role="tab"
             aria-selected={i === mi}
+            tabIndex={i === mi ? 0 : -1}
             onClick={() => setMi(i)}
             className={cn(
               "rounded-md border px-2.5 py-1 text-xs",

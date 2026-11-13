@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Seven of the paper's instantiations, read from arXiv 2609.20800v1 Table 2
 // (adapter, backbone, d; K x r), Tables 3, 4, 6, 9 and Figures 3, 4, 6 (the
@@ -116,9 +117,9 @@ export function DomainAtlas() {
       </div>
 
       <div className="p-3 sm:p-4">
-        <div className="mb-3 flex flex-wrap gap-1.5" role="tablist" aria-label="Domain">
+        <div className="mb-3 flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Domain">
           {DOMAINS.map((x) => (
-            <button key={x.key} type="button" role="tab" aria-selected={x.key === key}
+            <button key={x.key} type="button" role="tab" aria-selected={x.key === key} tabIndex={x.key === key ? 0 : -1}
               onClick={() => setKey(x.key)}
               className={cn(
                 "rounded-full border px-2.5 py-1 font-mono text-[11px] transition-colors hover:bg-muted/30",

@@ -8,6 +8,7 @@
 // 31b2dc9 (MEASURED by reading them). SSR-safe: plain state, no effects.
 
 import { useState } from "react"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 type Who = "app" | "script" | "agent"
 type Stage = { name: string; who: Who; files: string; does: string; doesNot: string }
@@ -77,7 +78,7 @@ export function WhoDecides() {
         <span className="text-muted-foreground/70">read from the skill and its scripts</span>
       </div>
       <div className="p-4 sm:p-5">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Pipeline stage">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Pipeline stage">
           {STAGES.map((x, k) => {
             const on = k === i
             return (
@@ -86,6 +87,7 @@ export function WhoDecides() {
                 type="button"
                 role="tab"
                 aria-selected={on}
+                tabIndex={on ? 0 : -1}
                 onClick={() => setI(k)}
                 className={
                   "rounded-md border px-2.5 py-1 font-mono text-xs transition-colors " +

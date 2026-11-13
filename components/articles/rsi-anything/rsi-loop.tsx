@@ -10,6 +10,7 @@ import {
   type StationId,
   type Status,
 } from "@/components/articles/rsi-anything/data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // The six-step loop from the paper's Figure 2, walked one station at a time,
 // for each of the four benchmark domains. Each station is coloured by what the
@@ -67,13 +68,14 @@ export function RsiLoop() {
         </div>
       </div>
 
-      <div className="mb-3 flex flex-wrap gap-2" role="tablist" aria-label="Domain">
+      <div className="mb-3 flex flex-wrap gap-2" role="tablist" onKeyDown={tablistKeys()} aria-label="Domain">
         {DOMAINS.map((d) => (
           <button
             key={d.id}
             type="button"
             role="tab"
             aria-selected={d.id === domainId}
+            tabIndex={d.id === domainId ? 0 : -1}
             onClick={() => {
               setDomainId(d.id)
               setRound(0)

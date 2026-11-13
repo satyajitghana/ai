@@ -6,6 +6,7 @@ import { Range } from "@/components/articles/ui/range"
 import { cn } from "@/lib/utils"
 
 import { BRIDGES, BRIDGE_SAMPLES, CANDIDATES, CONTROLS, DOSES } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Both widgets draw the numbers in data.ts, which are the output of scripts/neuron-lab/data_discover.py for the
 // "talk about bridges and landmarks" axis on Qwen3-0.6B. Nothing here is interpolated or invented.
@@ -70,9 +71,9 @@ export function BridgeSweep() {
         dose sweep: bridge words gained per 100 words, with random neurons beside it (measured, greedy, 5 prompts x 40 tokens)
       </div>
       <div className="space-y-3 px-4 py-3">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Candidate neuron">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Candidate neuron">
           {CANDIDATES.map((c, k) => (
-            <button key={k} role="tab" aria-selected={k === who} onClick={() => setWho(k)} className={cn("rounded border px-2 py-0.5 font-mono text-[11px]", k === who ? "border-foreground bg-muted" : "text-muted-foreground hover:text-foreground")}>
+            <button key={k} role="tab" aria-selected={k === who} tabIndex={k === who ? 0 : -1} onClick={() => setWho(k)} className={cn("rounded border px-2 py-0.5 font-mono text-[11px]", k === who ? "border-foreground bg-muted" : "text-muted-foreground hover:text-foreground")}>
               L{c.layer} N{c.neuron}
             </button>
           ))}

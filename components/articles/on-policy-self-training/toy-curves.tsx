@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { BASE, SERIES } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Round-by-round accuracy of the toy loop, mean of 30 seeds (measured). Each
 // series is one configuration; round 0 is the pretrained model, which has seen
@@ -33,12 +34,13 @@ export function ToyCurves() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">toy loop · accuracy by round · 30 seeds · measured</span>
-        <div role="tablist" className="flex gap-1 font-mono text-xs">
+        <div role="tablist" onKeyDown={tablistKeys()} className="flex gap-1 font-mono text-xs">
           {(["in-domain (seeded half)", "out-of-domain (unseen half)"] as const).map((label, k) => (
             <button
               key={label}
               role="tab"
               aria-selected={metric === k}
+              tabIndex={metric === k ? 0 : -1}
               onClick={() => setMetric(k as 0 | 1)}
               className={`rounded-md border px-2.5 py-1 ${metric === k ? "bg-foreground text-background" : "text-muted-foreground"}`}
             >

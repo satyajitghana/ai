@@ -5,6 +5,7 @@ import { useState } from "react"
 import { cn } from "@/lib/utils"
 
 import { GATE, GATE_METHODS, type GateMethod } from "./gate-data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Per token, how much each trained edit adds to the model: the sum over edited modules of |dW x|, with x the
 // unedited model's input to that module (measured on SmolLM2-135M-Instruct, seed 0). A neuron edit can only write
@@ -28,13 +29,14 @@ export function WhereItWrites() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">measured · where the edit writes, token by token</span>
-        <div className="flex flex-wrap gap-1" role="tablist" aria-label="Edit">
+        <div className="flex flex-wrap gap-1" role="tablist" onKeyDown={tablistKeys()} aria-label="Edit">
           {GATE_METHODS.map((k) => (
             <button
               key={k.id}
               type="button"
               role="tab"
               aria-selected={k.id === m}
+              tabIndex={k.id === m ? 0 : -1}
               onClick={() => setM(k.id)}
               className={cn(
                 "cursor-pointer rounded-full border px-2.5 py-1 font-mono text-[10px] transition-colors",

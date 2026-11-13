@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // The four numbers in the Atria Dawn launch post, and what each one counts.
 //
@@ -125,12 +126,13 @@ export function MetricExplorer() {
       </div>
 
       <div className="space-y-4 p-3 sm:p-4">
-        <div className="flex flex-wrap gap-1.5" role="tablist">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()}>
           {BENCHES.map((x) => (
             <button
               key={x.id}
               role="tab"
               aria-selected={x.id === id}
+              tabIndex={x.id === id ? 0 : -1}
               onClick={() => setId(x.id)}
               className={cn(
                 "rounded-md border px-2.5 py-1 font-mono text-[11px] transition-colors",

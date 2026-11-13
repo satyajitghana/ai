@@ -14,6 +14,7 @@ import { mlog10 } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
 
 import { LOCAL_SWEEP, SMOOTH_SWEEP } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 const W = 520
 const H = 250
@@ -45,7 +46,7 @@ export function PerturbSweep() {
         <span className="text-muted-foreground/60">our fits, mean of 5 draws</span>
       </div>
       <div className="p-4 sm:p-5">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Kind of deviation">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Kind of deviation">
           {(
             [
               ["smooth", "smooth deviation from radial"],
@@ -57,6 +58,7 @@ export function PerturbSweep() {
               type="button"
               role="tab"
               aria-selected={mode === id}
+              tabIndex={mode === id ? 0 : -1}
               onClick={() => setMode(id)}
               className={cn(
                 "cursor-pointer rounded-full border px-3 py-1 font-mono text-[11px] transition-colors",

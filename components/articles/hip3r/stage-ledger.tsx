@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // The paper's Table 6, stage by stage on identical VGGT-Omega predictions. REPORTED, not re-run.
 // Bars are drawn as a share of each dataset's own baseline so a 77 m and a 0.09 m error can sit in one chart.
@@ -35,13 +36,14 @@ export function StageLedger() {
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
         reported · HiP3R paper, Table 6, VGGT-Omega predictions · bar = share of that dataset&apos;s own baseline
       </div>
-      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" aria-label="Metric">
+      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" onKeyDown={tablistKeys()} aria-label="Metric">
         {METRICS.map((x) => (
           <button
             key={x.id}
             type="button"
             role="tab"
             aria-selected={m === x.id}
+            tabIndex={m === x.id ? 0 : -1}
             onClick={() => setM(x.id)}
             className={cn(
               "rounded border px-2.5 py-1 font-mono text-xs transition-colors",

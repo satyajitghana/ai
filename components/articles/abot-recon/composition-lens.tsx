@@ -6,6 +6,7 @@ import { mpow } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
 
 import { DEEP } from "./deep-data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // MEASURED (e1.py): per-step rotation errors are AR(1) with the same marginal spread (0.05 degrees per axis) and
 // a correlation rho that changes. For each rho: the adjacent-pair rotation loss, the rotation term of the paper's
@@ -71,13 +72,14 @@ export function CompositionLens() {
           ? "measured · e1.py · AR(1) rotation error, σ 0.05° per axis per step · 6 seeds"
           : "reasoned · Eq 13 of the paper, evaluated here · the paper does not publish γ"}
       </div>
-      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" aria-label="View">
+      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" onKeyDown={tablistKeys()} aria-label="View">
         {TABS.map((t) => (
           <button
             key={t.id}
             type="button"
             role="tab"
             aria-selected={tab === t.id}
+            tabIndex={tab === t.id ? 0 : -1}
             onClick={() => setTab(t.id)}
             className={cn(
               "rounded border px-2.5 py-1 font-mono text-xs transition-colors",

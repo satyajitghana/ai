@@ -15,6 +15,7 @@ import { useMemo, useState } from "react"
 
 import { macos, matan, mcos, mhypot, mtan } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 type CamId = "pinhole" | "fisheye" | "catadioptric" | "equirect"
 type Pt = { x: number; y: number; r: number; theta: number }
@@ -127,13 +128,14 @@ export function CameraRays() {
         <span className="text-muted-foreground/60">analytic camera models</span>
       </div>
       <div className="p-4 sm:p-5">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Camera model">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Camera model">
           {CAMS.map((c) => (
             <button
               key={c.id}
               type="button"
               role="tab"
               aria-selected={c.id === id}
+              tabIndex={c.id === id ? 0 : -1}
               onClick={() => setId(c.id)}
               className={cn(
                 "cursor-pointer rounded-full border px-3 py-1 font-mono text-[11px] transition-colors",

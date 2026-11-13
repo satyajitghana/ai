@@ -6,6 +6,7 @@ import { mlog10 } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
 
 import { PRED, type PredRow } from "./predictor-data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Each dot is one trained edit from the repository's experiment 03 (read from its committed result files, not
 // re-trained). x = off-target write after training: sum over layers of |dW a(x)| on unrelated tokens. y = change on
@@ -98,13 +99,14 @@ export function PredictorScatter() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">reported runs · correlation recomputed here</span>
-        <div className="flex flex-wrap gap-1" role="tablist" aria-label="Task">
+        <div className="flex flex-wrap gap-1" role="tablist" onKeyDown={tablistKeys()} aria-label="Task">
           {TASKS.map((t) => (
             <button
               key={t}
               type="button"
               role="tab"
               aria-selected={t === task}
+              tabIndex={t === task ? 0 : -1}
               onClick={() => {
                 setTask(t)
                 setHover(null)

@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // The pair-free pipeline, stepped. Every count in the captions is read from the paper's text (arXiv 2610.28954,
 // Sections 3-4 and Appendix A): 14,000 image pairs per modality, 389,854 real videos, 180.54M trainable adapter
@@ -75,12 +76,13 @@ export function PairFlow() {
   const by = Object.fromEntries(BOXES.map((b) => [b.id, b]))
   return (
     <figure className="not-prose my-8 rounded-lg border border-border p-4">
-      <div className="mb-3 flex flex-wrap gap-2" role="tablist" aria-label="Pipeline stage">
+      <div className="mb-3 flex flex-wrap gap-2" role="tablist" onKeyDown={tablistKeys()} aria-label="Pipeline stage">
         {STEPS.map((s, i) => (
           <button
             key={s.t}
             role="tab"
             aria-selected={i === step}
+            tabIndex={i === step ? 0 : -1}
             onClick={() => setStep(i)}
             className={cn(
               "rounded-md border px-3 py-1 text-sm",

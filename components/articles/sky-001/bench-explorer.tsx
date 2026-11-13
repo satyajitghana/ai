@@ -18,6 +18,7 @@
 // only, so server and client serialize the same strings.
 
 import { useState } from "react"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 type Row = { model: string; iou: number | null; s: number; usd: number; ours?: boolean }
 type Task = "cad" | "bim"
@@ -93,7 +94,7 @@ function Tabs<T extends string>({
   onChange: (v: T) => void
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5" role="tablist" aria-label={label}>
+    <div className="flex flex-wrap items-center gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label={label}>
       <span className="mr-1 font-mono text-[11px] text-muted-foreground">{label}</span>
       {options.map(([k, text]) => {
         const on = value === k
@@ -103,6 +104,7 @@ function Tabs<T extends string>({
             type="button"
             role="tab"
             aria-selected={on}
+            tabIndex={on ? 0 : -1}
             onClick={() => onChange(k)}
             className={
               "rounded-md border px-2.5 py-1 font-mono text-xs transition-colors " +

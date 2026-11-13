@@ -12,6 +12,7 @@ import { mlog10 } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
 
 import { GEOMS } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 const ROWS: { key: "pinhole" | "sh" | "radial" | "radialSh" | "free"; label: string; params: string }[] = [
   { key: "pinhole", label: "pinhole", params: "6" },
@@ -43,13 +44,14 @@ export function StageErrors() {
         <span className="text-muted-foreground/60">our oracle fit, measured</span>
       </div>
       <div className="p-4 sm:p-5">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Camera">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Camera">
           {GEOMS.map((c, i) => (
             <button
               key={c.id}
               type="button"
               role="tab"
               aria-selected={i === g}
+              tabIndex={i === g ? 0 : -1}
               onClick={() => setG(i)}
               className={cn(
                 "cursor-pointer rounded-full border px-3 py-1 font-mono text-[11px] transition-colors",

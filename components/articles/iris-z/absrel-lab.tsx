@@ -5,6 +5,7 @@ import { useMemo, useState } from "react"
 import { Range } from "@/components/articles/ui/range"
 import { mexp, mlog } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // AbsRel needs an alignment before it means anything. A relative-depth model
 // like Iris-Z emits *normalised log depth*: per image, the 2nd-98th percentile
@@ -210,13 +211,14 @@ export function AbsRelLab() {
       </div>
 
       <div className="space-y-4 p-3 sm:p-4">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="alignment">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="alignment">
           {METHODS.map((m) => (
             <button
               key={m.id}
               type="button"
               role="tab"
               aria-selected={method === m.id}
+              tabIndex={method === m.id ? 0 : -1}
               onClick={() => setMethod(m.id)}
               className={cn(
                 "cursor-pointer rounded-md border px-2.5 py-1 font-mono text-[11px] transition-colors",

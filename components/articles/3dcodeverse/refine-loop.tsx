@@ -17,6 +17,7 @@
 // only.
 
 import { useState } from "react"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 type Finding = { gate: string; part: string; text: string; cap: string }
 type Diff = { file: string; lines: string[] }
@@ -235,7 +236,7 @@ export function RefineLoop() {
       </div>
 
       <div className="p-4 sm:p-5">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Refinement round">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Refinement round">
           {[...ROUNDS.map((x) => x.label), "select"].map((label, k) => {
             const on = k === i
             return (
@@ -244,6 +245,7 @@ export function RefineLoop() {
                 type="button"
                 role="tab"
                 aria-selected={on}
+                tabIndex={on ? 0 : -1}
                 onClick={() => setI(k)}
                 className={
                   "rounded-md border px-2.5 py-1 font-mono text-xs transition-colors " +

@@ -17,6 +17,7 @@ import {
   RXN_POOL_BEST,
   RXN_RELEASE,
 } from "@/components/articles/rsi-anything/data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // The four launch numbers, each next to the comparison that decides what it
 // means. Code repair: the bars with the paper's one paired interval and the
@@ -44,13 +45,14 @@ export function ClaimLedger() {
   return (
     <div className="my-8 rounded-lg border bg-card p-4 sm:p-5">
       <div className="mb-3 font-heading text-sm font-semibold">Four headline numbers, each with what it is measured against</div>
-      <div className="mb-3 flex flex-wrap gap-2" role="tablist" aria-label="Claim">
+      <div className="mb-3 flex flex-wrap gap-2" role="tablist" onKeyDown={tablistKeys()} aria-label="Claim">
         {TABS.map((x) => (
           <button
             key={x.id}
             type="button"
             role="tab"
             aria-selected={x.id === tab}
+            tabIndex={x.id === tab ? 0 : -1}
             onClick={() => setTab(x.id)}
             className={
               "rounded-full border px-3 py-1 text-xs transition-colors " +

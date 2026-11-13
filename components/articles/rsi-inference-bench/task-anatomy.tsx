@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
 import { mcbrt } from "@/lib/dmath"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // One real task, end to end: tasks/regression_fp8_decode_throughput in
 // apple-aiml-research/ml-rsi-inference-bench at a6b10af (2026-10-16).
@@ -91,7 +92,7 @@ export function TaskAnatomy() {
         <div className="font-mono text-xs text-muted-foreground">measured · read from the task directory</div>
       </div>
 
-      <div className="mb-4 flex flex-wrap gap-1.5" role="tablist">
+      <div className="mb-4 flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()}>
         {TABS.map((t) => {
           const on = t.id === tab
           return (
@@ -100,6 +101,7 @@ export function TaskAnatomy() {
               type="button"
               role="tab"
               aria-selected={on}
+              tabIndex={on ? 0 : -1}
               onClick={() => setTab(t.id)}
               className="rounded-md border px-2.5 py-1.5 font-mono text-xs transition-colors"
               style={{ background: on ? ACCENT : "transparent", borderColor: on ? ACCENT : undefined, color: on ? "white" : undefined }}

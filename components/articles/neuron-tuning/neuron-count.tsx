@@ -6,6 +6,7 @@ import { mlog10 } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
 
 import { K_ARMS, MATCHED, RUNS, SETS, type Target } from "./deep-data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Second CPU run (measured): SmolLM2-135M-Instruct, fp32, seed 0, the repository's own reference sets. For each
 // number of neurons K (the first K of ONE ranking by make_edit.py's rule), F is interpolated at a held-out
@@ -44,13 +45,14 @@ export function NeuronCount() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">measured · how many neurons · SmolLM2-135M · seed 0</span>
-        <div className="flex gap-1" role="tablist" aria-label="Strength target">
+        <div className="flex gap-1" role="tablist" onKeyDown={tablistKeys()} aria-label="Strength target">
           {(["0.5", "0.3"] as Target[]).map((v) => (
             <button
               key={v}
               type="button"
               role="tab"
               aria-selected={v === t}
+              tabIndex={v === t ? 0 : -1}
               onClick={() => setT(v)}
               className={cn(
                 "cursor-pointer rounded-full border px-2.5 py-1 font-mono text-[10px] transition-colors",

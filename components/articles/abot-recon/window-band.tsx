@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Which past frames each frame's cross-frame attention may read. READ from the released code:
 // abot_recon/modeling/streaming/core/window_mask.py blocks key frame Tk for query frame Tq when
@@ -34,13 +35,14 @@ export function WindowBand() {
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
         read · window_mask.py and config.py in amap-cvlab/ABot-Recon · 24 frames shown, one cell per frame
       </div>
-      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" aria-label="Cache policy">
+      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" onKeyDown={tablistKeys()} aria-label="Cache policy">
         {MODES.map((m) => (
           <button
             key={m.id}
             type="button"
             role="tab"
             aria-selected={mode === m.id}
+            tabIndex={mode === m.id ? 0 : -1}
             onClick={() => setMode(m.id)}
             className={cn(
               "rounded border px-2.5 py-1 font-mono text-xs transition-colors",

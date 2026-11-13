@@ -5,6 +5,7 @@ import { useState } from "react"
 import { cn } from "@/lib/utils"
 
 import { RUN } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Top-down view of ONE simulated run (seed 0): the ground-truth two-lap loop and the trajectory each stage of our
 // simplified re-implementation recovers, after a Sim(3) fit to ground truth. MEASURED on a synthetic backend,
@@ -46,13 +47,14 @@ export function TrajectoryStages() {
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
         measured · synthetic 800-frame, two-lap trajectory · our simplified re-implementation, not HiP3R&apos;s code
       </div>
-      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" aria-label="Stage">
+      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" onKeyDown={tablistKeys()} aria-label="Stage">
         {STAGES.map((x, k) => (
           <button
             key={x.id}
             type="button"
             role="tab"
             aria-selected={i === k}
+            tabIndex={i === k ? 0 : -1}
             onClick={() => setI(k)}
             className={cn(
               "rounded border px-2.5 py-1 font-mono text-xs transition-colors",

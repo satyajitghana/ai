@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Counted with wc / grep / find on two checkouts: the vendored skill in this repo (brand-crew/skills/hand-drawn-canvas-animation)
 // and anidoodle at commit 9c20e77 (2026-10-31). Nothing here was rendered; these are sizes, not speeds.
@@ -61,13 +62,14 @@ export function EngineLedger() {
   )
   return (
     <figure className="not-prose my-8 rounded-xl border border-border bg-card p-4">
-      <div className="flex flex-wrap gap-2" role="tablist">
+      <div className="flex flex-wrap gap-2" role="tablist" onKeyDown={tablistKeys()}>
         {METRICS.map((x) => (
           <button
             key={x.id}
             type="button"
             role="tab"
             aria-selected={x.id === id}
+            tabIndex={x.id === id ? 0 : -1}
             onClick={() => setId(x.id)}
             className={cn(
               "rounded-full border px-3 py-1 text-xs",

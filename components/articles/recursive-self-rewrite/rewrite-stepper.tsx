@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // One StateM success rewritten into a Terminus 2 training trajectory, stage by
 // stage. The task, the runbook milestones and the quoted commands are the
@@ -218,7 +219,7 @@ export function RewriteStepper() {
         </div>
       </div>
 
-      <div className="mb-4 flex flex-wrap gap-1.5" role="tablist" aria-label="Rewrite stage">
+      <div className="mb-4 flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Rewrite stage">
         {STAGES.map((st, k) => {
           const on = k === i
           return (
@@ -227,6 +228,7 @@ export function RewriteStepper() {
               type="button"
               role="tab"
               aria-selected={on}
+              tabIndex={on ? 0 : -1}
               onClick={() => setI(k)}
               className="rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors"
               style={{

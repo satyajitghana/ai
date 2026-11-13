@@ -6,6 +6,7 @@ import { mlog10 } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
 
 import { RUN } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Two panels.
 // 1. REASONED from tensor shapes read in the released code: K and V for 725 tokens per frame
@@ -46,13 +47,14 @@ export function MemoryLedger() {
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
         reasoned · cross-frame K/V of the released model, {RUN.realKv.MiB_per_frame} MiB per frame · log scale
       </div>
-      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" aria-label="Stream length">
+      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" onKeyDown={tablistKeys()} aria-label="Stream length">
         {LENGTHS.map((x) => (
           <button
             key={x}
             type="button"
             role="tab"
             aria-selected={n === x}
+            tabIndex={n === x ? 0 : -1}
             onClick={() => setN(x)}
             className={cn(
               "rounded border px-2.5 py-1 font-mono text-xs transition-colors",

@@ -11,6 +11,7 @@
 // SSR-safe: plain state, no effects. Widths use + - * / only.
 
 import { useState } from "react"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 type Src = { key: string; dialect: string; rows: number; ids: number; heldOut?: boolean }
 
@@ -46,7 +47,7 @@ export function RowLedger() {
       </div>
 
       <div className="p-4 sm:p-5">
-        <div className="flex gap-1.5" role="tablist" aria-label="Counting unit">
+        <div className="flex gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Counting unit">
           {(
             [
               ["rows", `rows (${fmt(TOTAL_ROWS)})`],
@@ -60,6 +61,7 @@ export function RowLedger() {
                 type="button"
                 role="tab"
                 aria-selected={on}
+                tabIndex={on ? 0 : -1}
                 onClick={() => setUnit(k)}
                 className={
                   "rounded-md border px-2.5 py-1 font-mono text-xs transition-colors " +

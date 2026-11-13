@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils"
 
 import { CPU_RUNS } from "./cpu-data"
 import { REPO_AGG, type Group } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // A setting is one candidate neuron at one dose, scored on 8 sampled replies. Bars: the share of settings that reach
 // 0.375 (the tool's "found" bar) or the mean hit rate, by which screen listed the neuron, against random neurons.
@@ -90,13 +91,14 @@ export function ScreenPrecision() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">{tab.src}</span>
-        <div className="flex flex-wrap gap-1" role="tablist" aria-label="Run">
+        <div className="flex flex-wrap gap-1" role="tablist" onKeyDown={tablistKeys()} aria-label="Run">
           {TABS.map((r, k) => (
             <button
               key={r.id}
               type="button"
               role="tab"
               aria-selected={k === t}
+              tabIndex={k === t ? 0 : -1}
               onClick={() => setT(k)}
               className={cn(
                 "cursor-pointer rounded-full border px-2.5 py-1 font-mono text-[10px] transition-colors",

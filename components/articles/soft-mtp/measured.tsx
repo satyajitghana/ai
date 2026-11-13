@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { COST, RANK_167M, RANK_PAPER_1P2B, TRAIN, TRAIN_META, type TrainMetric } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Three things this article measured, in one card. Every number is read from
 // the run files in public/articles/soft-mtp/code/: the toy training runs
@@ -59,13 +60,14 @@ export function Measured() {
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
-      <div className="flex flex-wrap items-center gap-1.5 border-b px-4 py-2.5" role="tablist" aria-label="Measurement">
+      <div className="flex flex-wrap items-center gap-1.5 border-b px-4 py-2.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Measurement">
         {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
             role="tab"
             aria-selected={tab === t.id}
+            tabIndex={tab === t.id ? 0 : -1}
             onClick={() => setTab(t.id)}
             className={`rounded-md border px-2.5 py-1 font-mono text-xs focus-visible:outline focus-visible:outline-2 ${tab === t.id ? "bg-muted/60" : "hover:bg-muted/30"}`}
           >
@@ -79,13 +81,14 @@ export function Measured() {
         {tab === "train" && (
           <div>
             <p className="mb-2 text-[11px] leading-snug text-muted-foreground">{TRAIN_META}</p>
-            <div className="mb-2 flex flex-wrap gap-1.5" role="tablist" aria-label="Metric">
+            <div className="mb-2 flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Metric">
               {TRAIN.metrics.map((x) => (
                 <button
                   key={x.id}
                   type="button"
                   role="tab"
                   aria-selected={metric === x.id}
+                  tabIndex={metric === x.id ? 0 : -1}
                   onClick={() => setMetric(x.id)}
                   className={`rounded-md border px-2 py-0.5 font-mono text-[11px] focus-visible:outline focus-visible:outline-2 ${metric === x.id ? "bg-muted/60" : "hover:bg-muted/30"}`}
                 >

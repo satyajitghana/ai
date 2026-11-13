@@ -5,6 +5,7 @@ import { useState } from "react"
 import { cn } from "@/lib/utils"
 
 import { DEEP } from "./deep-data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // MEASURED (loop_closure_toy.py): ABot-Recon's loop-closure back end re-implemented on CPU with the released
 // defaults (NMS radius 25, frame separation 30, keyframe stride 50, loop weight 0.01 * sqrt(128 / 24), odometry
@@ -67,13 +68,14 @@ export function LoopLab() {
         measured · loop_closure_toy.py · {E2.frames.toLocaleString("en-US")} frames · {E2.n_raw_candidates} raw candidates → {E2.n_kept} after NMS ·
         rotation noise 0.05°, translation 2% a step
       </div>
-      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" aria-label="View">
+      <div className="flex flex-wrap gap-2 px-3 pt-3" role="tablist" onKeyDown={tablistKeys()} aria-label="View">
         {(["paths", "ate"] as const).map((t) => (
           <button
             key={t}
             type="button"
             role="tab"
             aria-selected={tab === t}
+            tabIndex={tab === t ? 0 : -1}
             onClick={() => setTab(t)}
             className={cn(
               "rounded border px-2.5 py-1 font-mono text-xs transition-colors",

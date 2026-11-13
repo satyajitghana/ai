@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { TILE_ROWS, type TileRow } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Our measurement, not the paper's: for random Gaussians under the real FIORD Hall_In lens, how often does the
 // rectangle 3DGUT builds from unscented-transform sigma points (rule read in gutProjector.cuh) cover every pixel
@@ -41,12 +42,13 @@ export function AdmissionMiss() {
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">projected rectangle vs. ray support · measured, 25 Gaussians per cell</span>
-        <div role="tablist" aria-label="Metric" className="flex flex-wrap gap-1">
+        <div role="tablist" onKeyDown={tablistKeys()} aria-label="Metric" className="flex flex-wrap gap-1">
           {METRICS.map((m) => (
             <button
               key={m.id}
               role="tab"
               aria-selected={m.id === mid}
+              tabIndex={m.id === mid ? 0 : -1}
               onClick={() => setMid(m.id)}
               className={`rounded-md border px-2 py-1 font-mono text-[11px] ${m.id === mid ? "bg-foreground text-background" : "bg-background"}`}
             >

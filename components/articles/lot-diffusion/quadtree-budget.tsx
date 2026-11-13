@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Quadtree token budget for a 1024x1024 FLUX.2 klein 4B image.
 //
@@ -142,13 +143,14 @@ export function QuadtreeBudget() {
       </div>
 
       <div className="space-y-4 px-4 py-4">
-        <div className="flex flex-wrap gap-2" role="tablist" aria-label="Layout source">
+        <div className="flex flex-wrap gap-2" role="tablist" onKeyDown={tablistKeys()} aria-label="Layout source">
           {SCENES.map((sc) => (
             <button
               key={sc.id}
               type="button"
               role="tab"
               aria-selected={scene === sc.id}
+              tabIndex={scene === sc.id ? 0 : -1}
               onClick={() => {
                 setScene(sc.id)
                 setSel(null)

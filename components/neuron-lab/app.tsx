@@ -16,6 +16,7 @@ import { EngineStatus, SteerPanel, type EngineState } from "./steer-panel"
 import type { NeuronEngine, Steer } from "./types"
 import { fmtNeuron, nkey } from "./types"
 import { useLabData } from "./use-lab-data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 type Tab = "steer" | "details" | "investigate" | "find"
 type Pane = "map" | "list" | "panel"
@@ -714,7 +715,7 @@ export function NeuronLabApp() {
             </button>
             </div>
           </div>
-          <div className="nl-tabs" role="tablist">
+          <div className="nl-tabs" role="tablist" onKeyDown={tablistKeys()}>
             {(
               [
                 ["steer", "Steer"],
@@ -723,7 +724,7 @@ export function NeuronLabApp() {
                 ["find", "Find"],
               ] as [Tab, string][]
             ).map(([k, label]) => (
-              <button key={k} className="nl-tab" role="tab" aria-selected={tab === k} onClick={() => setTab(k)}>
+              <button key={k} className="nl-tab" role="tab" aria-selected={tab === k} tabIndex={tab === k ? 0 : -1} onClick={() => setTab(k)}>
                 {label}
               </button>
             ))}

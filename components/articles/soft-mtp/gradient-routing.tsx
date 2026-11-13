@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // Table 1 of the paper as a diagram: which gradient reaches the shared output
 // head W and which reaches the MTP heads and the trunk, for each objective.
@@ -25,13 +26,14 @@ export function GradientRouting() {
 
   return (
     <figure className="my-8 overflow-hidden rounded-xl border bg-gradient-to-b from-muted/15 to-transparent">
-      <div className="flex flex-wrap items-center gap-1.5 border-b px-4 py-2.5" role="tablist" aria-label="Objective">
+      <div className="flex flex-wrap items-center gap-1.5 border-b px-4 py-2.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Objective">
         {MODES.map((x) => (
           <button
             key={x.id}
             type="button"
             role="tab"
             aria-selected={mode === x.id}
+            tabIndex={mode === x.id ? 0 : -1}
             onClick={() => setMode(x.id)}
             className={`rounded-md border px-2.5 py-1 font-mono text-xs focus-visible:outline focus-visible:outline-2 ${mode === x.id ? "bg-muted/60" : "hover:bg-muted/30"}`}
           >

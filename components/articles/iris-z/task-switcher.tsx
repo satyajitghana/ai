@@ -4,6 +4,7 @@ import { useState } from "react"
 
 import { Range } from "@/components/articles/ui/range"
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // One backbone, four tasks, read straight from iris_z/rgbd.py in the released
 // SDK (commit 6c8925f). Every task builds the same sequence: text tokens, then
@@ -138,13 +139,14 @@ export function TaskSwitcher() {
       </div>
 
       <div className="space-y-4 p-3 sm:p-4">
-        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="task">
+        <div className="flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="task">
           {TASKS.map((t) => (
             <button
               key={t.id}
               type="button"
               role="tab"
               aria-selected={t.id === taskId}
+              tabIndex={t.id === taskId ? 0 : -1}
               onClick={() => {
                 setTaskId(t.id)
                 setProgress(0)

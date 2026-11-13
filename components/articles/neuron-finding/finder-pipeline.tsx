@@ -6,6 +6,7 @@ import { mlog10 } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
 
 import { FUNNEL, NF_TOTAL_NEURONS } from "./data"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // The five stages of neuron-finder's default run, with the counts that go through each one. The counts are read from
 // the repository's own result files (one run, "calm", and the median over 46 runs); the stage descriptions are read
@@ -113,13 +114,14 @@ export function FinderPipeline() {
             )
           })}
         </svg>
-        <div className="mt-2 flex flex-wrap gap-1.5" role="tablist" aria-label="Pipeline stage">
+        <div className="mt-2 flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Pipeline stage">
           {STAGES.map((s, k) => (
             <button
               key={s.id}
               type="button"
               role="tab"
               aria-selected={k === i}
+              tabIndex={k === i ? 0 : -1}
               onClick={() => setI(k)}
               className={cn(
                 "cursor-pointer rounded-full border px-2.5 py-1 font-mono text-[10px] transition-colors",

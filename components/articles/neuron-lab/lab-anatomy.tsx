@@ -3,6 +3,7 @@
 import { useState } from "react"
 
 import { cn } from "@/lib/utils"
+import { tablistKeys } from "@/components/articles/ui/tablist-keys"
 
 // A schematic of the lab page (not a screenshot): the four regions and what each one does. Positions are literal
 // SVG coordinates, so the markup is identical on the server and the client.
@@ -42,9 +43,9 @@ export function LabAnatomy() {
             <circle key={i} cx={x} cy={y} r={3} fill={i % 2 ? "oklch(0.62 0.17 295)" : "oklch(0.7 0.15 65)"} />
           ))}
         </svg>
-        <div className="mt-2 flex flex-wrap gap-1.5" role="tablist" aria-label="Regions">
+        <div className="mt-2 flex flex-wrap gap-1.5" role="tablist" onKeyDown={tablistKeys()} aria-label="Regions">
           {PARTS.map((p) => (
-            <button key={p.id} role="tab" aria-selected={p.id === active} onClick={() => setActive(p.id)} className={cn("rounded border px-2 py-0.5 font-mono text-[11px]", p.id === active ? "border-foreground bg-muted" : "text-muted-foreground hover:text-foreground")}>
+            <button key={p.id} role="tab" aria-selected={p.id === active} tabIndex={p.id === active ? 0 : -1} onClick={() => setActive(p.id)} className={cn("rounded border px-2 py-0.5 font-mono text-[11px]", p.id === active ? "border-foreground bg-muted" : "text-muted-foreground hover:text-foreground")}>
               {p.n} {p.name}
             </button>
           ))}
