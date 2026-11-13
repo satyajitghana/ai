@@ -1557,6 +1557,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "tiel-coder-35b-a3b/dynamic-recipe": () => import("@/components/articles/tiel-coder-35b-a3b/dynamic-recipe"),
   "tiel-coder-35b-a3b/quant-ladder": () => import("@/components/articles/tiel-coder-35b-a3b/quant-ladder"),
   "tiktok-5-6b-videos/query-cost": () => import("@/components/articles/tiktok-5-6b-videos/query-cost"),
+  "tilelang/pipeline-stages": () => import("@/components/articles/tilelang/pipeline-stages"),
   "tilelang/tile-budget": () => import("@/components/articles/tilelang/tile-budget"),
   "time-smeared-video-gaussians/ghost-toy": () => import("@/components/articles/time-smeared-video-gaussians/ghost-toy"),
   "time-smeared-video-gaussians/smear-builder": () => import("@/components/articles/time-smeared-video-gaussians/smear-builder"),
