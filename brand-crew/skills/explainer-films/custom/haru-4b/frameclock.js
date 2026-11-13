@@ -32,7 +32,7 @@ BESPOKE.define((() => {
   }
 
   return {
-    stampAt: k => [1240, Math.max(k.top + 40, 230) - 10],
+    stampAt: k => [1570, Math.max(k.top + 40, 230) - 10],
     plan: () => ({
       min: [5.2, 5.6, 4.6, 4.6, 4.8],
       events: [
