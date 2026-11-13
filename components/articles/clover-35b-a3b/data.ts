@@ -36,3 +36,19 @@ export const CLAIMS = [
   { key: "h200", gpu: "NVIDIA H200", precision: "BF16", tps: 515, note: "agent tasks; the blog lists 365 for Qwen with DFlash2", gbps: 4800, gbpsNote: "4.8 TB/s, NVIDIA's published figure (not re-checked here)" },
   { key: "rtx", gpu: "RTX 5070 Ti, 16 GB", precision: "INT4", tps: 101.8, note: "MATH-500; the blog lists 48.5 for comparable models", gbps: 896, gbpsNote: "896 GB/s, the card's published figure (not re-checked here)" },
 ] as const
+
+// MEASURED (2026-11-13, RTX 3090 box, CPU forward of the official modeling code truncated to the 29 layers whose
+// shards fit on disk; routing at a layer depends only on the layers before it, so these are the full model's choices
+// at layers 0-28). Mean distinct experts per layer for one block of 32 tokens, over 16 blocks of four texts
+// (an agent JSON trace, Python, English and Chinese prose). verify: causal pass over 32 real tokens, no coreset.
+// preview0: [token, MASK x 31]; preview50: half the slots masked. "coreset" is after the top_p 0.9 block coreset.
+export const MEASURED_UNION = {
+  verify: 83.9,
+  verifyMin: 34,
+  verifyMax: 146,
+  preview0Raw: 44.9,
+  preview0Coreset: 23.8,
+  preview50Raw: 80.2,
+  preview50Coreset: 48.0,
+  agentVerify: 104.6,
+} as const

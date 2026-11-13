@@ -6,14 +6,14 @@ import { Range } from "@/components/articles/ui/range"
 import { mpow } from "@/lib/dmath"
 import { cn } from "@/lib/utils"
 
-import { CLAIMS, DENSE_PARAMS, EXPERTS, EXPERT_PARAMS, LAYERS, TOP_K } from "./data"
+import { CLAIMS, DENSE_PARAMS, EXPERTS, EXPERT_PARAMS, LAYERS, MEASURED_UNION, TOP_K } from "./data"
 
 // One decode round of Clover's self-speculative mode, as a bandwidth budget. A round is two forward passes over a
 // block of B tokens: a preview pass (the diffusion draft, with the MoE coreset limiting which experts a block uses)
 // and a causal verify pass (every token routed normally). A batch-size-1 pass is limited by the bytes it must read,
 // so: round time = (preview bytes + verify bytes) / (bandwidth x efficiency), speed = tokens kept per round / round
-// time. The weights are MEASURED, the bandwidths are vendors' published figures, and the expert-union sizes and the
-// efficiency are ASSUMPTIONS the reader sets: the checkpoint does not say how many distinct experts a block uses.
+// time. The weights and the default expert unions are MEASURED (data.ts, MEASURED_UNION), the bandwidths are published figures, and the
+// efficiency and tokens kept per round are ASSUMPTIONS the reader sets. The measured unions cover layers 0-28 only.
 
 function uniformUnion(tokens: number): number {
   // expected number of distinct experts when each token picks TOP_K of EXPERTS uniformly: E (1 - (1 - K/E)^tokens)
@@ -47,8 +47,8 @@ export function StepBudget() {
   const [claim, setClaim] = useState<(typeof CLAIMS)[number]["key"]>("h200")
   const [block, setBlock] = useState(32)
   const [eff, setEff] = useState(60)
-  const [up, setUp] = useState(64)
-  const [uv, setUv] = useState(Math.round(uniformUnion(32)))
+  const [up, setUp] = useState(Math.round(MEASURED_UNION.preview0Coreset))
+  const [uv, setUv] = useState(Math.round(MEASURED_UNION.verify))
   const [tpr, setTpr] = useState(8)
 
   const c = CLAIMS.find((x) => x.key === claim) ?? CLAIMS[1]
@@ -74,11 +74,22 @@ export function StepBudget() {
     setUv(Math.round(uniformUnion(b)))
     setTpr((t) => Math.min(t, b))
   }
+  const preset = (k: "measured" | "independent") => {
+    setBlock(32)
+    setTpr((t) => Math.min(t, 32))
+    if (k === "measured") {
+      setUp(Math.round(MEASURED_UNION.preview0Coreset))
+      setUv(Math.round(MEASURED_UNION.verify))
+    } else {
+      setUp(Math.round(uniformUnion(32)))
+      setUv(Math.round(uniformUnion(32)))
+    }
+  }
 
   return (
     <figure className="my-8 overflow-hidden rounded-md border">
       <div className="border-b px-3 py-2 font-mono text-xs text-muted-foreground">
-        the byte budget of one round · weights measured, bandwidths published, expert unions assumed
+        the byte budget of one round · weights and block-32 expert unions measured, bandwidths published
       </div>
       <div className="flex flex-wrap items-center gap-1.5 border-b px-4 py-2.5">
         <span className="font-mono text-[11px] text-muted-foreground">reported</span>
@@ -94,6 +105,17 @@ export function StepBudget() {
             )}
           >
             {x.gpu} {x.precision} {x.tps}
+          </button>
+        ))}
+        <span className="ml-3 font-mono text-[11px] text-muted-foreground">routing</span>
+        {(["measured", "independent"] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => preset(k)}
+            className="rounded border px-2 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors hover:bg-muted"
+          >
+            {k}
           </button>
         ))}
         <span className="ml-3 font-mono text-[11px] text-muted-foreground">block</span>
@@ -118,7 +140,7 @@ export function StepBudget() {
         <Slider label="experts per layer, verify" value={uv} min={8} max={256} step={1} fmt={(v) => `${v} of 256`} onChange={setUv} />
         <Slider label="tokens kept per round" value={Math.min(tpr, block)} min={1} max={block} step={1} fmt={(v) => `${v}`} onChange={setTpr} />
         <div className="font-mono text-[10px] text-muted-foreground">
-          uniform routing would touch about {uniform} of 256 experts for {block} tokens; real routing is correlated, so a block touches fewer, and the coreset setting exists to cut it further
+          uniform routing would touch about {uniform} of 256 experts for {block} tokens; measured over 29 of 40 layers, a causal pass over 32 real tokens touched {MEASURED_UNION.verify} on average, and a preview of one token plus 31 masks {MEASURED_UNION.preview0Coreset} after the coreset ({MEASURED_UNION.preview0Raw} before it)
         </div>
       </div>
 

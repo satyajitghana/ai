@@ -189,6 +189,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "clover-35b-a3b/accept-rule": () => import("@/components/articles/clover-35b-a3b/accept-rule"),
   "clover-35b-a3b/block-denoiser": () => import("@/components/articles/clover-35b-a3b/block-denoiser"),
   "clover-35b-a3b/param-stack": () => import("@/components/articles/clover-35b-a3b/param-stack"),
+  "clover-35b-a3b/round-diagram": () => import("@/components/articles/clover-35b-a3b/round-diagram"),
   "clover-35b-a3b/step-budget": () => import("@/components/articles/clover-35b-a3b/step-budget"),
   "coarse-to-real-c2r/pair-flow": () => import("@/components/articles/coarse-to-real-c2r/pair-flow"),
   "coarse-to-real-c2r/table-explorer": () => import("@/components/articles/coarse-to-real-c2r/table-explorer"),
