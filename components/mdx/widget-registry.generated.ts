@@ -432,6 +432,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "frontier-rl-cheaper/rollout-timeline": () => import("@/components/articles/frontier-rl-cheaper/rollout-timeline"),
   "fsearch/block-layout": () => import("@/components/articles/fsearch/block-layout"),
   "fsearch/index-race": () => import("@/components/articles/fsearch/index-race"),
+  "full-attention-census/census-chart": () => import("@/components/articles/full-attention-census/census-chart"),
+  "full-attention-census/kv-mix": () => import("@/components/articles/full-attention-census/kv-mix"),
   "full-bandwidth-transformer/bandwidth-gap": () => import("@/components/articles/full-bandwidth-transformer/bandwidth-gap"),
   "full-bandwidth-transformer/result-ledger": () => import("@/components/articles/full-bandwidth-transformer/result-ledger"),
   "functional-gradient-descent/adaptive-fit": () => import("@/components/articles/functional-gradient-descent/adaptive-fit"),
