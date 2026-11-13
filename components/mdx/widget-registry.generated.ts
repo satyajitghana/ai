@@ -358,6 +358,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "echo-3-world-model/credit-meter": () => import("@/components/articles/echo-3-world-model/credit-meter"),
   "echo-3-world-model/room-scan": () => import("@/components/articles/echo-3-world-model/room-scan"),
   "echo-3-world-model/surfel-sizes": () => import("@/components/articles/echo-3-world-model/surfel-sizes"),
+  "edge0-145b/where-it-lives": () => import("@/components/articles/edge0-145b/where-it-lives"),
+  "edge0-145b/window-sim": () => import("@/components/articles/edge0-145b/window-sim"),
   "edge0-streaming-moe/critical-path": () => import("@/components/articles/edge0-streaming-moe/critical-path"),
   "edge0-streaming-moe/memory-budget": () => import("@/components/articles/edge0-streaming-moe/memory-budget"),
   "efficient-gaussian-appearance/appearance-tradeoffs": () => import("@/components/articles/efficient-gaussian-appearance/appearance-tradeoffs"),
