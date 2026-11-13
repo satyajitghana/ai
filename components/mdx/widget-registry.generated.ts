@@ -343,6 +343,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "dsh-superagent/stage-ladder": () => import("@/components/articles/dsh-superagent/stage-ladder"),
   "dust-zeroth-order/noise-board": () => import("@/components/articles/dust-zeroth-order/noise-board"),
   "dust-zeroth-order/perturbation-race": () => import("@/components/articles/dust-zeroth-order/perturbation-race"),
+  "dwg-redraw-skill/provenance-ledger": () => import("@/components/articles/dwg-redraw-skill/provenance-ledger"),
+  "dwg-redraw-skill/redraw-diff": () => import("@/components/articles/dwg-redraw-skill/redraw-diff"),
   "e-means/kmeans-playground": () => import("@/components/articles/e-means/kmeans-playground"),
   "e-means/recipe-calculator": () => import("@/components/articles/e-means/recipe-calculator"),
   "eagle-3-speculative-decoding/draft-verify": () => import("@/components/articles/eagle-3-speculative-decoding/draft-verify"),
