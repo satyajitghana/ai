@@ -30,7 +30,17 @@ export type Prim = {
 }
 
 export type View = { name: string; eye: Vec3; target: Vec3 }
-export type Scene = { prims: Prim[]; views: View[]; min: Vec3; max: Vec3; triangles: number }
+export type Scene = {
+  prims: Prim[]
+  views: View[]
+  min: Vec3
+  max: Vec3
+  triangles: number
+  /** optional, from scene.extras.sun: unit vector toward the sun (glTF axes). Absent: the first house's sun. */
+  sun?: Vec3
+  /** optional, from scene.extras.interior: the box that counts as "inside" when switching to Walk. */
+  interior?: { min: Vec3; max: Vec3 }
+}
 
 /* ------------------------------------------------------------------ math */
 const m4 = () => {
@@ -261,7 +271,10 @@ export async function parseGlb(buf: ArrayBuffer): Promise<Scene> {
   const scene = json.scenes[json.scene ?? 0]
   for (const n of scene.nodes) await visit(n, m4(), {})
   const views: View[] = (scene.extras?.views ?? []) as View[]
-  return { prims, views, min, max, triangles }
+  const vec3 = (v: unknown): Vec3 | undefined => (Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === "number" && Number.isFinite(x)) ? (v as Vec3) : undefined)
+  const sun = vec3(scene.extras?.sun)
+  const imin = vec3(scene.extras?.interior?.min), imax = vec3(scene.extras?.interior?.max)
+  return { prims, views, min, max, triangles, sun, interior: imin && imax ? { min: imin, max: imax } : undefined }
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -450,12 +463,13 @@ const FOG: Vec3 = [0.93, 0.80, 0.68]
 export function createViewer(
   canvas: HTMLCanvasElement,
   scene: Scene,
-  opts: { onMode?: (m: Mode) => void; start?: string; animate?: boolean } = {},
+  opts: { onMode?: (m: Mode) => void; start?: string; animate?: boolean; /** view to drop the walker at; default "walk", else "deck" */ walkStart?: string } = {},
 ): Viewer {
   const glc = canvas.getContext("webgl2", { antialias: true, alpha: false, powerPreference: "high-performance" })
   if (!glc) throw new Error("WebGL2 is not available")
   const gl: WebGL2RenderingContext = glc
   const collider = new Collider(scene.prims)
+  const sunDir: Vec3 = scene.sun ?? SUN
   let prog: WebGLProgram, sky: WebGLProgram, gpu: GPUPrim[] = [], skyVao: WebGLVertexArrayObject
   let U: Record<string, WebGLUniformLocation | null> = {}
   let SU: Record<string, WebGLUniformLocation | null> = {}
@@ -749,7 +763,7 @@ export function createViewer(
     gl.disable(gl.DEPTH_TEST)
     gl.useProgram(sky)
     gl.uniformMatrix4fv(SU.uInvVP, false, invert(VP))
-    gl.uniform3fv(SU.uSunDir, SUN)
+    gl.uniform3fv(SU.uSunDir, sunDir)
     gl.bindVertexArray(skyVao)
     gl.drawArrays(gl.TRIANGLES, 0, 3)
     // scene
@@ -759,7 +773,7 @@ export function createViewer(
     gl.uniform3fv(U.uEye, eye)
     gl.uniform1f(U.uTime, time / 1000)
     gl.uniform3fv(U.uFog, FOG)
-    gl.uniform3fv(U.uSunDir, SUN)
+    gl.uniform3fv(U.uSunDir, sunDir)
     gl.uniform1i(U.uTex, 0)
     const opaque = gpu.filter((g) => !g.prim.blend)
     const blended = gpu.filter((g) => g.prim.blend).sort((a, b) => {
@@ -833,8 +847,9 @@ export function createViewer(
     if (m === "walk") {
       const [eye] = eyeAndTarget()
       // drop the walker on the front deck, facing the living room, unless the orbit eye is already inside
-      const deck = scene.views.find((v) => v.name === "walk") ?? scene.views.find((v) => v.name === "deck")
-      const inside = eye[0] > -8 && eye[0] < 8 && eye[2] > -5 && eye[2] < 7 && eye[1] < 9
+      const deck = (opts.walkStart ? scene.views.find((v) => v.name === opts.walkStart) : undefined) ?? scene.views.find((v) => v.name === "walk") ?? scene.views.find((v) => v.name === "deck")
+      const box = scene.interior ?? { min: [-8, -Infinity, -5] as Vec3, max: [8, 9, 7] as Vec3 }
+      const inside = eye[0] > box.min[0] && eye[0] < box.max[0] && eye[1] > box.min[1] && eye[1] < box.max[1] && eye[2] > box.min[2] && eye[2] < box.max[2]
       if (inside) setWalkFrom({ name: "here", eye, target: orbit.target })
       else if (deck) setWalkFrom(deck)
     }

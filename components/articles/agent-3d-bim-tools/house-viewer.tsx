@@ -1,6 +1,8 @@
 "use client"
 
-// The beach house we built with the one-prompt method, explorable in the page.
+// A beach house built with the one-prompt method, explorable in the page. With
+// no props it is the first house (Opus 5.5's); `src`, `poster`, `places` and the
+// other optional props point the same viewer at another build of the brief.
 // Server render: the poster and a button, nothing else. WebGL starts only when
 // the reader clicks "Explore in 3D": then the renderer module and the .glb
 // (lighting baked into three JPEG atlases, about 6 MB) are fetched, parsed by
@@ -16,10 +18,38 @@ const GLB = "/articles/agent-3d-bim-tools/house.glb"
 const POSTER = "/articles/agent-3d-bim-tools/house-poster.jpg"
 const DOWNLOAD = "about 6 MB"
 
-const PLACES: { id: string; label: string }[] = [
-  { id: "aerial", label: "Overview" },
-  { id: "hero", label: "From the waterline" },
-  { id: "boardwalk", label: "Boardwalk" },
+const POSTER_ALT =
+  "A two-storey beach house with sea-glass blue siding, white trim and a dark metal roof, standing on piers behind a dune. A wraparound deck and an upstairs balcony face the sea, and a boardwalk runs down through dune grass to the sand."
+const CAPTION =
+  "The beach house from our run of the one-prompt loop. Its lighting was baked in Blender, so what you see is the same late-afternoon sun from every angle. Drag to orbit, scroll or pinch to zoom, or switch to Walk and go inside."
+
+/** One entry of the "Go to" list: `id` is a view name stored in the .glb (scene.extras.views). */
+export type HousePlace = { id: string; label: string; /** seen from outside: shown in Orbit rather than Walk */ outside?: boolean }
+
+export type HouseViewerProps = {
+  /** site path of the .glb (goes through mediaUrl). Default: the first house. */
+  src?: string
+  /** site path of the poster shown before WebGL starts */
+  poster?: string
+  posterAlt?: string
+  /** what the canvas is called for screen readers, e.g. "the beach house" */
+  label?: string
+  /** the size note under the button, e.g. "about 6 MB" */
+  download?: string
+  /** the "Go to" list; ids must be views in the .glb */
+  places?: HousePlace[]
+  /** the view the camera starts at and "Reset view" returns to */
+  start?: string
+  /** the view the walker is dropped at when Walk is chosen from outside (default: the .glb's "walk", else "deck") */
+  walkStart?: string
+  /** the orbit-mode caption */
+  caption?: string
+}
+
+const PLACES: HousePlace[] = [
+  { id: "aerial", label: "Overview", outside: true },
+  { id: "hero", label: "From the waterline", outside: true },
+  { id: "boardwalk", label: "Boardwalk", outside: true },
   { id: "deck", label: "Front deck" },
   { id: "living", label: "Living room" },
   { id: "kitchen", label: "Kitchen and dining" },
@@ -32,7 +62,17 @@ const PLACES: { id: string; label: string }[] = [
 
 type Phase = "idle" | "loading" | "ready" | "error"
 
-export function HouseViewer() {
+export function HouseViewer({
+  src = GLB,
+  poster = POSTER,
+  posterAlt = POSTER_ALT,
+  label = "the beach house",
+  download = DOWNLOAD,
+  places = PLACES,
+  start: startView = "aerial",
+  walkStart,
+  caption = CAPTION,
+}: HouseViewerProps = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const boxRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
@@ -40,7 +80,7 @@ export function HouseViewer() {
   const [pct, setPct] = useState(0)
   const [error, setError] = useState("")
   const [mode, setMode] = useState<Mode>("orbit")
-  const [place, setPlace] = useState("aerial")
+  const [place, setPlace] = useState(startView)
 
   useEffect(() => () => viewerRef.current?.dispose(), [])
   // focus the canvas once it is shown, so the keys work without another click
@@ -55,7 +95,7 @@ export function HouseViewer() {
     try {
       const probe = document.createElement("canvas").getContext("webgl2")
       if (!probe) throw new Error("This browser has no WebGL2, so the model cannot be shown here.")
-      const [{ createViewer, parseGlb }, res] = await Promise.all([import("./house-gl"), fetch(mediaUrl(GLB), { mode: "cors" })])
+      const [{ createViewer, parseGlb }, res] = await Promise.all([import("./house-gl"), fetch(mediaUrl(src), { mode: "cors" })])
       if (!res.ok) throw new Error(`The model did not download (HTTP ${res.status}).`)
       const total = Number(res.headers.get("content-length")) || 0
       let buf: ArrayBuffer
@@ -82,13 +122,13 @@ export function HouseViewer() {
       const scene = await parseGlb(buf)
       const canvas = canvasRef.current
       if (!canvas) return
-      viewerRef.current = createViewer(canvas, scene, { onMode: setMode, start: "aerial" })
+      viewerRef.current = createViewer(canvas, scene, { onMode: setMode, start: startView, walkStart })
       setPhase("ready")
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setPhase("error")
     }
-  }, [phase])
+  }, [phase, src, startView, walkStart])
 
   const choose = (m: Mode) => {
     viewerRef.current?.setMode(m)
@@ -97,7 +137,7 @@ export function HouseViewer() {
   }
   const go = (id: string) => {
     setPlace(id)
-    const outside = id === "aerial" || id === "hero" || id === "boardwalk"
+    const outside = places.find((p) => p.id === id)?.outside ?? false
     const v = viewerRef.current
     if (!v) return
     v.setMode(outside ? "orbit" : "walk")
@@ -120,8 +160,8 @@ export function HouseViewer() {
         {phase !== "ready" && (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={mediaUrl(POSTER)}
-            alt="A two-storey beach house with sea-glass blue siding, white trim and a dark metal roof, standing on piers behind a dune. A wraparound deck and an upstairs balcony face the sea, and a boardwalk runs down through dune grass to the sand."
+            src={mediaUrl(poster)}
+            alt={posterAlt}
             className="absolute inset-0 h-full w-full object-cover"
             loading="lazy"
           />
@@ -130,7 +170,7 @@ export function HouseViewer() {
           ref={canvasRef}
           tabIndex={0}
           role="application"
-          aria-label="3D model of the beach house. Orbit mode: drag to turn, scroll or pinch to zoom, shift-drag to pan, arrow keys turn. Walk mode: W A S D or arrow keys to move, drag to look, shift to run."
+          aria-label={`3D model of ${label}. Orbit mode: drag to turn, scroll or pinch to zoom, shift-drag to pan, arrow keys turn. Walk mode: W A S D or arrow keys to move, drag to look, shift to run.`}
           className={phase === "ready" ? "absolute inset-0 h-full w-full touch-none outline-none focus-visible:ring-2 focus-visible:ring-ring" : "hidden"}
         />
         {phase !== "ready" && (
@@ -144,7 +184,7 @@ export function HouseViewer() {
                 <button type="button" onClick={start} className="rounded-lg bg-background/95 px-4 py-2 text-sm font-semibold shadow-md hover:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   Explore in 3D
                 </button>
-                <span className="rounded bg-black/50 px-2 py-0.5 font-mono text-[11px] text-white">{phase === "error" ? error : `${DOWNLOAD}, WebGL2`}</span>
+                <span className="rounded bg-black/50 px-2 py-0.5 font-mono text-[11px] text-white">{phase === "error" ? error : `${download}, WebGL2`}</span>
               </div>
             )}
           </div>
@@ -168,7 +208,7 @@ export function HouseViewer() {
           <label className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
             Go to
             <select value={place} onChange={(e) => go(e.target.value)} className="rounded-md border bg-background px-1.5 py-1 font-mono text-xs text-foreground">
-              {PLACES.map((p) => (
+              {places.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.label}
                 </option>
@@ -179,7 +219,7 @@ export function HouseViewer() {
             type="button"
             onClick={() => {
               viewerRef.current?.reset()
-              setPlace("aerial")
+              setPlace(startView)
             }}
             className={btn}
           >
@@ -190,7 +230,7 @@ export function HouseViewer() {
       <figcaption className="border-t px-4 py-3 text-sm text-muted-foreground">
         {mode === "walk" && phase === "ready"
           ? "Walk: W A S D or the arrow keys to move, drag to look, Shift to run. On a phone, drag from the lower left to move. Stairs and the deck steps climb as you walk into them."
-          : "The beach house from our run of the one-prompt loop. Its lighting was baked in Blender, so what you see is the same late-afternoon sun from every angle. Drag to orbit, scroll or pinch to zoom, or switch to Walk and go inside."}
+          : caption}
       </figcaption>
     </figure>
   )
