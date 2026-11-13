@@ -526,6 +526,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "harness-effect/controlled-swap": () => import("@/components/articles/harness-effect/controlled-swap"),
   "harness-effect/harness-leverage": () => import("@/components/articles/harness-effect/harness-leverage"),
   "harness-effect/token-maxing": () => import("@/components/articles/harness-effect/token-maxing"),
+  "haru-4b/context-budget": () => import("@/components/articles/haru-4b/context-budget"),
+  "haru-4b/duplex-timeline": () => import("@/components/articles/haru-4b/duplex-timeline"),
   "hatchzip/batch-replay": () => import("@/components/articles/hatchzip/batch-replay"),
   "hatchzip/disk-trace": () => import("@/components/articles/hatchzip/disk-trace"),
   "hauhaucs-qwen-fastmtp/quant-ledger": () => import("@/components/articles/hauhaucs-qwen-fastmtp/quant-ledger"),

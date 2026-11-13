@@ -1,0 +1,246 @@
+---
+title: "Haru-4B: a voice model that listens and talks on one 133 ms clock"
+description: "Higurashi's Haru-4B is an Apache-2.0 full-duplex speech model: Qwen3.5-4B with three streams summed into one position every 133 ms, 64-dimensional continuous audio latents from VibeVoice's codec, and a one-step MeanFlow head instead of Moshi's depth transformer. I read the code and the safetensors header (5.27B parameters in the file, a 363M head, a 687M codec), worked through the latency and memory arithmetic, and checked the claims. The 65 ms figure excludes up to 133 ms of framing, the 13 million hours of two-sided conversation were separated from mono recordings, and there is no benchmark of any kind yet. Measured from the four demo recordings' separate channels, the model takes the floor with a median gap of +0.20 s, 38% of the time in overlap."
+date: 2026-11-13
+tags:
+  - speech
+  - voice-agents
+  - realtime
+  - audio
+  - flow-matching
+  - hybrid-attention
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Full-duplex speech from first principles, Haru's code and header against its claims, latency and cache arithmetic, and turn timing from its demo tracks."
+topic: speech-audio
+kind: model
+level: practitioner
+runsOn: consumer-gpu
+licence: Apache-2.0
+---
+
+import { DuplexTimeline } from "@/components/articles/haru-4b/duplex-timeline"
+import { ContextBudget } from "@/components/articles/haru-4b/context-budget"
+
+On 13 November the Japanese startup Higurashi [posted](https://x.com/HigurashiAI/status/2121052314773717386) that it had open-sourced "our 4B full-duplex speech model under Apache 2.0", trained "on 40M hours" and using "continuous tokens". The Japanese post it quoted leads with the part people actually notice when they listen: 自然に笑い、相槌を打つ, it laughs naturally and does *aizuchi*, the short "un", "sou sou", "mm-hm" a Japanese listener drops into the other person's sentence to show they are following.
+
+There is a lot to like about the release. Weights on [Hugging Face](https://huggingface.co/higurashi-ai/Haru-4B), inference code in three flavours on [GitHub](https://github.com/higurashi-ai/Haru) (PyTorch, MLX with a native Mac app, a vLLM-Omni plugin), a [technical blog](https://blog.higurashi.ai/melte/haru4b/) that names its references, and a [project page](https://www.higurashi.ai/haru4b/) with four demo conversations. There is no paper, no training code, and, which matters more, no evaluation: not a word error rate, not a turn-taking benchmark, not a comparison with Moshi.
+
+So this is a teardown of the design, from the files. I read the code at commit `7fe6b76`, read `config.json`, and pulled the safetensors header with two HTTP range requests to count what is in the 10.5 GB file. I did not run the model. What I could measure without running it is the timing in Higurashi's own demo recordings, whose two speakers sit on separate stereo channels.
+
+<Video
+  src="/articles/haru-4b/clip1"
+  poster="/articles/haru-4b/clip1-poster.jpg"
+  alt="Two waveform lanes on a dark background, the person's speech in cyan on top and the model's in purple below, with a white playhead moving right. Labels above the lanes read Laughter, Uses filler words while thinking, Continues speaking while the user backchannels, Gets excited when discussing her favorite topics, and Backchannel. Thin red bars mark moments when both lanes carry sound. A transcript box under the lanes shows the person saying rom-com of all time and the model answering that its favourite rom-com would be How to Lose a Guy in 10 Days."
+  caption="Fourteen seconds of the English demo, muted: the playhead passes the mark where the model keeps talking while the person backchannels, and the red bars are the overlaps. The full conversation, with sound, is in the post and on the project page (video from @HigurashiAI's post on X)."
+/>
+
+<ModelCard repo="higurashi-ai/Haru-4B" />
+
+## A voice pipeline spends most of its time waiting
+
+Most voice assistants you can call today are a relay. A voice activity detector (VAD) listens for you to stop. Then a speech recogniser (ASR) turns your audio into text, a text LLM writes a reply, and a text-to-speech model (TTS) reads it out. The trouble is the joins, and the first is the worst. The VAD cannot know you have finished a sentence until you have been silent for a while, and "a while" is a setting: too short and it cuts you off when you pause to think, too long and every reply starts late. Only after that wait does ASR finalise, the LLM start, and TTS produce its first audio. The gaps add. Higurashi's own diagram of the cascade puts "~2-3 sec" under that stack and labels it "Illustrative latency", which is fair: it depends entirely on the parts you pick and how you stream between them. Hugging Face's [speech-to-speech](/articles/speech-to-speech) pipeline spends real engineering on shaving them.
+
+The second problem is what the relay throws away. Text is the only thing that crosses from ASR to the LLM, so your tone, your laugh and the fact that you said "yeah" while it was talking never reach the model that decides what to say. And the relay has one floor: either you speak or it does. A backchannel looks to a VAD exactly like an interruption. Turn barge-in on and a polite "mm-hm" stops the reply mid-sentence; turn it off and the system talks straight over a real interruption. You can only choose which mistake to make, and how long a sound has to last before it counts.
+
+A full-duplex model throws out the floor. It hears and speaks every frame, all the time, and "being quiet" is just the model predicting that its next frame of audio is silence. The widget plays one scripted exchange both ways. Set the cascade's stage times to whatever you believe your stack does; the full-duplex lane uses only the frame length and Higurashi's measured per-frame pipeline time.
+
+<DuplexTimeline />
+
+Try the backchannel with barge-in on and a 200 ms threshold: the cascade stops for a 300 ms "mm-hm" and then pays a full new turn to recover. Raise the threshold to 400 ms and the mm-hm survives, but now any real interruption is caught 200 ms later. The full-duplex lane has no threshold to tune. It has a different problem: its timing is learned, and Higurashi has not measured it. Further down I measure what its own demo recordings show.
+
+## Three streams, one position, every 133 ms
+
+Think of a grid. Time runs left to right in fixed frames, and each frame has a slot for the user's audio, the model's audio and the model's text. The microphone fills the user's slot; the model fills its own two, one frame ahead.
+
+[Moshi](https://arxiv.org/abs/2410.00037), Kyutai's 2024 model and the first open one that really listens while it talks, set the template. Its frames are 80 ms (12.5 Hz), and each frame of audio is eight discrete codes from its Mimi codec, so one column of Moshi's grid holds 17 tokens: one text token, eight for its own voice, eight for yours. A 7B "temporal" transformer sums the embeddings of a whole column into one vector and takes one step per frame; a small "depth" transformer then generates the model's text token and eight codes one after another inside the frame. Predicting the text first is Kyutai's Inner Monologue. I took that architecture apart in [PersonaPlex](/articles/personaplex-full-duplex), NVIDIA's fine-tune of Moshi.
+
+Haru keeps the summed column and drops the rest. Higurashi's figure lays out the options in four rows.
+
+<Figure
+  src="/articles/haru-4b/fig1.png"
+  alt="Four dark panels stacked vertically. Cascaded half-duplex systems: user speech to ASR to a transcript, Hello, to a language model to reply text, Hi there, to TTS to model speech. Turn-based half-duplex speech-to-speech models: the language model listens to four user audio tokens with no output, then speaks Hi, there and two audio tokens, then EOS, and cannot hear the user while speaking. Interleaved single-stream full-duplex models: user, text and model tokens alternate one per position, 18 tokens for six frames, with PAD and EOP tokens on the text stream. Multi-stream full-duplex models, marked Haru: user, model and text tokens are added together into one position per frame, six tokens for six frames, and the language model predicts the next text and next model audio together."
+  caption="Four ways to build spoken dialogue. Interleaving the three streams costs three positions per frame (18 for six frames); summing them into one position costs 6, which is Haru's choice (Higurashi technical blog, multi-stream modeling figure)."
+/>
+
+The summing is one function in `haru/haru/models/haru.py`:
+
+```python
+# higurashi-ai/Haru @ 7fe6b76, haru/haru/models/haru.py (abridged)
+def embed(self, tokens, model_latents=None, user_latents=None, model_mask=None, user_mask=None):
+    x = self.lm.embed_tokens(tokens)
+    for proj, latents, mask in (
+        (self.model_audio_proj, model_latents, model_mask),
+        (self.user_audio_proj, user_latents, user_mask),
+    ):
+        if latents is None:
+            continue
+        y = proj(self.scale_latents(latents).to(x.dtype))
+        if mask is not None:
+            y = y * mask[..., None].to(y.dtype)
+        x = x + y
+    return x
+```
+
+A text token's embedding, plus the model's own last audio latent through a small projector, plus the user's audio latent through another. One vector, one position. The two projectors are each a 64-to-2,560 linear layer, an RMSNorm and a 2,560-square linear layer: 6,725,120 parameters apiece in the header.
+
+The hidden state at that position then has to produce two things for the next frame: a text token and an audio latent. The text token comes from the tied output embedding, the usual LM head. The audio latent comes from a separate head, and that head is where Haru differs most from Moshi.
+
+<Figure
+  src="/articles/haru-4b/fig2.png"
+  alt="Haru-4B architecture shown over five frames at 7.5 Hz, 133 ms per frame. In each frame, input speech passes through a speech tokenizer into a purple user latent, which is added to an orange model latent and a green or grey text token, EOP in the first frame and then Hi, there, how, are. The sum enters one shared language model. Its output branches to a text head and a speech head, which produce the next text token, Hi, there, how, are, you, and the next speech latent; these are decoded by a text tokenizer and a speech tokenizer into output text and output audio."
+  caption="Haru over five frames: in each 133 ms frame the user latent, the model's previous latent and its previous text token are summed into one position, and the output branches into a text head and a speech head (Higurashi project page, architecture figure)."
+/>
+
+## What "continuous tokens" means here
+
+Moshi's audio is discrete. Mimi encodes each 80 ms of 24 kHz audio to a vector and then quantises it with a residual vector quantiser: pick the nearest of 2,048 codebook entries, subtract it, quantise the remainder with the next codebook, eight times. Eight codes of 11 bits, 12.5 times a second, is the 1.1 kbps the Moshi paper quotes. Discrete codes suit a softmax, and cost twice: quantisation throws information away, and a frame becomes eight tokens generated one after another. The Moshi paper does the sum itself: flattening the codes "would require a sequence length of 100 steps per second of audio", which is why it needs the depth transformer.
+
+Haru's audio is a 64-dimensional real-valued vector per frame. The codec is the acoustic tokenizer from Microsoft's [VibeVoice](https://arxiv.org/abs/2508.19205), a causal convolutional VAE whose strides in `config.json` are 8, 5, 5, 4, 2 and 2. Their product is 3,200, so one latent covers 3,200 samples at 24 kHz, which is 133.3 ms, which is 7.5 frames a second. That one number sets everything else in the model: the frame, the context length, the latency floor. In the header the codec is 687,392,001 parameters, split almost exactly in half between encoder (343,696,032) and decoder (343,695,969).
+
+"Continuous" does not mean lossless. The latent is a VAE code, not the waveform, and the codec is the fidelity ceiling; the decoder has to invent whatever 64 numbers per 133 ms could not hold. On the input side the code even adds noise on purpose: `codec.sample()` draws the user's latent around the encoder's mean with a random scale, the σ-VAE noise VibeVoice trains its tokenizer with, applied at inference too. What continuous buys is that nothing is snapped to a codebook, and that one frame is one vector, so there is no second axis to generate along.
+
+The price is that you cannot sample a 64-dimensional real vector with a softmax. Haru generates it with a small diffusion-style head conditioned on the LM's hidden state, the "next-token diffusion" recipe from [MAR](https://arxiv.org/abs/2406.11838), [LatentLM](https://arxiv.org/abs/2412.08635) and VibeVoice, and the one Kyutai's [CALM](https://arxiv.org/abs/2509.06926) used for speech. Higurashi trained the head with flow matching and then distilled it with [MeanFlow](https://arxiv.org/abs/2505.13447), which learns the *average* velocity over an interval instead of the instantaneous one. If you know the average velocity from noise to data over the whole interval, one step lands on the sample. I covered a sibling idea, drifting, in Kyutai's [Pocket TTS](/articles/pocket-tts-drifting).
+
+<Figure
+  src="/articles/haru-4b/fig3.png"
+  alt="Three dark panels. Discrete RVQ tokens at 12.5 Hz: an LLM feeds an autoregressive Transformer that loops eight times to emit eight codes per frame, each frame 80 ms, five frames making 400 ms of audio. Continuous latents and iterative sampling at 7.5 Hz: the LLM feeds an MLP flow head that loops N times with noise as input, producing one latent of 133 ms, three making 400 ms. Continuous latents and single-step sampling at 7.5 Hz, marked Haru: the same MLP flow head runs once per latent."
+  caption="How much work 400 ms of audio takes: an autoregressive transformer run 8 times per 80 ms frame, a flow head run N times per 133 ms latent, or Haru's flow head run once (Higurashi technical blog, speech generation figure)."
+/>
+
+The sampler in `meanflow_head.py` is short enough to quote:
+
+```python
+# higurashi-ai/Haru @ 7fe6b76, haru/haru/models/meanflow_head.py (abridged)
+cond = self.cond_proj(hidden.to(noise.dtype))
+z, h = noise, 1.0 / steps
+for i in range(steps):
+    z = z + h * self.velocity(z, cond, i * h, h, guidance)
+return z
+```
+
+With `num_steps: 1` in the config, that loop runs once: start at Gaussian noise, add the predicted mean velocity, done. Two details in `velocity()` are worth knowing. The interval and the time each get their own sinusoidal embedding, as MeanFlow requires. And the classifier-free guidance scale is an *input* (`omega_embed` of `1 - 1/w`), the Improved MeanFlow trick, so guidance costs no second forward pass. The default is 1.5, in a trained range of 1 to 2.
+
+The blog calls this head "a lightweight MLP". It is four adaLN residual MLP blocks of width 2,560 with a 7,680-wide gated FFN, and the header puts it at 363,407,360 parameters. That is light next to a 4B backbone and an extra transformer, and it is still 6.9% of the file. The file holds 5,270,000,899 parameters in 1,022 BF16 tensors: 4,205,751,296 in the language model, 687,392,001 in the codec, 363,407,360 in the head and 13,450,240 in the two projectors. "4B" is the backbone's name.
+
+## The text runs ahead in chunks
+
+Haru keeps an inner monologue, but a looser one than Moshi's. Moshi aligns each word to the frame where its audio starts. Haru writes a phrase as one unbroken run of text tokens and then pads while the audio catches up.
+
+<Figure
+  src="/articles/haru-4b/fig4.png"
+  alt="Two dark panels comparing alignment on a text row and an audio row of 14 slots. Token-level alignment: pad, EOP, Hi, EOP, there, pad, EOP, how, EOP, are, EOP, you, pad, EOP on the text row, with arrows from each word to the audio slot where its speech starts. Chunk-level alignment, marked Haru: pad, EOP, then Hi, there, how, are, you in five consecutive slots, then six pads and a final EOP, with one arrow from Hi to the first speaking audio slot."
+  caption="Token-level alignment pins every word to its audio; Haru's chunk-level alignment writes the phrase in one run and pads while the speech catches up (Higurashi technical blog, chunk-level alignment figure)."
+/>
+
+Two special tokens do the bookkeeping. In the tokenizer, id 248076 is `<|audio_pad|>`, the PAD written on frames with no new text, and id 248071 is `<|audio_end|>`, which Higurashi calls EOP (end of padding). EOP is sampled on the frame *before* the model starts a new stretch of speech, so it is the closest thing Haru has to a "my turn" decision. The blog gives two reasons for chunks: text and audio run at different rates, and keeping the text contiguous helps the backbone stay a language model ("mitigating catastrophic forgetting"). I find the second one plausible and unproven; there is no ablation.
+
+The EOP decision is fragile enough that the code treats it specially. In `session.py` the logits of PAD and EOP are recomputed in float32 because, in the code's words, "the PAD / EOP decision (stay silent or start speaking) is often closer than the resolution of bfloat16 at the magnitude of those logits." And there is an `eop_bias` setting, "added to the EOP logit: > 0 makes the model start speaking sooner". So the turn-taking policy is learned, but not entirely knob-free: you get one scalar to make it more or less eager, and the character card has a `backchannel` field with three settings that read as sparse, moderate and frequent. One thing EOP does not do is gate the audio. The head produces an audio latent every frame whatever the text says; a silent frame is a latent that decodes to silence.
+
+The prompt uses the same grid. `prompt.py` lays it out: the character card is a ChatML system turn with no audio, then the voice reference (3 seconds to 3 minutes of one speaker) is written onto the *model's* audio stream with PAD on every frame and EOP on the last, then the live conversation starts. The model's voice is whatever it has "been saying" in the reference. That is the same trick PersonaPlex uses.
+
+## The latency arithmetic
+
+The session loop runs one position per frame and stays exactly one frame ahead. The docstring states it: "Frame 0 comes from the end of the prompt, so the model stays exactly one frame ahead and the frame length (133 ms) is the only structural latency." When your frame *t* arrives, the model runs the position for *t* and emits its own frame *t + 1*. There is no acoustic delay to wait out, because a frame's audio is one latent from one head pass, not eight codes in a hierarchy.
+
+Higurashi's latency claim is "about 65 ms end-to-end latency on a MacBook", and the blog's table is careful about what that covers. It is an M1 Max running a native Swift app with custom Metal kernels and int8 weights, measured from the last sample of a user frame at the microphone to the first sample of the answering model frame at the headphones:
+
+| Stage (M1 Max, int8) | Latency |
+| --- | --- |
+| Input (microphone to app) | 5.3 ± 0.0 ms |
+| One model step | 34.2 ± 0.5 ms |
+| Socket and handoff | 4.1 ± 0.3 ms |
+| Output wait (15 ms margin and slack) | 13.3 ± 1.5 ms |
+| Output (app to headphones) | 8.1 ± 0.2 ms |
+| Total (p50) | 65.2 ± 1.5 ms |
+
+The rows sum to 65.0 ms against a stated 65.2, which is what you expect when each row is its own median. The blog then adds the sentence that the headline drops: "With a 7.5 Hz token rate, audio framing introduces up to 133 ms of additional algorithmic latency." A sound you make at the start of a frame cannot be heard until the frame ends. So the time from a sound to the first sample that could react to it is 65.2 ms plus somewhere between 0 and 133 ms, about 132 ms on average and about 198 ms at worst.
+
+That puts Haru right beside Moshi on Moshi's own definition. The Moshi paper reports "a theoretical latency of 160ms, 200ms in practice": one 80 ms frame to hear, plus 80 ms of acoustic delay, plus compute. Haru's structural floor on that definition is one 133 ms frame and no acoustic delay. Haru trades a longer frame for a single-pass head, and the two land in the same place. That is respectable for a 4B model on a laptop, not "ultra-low latency" next to Moshi, and the project page's own diagram of a full-duplex exchange, which shows "~0.32 sec", carries the same "Illustrative latency" label as the cascade's.
+
+The compute side checks out on the back of an envelope. At batch size one, a forward pass reads essentially every weight. Haru's language model, head and projectors are 4.58 billion parameters, 9.17 GB in BF16, read 7.5 times a second: about 69 GB/s of memory traffic, before the codec. Moshiko, by the header count in my PersonaPlex piece, is 7,687,729,152 parameters, 15.4 GB read 12.5 times a second: about 192 GB/s. Smaller model, fewer frames, no depth transformer: under half the bandwidth. An M1 Max's memory system is rated at 400 GB/s, so a 34.2 ms int8 step in a 133 ms frame leaves room. On a datacenter GPU the blog reports about 15 ms for encode, decode and one LM step on a B300, which is what lets the [vLLM-Omni](/articles/vllm-omni-serving) plugin batch many conversations per GPU. The README asks for "about 12 GB" of GPU memory, which fits the 10.5 GB of BF16 weights plus cache; a 16 GB consumer card should run it.
+
+None of these numbers is the one a user feels most, which is how long the model waits after you stop before it chooses to speak. In a full-duplex model that is behaviour, not plumbing: the number of silent frames before it samples EOP. On real speech that gap is learned from the data, varies by context, and is exactly what turn-taking benchmarks such as Full-Duplex-Bench measure. Higurashi publishes no such measurement. So I took one from its own demos.
+
+## What the demo tracks show
+
+The four demo videos on the project page carry stereo audio, and the two channels are the two speakers: in all four, the left channel's envelope matches the person's lane drawn in the video and the right channel's matches the model's, and over the whole English demo the two correlate at 0.002. That matches the Mac app's own export ("you on the left, the model on the right, as heard"). So the timing can be measured the way I measured Block's [Dessa](/articles/dessa), with the same detector: 10 ms frames, voiced when 18 dB above the channel's 10th-percentile floor and never below -50 dBFS, pauses under 180 ms bridged, bursts under 90 ms dropped. A floor switch is a talkspurt that follows one of the other speaker's, unless it starts and ends inside it (that is a backchannel); its offset is its start minus the end of the other's last talkspurt, negative when it starts in overlap.
+
+| Demo | Length | Model takes the floor | Its median offset | The person's median offset |
+| --- | --- | --- | --- | --- |
+| Economy (JA) | 104.4 s | 18 times | -0.115 s | +0.16 s |
+| Movies (EN) | 67.2 s | 7 times | -0.17 s | +0.26 s |
+| Parenting (JA) | 212.5 s | 32 times | +0.37 s | +0.055 s |
+| Investment advice (EN) | 95.4 s | 6 times | +0.965 s | -0.085 s |
+| All four | 8.0 min | 63 times | +0.20 s | +0.065 s |
+
+Across all four the model takes the floor with a median gap of +0.20 s, and 38% of its starts are in overlap; the middle half of its offsets runs from -0.155 s to +0.765 s. That is conversational timing, not cascade timing, and it is close to what Dessa's tracks gave (+0.24 s, 29.5% in overlap). The people here were quicker than the model, +0.065 s at the median. It backchannels less than they do: 14 short bursts that start and end inside the person's talkspurt, 1.75 a minute with a median length of 0.395 s, against the people's 24. Both speak at once for 10.2% of all speech time, and the model does 52% of the talking.
+
+The numbers move with the detector more than Dessa's did. With the absolute floor at -40 or -60 dBFS instead of -50, the model's median offset lands between +0.05 s and +0.27 s. And the sample is small and selected: eight minutes, four conversations Higurashi chose to publish, AAC audio inside a video. The investment demo, where the model shifts into a careful advisory tone, is much slower at +0.965 s, from only six switches. What it does show is gaps spread the way human gaps are, overlaps included. What it cannot show is how often the model is wrong about when to speak, which needs a benchmark with ground truth.
+
+## Sixty minutes of memory
+
+The other thing a 7.5 Hz frame buys is a short sequence. An hour is 27,000 positions, which is the `max_frames` default in `DuplexConfig` ("60 minutes"), and the blog says training samples run up to 60 minutes long. Interleaving the same three streams would be 81,000 positions; Moshi's 12.5 Hz would be 45,000.
+
+The backbone makes the hour affordable. Qwen3.5-4B is a hybrid: `layer_types` in the config lists 24 `linear_attention` layers (Gated DeltaNet) and 8 `full_attention` layers, one in every four. Only the full-attention layers keep a growing key-value cache. Each has 4 KV heads of 256 dimensions, so a position costs 8 × 2 × 4 × 256 BF16 values, 32,768 bytes. Sixty minutes is 27,000 × 32,768 bytes, about 885 MB. The DeltaNet layers carry a fixed recurrent state instead, 32 value heads of 128 × 128 per layer; at the float32 the config names that is about 50 MB, the same at minute one and minute sixty. With every layer on full attention the hour would need about 3.54 GB of cache instead.
+
+<ContextBudget />
+
+For comparison, Moshi's loader config gives its temporal transformer a ring cache of 3,000 steps, which at 12.5 Hz is 240 seconds; past four minutes the oldest frames, including the prompt, fall out. Haru's `DynamicCache` just grows. I have not run an hour-long call to see whether the model's behaviour holds up across it, and neither the blog nor the card shows one.
+
+## Forty million hours, and the thirteen that teach turn-taking
+
+The data claim is the least documented. The blog says Haru was pretrained on "over 40 million hours of speech", over 160 languages, nine of them primary (English, Spanish, Portuguese, German, French, Chinese, Japanese, Russian, Korean), with LLM-generated dialogues and TTS-synthesised speech deliberately excluded. It does not say where the audio came from.
+
+Training ran in two stages. Stage one adapts Qwen3.5-4B to speech with a mix of ASR, speech and text continuation, and text-only rehearsal to keep the language model's knowledge. Most of the audio was first cleaned with [Sidon](https://github.com/higurashi-ai/Sidon-Triton), a speech restoration model for which Higurashi released Triton kernels. Stage two is the full-duplex part, and it has a problem every lab in this space has: two-sided conversation with each speaker on their own channel is rare. Most recordings are a single mixed track.
+
+Higurashi's answer is [FastDialogueSidon](https://github.com/higurashi-ai/FastDialogueSidon), a joint separation and restoration model that splits mixed conversations into two time-aligned streams. Over 13 million hours of separated dialogue went into stage two. The blog's demo section is explicit that this is all of it: "Without training on any natively recorded two-channel conversations, our model pretrained only on separated speech achieves natural conversation, including backchannels and overlapping speech."
+
+That is a big bet, and a reply under the launch post put the objection well: "full-duplex is learned in the overlaps, and that's exactly where 13M hours separated from mono is the separator's guess, not what the speakers did." Separation is hardest exactly when two people talk at once, which is the behaviour the model is supposed to learn from it. Higurashi concedes the point in its future-work section ("separation errors and noise can remain, especially in overlapping speech") and says it is now fine-tuning on native two-channel recordings. Moshi took a similar route with diarization-simulated streams over its 7 million hours of audio, and then got its full-duplex behaviour from Fisher, 2,000 hours of telephone calls with each side recorded separately. Haru's separated dialogue alone is almost twice Moshi's entire 7 million hours of audio, and it has none of the native kind.
+
+<Video
+  src="/articles/haru-4b/clip2"
+  poster="/articles/haru-4b/clip2-poster.jpg"
+  alt="The Japanese demo's two waveform lanes, labelled 人間 for the person in cyan and AI for the model in purple, with a playhead moving right. Labels above the lanes in Japanese include 相槌 (backchannel) and 重複のある会話 (overlapping conversation); red bars mark overlap. The transcript box shows short Japanese turns from each side."
+  caption="Fourteen seconds of the Japanese economics demo, muted: the playhead crosses an aizuchi mark (相槌) and then a stretch labelled 重複のある会話, overlapping conversation. These are Higurashi's annotations on its own chosen recording (video from @HigurashiAI's post on X)."
+/>
+
+The compute claim, at least, is self-consistent. The blog says 256 NVIDIA B200 GPUs for about 8 days, 49,152 GPU-hours. One pass over 40 million hours at 7.5 Hz is 1.08 trillion positions. At the usual 6 × parameters × tokens with the 4.2B backbone, that is about 2.7 × 10²² FLOPs. Taking 2.25 PFLOPS as a B200's dense BF16 peak, 256 of them for 8 days supply about 4 × 10²³, so one pass would need roughly 7% utilisation. It is a plausibility check, not a reconstruction: the blog does not say how many epochs, what fraction of the hours each stage saw, or how the text mix was weighted.
+
+One more, a different conversation from the project page, chosen for its overlaps.
+
+<Video
+  src="/articles/haru-4b/clip3"
+  poster="/articles/haru-4b/clip3-poster.jpg"
+  alt="The Japanese parenting demo's two waveform lanes, A in cyan and B in purple, dense with overlap marked by many red bars. Labels above in Japanese include 結論部分を強調 (emphasises the conclusion) and 冗談に対して笑う (laughs at a joke). The transcript box shows Japanese text about a two-year-old child."
+  caption="Fourteen seconds of the parenting demo, muted, crossing the mark Higurashi labels 冗談に対して笑う, laughs at a joke. The density of red overlap bars is the point of this recording; hear it on the project page (Higurashi project page, Demo 03)."
+/>
+
+## What you can run, and what it is not
+
+The quick start is three lines with an NVIDIA GPU: `pip install -e ./haru`, then `python -m haru.server --hf-repo higurashi-ai/Haru-4B`, then open `localhost:8998`, pick a character card, give it a voice clip, and talk. Wired headphones matter; the README warns that Bluetooth adds 100 ms or more, which on this model is most of a frame. The Mac path builds a native app from `haru_mlx/swift`, and the vLLM-Omni plugin speaks the OpenAI Realtime event protocol, one 3,200-sample frame per `input_audio_buffer.append`.
+
+Licensing is clean for a release like this. Code and weights are Apache 2.0. The backbone, Qwen3.5-4B, is Apache 2.0 on its own card. `THIRD_PARTY_NOTICES.md` lists the codec parameters as Microsoft's MIT-licensed VibeVoice tokenizer and the web client as derived from Moshi's MIT client. Haru ships with no voice clips, so you bring one. The README's line, "Only use voices you have the right to use", is the whole safety story for a model that clones a voice from three seconds.
+
+This is a pretrained base model, not an assistant. The card says it "is not a reliable source of facts and does not follow instructions the way an assistant does", and the blog says the small backbone "limits its response quality". There is no tool calling, which one reply asked about. If you want a phone agent that books appointments, this is a foundation to fine-tune, not a product.
+
+## Where I land
+
+The architecture is a sensible set of choices more than a new idea. Summing streams is Moshi's. Next-latent diffusion for speech is VibeVoice's and CALM's. One-step heads are MeanFlow's. What Higurashi did is put them together in the order that removes work: a 7.5 Hz continuous codec so a frame is one vector, a one-pass head so there is no depth transformer, chunked text so the LM stays a language model, and a hybrid backbone so an hour of context is 885 MB. The model code is 589 lines across four files, and it is clean.
+
+The claims need the qualifiers the blog itself supplies. The 65 ms is a per-frame pipeline time with up to 133 ms of framing on top, which puts it level with Moshi rather than ahead. The 40 million hours are undocumented in source and mix, and the 13 million that teach overlap were reconstructed by a separator from single-track audio. And Higurashi has measured nothing about the conversation: no turn-taking benchmark, no interruption handling, no WER, no comparison. Its own demo tracks give a median floor-taking gap of +0.20 s with plenty of overlap, which is the right shape, from eight minutes the company chose.
+
+I would download it if you work on voice agents, because an Apache-2.0 full-duplex base model that fits in 12 GB and has a Mac app is rare, and because it is the cleanest open reference I have seen for continuous-latent dialogue. I would not trust its turn-taking past "the demos have human-shaped gaps" until someone runs Full-Duplex-Bench on it, or records a few hours against people who were not chosen by Higurashi. The 100B-parameter version Higurashi says it is now pretraining will need that even more.
+
+<RepoCard repo="higurashi-ai/Haru" />
+
+## What I read and what I computed
+
+I read the Haru repository at `7fe6b76` (`models/haru.py`, `models/meanflow_head.py`, `models/vibevoice_codec.py`, `session.py`, `prompt.py`, `sampling.py`, the READMEs and `THIRD_PARTY_NOTICES.md`), the Hugging Face card, `config.json` and `tokenizer.json`, the English blog and the project page (and the Japanese blog, searched for an evaluation section it does not have), the [Moshi paper](https://arxiv.org/abs/2410.00037), and the replies to the launch post. The demo timing is measured from the stereo audio of the four project-page videos (the X videos are two of them), with the energy detector described above, in a short numpy script. The parameter counts come from the `model.safetensors` header, fetched by HTTP range request; no weights were downloaded. The cache, bandwidth, sequence-length and compute figures are my arithmetic on the config and header, with the M1 Max bandwidth and B200 peak taken from Apple's and NVIDIA's specifications. I did not run the model. The latency table, the training scale and the data figures are Higurashi's. The figures were rendered from the SVGs on Higurashi's blog and project page, and the three clips are cut from its demo videos with the audio removed.
