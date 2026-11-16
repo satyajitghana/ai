@@ -1736,6 +1736,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "worldclaw/model-stack": () => import("@/components/articles/worldclaw/model-stack"),
   "worldcrafter/revisit-map": () => import("@/components/articles/worldcrafter/revisit-map"),
   "worldcrafter/revisit-scores": () => import("@/components/articles/worldcrafter/revisit-scores"),
+  "xeet/line-fit": () => import("@/components/articles/xeet/line-fit"),
+  "xeet/size-budget": () => import("@/components/articles/xeet/size-budget"),
   "xgen-jing-dao/state-split": () => import("@/components/articles/xgen-jing-dao/state-split"),
   "xhc-residual-connections/cost-explorer": () => import("@/components/articles/xhc-residual-connections/cost-explorer"),
   "xhc-residual-connections/stream-mixer": () => import("@/components/articles/xhc-residual-connections/stream-mixer"),
