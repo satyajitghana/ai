@@ -3,7 +3,7 @@ import Link from "next/link"
 import { notFound } from "next/navigation"
 import { ArrowUpRightIcon } from "@phosphor-icons/react/dist/ssr"
 
-import { FAMILY_LABEL } from "@/components/architectures/families"
+import { DIAGRAM_FIT, FAMILY_LABEL } from "@/components/architectures/families"
 import { ArchDiagram } from "@/components/architectures/registry"
 import { AgentChip } from "@/components/site/agent-chip"
 import { ArticleFilm } from "@/components/site/article-film"
@@ -151,7 +151,9 @@ export default async function Page({
           ) : null}
         </header>
         {/* the gallery's vetted diagram of this architecture */}
-        <ArchDiagram slug={slug} />
+        <div className={DIAGRAM_FIT}>
+          <ArchDiagram slug={slug} />
+        </div>
         <Doc />
       </article>
       {arch.paper || related ? (

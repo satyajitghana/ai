@@ -1,0 +1,110 @@
+---
+title: "Hashed n-gram memory: parameters you look up instead of multiply"
+description: "How Engram-style conditional memory works: suffix n-grams hashed into many prime-sized tables, rows concatenated, gated by the hidden state and added to the residual stream at one or two early layers. Why the hashing uses a different prime per head, why the table can live in host memory or on an SSD, the U-shaped split between experts and memory, and what DeepSeek V4.1, Qwen3.8-Flash-Next, Edge0 and KLM actually ship."
+date: 2026-11-16
+tags:
+  - mixture-of-experts
+  - inference
+  - explainer
+---
+
+Qwen3.8-Flash-Next's checkpoint has a single layer that holds 28.4% of every parameter in the model. It is not attention or an expert bank. It is a table of 320,001,536 rows, each 160 numbers wide, and a token reads sixteen of those rows and nothing else. DeepSeek-V4.1-Flash ships two tables like it, 196.61B parameters together, more than a quarter of the model. Both are versions of one idea from DeepSeek's [Engram paper](https://arxiv.org/abs/2601.07372) (Peking University and DeepSeek-AI): give the Transformer a lookup primitive, so that it stops spending layers on reconstructing phrases it could have looked up.
+
+This page builds the module from the paper, then checks it against the shipped configs that this site has read: [Tinfield 1](/articles/tinfield-1) decoded Qwen's table, [the V4.1-Flash teardown](/articles/deepseek-v4-1-flash-1017) read DeepSeek's, and [Edge0-145B](/articles/edge0-145b) moved one onto an SSD.
+
+## Why a model would want a lookup table
+
+The paper's argument starts from what text is made of. Some of it needs reasoning. A lot of it is local and stereotyped: named entities, idioms, formulaic phrases, the second half of "Alexander the Great". A Transformer has no instruction for "recognise this phrase". To resolve a multi-token entity it spends several early layers of attention and feed-forward work rebuilding the association every time it sees it. The paper calls that "an expensive runtime reconstruction of a static lookup table".
+
+Mixture-of-experts already makes most parameters inactive per token, but an expert is still a matrix multiply, and which expert fires depends on the hidden state, so it is only known at the last moment. The paper proposes a second axis of sparsity next to MoE's conditional computation: **conditional memory**, parameters fetched by a key known from the token ids alone.
+
+## The module, step by step
+
+The paper's figure shows the pieces, and the diagram above redraws them as one path from tokens to the residual stream.
+
+<Figure
+  src="/articles/architectures/ngram-memory/fig1.png"
+  alt="Left: a Transformer stack over the sentence Only Alexander the Great could tame the horse Bucephalus; an Engram module sits inside one block before Attention and MoE, each with a residual add. Right, the module opened: the 2-gram the Great and the 3-gram Alexander the Great each pass through h hash heads into stacks of 2-gram and 3-gram embedding tables; the retrieved rows are concatenated, two linear projections make a key and a value, a scaled dot product with the input hidden state forms a gate that multiplies the value, and a convolution finishes the output."
+  caption="The Engram module: suffix 2-grams and 3-grams hashed by h heads into embedding tables, concatenated, then gated against the hidden state and passed through a convolution (Engram paper, Figure 1)."
+/>
+
+**1. Canonical tokens.** Subword tokenizers give "Apple" and " apple" different ids. Engram first maps every raw id through a precomputed function that collapses ids with the same normalised text (NFKC, lowercasing and so on). The paper reports this shrinks a 128K vocabulary's effective size by 23%. DeepSeek's reference `inference/engram.py` does the same: lowercase, strip accents.
+
+**2. Suffix n-grams.** At position $t$, form the n-grams ending there, $g_{t,n} = (x'_{t-n+1}, \dots, x'_t)$, for $n = 2$ up to a maximum $N$.
+
+**3. Multi-head hashing.** The space of all n-grams is far too large to index directly, so each n-gram order gets $K$ hash heads, and head $k$ maps the n-gram to a row of its own table $E_{n,k}$, whose size $M_{n,k}$ is prime:
+
+$$
+z_{t,n,k} = \varphi_{n,k}(g_{t,n}), \qquad e_{t,n,k} = E_{n,k}[z_{t,n,k}]
+$$
+
+$\varphi$ is a cheap multiplicative-XOR hash. The rows from every head of every order are concatenated into one memory vector $e_t$.
+
+**4. Context-aware gating.** A static row knows nothing about context, and it may be a hash collision or the wrong sense of a word. So the current hidden state $h_t$, which has already seen the context through the layers below, acts as a query against a key made from the memory:
+
+$$
+k_t = W_K e_t, \quad v_t = W_V e_t, \qquad \alpha_t = \sigma\!\left(\frac{\mathrm{RMSNorm}(h_t)^\top \mathrm{RMSNorm}(k_t)}{\sqrt{d}}\right), \qquad \tilde v_t = \alpha_t\, v_t
+$$
+
+If the retrieved memory contradicts the context, $\alpha_t$ goes towards zero and the row is suppressed.
+
+**5. A short convolution, then the residual.** A depthwise causal convolution of width 4 with SiLU refines the gated values, $Y = \mathrm{SiLU}(\mathrm{Conv1D}(\mathrm{RMSNorm}(\tilde V))) + \tilde V$, and the result is added to the hidden states before that layer's attention and MoE. The convolution starts at zero, so at initialisation the module is an identity and training decides how much memory to let in.
+
+With hyper-connections, the backbone the paper uses by default (mHC with 4 streams; [the xHC article](/articles/xhc-residual-connections) explains them), the table and $W_V$ are shared across streams and each stream gets its own $W_K$ and its own gate.
+
+## Why a different prime for every head
+
+A single hash table of any size collides: two unrelated n-grams land on the same row and share an embedding forever. Several heads with different prime moduli make collisions independent. Two n-grams that collide under one prime almost never collide under another as well, so the concatenation of all heads' rows still identifies the phrase, and the gate can suppress the head that went wrong.
+
+The Tinfield 1 article read the three small integer tensors that drive Qwen's version. The sixteen table sizes are 20,000,003, 20,000,023, 20,000,033 and so on up to 20,000,171: sixteen distinct primes just above twenty million. The hash multipliers are three odd constants of 43 to 45 bits, one per n-gram position. The article's description: take the last two or three token ids, hash them with a polynomial whose coefficients are those multipliers, reduce modulo each head's prime.
+
+## Why the table can live somewhere slow
+
+Everything about a lookup's address is known as soon as the tokens are. Nothing depends on a hidden state. That is the system property the paper builds on. During training the tables are sharded across GPUs and rows are gathered with an all-to-all. At inference they can sit in host memory, and the runtime prefetches the rows over PCIe while the layers before the Engram layer compute.
+
+The paper measured it with a 100B-parameter Engram table entirely in host DRAM, inserted at the second block of dense 4B and 8B models on H800s. Throughput went from 9,031.62 to 8,858.28 tokens per second on the 4B model and from 6,315.52 to 6,140.02 on the 8B: a penalty of at most 2.8%. Traffic scales with the rows a token reads, not with the table. And because n-gram use is Zipfian, the paper suggests a cache hierarchy: hot rows in HBM or DRAM, the long tail on NVMe.
+
+Edge0-145B takes that literally. Its "PLE", which is Qwen's n-gram table, sits on the SSD and is read with direct I/O. Sixteen rows of 160 FP8 bytes is 2,560 bytes a token; in 4 KiB pages the device sees about 64 KiB a token, under 5 MB/s at 75 tokens per second. The 51.2B parameters never occupy RAM or VRAM.
+
+## Experts or memory: the U-shaped split
+
+If both MoE experts and Engram rows are inactive parameters, a fixed parameter budget has to be split between them. The paper defines $\rho$ as the fraction of the inactive budget given to routed experts and sweeps it at two compute budgets, holding total and active parameters fixed.
+
+<Figure
+  src="/articles/architectures/ngram-memory/fig3.png"
+  alt="Left: validation loss against the allocation ratio rho for two compute budgets, 2e20 and 6e20 FLOPs; both curves are U-shaped, with the minimum near rho of 75 to 80 percent, below the pure-MoE point at 100 percent. Right: validation loss against the number of Engram embedding slots on a log axis, falling in a straight line for Engram and less steeply for the OverEncoding baseline."
+  caption="Left, loss against the share of the sparse budget given to experts: both budgets bottom out with about a fifth to a quarter moved to Engram. Right, loss keeps falling log-linearly as the table grows, at no extra compute (Engram paper, Figure 3)."
+/>
+
+Both curves are U-shaped. Pure MoE is not the optimum: moving roughly 20 to 25% of the sparse budget into Engram gives the best loss, and in the 10B regime the loss improves from 1.7248 to 1.7109. Push too far the other way and the model loses conditional computation, and memory cannot replace it. Separately, with compute fixed and the table growing from 258,000 slots to 10 million, loss follows a power law in the table size. The memory is a scaling knob that costs storage and nothing else.
+
+At scale, the paper's Engram-27B takes MoE-27B, cuts routed experts from 72 to 55, and spends the freed parameters on a 5.7B-parameter table at layers 2 and 15 (n-grams up to 3, 8 heads), keeping the total at 26.7B. The abstract lists the gains over the iso-parameter, iso-FLOPs MoE: MMLU up 3.4, BBH up 5.0, HumanEval up 3.0, and Multi-Query NIAH from 84.2 to 97.0. That last one is the surprising result. The paper's reading is that once local patterns come from lookups, attention has more capacity left for global context.
+
+Where to put it: a single module works best at layer 2 in the paper's sweep, and splitting the same memory across layers 2 and 6 did slightly better. Earlier is better for modelling, deeper gives the prefetch more time to hide. Shipped models pick early layers.
+
+## What actually ships
+
+| | Table | Per token | Where |
+|---|---|---|---|
+| **DeepSeek-V4.1-Flash** | 2 tables, ~384M rows each, 256 FP8 values per row, 196.61B parameters | 2, 3 and 4-grams × 8 heads = 24 rows per layer, about 12.7 KB from 203 GB | two Engram layers |
+| **Qwen3.8-Flash-Next** | 320,001,536 rows × 160 BF16, 51.2B parameters | 2 and 3-grams × 8 heads = 16 rows, concatenated to 2,560 | one layer |
+| **Edge0-145B** | Qwen's table in FP8 | 2,560 bytes | on the SSD |
+| **KLM 1.6** | 125,000 bigrams and 38,000 trigrams by exact match, 32-wide rows | 2 rows | beside the embedding |
+
+KLM is the small, unhashed version: it looks the bigram and trigram ending at each token up in a sorted list of the most frequent ones, with row 0 for anything missing, and lifts the two rows to model width with small projections ([KLM 1.6](/articles/klm-1-6)). At 99M parameters, exact match is affordable and collisions are not a concern.
+
+A related idea is easy to confuse with this one. A **per-layer embedding**, as in Gemma 3n, Gemma 4's small models and [Raon-1 nano](/articles/raon-1-nano), is also a table that is only indexed, but its key is the single token id, and it gives every layer a private slice of that token's row. Raon's table is 259,840 rows by 6,144, half the 3.1B checkpoint. Edge0's article notes that its "PLE" is Qwen's n-gram table, not a per-layer embedding in Raon's or Gemma's sense, despite the name in the files.
+
+## What it costs
+
+Storage, plainly. Qwen's table is 95.4 GiB in BF16. DeepSeek's two are 202.76 GB on disk, more than half of what the experts take. Somebody has to hold them, and while a host or an SSD is cheaper than HBM, a laptop deployment still has to ship and page tens of gigabytes the model barely touches per token.
+
+Hashing also makes the memory unreadable. A row is the sum of whatever n-grams collided onto it under that prime, so the table cannot be edited or inspected per phrase, and the gate is the only thing standing between a collision and the residual stream. The paper's gating visualisation shows the gate firing on completed phrases, "Alexander the Great", "By the way", which is the behaviour you want; I have not seen a measurement of how often it fails.
+
+And the gain is front-loaded. The memory replaces early-layer work on local patterns. It does nothing for reasoning that has no stereotyped surface form, which is why the U-curve turns back up when memory takes too much of the budget.
+
+## Where I land
+
+This is the most interesting new parameter type since mixture-of-experts, and for the same reason MoE was: it changes the ratio between parameters you store and parameters you compute with. An expert still costs a matmul and wants to be near the accelerator. A hashed row costs a pointer chase and can be anywhere, with its address known ahead of time. Qwen's own card says embeddings are "more amenable to offloading than Mixture-of-Experts", and Edge0 shipped it from an SSD.
+
+The open question for me is how far the U-curve's bottom moves at larger scale, and whether the long-context gain holds outside the paper's own runs. Two of the largest open releases of 2026 have bet on it, which is better evidence than a paper. [Edge0's latent experts](/articles/edge0-145b) show the other way to make sparse parameters cheaper, by shrinking each expert instead of adding a table.

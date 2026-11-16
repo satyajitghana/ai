@@ -1,0 +1,119 @@
+---
+title: "Index-selected sparse attention: a cheap scorer decides what the real attention reads"
+description: "How DeepSeek Sparse Attention splits one attention layer into a lightning indexer that scores every cached token and a main attention that reads only the top 2,048, why it is built on MLA's shared latent, how the indexer is trained to imitate dense attention, and what it does and does not save: reads, not storage. With the variants that followed (block scoring, shared selections, clustered keys) and the oracle experiment that shows where top-k breaks."
+date: 2026-11-16
+tags:
+  - sparse-attention
+  - long-context
+  - explainer
+---
+
+The chart that went round in late 2026 said full attention had disappeared from new open models. The [full-attention census](/articles/full-attention-census) reread every config behind it and found something narrower. Of the eleven "no full attention" releases in the last window, every one still has layers that can reach any earlier token. They put a small scorer in front of attention and let it choose which tokens the attention reads. DeepSeek introduced the pattern as DeepSeek Sparse Attention (DSA) in [DeepSeek-V3.2](https://arxiv.org/abs/2512.02556), and by November the census counts it, or a close relative, in Hy4-preview, MiniMax M3.1 Flash, Mistral Large 4, LongCat-2.5, GLM-5.3-Flash, Kimi K3.1 Pro and Qwen3.8-Flash-Next.
+
+This page explains the mechanism from the paper, then what the variants changed and what the design costs.
+
+## The bill sparse attention goes after
+
+A dense attention layer, decoding token $t$, reads every cached key and value: $t$ entries per layer. Prefilling a prompt of $L$ tokens does $O(L^2)$ query-key products. Both grow with context, and at hundreds of thousands of tokens they dominate everything else a layer does.
+
+Not every key matters to every query, though. Softmax weights are usually concentrated on a few positions. If a query could find its important keys cheaply, it could attend over $k$ of them and skip the rest. Attention would cost $O(Lk)$ in prefill and $O(k)$ per decoded token, with $k$ fixed.
+
+The question is who does the finding. Fixed patterns, like a sliding window, are free and wrong for anything far away. Learned retrieval has to look at the candidates to rank them. DSA's answer is to look at all of them, with something far cheaper than attention.
+
+## Two parts: an indexer and a selector
+
+The paper splits the layer in two. The **lightning indexer** computes a score between the query token $h_t$ and every preceding token $h_s$:
+
+$$
+I_{t,s} = \sum_{j=1}^{H^I} w^I_{t,j} \cdot \mathrm{ReLU}\big(q^I_{t,j} \cdot k^I_s\big)
+$$
+
+$H^I$ is the number of indexer heads. Each head has its own small query $q^I_{t,j}$ and its own scalar weight $w^I_{t,j}$, both computed from the query token; there is one index key $k^I_s$ per past token, shared by all indexer heads. ReLU replaces the softmax, the paper says "for throughput consideration", and the indexer "has a small number of heads and can be implemented in FP8".
+
+The **fine-grained token selector** then keeps, for each query, only the key-value entries whose scores are in the top $k$, and runs ordinary attention over them:
+
+$$
+u_t = \mathrm{Attn}\Big(h_t,\ \big\{ c_s \ \big|\ I_{t,s} \in \mathrm{Top}\text{-}k(I_{t,:}) \big\}\Big)
+$$
+
+In DeepSeek-V3.2, $k$ is 2,048. Below 2,048 tokens of context the selector keeps everything, so a short prompt runs exactly dense attention. The census uses that to argue a DSA layer is "full attention with a gate in front".
+
+The diagram above draws the two paths with five picks out of 24. The paper's own figure draws them on top of MLA:
+
+<Figure
+  src="/articles/architectures/sparse-attention-indexer/fig2.png"
+  alt="DeepSeek-V3.2's attention. From the input hidden state h_t, the left side builds MLA queries (compressed query, then per-head query parts with and without RoPE, concatenated) and the shared key-value latent c_t^KV with a RoPE key part. On the right, in green, the lightning indexer takes index queries q^I_{t,j}, an index key k^I_t and weights w^I_{t,j}, all partially rotated, and produces a bar chart of scores that feeds a Top-k Selector. The selector picks which key-value entries go into the core multi-query attention, whose per-head outputs are combined into the output hidden state u_t."
+  caption="DSA instantiated under MLA: the green path is the lightning indexer, whose scores drive the top-k selector in front of the core attention (DeepSeek-V3.2 paper, Figure 2)."
+/>
+
+## Why it sits on MLA's latent
+
+A sparse read is only fast if a selected entry is fetched once and used by many query heads. If each of 128 heads chose its own 2,048 tokens, the kernel would gather up to 128 different sets per token and lose most of the gain to memory traffic. The paper says it directly: "each key-value entry must be shared across multiple queries for computational efficiency".
+
+MLA already stores one compressed latent per token, which every head reconstructs its keys and values from (the [KV-cache entry](/architectures/attention-kv) builds it). DeepSeek runs MLA in its MQA mode, where that latent is the key-value entry and all query heads attend to it directly. So one selection per token serves every head, and the gather is one list of 2,048 latents. The same constraint shows up in every follower. Qwen's QSA and Step-5's regions score blocks, MiniMax's MSA picks 16 blocks of 128 tokens, and LSA builds one shared index query by summing all the heads.
+
+## Teaching the indexer what dense attention would do
+
+The indexer is new weights on top of a trained model, so DeepSeek trains it to imitate the attention it is replacing. V3.2 starts from DeepSeek-V3.1-Terminus, already extended to 128K tokens, and continues pretraining in two stages.
+
+**Dense warm-up.** Dense attention stays on, and every parameter is frozen except the indexer's. For each query, the main attention's scores are summed over heads and L1-normalised along the sequence into a target distribution $p_{t,:}$, and the indexer is trained to match it:
+
+$$
+\mathcal{L}^I = \sum_t D_{\mathrm{KL}}\big(p_{t,:}\ \big\|\ \mathrm{Softmax}(I_{t,:})\big)
+$$
+
+That stage is short: 1,000 steps of 16 sequences of 128K tokens, 2.1B tokens, at a learning rate of $10^{-3}$.
+
+**Sparse training.** Then the selector is switched on and the whole model trains to live with it, at 2,048 selected tokens per query. The indexer keeps its KL loss, now only over the selected set, and its input is detached from the graph: the indexer learns only from $\mathcal{L}^I$, and the main model only from the language-modelling loss. This stage runs 15,000 steps of 480 sequences of 128K tokens, 943.7B tokens, at $7.3 \times 10^{-6}$.
+
+Naive-N0.5-Flash later used the same recipe at a native 1M context: 50B tokens of indexer warmup against a full-attention reference by KL, with everything else frozen, then 3T tokens of sparse continued pretraining ([its article](/articles/naive-n05-flash) has the details).
+
+## What it costs, and what it saves
+
+The paper states the complexity plainly. The main attention goes from $O(L^2)$ to $O(Lk)$. The indexer "still has a complexity of $O(L^2)$", with a much smaller constant than MLA. Its Figure 3 shows the result as service cost per million tokens against position in the sequence, measured on H800s at 2 USD per GPU hour:
+
+<Figure
+  src="/articles/architectures/sparse-attention-indexer/fig3.png"
+  alt="Two line charts of cost per million tokens against token position from 0 to 128K. Left, prefilling: DeepSeek-V3.1-Terminus rises in a straight line to about 0.66 dollars at 128K; DeepSeek-V3.2 starts slightly higher, bends after a few thousand tokens and rises slowly to under 0.2 dollars. Right, decoding: Terminus rises to about 2.15 dollars at 128K; V3.2 stays nearly flat, near 0.25 dollars."
+  caption="Inference cost per million tokens by token position, prefill (left) and decode (right), DeepSeek-V3.1-Terminus against V3.2 on H800 clusters. Short prefills use a masked dense mode that simulates DSA (DeepSeek-V3.2 paper, Figure 3)."
+/>
+
+Decode is where the curve flattens, because a decoded token's main attention reads 2,048 entries whatever the position, and only the cheap indexer scan still grows. The paper's parity checks, on standard benchmarks, Chatbot Arena and independent long-context tests, found no substantial loss against Terminus.
+
+DSA leaves storage and the scan alone, and both are easy to miss.
+
+**Storage.** Nothing is evicted. Every past token's latent stays in the cache, because any of them might be selected later, and the indexer adds a small index key per token per layer on top. The census works it out for MiniMax M3.1 Flash, whose MSA layers are this design: at 1M tokens in BF16 it keeps 145 GB, more than the 128.8 GB the same model would keep with plain GQA. What drops is the read, from 128.8 GB to 16.4 GB per decoded token. Reads set decode speed; storage sets how many sessions fit. Index-selected attention helps the first only. DeepSeek's later models attack the second separately: V4's compressed layers and V4.1's shared cache take the global cache from 48,068 bytes per token in V3.2 to 890 in [V4.1-Flash](/articles/deepseek-v4-1-flash-1017).
+
+**The scan.** The indexer is linear per query and so quadratic over a prefill. The [Latent Sparse Attention](/articles/latent-sparse-attention) paper measured how big that gets on one GLM-5.3-Flash layer on an H200: the indexer is 67% of the sparse layer's prefill time at 512K tokens and 98% at 10M. GLM's indexer has 32 heads of 128 dimensions over keys pooled four at a time, $32 \times 128 \times T/4 = 1{,}024\,T$ multiply-adds per query. At a million tokens and beyond, the scorer is the layer.
+
+## Variants
+
+Most of what followed DSA changes what the indexer scores, or how often it scores.
+
+- **Fewer heads.** Naive-N0.5-Flash uses 16 indexer heads and one key head in FP8; the lab reports that cut index-selection wall time by 44% against the original DSA implementation. Atria Dawn and Kimi K3.1 Pro use 32 heads of 128, with `index_topk` 2,048.
+- **Blocks instead of tokens.** Qwen's QSA scores keys compressed in blocks of 4 and keeps 512 blocks, 2,048 tokens. Step-5 Preview scores 8-token regions per KV group and keeps 512. MiniMax's MSA scores blocks of 128 and attends exactly over the top 16. Scoring a block divides the scan by the block size.
+- **Shared selections.** [Mistral Large 4](/articles/mistral-le-chonk) has 72 indexed layers, but only 44 carry an indexer. The other 28 are marked `shared` and reuse an earlier layer's selection, so they skip the scan altogether.
+- **Search instead of scan.** LSA clusters keys by meaning into buckets of about eight, and a query scores one centroid per bucket before attending to the best buckets' keys. On GLM-5.3-Flash that moved the selection from 98% of the layer at 10M tokens to about a quarter.
+- **Mixed with windows or recurrence.** Naive-N0.5-Flash is 39 sliding-window layers of 128 tokens and 9 DSA layers; at 1M tokens a decoded token reads 23,424 backbone keys, against 9,442,176 if the 9 sparse layers were dense. GLM-5.3-Flash pairs 34 KDA layers with 11 DSA layers, Qwen3.8-Flash-Next 36 Gated DeltaNet layers with 12 QSA layers.
+
+The selection budget itself barely moves: the census finds 2,048 in most configs and 512 in two.
+
+## Where top-k breaks
+
+The bet behind every one of these designs is that a query's attention is concentrated enough for $k$ keys to carry it. The LSA paper tested the bet with an oracle no real indexer can afford: give each query its true top-$k$ keys by summed attention, plus a 4-token sink and a 512-token window, and run RULER on Qwen3.8-27B at 128K tokens.
+
+<Figure
+  src="/articles/latent-sparse-attention/fig8.png"
+  alt="Thirteen small line charts of RULER task accuracy for Qwen3.8-27B at 128k tokens as top-k falls from 2k to 1, against a dashed full-attention line. Single-needle tasks stay at 100% until the smallest values of k; MultiKey 2 and 3, and CWE, fall steadily from the start; the average of all 13 tasks stays near full attention down to about 512 and falls to 26% at k = 1."
+  caption="Oracle top-k attention on RULER, Qwen3.8-27B at 128K tokens. Single needles survive to tiny k; multi-key retrieval and common-word extraction fall first (Latent Sparse Attention paper, Figure 8)."
+/>
+
+With perfect selection, the model keeps 98% of its full-attention score down to $k = 512$, which at 128K tokens is 0.8% of the keys, and single-needle retrieval survives to $k = 16$. Tasks that need many scattered tokens at once, multi-key needles and counting common words, fall first. A trained indexer is worse than an oracle, so those curves are upper bounds. The measured cost of a real one can be small: A.X-K2 published the ablation for adding a top-2,048 indexer to gated MLA, and [LongBench went from 62.80 to 62.99](/articles/ax-k2).
+
+The test most launch posts quote, a single needle in a haystack, is the one least able to show the loss.
+
+## Where I land
+
+Index-selected attention is the most conservative way to stop paying for dense attention: the model keeps every token, keeps a softmax over the ones that matter, and only changes which ones it reads. That is why labs could retrofit it onto trained models with a few hundred billion tokens of continued pretraining, and why it has spread faster than any recurrent design.
+
+It is not a memory fix. If your constraint is how many long sessions fit on a node, DSA makes it slightly worse, and you want compression, sharing or a recurrent layer as well. If your constraint is decode speed at long context, it is the best trade on offer, until the prompt is long enough that the scorer becomes the bill. Then the work that matters is in the indexer, which is where [LSA](/articles/latent-sparse-attention), block scoring and shared selections are all aimed.

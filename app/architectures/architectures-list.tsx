@@ -9,7 +9,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react/dist/ssr"
 
-import { FAMILY_LABEL } from "@/components/architectures/families"
+import { DIAGRAM_FIT, FAMILY_LABEL } from "@/components/architectures/families"
 import { ArchDiagram } from "@/components/architectures/registry"
 import { useUrlState } from "@/lib/use-url-state"
 import { cn } from "@/lib/utils"
@@ -102,34 +102,26 @@ function MetaRow({ a }: { a: ArchCard }) {
   )
 }
 
-// article / paper link (used in both card + modal); stops propagation so it
-// navigates instead of expanding the card.
+// article and paper links (used in both card + modal); they stop propagation
+// so they navigate instead of expanding the card. "article" is the site's
+// related article; the architecture's own page is the DocLink below.
 function SourceLink({ a }: { a: ArchCard }) {
-  if (a.article) {
-    return (
-      <Link
-        href={`/articles/${a.article}`}
-        onClick={(e) => e.stopPropagation()}
-        className="flex items-center gap-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
-      >
-        read the explainer <ArrowUpRightIcon size={12} weight="bold" />
-      </Link>
-    )
-  }
-  if (a.paper) {
-    return (
-      <a
-        href={a.paper}
-        target="_blank"
-        rel="noreferrer"
-        onClick={(e) => e.stopPropagation()}
-        className="flex items-center gap-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
-      >
-        paper <ArrowUpRightIcon size={12} weight="bold" />
-      </a>
-    )
-  }
-  return null
+  const cls = "flex items-center gap-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
+  if (!a.article && !a.paper) return null
+  return (
+    <span className="flex items-center gap-4">
+      {a.article ? (
+        <Link href={`/articles/${a.article}`} onClick={(e) => e.stopPropagation()} className={cls}>
+          article <ArrowUpRightIcon size={12} weight="bold" />
+        </Link>
+      ) : null}
+      {a.paper ? (
+        <a href={a.paper} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className={cls}>
+          paper <ArrowUpRightIcon size={12} weight="bold" />
+        </a>
+      ) : null}
+    </span>
+  )
 }
 
 // The way into an architecture's own page: its thumbnail and what the page
@@ -325,7 +317,7 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
             <DocLink a={a} />
 
             {a.hasDiagram ? (
-              <div className="mt-4 overflow-hidden rounded-lg border transition-shadow [&>figure]:my-0 [&>figure]:rounded-none [&>figure]:border-0 [&>figure]:bg-transparent">
+              <div className={cn("mt-4 overflow-hidden rounded-lg border transition-shadow [&>figure]:my-0 [&>figure]:rounded-none [&>figure]:border-0 [&>figure]:bg-transparent", DIAGRAM_FIT)}>
                 <ArchDiagram slug={a.slug} />
               </div>
             ) : null}
@@ -379,7 +371,11 @@ export function ArchitecturesList({ items }: { items: ArchCard[] }) {
 
             <DocLink a={expanded} />
 
-            {expanded.hasDiagram ? <ArchDiagram slug={expanded.slug} /> : null}
+            {expanded.hasDiagram ? (
+              <div className={DIAGRAM_FIT}>
+                <ArchDiagram slug={expanded.slug} />
+              </div>
+            ) : null}
 
             <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-4 font-mono text-xs">
               {expanded.tags.length ? (

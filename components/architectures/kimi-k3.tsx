@@ -71,7 +71,7 @@ export function KimiK3Architecture() {
         Kimi K3 · hybrid KDA / MLA / LatentMoE block + Block Attention Residuals (AttnRes)
       </div>
       <div className="p-3 sm:p-4">
-        <svg viewBox="0 0 660 612" className="w-full" role="img" aria-label="Kimi K3 architecture: a hybrid block stack (KDA linear attention, Gated MLA full attention, Stable LatentMoE sparse FFN, interleaved) in the residual stream, and Block Attention Residuals where each residual add reads a gated mix of every earlier block through a learnable gate alpha, carried on a residual bus.">
+        <svg viewBox="0 172 660 440" className="w-full" role="img" aria-label="Kimi K3 architecture: a hybrid block stack (KDA linear attention, Gated MLA full attention, Stable LatentMoE sparse FFN, interleaved) in the residual stream, and Block Attention Residuals where each residual add reads a gated mix of every earlier block through a learnable gate alpha, carried on a residual bus.">
           <defs>
             <marker id="kk-a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
               <path d="M0 0 L10 5 L0 10 z" fill={INK} />
@@ -80,7 +80,7 @@ export function KimiK3Architecture() {
               <path d="M0 0 L10 5 L0 10 z" fill={RESID} />
             </marker>
           </defs>
-          <rect x="0" y="0" width="660" height="612" rx="10" fill={PAPER} />
+          <rect x="0" y="172" width="660" height="440" rx="10" fill={PAPER} />
 
           {/* ── output (top) ── */}
           <text x={cx} y={196} textAnchor="middle" fill={INK} fontSize="12" fontWeight={600}>Output</text>

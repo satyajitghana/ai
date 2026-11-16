@@ -1,0 +1,151 @@
+---
+title: "Gated DeltaNet hybrids: a fixed memory on three layers in four"
+description: "How the Gated DeltaNet layer works, from linear attention through the delta rule to the gated delta rule, how it trains in parallel chunks, and why every model built on it still keeps one full-attention layer in four. With the state and the cache weighed in bytes on Qwen3.8-27B and KLM 1.6, the paper's recall results, and the decoupled gates of Gated DeltaNet-2."
+date: 2026-11-16
+tags:
+  - linear-attention
+  - hybrid-attention
+  - explainer
+---
+
+Open a recent Qwen `config.json` and the `layer_types` list reads like a drum pattern: three `linear_attention`, one `full_attention`, repeated. Qwen3.8-27B has 64 layers, 48 of them Gated DeltaNet and 16 full attention. KLM 1.6, a 99M-parameter base model, puts attention at layers 3, 7, 11, 15, 19 and 23 and Gated DeltaNet-2 everywhere else. The [full-attention census](/articles/full-attention-census) found that most DeltaNet and KDA designs sit at exactly that 3 to 1 ratio.
+
+This page builds the layer that fills three slots in four, from plain linear attention up, then explains why the fourth slot is still softmax attention. The source is the Gated DeltaNet paper ([Yang, Kautz and Hatamizadeh](https://arxiv.org/abs/2412.06464), from MIT and NVIDIA); the numbers on real models come from this site's pieces on [KLM 1.6](/articles/klm-1-6), [the census](/articles/full-attention-census) and [the linear-attention roundup](/articles/linear-attention-state-roundup).
+
+## A cache that grows, and a state that doesn't
+
+Softmax attention keeps every key and value it has seen. For a query $q_t$ it computes
+
+$$
+o_t = \sum_{i \le t} \frac{\exp(q_t^\top k_i)}{\sum_{j \le t} \exp(q_t^\top k_j)}\, v_i
+$$
+
+and the softmax couples every term to every other, so nothing can be summarised in advance. Decoding token $t$ reads $t$ cached entries per layer. At long context that read, and the memory holding it, is the cost.
+
+Drop the softmax and the sum factorises. Following the paper's convention, with the state $S$ a $d_v \times d_k$ matrix:
+
+$$
+S_t = S_{t-1} + v_t k_t^\top, \qquad o_t = S_t\, q_t = \sum_{i \le t} v_i\, (k_i^\top q_t)
+$$
+
+That is linear attention. The state is the same size at token 10 and at token 1,000,000: one $d_v \times d_k$ matrix per head. Reading it is one matrix-vector product. In the paper's words, it "underperforms Transformers in language modeling by a large margin", and the reason is visible in the update. Every token adds an outer product and nothing ever leaves. Write two values at overlapping keys and every later read returns a blend of both.
+
+## Two repairs: forget, and overwrite
+
+The first repair is a **decay**. Mamba-2, written as linear attention, multiplies the state by a data-dependent scalar before each write:
+
+$$
+S_t = \alpha_t S_{t-1} + v_t k_t^\top, \qquad \alpha_t \in (0, 1)
+$$
+
+The model can now clear its memory when the topic changes. It cannot clear one association without fading all of them; the decay is global.
+
+The second repair is the **delta rule**. Treat $S$ as a memory that maps keys to values. Before writing, read what it currently returns for $k_t$, call that $v_t^{\text{old}} = S_{t-1} k_t$, take it out, and put a blend of the new and old value back:
+
+$$
+S_t = S_{t-1} - (S_{t-1} k_t)\, k_t^\top + \big(\beta_t v_t + (1 - \beta_t) S_{t-1} k_t\big)\, k_t^\top = S_{t-1}\big(I - \beta_t k_t k_t^\top\big) + \beta_t v_t k_t^\top
+$$
+
+$\beta_t \in (0, 1)$ is the writing strength. With unit-length keys and $\beta_t = 1$, the slot along $k_t$ is replaced exactly. Associations along orthogonal keys are untouched. The transition $I - \beta_t k_t k_t^\top$ is a generalised Householder matrix: it shrinks the state along one direction and leaves the rest alone.
+
+The paper reads this as optimisation. The delta rule is one step of gradient descent on the regression loss $\tfrac{1}{2}\lVert S k_t - v_t \rVert^2$, with learning rate $\beta_t$:
+
+$$
+S_{t} = S_{t-1} - \beta_t (S_{t-1} k_t - v_t) k_t^\top
+$$
+
+So a delta-rule layer is an online regressor fitted to the key-value pairs it has seen, and its state is the regressor's weights. The [linear-attention roundup](/articles/linear-attention-state-roundup) builds its whole comparison on that reading.
+
+## The gated delta rule
+
+Gated DeltaNet puts the two repairs together. Its Eq. 10 is
+
+$$
+S_t = S_{t-1}\Big(\alpha_t \big(I - \beta_t k_t k_t^\top\big)\Big) + \beta_t v_t k_t^\top
+$$
+
+Both gates are computed from the token. When $\alpha_t \to 0$ the memory is wiped in one step. When $\alpha_t \to 1$ the layer is a pure delta rule and edits one association without touching the others. In optimisation terms, $\alpha_t$ is an adaptive weight decay on the online regressor.
+
+Per head and per token, the work is three moves on a $d_v \times d_k$ matrix:
+
+1. **Decay**: multiply the state by $\alpha_t$.
+2. **Erase**: read $S k_t$ and subtract $\beta_t (S k_t) k_t^\top$.
+3. **Write**: add $\beta_t v_t k_t^\top$.
+
+Then the query reads it, $o_t = S_t q_t$. The diagram above draws those three moves on a 4 by 4 head. KLM's reference code is the same loop written out one token at a time in FP32: multiply the state by the decay, read the erase term, add the corrected write.
+
+The paper's single-needle results (its Table 2, 1.3B models trained on 100B tokens) show why both repairs matter. On S-NIAH-1, a pass-key buried in repeated filler, Mamba-2 falls from 99.2 at 1K tokens to 30.4 at 8K because its decay forgets too fast, while DeltaNet holds 98.8. On S-NIAH-2, a number hidden in real essays, DeltaNet drops to 14.4 at 8K because it never clears anything and the needle collides with everything else, while Gated DeltaNet keeps 92.2 at 4K. The authors summarise it as three observations: decay hurts retention, gating helps filtering, and the delta rule helps memorisation.
+
+## Inside the layer
+
+The block around the recurrence is close to a Llama layer with the attention swapped out. Queries, keys and values each come from a linear projection, a short causal convolution and SiLU; queries and keys are then L2-normalised, which keeps the Householder transition stable. $\alpha$ and $\beta$ come from their own linear projections, $\alpha$ in Mamba-2's parameterisation. The output is normalised and multiplied by a gate before the output projection. The paper's figure shows that block next to its two hybrid layouts:
+
+<Figure
+  src="/articles/architectures/gated-deltanet-hybrid/fig1.png"
+  alt="Three panels. Gated DeltaNet-H1: a block repeated N times with Gated DeltaNet then MLP, then sliding-window attention then MLP, each with a residual add. Gated DeltaNet-H2: Mamba2 then MLP, Gated DeltaNet then MLP, sliding-window attention then MLP. Block design: q and k pass through a linear projection, a short convolution, SiLU and L2 norm; v through a linear projection, convolution and SiLU; alpha and beta through linear projections; all feed the Gated Delta Rule, whose output is normalised, multiplied by a gate from its own linear projection, and projected."
+  caption="The paper's two hybrids and its layer: H1 alternates Gated DeltaNet with sliding-window attention, H2 stacks Mamba2, Gated DeltaNet and sliding-window attention (Gated DeltaNet paper, Figure 1)."
+/>
+
+Production models kept the layer and changed the hybrid. The paper's H1 alternates one Gated DeltaNet layer with one sliding-window attention layer. Qwen and KLM put three recurrent layers under one full-attention layer that sees the whole context.
+
+## Training it in parallel
+
+Written as a recurrence, the layer is a loop over tokens, which a GPU hates. Written fully in parallel, as a masked $L \times L$ matrix, it is quadratic again. The paper trains it chunkwise: split the sequence into chunks of $C$ tokens, run the recurrence only across chunk boundaries, and do everything inside a chunk with matrix multiplies.
+
+The hard part is the product of Householder transitions inside a chunk. The paper extends the WY representation that DeltaNet's parallel algorithm used (Yang et al., 2024) to carry the decay. A product of $r$ transitions collapses to $I - \sum_i w_i k_i^\top$, and the vectors $w$ and their value-side twins come from one triangular solve over the chunk:
+
+$$
+\widetilde{U}_{[t]} = \Big[I + \operatorname{strictLower}\big(\operatorname{diag}(\beta_{[t]})\,(\Gamma_{[t]} \odot K_{[t]} K_{[t]}^\top)\big)\Big]^{-1} \operatorname{diag}(\beta_{[t]})\, V_{[t]}
+$$
+
+where $\Gamma_{[t]}$ holds the ratios of cumulative decays inside the chunk. After that, the chunk's output and the state handed to the next chunk are a few dense matmuls. The paper's throughput comparison puts Gated DeltaNet at essentially DeltaNet's speed and slightly behind Mamba-2, whose scalar transition is cheaper than a Householder one. The same chunkwise shape is what [Kimi K3's KDA layers](/architectures/kimi-k3) and Mamba-2's SSD use.
+
+## Why one layer in four stays attention
+
+A fixed state is a lossy summary. The roundup's toy recall task puts a number on it: the delta rule recalls 96.9% of 8 stored pairs and 49.2% of 32. A softmax layer recalls whatever it was given, because it kept all of it. The team behind [Qwen3.8-Flash-Next](/articles/qwen3-8-flash-next) gives the design rule plainly: one layer in four stays global "because a finite state cannot reproduce exact token-level retrieval no matter how well it is gated".
+
+The paper says the same about linear models in general. They "have limitations in modeling local shifts and comparisons, and their fixed state size makes it hard for retrieval tasks". On its recall-heavy benchmarks, the hybrids beat both the pure recurrent models and the pure Transformer.
+
+So the hybrid splits the work. The recurrent layers carry recency and gist at a constant cost per token. The attention layers do exact lookup over the whole context. Where the attention layer sits is a choice. KLM puts it at the top of each group of four. The ratio is a choice too: across the census, hybrids keep between one layer in ten and one in two as full attention, and the DeltaNet and KDA designs cluster at one in four.
+
+## What it saves, in bytes
+
+**Qwen3.8-27B.** The census works it from the config. Each of the 16 full-attention layers has 4 KV heads of width 256, so it caches $2 \times 4 \times 256 = 2{,}048$ values, 4,096 bytes per token in BF16. The 16 layers together hold 64 KiB per token, and at the model's 262,144-token context that is 17.2 GB for one sequence. With all 64 layers full it would be 68.7 GB. Each Gated DeltaNet layer holds 48 value heads of a 128 by 128 state, 786,432 values, kept in FP32: 3 MiB per layer and 144 MiB for all 48, at any length. One recurrent layer's state equals one attention layer's cache at 768 tokens, and past that every token is savings.
+
+**KLM 1.6.** At 99M parameters the arithmetic is the same and the crossover is shorter. Each attention layer caches 4 KV heads of 64 dimensions, keys and values, so 512 numbers per token. Each Gated DeltaNet-2 layer keeps 4 heads of 128 by 128, 65,536 numbers. One state equals one layer's cache at 128 tokens. At the full 2,048-token context the six attention layers hold 25.2 MB and the 18 recurrent states, with their convolution windows, about 5.1 MB. All 24 layers as attention would be 101 MB.
+
+The generic version, for a model with $L$ layers, a fraction $f$ of them full attention with $h_{kv}$ heads of width $d$, and recurrent heads of $d_k \times d_v$:
+
+$$
+\text{bytes} \approx \underbrace{f L \cdot 2\, h_{kv}\, d\, b \cdot N}_{\text{grows with context } N} \;+\; \underbrace{(1 - f) L \cdot h\, d_k\, d_v\, b_s}_{\text{fixed}}
+$$
+
+with $b$ and $b_s$ the bytes per cached value and per state value. At $f = 1/4$ the growing term is a quarter of an all-attention model's.
+
+## The state is fragile in precision
+
+The fixed part is small, and it does not like being compressed. [LeapQuant](/articles/leapquant) measured what happens when a Gated DeltaNet state is stored in BF16 instead of FP32: Qwen3.5-9B's AIME 2026 score falls from 87.9 to 72.1, and in INT8 to 3.9. That is why Qwen's config asks for an FP32 state and why KLM's reference code runs the recurrence in FP32 whatever the weights are in. The state is not written once and read; every token multiplies it and adds to it, so its rounding error compounds over thousands of steps.
+
+Serving has its own costs. A server now manages two kinds of memory with different lifetimes, a paged KV cache and a per-sequence state, and a cached prefix can only be reused if a state snapshot was saved at that exact boundary. Prefix caching gets harder, not impossible.
+
+## Gated DeltaNet-2: splitting the gate in two
+
+The gated delta rule uses one scalar, $\beta_t$, for two jobs: how much old content to erase and how much new content to write. Kimi Delta Attention made the decay per channel. [Gated DeltaNet-2](https://arxiv.org/abs/2605.22791) (Hatamizadeh, Choi and Kautz, NeurIPS 2026) splits $\beta$ as well. In the convention of the KLM article, with $S$ as $d_k \times d_v$, its Eq. 10 is
+
+$$
+S_t = \big(I - k_t (b_t \odot k_t)^\top\big)\, D_t\, S_{t-1} + k_t (w_t \odot v_t)^\top
+$$
+
+with $D_t = \mathrm{Diag}(\alpha_t)$ a per-channel decay, $b_t$ an erase gate over key channels and $w_t$ a write gate over value channels. Tie both gates to the same scalar and it is KDA; make the decay a scalar too and it is Gated DeltaNet. Untied, the layer can erase an old value completely and write the new one at half strength, or forget a key without writing anything, neither of which a single $\beta$ can express. KLM 1.6 uses this layer; [its article](/articles/klm-1-6) has a widget that runs the three moves on a 4 by 4 head with the gates on sliders, and its figure shows the block.
+
+<Figure
+  src="/articles/klm-1-6/fig2.png"
+  alt="Left: the Gated DeltaNet-2 paper's hybrid block, repeated N times: Gated DeltaNet-2 then MLP, then sliding-window attention then MLP, with residual additions. Right: the block design, where q and k go through a linear projection, short convolution, SiLU and L2 norm, v through a projection, convolution and SiLU, and alpha, b and w come from separate linear projections, b and w through sigmoids, all feeding the Gated Delta Rule-2 operator, whose output is normalised, multiplied by a gate and projected."
+  caption="The same block one generation on: separate erase and write gates, b and w, feed the Gated Delta Rule-2 operator (Gated DeltaNet-2 paper, Figure 1)."
+/>
+
+## Where I land
+
+The Gated DeltaNet layer earns its place because the math is honest about what a fixed memory can do. The delta rule gives it a way to edit one association, the decay gives it a way to drop many, and the chunkwise algorithm makes both trainable at matmul speed. It still cannot do exact recall over a long context, and nobody shipping it pretends otherwise: every production model built on it keeps full attention in about one layer in four, and the census found no large open model whose only long-range memory is a recurrent state.
+
+If I were sizing a long-context deployment, the line I would watch is the one that grows: the attention quarter. The recurrent three quarters are cheap and constant, as long as their state stays in FP32. The [Mamba entry](/architectures/mamba-ssm) covers the selective-scan side of the same family, and [Kimi K3](/architectures/kimi-k3) shows the per-channel decay at 2.78T parameters.

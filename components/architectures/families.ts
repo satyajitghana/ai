@@ -12,3 +12,9 @@ export const FAMILY_LABEL: Record<string, string> = {
   training: "Training",
   other: "Other",
 }
+
+// Below sm a 700-900-unit diagram squeezed into a phone-width card puts its
+// labels at 4-5 px. Wrapped in this, a diagram keeps at least 40rem of width
+// there and scrolls sideways inside its figure; the caption under it still
+// wraps. Used by the gallery's cards and modal and by each architecture page.
+export const DIAGRAM_FIT = "[&_figure>div]:overflow-x-auto [&_svg]:min-w-[40rem] sm:[&_svg]:min-w-0"
