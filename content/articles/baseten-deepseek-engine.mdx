@@ -1,0 +1,444 @@
+---
+title: "deepseek-ultrafast: Baseten's one-model engine, and what 1,740 tokens a second measures"
+description: "Baseten released deepseek-ultrafast, an inference engine for DeepSeek-V4.1-Flash written in Rust and CUDA, with 1,740 tokens/s decode on four GPUs and 2,060 on eight. I read the source at 76766a9. The engine is real and specific: every expert is sliced across the GPUs so nothing is dispatched, the draft, verify and accept loop is one CUDA graph with a device-side switch over how many drafts to check, all-reduces are stores straight into peer memory, and the block of drafts is raised from the checkpoint's 5 to 6. The numbers are one request at a time on one Tetris prompt with thinking off: the server runs one job per replica, so 1,740 is both the per-user and the whole box's throughput, 435 tokens/s per GPU. The four-GPU row is GB300, not B300 as the post says. There is no vLLM or SGLang baseline anywhere. By my byte count a step reads 14 to 42 GB and streams for at most 1.3 of its 3.3 ms; a two-point fit to the README leaves about 2.1 ms a step that more GPUs cannot remove, which is why eight GPUs buy 18%. The licence is Elastic 2.0, not open source."
+date: 2026-11-16
+tags:
+  - inference
+  - deepseek
+  - speculative-decoding
+  - cuda
+  - rust
+  - kernels
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 1
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Baseten's DeepSeek engine read from source: one job per replica, TP-sliced experts, a graph-side verify switch, and the bytes behind 1,740 tok/s."
+topic: inference-serving
+kind: teardown
+level: practitioner
+runsOn: datacenter
+licence: Elastic-2.0
+---
+
+import { StepWalk } from "@/components/articles/baseten-deepseek-engine/step-walk"
+import { DecodeRoofline } from "@/components/articles/baseten-deepseek-engine/decode-roofline"
+
+On 13 November [Baseten posted](https://x.com/baseten/status/2121373358717862213) that it had
+"built an inference engine for DeepSeek V4.1-Flash from scratch in Rust and CUDA", with three
+numbers: about 1,740 tokens a second decode on 4xB300, about 2,060 on 8xB300, and a 1M-token
+prefill in about 12 seconds. "It's open-source." The post quotes a thread by
+[@saltyph](https://x.com/saltyph/status/2121301307437027415), one of the engineers who built it, that adds "the core engine is just rust + cuda. no
+pytorch, no sglang, no dsls, etc." and links the repository,
+[`basetenlabs/deepseek-ultrafast`](https://github.com/basetenlabs/deepseek-ultrafast).
+
+The replies split into two camps. One said this beats vLLM and SGLang. The other asked what batch
+size, what context, whether decode is speculative, and why doubling the GPUs bought so little. Both
+are answerable from the repository, so I read it: 17,319 lines of Rust, 14,242 of CUDA, 131
+`__global__` kernel definitions, at commit `76766a9`. I could not run it. It needs four or eight
+Blackwell GPUs and the 510 GB checkpoint, so every speed below is Baseten's, and every byte count and
+code path is mine.
+
+<RepoCard repo="basetenlabs/deepseek-ultrafast" />
+
+<Video
+  src="/articles/baseten-deepseek-engine/clip1"
+  poster="/articles/baseten-deepseek-engine/clip1-poster.jpg"
+  alt="A dark web page with a prompt box reading 'implement the tetris game.', a speedometer and a stats panel. The status goes from idle to decoding, the token count climbs past 5,000 in under three seconds while HTML scrolls in a code pane, and the gauge settles at 2,206 average tokens per second, 5,448 tokens, peak 2,407. Then the generated Tetris game runs in the right pane with falling blocks."
+  caption="The demo from the post and the README: one request, 'implement the tetris game.', streamed and then played. The gauge ends at 5,448 tokens and 2,206 average tokens a second, which is neither headline number; the hardware is not labelled (video from @saltyph's post on X, also docs/tetris-demo.gif in the repository)."
+/>
+
+## One request at a time
+
+The README's table is more careful than the post. Its four-GPU column is **4 x GB300 (TP4)** and its
+eight-GPU column is **8 x B300 (TP8)**: two different machines, not one machine with more GPUs. Both
+have Blackwell Ultra GPUs with 8 TB/s of HBM each, but a GB300 node pairs the GPUs with Grace CPUs,
+and the engine picks different kernels for each width at runtime (more on that below). The post's
+"4xB300" is not what the README measured.
+
+The rows are:
+
+| | 4 x GB300, TP4 | 8 x B300, TP8 |
+|---|---:|---:|
+| Decode | 1,740 tokens/s | 2,060 tokens/s |
+| Step time | 3.30 ms | 2.71 ms |
+| Acceptance length | 5.6 tokens a step | 5.6 tokens a step |
+| Prefill, 1,000,000 tokens | 13.2 s (76,000 tokens/s) | 11.7 s (85,000 tokens/s) |
+
+All decode rows come from one prompt: *"implement the tetris game. output HTML code directly - no
+explanation."* The reproduction script in the README sends it with `"thinking": {"type": "disabled"}`,
+measures from the first streamed token to the last, and prints a line like `5142 tokens at 1,717
+tokens/s`. It reports ranges too: "We see 1,700-1,770 tokens/s on 4xGB300 and 1,980-2,170 tokens/s on
+8xB300", and "Over 30 runs we see 3.24-3.37 ms and 5.1-6.1 tokens/step on 4xGB300, and 2.69-2.74 ms
+and 5.3-6.1 tokens/step on 8xB300."
+
+The thing the README does not say in words is in `crates/server/src/engine.rs`. Each replica pulls
+one job off its admission queue, and all of its GPUs work on that job until it retires:
+
+```rust
+// crates/server/src/engine.rs (abridged)
+while let Some(job) = shared.next_job(r, admission)? {
+    w.job(&job)?;
+    drop(job);
+    shared.retired(r);
+}
+```
+
+There is no batching. A second request waits until the first finishes (the queue prepares up to six
+jobs ahead, looking up where their KV cache lives, but decodes one). So 1,740 tokens a second is the
+speed one user sees and also the total output of the four-GPU box: **435 tokens a second per GPU**, or
+257.5 on the eight-GPU box. That is the right way to read this engine. It is a latency machine. It
+answers "how fast can one stream go", not "how many tokens can a GPU make".
+
+The sampling is fixed as well. `docs/SERVER.md`: "`temperature` and `top_p` are fixed at 1; other
+values are rejected." Logprobs, structured output and strict tool schemas return 400. The context is a
+few thousand tokens; no decode number at long context is published, though the server takes 1,048,576.
+
+## The model it was cut for
+
+DeepSeek-V4.1-Flash is an odd model to serve, which is part of why a dedicated engine makes sense.
+[The site's file-level read of the checkpoint](/articles/deepseek-v4-1-flash-1017) has the facts this
+piece leans on: 40 layers, each with 384 routed experts plus one shared, 6 routed per token; one
+routed expert is three 2304 x 5120 matrices stored in FP4 with a scale per 32 values; attention, shared
+experts, routers and the hyper-connection mixers are 7.20 GB, mostly FP8; the routed experts total
+288.78 GB; two Engram n-gram tables are another 202.76 GB; and a decoded token reads **13.04 GB** at
+the shipped precision, of which the routed experts are only 4.51 GB.
+
+The `config.json` adds the parts an engine has to implement:
+
+- **Attention with one KV head.** 64 query heads of width 512 share a single 512-wide KV (with a
+  64-wide rotary part), behind a low-rank query (`q_lora_rank` 1280) and a grouped low-rank output
+  (`o_groups` 8). It is DeepSeek's latent-attention lineage, compressed further.
+- **A sparse indexer.** In every layer but the first two, a small indexer (32 heads of width 128)
+  scores the KV and keeps the top 512 positions; attention reads those plus a 128-token sliding window.
+  From layer 20 on, the indexer only looks inside 2,048 candidate blocks of 8 positions that layer 20
+  pre-selects.
+- **A causal encoder-decoder with shared KV.** The first 20 layers are an encoder. Layers share KV
+  caches in groups that start at layers 2, 8, 14 and 20, and the decoder's whole cache is layer 20's,
+  computed from the encoder's output. A prompt only has to run through half the network, which is
+  where the 1M-token prefill comes from.
+- **mHC.** Four residual lanes (`hc_mult` 4) mixed by a Sinkhorn-normalised matrix at every block.
+- **Engram.** Two lookup tables at layers 1 and 14, about 384 million rows each, read by hashing the
+  last 2 to 4 tokens.
+- **DSpark.** Three draft layers with 128 experts each (3 active), a Markov head of rank 256 and a
+  block size of 5: the drafter that [the DSpark article](/articles/deepseek-dspark) explains.
+
+A general engine has to make every one of these a pluggable piece. [vLLM](/articles/vllm) and
+[SGLang](/articles/sglang) did, and
+[DeepSeek's own DeepInfer](/articles/deepinfer) did with TileLang. Baseten's engine makes none of them
+pluggable. `weights.rs` checks `dim == 5120` before it picks its MoE path, and the fast all-reduce only
+turns on for `sm_103` at TP4 or TP8.
+
+## One decode step on four GPUs
+
+Every decode step is one CUDA graph, captured once at startup by `capture_spec_vadapt` and launched
+once per step. Step through it:
+
+<StepWalk />
+
+The drafter is the place the engine departs from the checkpoint. `config.json` says
+`dspark_block_size: 5`; `crates/cuda/src/profile.rs` overrides it:
+
+```rust
+// crates/cuda/src/profile.rs
+pub fn dspark_block() -> Option<usize> {
+    match get() {
+        (Profile::Sm103Tp4 | Profile::Sm103Tp8, _) => Some(6),
+        (Profile::Base, tp) if tp >= 8 => Some(7),
+        _ => None,
+    }
+}
+```
+
+So on GB300 and B300 a step drafts **6** tokens: the drafter runs six rows at once (the last committed
+token and five copies of a noise token), the draft head proposes a token per row, and the Markov rounds
+condition each proposal on the one before. Verification then runs the anchor plus the drafts through
+all 40 layers. `spec_accept` in `ops.cu` appends `c` accepted drafts and one sampled token and
+advances the position by `c + 1`, so a step emits between 1 and 7 tokens. The README's mean of 5.6
+means the verifier keeps about 4.6 of 6 drafts on this prompt. HTML for a Tetris game is about as
+predictable as text gets; prose and reasoning will not do that.
+
+The verify length is chosen on the GPU. A confidence head scores the drafts against a threshold (0.3
+on TP4, 0.2 on TP8, with the last two positions held to half and a quarter of it), and a conditional
+switch node inside the graph runs one of six pre-captured verify bodies, for 2 to 7 rows. In a
+Python engine that decision is a round trip through the host; here it costs nothing the CPU can see.
+The host loop in `engine.rs` launches step *n*, then reads back step *n-1*'s committed count from a
+double-buffered snapshot while *n* runs, and streams those tokens to the client.
+
+Sampling never gathers the logits either. The vocabulary of 129,280 is split four ways (32,320 ids a
+GPU), each GPU reduces its shard to the statistics speculative sampling needs and pushes those to its
+peers (`samp_stats`). One correctness note sits here: on TP4 the verify head is an FP8 copy of the
+BF16 LM head, quantised by `fp8_quant` at load and selected in `head()` when `verify_head_fp8()` is
+true, which it is only for `sm_103` at TP4. Speculative sampling is lossless with respect to the
+distribution the verifier computes, and on TP4 that is the FP8 head's distribution, not the shipped
+BF16 one. The repo's `run --samp-test` checks the first case with a chi-square test against the exact
+distribution; nobody has published the size of the second difference, and I expect it is small.
+
+## What a single-model engine gets to hard-code
+
+The question the post invites is what you buy by not using vLLM or SGLang. Reading the code, it is
+mostly choices a general engine cannot make because it has to serve batches.
+
+**Experts are sliced, not dispatched.** The textbook way to run a MoE across four GPUs is expert
+parallelism: each GPU owns 96 of the 384 experts and tokens are sent to the GPU that owns their
+expert, an all-to-all each way. That is what throughput engines do at large batch, because each
+expert's weights are then read once for many tokens. At batch 1 it is a bad deal: six experts land on
+whichever GPUs own them, so some GPUs do two experts' work while others sit idle, and you pay two
+all-to-alls per layer. `weights.rs` instead slices every one of the 384 experts by its hidden width
+(`inter = moe_inter_dim / tp`, so 576 of 2,304 columns on each of four GPUs, 288 on eight). Every GPU
+computes a quarter of whatever experts the router picks. The load is perfectly even by construction,
+and the only communication is the all-reduce the dense layers need anyway. The router itself is
+replicated, so every GPU routes every row without talking to anyone.
+
+**The all-reduce is a store.** There is no NCCL. `comm.cu`'s push kernels write each GPU's partial
+sum directly into every peer's receive buffer with system-scope stores over NVLink, using sentinel
+values (negative zero) to tell when a slot has arrived, and each GPU adds the four partials itself.
+The sum is fused into the epilogue of the next mHC mix. At batch 1 an all-reduce moves a few tens of kilobytes and is pure latency; skipping a library call, a barrier and a separate
+reduction kernel is the whole point. Kernels also use programmatic dependent launch (88 `pdl_wait`
+sites) so the next kernel's prologue overlaps the previous kernel's tail.
+
+**Everything that does not depend on the hidden state runs early.** The Engram lookups hash the last
+few token ids, not activations, so `engram_fork` starts both layers' lookups before layer 0, on a side
+stream. Each GPU holds a quarter of each table's rows (about 51 GB of the 203 GB), gathers the rows
+it owns and sums with its peers. The indexer's query weights are replicated so its scoring overlaps
+the main query projection on another stream. The drafter's KV for the next step is prepared while the
+verify head runs.
+
+**Shapes are constants.** With at most 16 rows in flight (`MAX_M = 16`), every matmul is a skinny GEMV.
+The engine has its own `tcgen05` (Blackwell tensor-core) GEMV kernels for FP4 experts and FP8
+projections at exactly these shapes, and 17 files named like `variant_zzzzzzzzzzmoe.cu` that
+`build.rs` compiles only for `sm_103a`. Those are the hill-climbed kernels, some specific to TP8
+(`variant_zzzzzzzztp8.cu`). A general engine picks a kernel from a table at runtime; this one was
+tuned until the table had one row.
+
+None of these is impossible inside vLLM or SGLang, and [vLLM's Kimi K3 decode path on
+GB300](/articles/kimi-k3-gb300-megakernel) does a version of several of them. What the dedicated
+engine removes is the cost of keeping the general path working beside the fast one.
+
+## What it gives up
+
+The list is long, and it is the same list as the strengths read backwards:
+
+- One request decoding at a time per replica. Throughput per GPU is 435 tokens a second.
+- One model. `ensure!` calls on `dim`, the expert count, the window of 128 and the encoder-decoder
+  layout stop it from loading anything else.
+- Two GPU families. The README supports GB300 (`sm_103a`), B300 (`sm_103a`) and B200 (`sm_100a`); the
+  push all-reduce and the variant kernels are off on B200. A reply from someone working on the SCALE
+  compiler found the `tcgen05` instructions are the blocker for porting.
+- Temperature and top-p fixed at 1, no logprobs, no structured output.
+- A Redis instance and an RDMA port, which the server needs to start.
+
+The last one is the part of the release that is a service and not a demo. Each server keeps recent
+conversations' KV in host memory. When a conversation's next turn lands on a different replica, that
+replica fetches the KV over RDMA from the one that has it, and Redis records who owns what. DeepSeek's
+compression makes that cheap: [890 bytes of global KV per token](/articles/deepseek-v4-1-flash-1017),
+so even a 100,000-token conversation is under 100 MB. The README's claim is that this "removes the need
+for prefix-aware routing" and lets a load balancer send each turn to the least busy replica. That is a
+sensible design for an engine that serves one request at a time: you scale by replicas, and you want
+any replica to be able to take any turn. No numbers are published for it.
+
+## Bytes per step, not per token
+
+Now the arithmetic. The usual decode roofline for one stream divides the bytes a token reads by the
+memory bandwidth. Four GPUs at 8 TB/s give 32 TB/s, and 13.04 GB a token takes 0.41 ms, so without
+speculation the ceiling is about **2,450 tokens a second**. Reaching 1,740 that way would mean running
+at 71% of peak HBM bandwidth on 40 layers of skinny GEMVs with two all-reduces each. Nobody does that
+at batch 1.
+
+Speculation changes what a step reads, and a common mistake is to multiply the per-token ceiling by the
+acceptance length. A verify step pushes up to 7 rows through every layer, and each row routes to its
+own 6 experts. The dense weights are read once per step whatever the row count; the experts are read
+once per *distinct* expert. If the 7 rows route independently, the expected number of distinct experts
+in a layer is $384\,(1 - (378/384)^7) \approx 40$; if they all agree, it is 6. Code tokens are
+correlated, so the truth is between, and only a profile would say where.
+
+With the sizes from the checkpoint, my count of what one TP4 step reads, summed over the four GPUs:
+
+| Part | All rows share experts | Rows route independently |
+|---|---:|---:|
+| Attention, shared experts, routers, mHC | 7.20 GB | 7.20 GB |
+| Routed experts, 40 layers x 18.8 MB each | 4.51 GB (6 a layer) | 30.1 GB (40 a layer) |
+| Verify head and draft head, FP8, plus Markov head | 1.39 GB | 1.39 GB |
+| Drafter: non-expert weights + its experts | 0.88 GB | 1.67 GB |
+| **Total a step** | **14.0 GB** | **40.4 GB** |
+| Time to stream it at 32 TB/s | 0.44 ms | 1.26 ms |
+
+The step takes 3.30 ms. So HBM is busy for 13% to 38% of the step. KV reads are tiny at this context length, and Engram reads 12.7 KB a token. A few
+hundred megabytes of small projections are replicated on every GPU, which makes the even split slightly
+optimistic. None of that changes the shape: this engine is not bandwidth-bound. Most of each step is
+something else.
+
+Set the sharing, the rows and the fixed cost yourself:
+
+<DecodeRoofline />
+
+## Why eight GPUs buy 18%
+
+The replies did this division too: 2,060 / 1,740 is 1.18, for twice the GPUs. The step times say why.
+Model a step as a part that does not shrink with more GPUs plus a part that does:
+
+$$
+t_{\text{step}} = a + \frac{b}{N}
+$$
+
+The two README rows give $3.30 = a + b/4$ and $2.71 = a + b/8$, so $b/8 = 0.59$ ms, $b = 4.72$ ms·GPU
+and $a = 2.12$ ms. On four GPUs the part that scales is 1.18 ms, 36% of the step; on eight it is 0.59
+ms, 22%. With infinitely many GPUs a step would still take 2.12 ms, and at 5.6 tokens a step that caps
+one stream near **2,640 tokens a second** on this software.
+
+The rows come from different machines, and TP8 runs its own kernels, so this is an estimate from
+two points, not a measurement. Also, 1.18 ms of scalable work at 32 TB/s is 37.8 GB of
+streaming at peak bandwidth, which sits toward the independent-routing end of my table; at a realistic
+80% to 90% of peak it lands inside the range. The two numbers agree with each other, which is all two
+numbers can do.
+
+What is in the 2.12 ms? Not weights. It is roughly 43 layers' worth (40 verify, 3 draft) of
+dependent stages: the mHC mix, the query projection, the indexer and its top-k, the attention, the
+output projection, an all-reduce, the router, the experts, another all-reduce. Each waits for the one
+before. At about 50 µs of non-streaming time per layer, that is a few microseconds per stage of launch
+ramp, synchronisation and tail. More GPUs make each stage's arithmetic smaller and leave its latency
+where it was. The same split showed up in [vLLM's Kimi K3 path](/articles/kimi-k3-gb300-megakernel),
+where fusion's whole win was in the part that is not bandwidth.
+
+An independent model reached the same diagnosis. The day after the release
+[@aercrist](https://x.com/aercrist/status/2121715821281984741) published a simulator calibrated to the
+README, and its breakdown of a 3.30 ms step puts weight and KV streaming at about 1.4 ms and the rest in
+collectives and per-stage fixed latency:
+
+<Figure
+  src="/articles/baseten-deepseek-engine/fig1.jpg"
+  alt="Horizontal stacked bar chart titled 'Where a DeepSeek-V4.1-Flash decode step goes'. Four bars: 4x GB300 deepseek-ultrafast (calibrated) 3.30 ms, 1,697 tok/s/user, with about 1.4 ms of weight and KV streaming, a thin compute slice, about 0.2 ms of collective latency and about 1.6 ms of per-stage fixed latency; a barrier-synced persistent kernel (projected) 2.05 ms, 2,728 tok/s/user; dataflow-style software (projected) 1.56 ms, 3,596 tok/s/user; MDA-1 x4 (proposed) 1.53 ms, 3,656 tok/s/user."
+  caption="A third party's model of the step, not a measurement: the top bar is calibrated to the README's 3.30 ms, the others are projections, and the bottom bar is the author's own proposed decode ASIC. Its streaming bar is close to the 1.18 ms my two-point fit gives (image from the first post of @aercrist's thread on X)."
+/>
+
+<Figure
+  src="/articles/baseten-deepseek-engine/fig2.jpg"
+  alt="Line chart titled 'Per-stage fixed latency caps strong scaling (simulated)'. X axis: chips per sequence, 2, 4, 8, 16. Y axis: tokens per second per user at batch 1. The grey calibrated GPU curve rises slowly from about 1,200 at 2 chips to about 2,300 at 16; two black stars for the README's measured points sit on it near 1,700 at 4 and 2,060 at 8. Two projected curves for dataflow-style software and the proposed ASIC rise steeply to about 6,300 and 6,600 at 16 chips."
+  caption="The same model's scaling curve with the README's two rows as stars. The flat grey curve is the per-stage latency at work; the steep curves are what the author projects if that latency were removed (image from the second post of @aercrist's thread on X)."
+/>
+
+Read it with the source in mind: the author is proposing a decode ASIC, the projected bars are a simulator's,
+and the study's own reply to Baseten says "These are modeled, not measured." I include it because its
+calibrated bar and my arithmetic land in the same place from different directions, not because I
+believe the projections.
+
+## The million-token prefill
+
+The prefill figure is the other one the replies liked. 1,000,000 tokens in 13.2 s on TP4 is 75,758
+tokens a second (the README rounds to 76,000); 11.7 s on TP8 is 85,470. Doubling the GPUs buys 12%
+here, even less than decode.
+
+The model does most of the work here. The prompt runs through the 20 encoder layers, about 7.89B
+active parameters a token by the site's header count, and the decoder only needs its 128-token window:
+`docs/SERVER.md` calls this "CED bounded SWA replay prefill". The global KV is 890 bytes a token, so a
+million tokens of it is 0.89 GB. What stays expensive is the encoder's indexers, which score every
+earlier compressed position for every new one, so that part grows with the square of the prompt. How much of the
+13 seconds it is, I can't say without a profile.
+
+## Against what?
+
+Neither the post, the thread nor the README compares this engine with anything. "From scratch" and the
+speeds invited the comparison, and one reply under Baseten's post was "RIP vLLM". There is no
+vLLM or SGLang number in the release at any setting, so there is nothing like for like to check.
+
+What exists are other single-stream or high-interactivity numbers for the same model, each measured
+differently. These are mine to line up, from the site's earlier reads:
+
+| Run | Tokens/s per user | What it is |
+|---|---:|---|
+| deepseek-ultrafast, 8 x B300 | 2,060 | one request, Tetris, thinking off, 5.6 a step |
+| deepseek-ultrafast, 4 x GB300 | 1,740 | the same |
+| [Fireworks Ultrafast demo](/articles/deepseek-v4-1-flash-1017) | 1,521 | peak of one Tetris stream, 1,284 average, hardware not disclosed |
+| [DeepInfer, most interactive point](/articles/deepinfer) | 325.2 | 8 requests per rank, 131,072 context, acceptance assumed |
+| [InferenceMAX, GB300 Dynamo vLLM](/articles/deepinfer) | 196.5 | P90, concurrency 10,888, agentic trace |
+
+The bottom rows are throughput systems running thousands of requests: the vLLM row makes 13,732
+tokens a second per decode GPU at that speed, about 32 times what deepseek-ultrafast makes per GPU, and
+DeepInfer's 26,270 per GPU (at about 100 per user, with acceptance assumed) is about 60 times. The top
+rows are latency systems running one. They are different products. The fair comparison would be vLLM
+or SGLang at batch 1 on the same four GB300s with DSpark on, the same prompt and thinking off, and
+nobody has published that. The reply asking for "total throughput at 64 concurrent users" was asking
+for a number this server cannot produce: it would run the 64 requests one after another.
+
+The closest thing to a speed comparison is Fireworks, also a Tetris demo with thinking off, and
+deepseek-ultrafast's four-GPU number is above its peak. Since Fireworks never said what hardware it
+used, that tells you little.
+
+## The demo clip
+
+The README says the GIF is "Shown at real-time speed." It checks out. Reading the counters frame by
+frame, the token count goes from 82 at 0.4 s into the clip to 5,323 at 2.8 s: 5,241 tokens in 2.4
+seconds of video, 2,184 a second, against the gauge's final 2,206 average. The clip is not sped up.
+
+It is also not either headline. 2,206 is above the README's stated range for 8 x B300 (1,980 to 2,170)
+and far above the four-GPU range, and the page does not say which machine it ran on. A good run on the
+eight-GPU box would explain it. The 5,448 tokens are all output: with thinking off there is no
+reasoning to hide.
+
+## Agents, SGLang and "from scratch"
+
+The thread is open about how this was built. "this was an experiment in how far you can get working
+mostly agent driven. our first attempt was from scratch with no reference and the agent struggled. so
+we started again and let the agents read from sglang, which allowed for some good bootstrapping." Then:
+"TP4 went from ~5ms to 3.5ms to 3.1ms per step in ~a day. stopped hill climbing around 2.6ms." The
+README's acknowledgment agrees: "The kernels were optimized by coding agents that could read the source
+of FlashInfer and SGLang while they worked."
+
+So "from scratch" means no PyTorch and no SGLang at runtime, which is true: the engine links
+`cudarc`, the Hugging Face `tokenizers` crate, DeepSeek's `deepseek-recipe` for prompt rendering,
+cuDNN and cuBLAS for the vision encoder only, and NVIDIA's Velo for RDMA. Its MoE path is named `sgl`
+throughout, and the thread says it pulled in "the best of some sglang work we have coming to OSS". It
+does not mean written without reference to the open engines.
+
+One number does not reconcile. The thread says hill climbing stopped "around 2.6ms" per step on TP4;
+the README's TP4 row is 3.30 ms, with 30 runs between 3.24 and 3.37. Perhaps the 2.6 ms was a
+different prompt, context or machine. As published, the README's figure is the one with a method
+behind it.
+
+The variant files read like a search that kept every winner: names such as
+`variant_zzzzzzzzzzsds.cu` sort after everything else, compile only for `sm_103a` and are picked by
+name at runtime. That is fine for one model on one GPU generation, and it is why I'd expect a rewrite
+rather than a port for Vera Rubin, which the thread already promises.
+
+## Open source, with a clause
+
+The post says "It's open-source." The `LICENSE` file is the Elastic License 2.0, which is
+source-available, not an OSI open-source licence. Its first limitation: "You may not provide the
+software to third parties as a hosted or managed service, where the service provides users with access
+to any substantial set of the features or functionality of the software." You can read it, run it for
+yourself and modify it. You cannot start an API business on it, which is the business Baseten is in;
+its own endpoint is `DeepSeek-V4.1-Flash-Fast` on Baseten Model APIs. That is a reasonable licence for a
+company to choose. It is not what the word in the post means.
+
+## Good code, oversold numbers
+
+The engineering is good and specific, and the repository is a better read than most serving code: one
+model, so every decision is visible. The design is right for the job it picked. At batch 1, slicing
+experts beats dispatching them, a push all-reduce beats a collective library, and keeping the
+draft-verify-accept loop inside one graph beats a host round trip. If you want to know what single
+stream decode on Blackwell looks like with the framework tax removed, this is the code to read.
+
+The numbers are honest in the README and oversold in the post. 1,740 is one user on four GB300s, on a
+prompt that lets the drafter keep 4.6 of 6 guesses, with thinking off. It is also the box's whole
+output. Nothing here says it beats vLLM or SGLang, because nothing here was compared with them, and
+the comparison that matters for most deployments (tokens per GPU-hour at a target latency) is the one
+this engine does not try to win.
+
+What I'd take from it is the 2.12 ms. More GPUs, more bandwidth and better FP4 kernels all go into the
+part of the step that is already the smaller one. The next 2x for one stream on this model is in the
+dependent-stage latency: a persistent kernel, fewer and earlier synchronisations, the weights for the
+next layer in flight while this one's experts stream. Baseten says Rubin numbers are coming. I'd
+rather see an `nsys` breakdown of a GB300 step through the `tools/nsys_breakdown.py` script they
+already ship, which would settle where those 2.12 ms go.
+
+What I read and what I ran: the post, the quoted thread and the replies through the fxtwitter mirror;
+the repository at `76766a9`; the checkpoint's `config.json` and `inference/config.json` from Hugging
+Face; frames of the demo clip. Byte sizes come from the site's [header-level read of the
+checkpoint](/articles/deepseek-v4-1-flash-1017). I ran nothing on a GPU. Every tokens-per-second and
+step-time figure is Baseten's; the per-step byte table, the fit and the per-GPU ratios are my
+arithmetic.

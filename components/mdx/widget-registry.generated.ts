@@ -121,6 +121,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "ax-k2/sga-path": () => import("@/components/articles/ax-k2/sga-path"),
   "baphomet-1-1-4b/curse-sim": () => import("@/components/articles/baphomet-1-1-4b/curse-sim"),
   "baphomet-1-1-4b/interference-lab": () => import("@/components/articles/baphomet-1-1-4b/interference-lab"),
+  "baseten-deepseek-engine/decode-roofline": () => import("@/components/articles/baseten-deepseek-engine/decode-roofline"),
+  "baseten-deepseek-engine/step-walk": () => import("@/components/articles/baseten-deepseek-engine/step-walk"),
   "beach-house-on-a-3090/house-compare": () => import("@/components/articles/beach-house-on-a-3090/house-compare"),
   "beach-house-on-a-3090/vram-budget": () => import("@/components/articles/beach-house-on-a-3090/vram-budget"),
   "beach-house-three-models/matched-views": () => import("@/components/articles/beach-house-three-models/matched-views"),
