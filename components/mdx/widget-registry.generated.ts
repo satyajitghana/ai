@@ -422,6 +422,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "flide-decision-inference/speedup-ledger": () => import("@/components/articles/flide-decision-inference/speedup-ledger"),
   "flint/bench-table": () => import("@/components/articles/flint/bench-table"),
   "flint/decode-ceiling": () => import("@/components/articles/flint/decode-ceiling"),
+  "floor-plan-to-3d-roundup/element-ledger": () => import("@/components/articles/floor-plan-to-3d-roundup/element-ledger"),
+  "floor-plan-to-3d-roundup/plan-extruder": () => import("@/components/articles/floor-plan-to-3d-roundup/plan-extruder"),
   "flux-3-action/replan-clock": () => import("@/components/articles/flux-3-action/replan-clock"),
   "flux-3-action/token-ledger": () => import("@/components/articles/flux-3-action/token-ledger"),
   "flux-3-image-klein/layout-builder": () => import("@/components/articles/flux-3-image-klein/layout-builder"),
