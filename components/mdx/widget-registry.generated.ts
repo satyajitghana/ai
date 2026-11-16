@@ -256,6 +256,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "cpu-chat-covert-channels/toy-channel": () => import("@/components/articles/cpu-chat-covert-channels/toy-channel"),
   "cpu-performance-engineering/decode-roofline": () => import("@/components/articles/cpu-performance-engineering/decode-roofline"),
   "cpu-performance-engineering/latency-ladder": () => import("@/components/articles/cpu-performance-engineering/latency-ladder"),
+  "cram-energy-based/energy-relax": () => import("@/components/articles/cram-energy-based/energy-relax"),
+  "cram-energy-based/speedup-ledger": () => import("@/components/articles/cram-energy-based/speedup-ledger"),
   "cross-model-kv-transfer/cost-curve": () => import("@/components/articles/cross-model-kv-transfer/cost-curve"),
   "cross-model-kv-transfer/retention-chart": () => import("@/components/articles/cross-model-kv-transfer/retention-chart"),
   "csfm-flow-matching/source-flow": () => import("@/components/articles/csfm-flow-matching/source-flow"),
