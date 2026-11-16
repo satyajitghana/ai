@@ -88,7 +88,7 @@ export const resume: Resume = {
     title: "Head of Engineering",
     company: { name: "Inkers Technology", url: "https://inkers.ai" },
     location: "Bengaluru, India",
-    email: "satyajitghana7@gmail.com",
+    email: "me@thesatyajit.com",
     github: "https://github.com/satyajitghana",
     linkedin: "https://www.linkedin.com/in/satyajitghana/",
     website: "https://ai.satyajit.si",

@@ -114,7 +114,7 @@ export const profile = {
     medium: "https://satyajitghana.medium.com/",
     scholar: "https://scholar.google.com/citations?user=rZCRakQAAAAJ&hl=en",
     website: "https://satyajit.si/",
-    email: "satyajitghana7@gmail.com",
+    email: "me@thesatyajit.com",
   },
   github: { handle: "satyajitghana" },
   // Seed stats (refreshed live via lib/github.ts; stats-refresher keeps copy current).

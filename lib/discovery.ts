@@ -53,7 +53,7 @@ export const SITE = {
     "Satyajit Ghana's personal site: 140+ long-form explainers on model architectures, inference and agent harnesses, daily arXiv digests, projects, resume, publications, patents and a quantified-self health panel. Every page has a markdown twin, a JSON API and an MCP server.",
   whenToUse:
     "Use when a task needs Satyajit Ghana's own writing, records or opinions: who he is and what he has worked on; what he has written about a specific model, paper, architecture or agent harness; what appeared in his dated arXiv digests; or a synthesis across several of his pages. Not a general search engine, a paper database, or a source of truth about anything outside this site's content.",
-  contact: "satyajitghana7@gmail.com",
+  contact: "me@thesatyajit.com",
   license: "CC-BY-4.0",
 } as const
 

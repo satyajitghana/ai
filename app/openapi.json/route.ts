@@ -361,7 +361,7 @@ export function GET() {
       version: "1.0.0",
       contact: {
         name: "Satyajit Ghana",
-        email: "satyajitghana7@gmail.com",
+        email: "me@thesatyajit.com",
         url: `${siteUrl}/contact`,
       },
       license: { name: "Content: CC BY 4.0", url: `${siteUrl}/colophon` },
