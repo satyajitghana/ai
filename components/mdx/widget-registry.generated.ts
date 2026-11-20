@@ -610,6 +610,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "impeccable-design-skill/rule-ledger": () => import("@/components/articles/impeccable-design-skill/rule-ledger"),
   "impeccable-design-skill/slop-bench": () => import("@/components/articles/impeccable-design-skill/slop-bench"),
   "index-translate/syllable-budget": () => import("@/components/articles/index-translate/syllable-budget"),
+  "inferssd-and-local-code/prefetch-pipeline": () => import("@/components/articles/inferssd-and-local-code/prefetch-pipeline"),
+  "inferssd-and-local-code/ssd-budget": () => import("@/components/articles/inferssd-and-local-code/ssd-budget"),
   "infinisplat-2/opacity-prune": () => import("@/components/articles/infinisplat-2/opacity-prune"),
   "injective-language-models/measure-zero-map": () => import("@/components/articles/injective-language-models/measure-zero-map"),
   "injective-language-models/sip-it-walker": () => import("@/components/articles/injective-language-models/sip-it-walker"),

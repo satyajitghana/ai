@@ -1,0 +1,410 @@
+---
+title: "InferSSD and Local Code: running MoE models bigger than memory by reading experts off the SSD"
+description: "Two releases the same week run mixture-of-experts models larger than RAM by keeping most routed experts on the SSD. InferSSD is an Apache-2.0 llama.cpp fork that reads experts straight out of ordinary GGUF files with O_DIRECT, caches them in a RAM tier (and a VRAM tier on CUDA) sized from a cgroup budget, computes cache misses on the CPU, and spends the drive's idle gap between layers reading the experts the next layer's own router predicts. Local Code is a GPL-3.0 Mac agent app from the Draw Things team whose engine does the same job inside a Metal graph with a per-layer resident pool and segmented-LRU eviction. I read both codebases and counted the bytes per token from the GGUF headers: Qwen3.6-35B-A3B at Q4_K_XL reads 0.61 GB of experts a token with nothing cached, Qwen3.8 Flash Next at IQ4_XS 1.28 GB, DeepSeek V4.1 Flash 4.51 GB. InferSSD publishes measured speedups over llama.cpp of 3.3x to 10.5x in decode for DeepSeek and no numbers for the two Qwen models the post names, so I ran Qwen3.6 CPU-only on an i7-14700 with an 8 GiB budget: 4.9 to 5.1 tok/s decode against 5.3 to 5.6 with everything in RAM, reading 33 to 43 GB from the SSD per 545-token request. An RTX 3090 box could not run it at all, because the launcher requires cgroup v2. Local Code's '32 GB Mac' is its stated minimum, while the demo video runs at a 48 GiB setting on a 64 GB machine, and its published decode numbers come from 128 GB and 256 GB Macs."
+date: 2026-11-16
+tags:
+  - mixture-of-experts
+  - inference
+  - offloading
+  - llama-cpp
+  - apple-silicon
+  - deepseek
+  - qwen
+draft: false
+rating:
+  novelty: 1
+  verification: 3
+  runnable: 3
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Reads InferSSD's expert cache, read ring and next-router prefetch in the source, counts bytes per token from GGUF headers, and checks both posts' claims."
+topic: inference-serving
+kind: tool
+level: practitioner
+runsOn: consumer-gpu
+licence: Apache-2.0
+---
+
+import { SsdBudget } from "@/components/articles/inferssd-and-local-code/ssd-budget"
+import { PrefetchPipeline } from "@/components/articles/inferssd-and-local-code/prefetch-pipeline"
+
+Two posts landed a day apart. On 13 November Ivan Fioravanti posted that DeepSeek V4.1 Flash runs
+"on Mac with 32GB" through "SSD streaming and Local Code". On 14 November a Qwen fan account
+posted, in Chinese, that when a model is too big for the graphics card you can read it off the disk
+one piece at a time, and that [InferSSD](https://github.com/wici-ai/inferssd) "already runs
+Qwen3.6-35B and Qwen3.8 Flash Next this way, with ready-made GGUFs".
+
+Both are the same trick. A mixture-of-experts model stores hundreds of small feed-forward networks per
+layer and uses a handful per token. Most of the file is experts nobody touches on a given token, so
+most of the file can stay on the drive. What separates a usable engine from "1 token per day" (an
+actual reply under the Qwen post) is everything around that idea: which bytes get read, how the reads
+are issued, what stays cached, and what the drive does while the CPU is busy.
+
+I cloned InferSSD at commit `ca8db2e` and read the runtime it adds to llama.cpp, then read Local
+Code's model graph and the Metal kernel its streaming runs on, and counted bytes per token from the
+GGUF headers of the models both projects name.
+
+<RepoCard repo="wici-ai/inferssd" />
+
+## How many bytes a token actually needs
+
+Start with the arithmetic, because it decides everything else. A GGUF file opens with a header that
+lists every tensor's name, shape, type and offset, so a few megabytes fetched by HTTP range request
+give the exact byte layout of a 22 GB file. For the three models InferSSD's README lists with SSD
+offload, I summed the routed expert tensors (`blk.N.ffn_{gate,up,down}_exps`) and divided by expert
+count:
+
+| GGUF (the README's tested quant) | Layers × experts used / experts | Bytes per expert-layer | Routed bytes per token, nothing cached | All routed experts |
+|---|---|---|---|---|
+| Qwen3.6-35B-A3B, Unsloth UD-Q4_K_XL | 40 × 8 / 256 | 1,921,024 (mean) | 0.61 GB | 19.67 GB |
+| Qwen3.8 Flash Next, Bartowski IQ4_XS | 48 × 10 / 512 | 2,662,400 | 1.28 GB | 65.43 GB |
+| DeepSeek V4.1 Flash 1017, Q8_0 | 40 × 6 / 384 | about 18.8 MB | 4.51 GB | 288.78 GB |
+
+The Qwen rows are my header counts (the Qwen3.6 file is 22,360,456,160 bytes, and 88% of its tensor
+bytes are routed experts; its expert gate and up matrices are `Q4_K`, its down matrices `Q5_K` with
+four layers at `Q6_K`). The DeepSeek row comes from this site's
+[header count of the 1017 release](/articles/deepseek-v4-1-flash-1017): the GGUF repacks the official
+MXFP4 experts without requantizing them, so the expert bytes are the release's. Flash Next has one
+more oddity. Its first shard holds a 28.80 GB per-layer token embedding table (`IQ4_NL`, 320 million
+rows of 160 values), which is a lookup and not a matrix the token multiplies through. I did not
+confirm how InferSSD places that table.
+
+Now the bound. An NVMe drive that serves random reads of a couple of megabytes at 7 GB/s takes 88 ms
+to deliver Qwen3.6's 0.61 GB, so with no cache at all and nothing else to do the model cannot beat about
+11 tok/s. DeepSeek's 4.51 GB at the same rate is 644 ms, a ceiling of 1.6 tok/s. Every useful number
+either engine posts is that ceiling raised by a cache hit rate, and the widget makes the trade
+explicit. It uses InferSSD's own pre-launch estimator: `framework/src/inferssd/strategy/estimate.py`
+computes exactly this sum (dense time, CPU and GPU expert time, and `(1 - hit) × bytes / drive rate`)
+and its two-zone routing model, where some fraction of the experts carries some fraction of the
+traffic and the hot ones are cached first.
+
+<SsdBudget />
+
+Play with it and the first lesson is that under uniform routing a cache only buys its own size: hold 20%
+of DeepSeek's experts and 80% of lookups still hit the drive. And the engine's real job is to make the
+skewed patterns true, by keeping the right experts and hiding whatever reads remain behind compute.
+`estimate.py` is candid about the first part: its comment calls the hot-set patterns "illustrative
+hypotheses, NOT a learned distribution or a "typical" confidence band."
+
+## What InferSSD adds to llama.cpp
+
+The bundled engine is llama.cpp at upstream build b8961 (revision `f42e29f`, 28 April 2026), with
+DeepSeek V4 and V4.1 support ported from community forks, Engram decode arithmetic transcribed from
+antirez's `ds4.c`, and a deferred expert loader adapted from an ik_llama.cpp pull request; the
+`NOTICE` file lists each with its revision. InferSSD's own code sits in named directories. I counted
+lines with `wc`: 10,391 in `ggml/src/ggml-ssd` (the store, read rings, host memory ledger, expert
+cache and placement policy), 6,910 in the CPU sink, 5,249 in the CUDA expert tier, 14,661 lines of
+Python in the launcher framework, and 27,547 in `tests/ssd`. It is a lot of engineering for "read the
+experts from disk", and most of it is about memory accounting.
+
+The pieces, in the order a decode token meets them:
+
+**The source index.** The framework reads the GGUF header and builds an alias index of where each
+expert's three slices sit in the original file. Nothing is copied. An optional "expert pack" regroups
+the slices by layer and expert at 4 KiB alignment for cleaner reads; it costs another 269 GiB for
+DeepSeek and is optional.
+
+**The read ring.** Every expert read goes through one ring per OS: `io_uring` through raw system calls
+on Linux, IoRing on Windows, persistent reader threads on macOS. Files are opened for direct I/O,
+`O_DIRECT` on Linux and `F_NOCACHE` on macOS (`platform/file.cpp`), so the kernel's page cache never
+holds a second copy of an expert. That matters more than it looks. With buffered reads, a 125 GB
+workstation would cache the whole Qwen file in the page cache after one pass and every
+"SSD" benchmark would be a RAM benchmark.
+
+**The RAM expert cache.** An anonymous arena of fixed slots, each sized for the model's largest expert,
+split evenly across layers. Its size is not a setting. On Linux it comes from the tightest cgroup v2
+`memory.max` above the process less a 512 MiB reserve, and from `MemAvailable` less a floor; the
+launcher runs the server in a systemd scope whose `MemoryMax` is the memory budget and whose
+`MemorySwapMax` is 0. Every other allocation (compute buffers, KV growth, prompt-cache checkpoints)
+asks the same ledger first and takes slots back from the cache if it has to, so a short machine runs
+with a smaller cache instead of failing. Replacement is `count_decay2`, set in `cpu-sink.cpp`: each
+layer keeps a selection count per expert, and every token the counts decay by a factor of two over
+two tokens (`value × 2^(-(age_steps - count_step) / 2)` in `host/expert-cache.h`). It is frequency
+with a short memory, closer to LRFU than to plain LRU.
+
+That memory accounting has a price in what the launcher demands of the host. On Linux it refuses to
+start without systemd, the cgroup v2 unified hierarchy and, for a non-root user, the memory controller
+delegated to the user's systemd manager; the quickstart says most containers and WSL without systemd
+lack them. I found this out directly. I wrote a script to run Qwen3.6 on an RTX 3090 workstation with
+the RAM budget squeezed to 8 GiB, and its preflight check failed before anything was built: that
+machine's `/sys/fs/cgroup` is the older cgroup v1 hybrid layout, and its user manager has no memory
+controller. Stock llama.cpp runs there. InferSSD, as shipped, does not, because its cache has
+no budget to size itself from. Ubuntu 20.04 and other v1 hosts are out until someone switches the boot
+to the unified hierarchy. A second machine with cgroup v2 did run it, and the next-but-one section
+has what it measured.
+
+**The CUDA tier.** On Linux with an NVIDIA card, experts can also live in VRAM slots, and a placement
+evaluator decides per expert whether to run it on the GPU (resident, or copied over PCIe from a RAM
+slot) or on the CPU, from cost lines it measures as decode runs. `vram.budget = 0` turns the tier off.
+On Apple silicon the GPU runs the dense layers and the CPU computes routed experts in decode; since
+0.1.3 the GPU also takes a prompt's heaviest experts through a "graph lane".
+
+**Compute on the CPU, where the bytes land.** This is the design choice that defines the engine. A
+missed expert is read into a ring slot or a RAM cache slot and multiplied on the CPU right there, on
+ggml's own threadpool. For one decode token each expert sees one row, so the arithmetic is a
+matrix-vector product, bounded by how fast memory streams the weights, and copying 2 MB to a GPU to do
+a matrix-vector product there buys little. The launcher measures how many threads saturate that
+stream and uses no more.
+
+That half of the design is not new on this site. [Strata](/articles/strata-engine) computes the
+experts its VRAM cache misses on the CPU in the same window as the GPU, and so does the
+[Edge0-145B](/articles/edge0-145b) fork of it, and so does the vLLM build in
+[a 200 GB MoE on one RTX 3090](/articles/big-moe-one-3090). The difference is where the misses live.
+In all three, by default, every expert the GPU lacks sits pinned in host RAM, so the machine needs RAM
+for the whole expert pool (Edge0-145B's own README rows use 54 GiB of VRAM and RAM between them), and
+the SSD holds at most a lookup table. InferSSD adds the tier underneath: RAM is a cache too, sized
+from a budget, and whatever falls out of it is read back from the original file. That is what lets a
+48 GB Mac run a 473 GiB DeepSeek GGUF at all, and it is why the read path gets most of the code.
+
+## Where the reads hide
+
+A naive streaming engine stalls once per layer per token: the router for layer L+1 cannot run until
+layer L is done, so the read for L+1 cannot start until then, and the CPU idles while the drive works.
+InferSSD attacks that from three directions, and the widget below builds them up one at a time.
+
+<PrefetchPipeline />
+
+The first is the order of the reads. `io_issue()` in `cpu-sink.cpp` queues, for one batch of missed
+experts, every gate and up slice before any down slice. The comment there says why: "put every
+expert's up/gate before any down so early-up-gate can overlap the CPU work with the streamed down
+reads." An expert's first half of the math (`x·W_gate`, `x·W_up`, SwiGLU) needs only those two
+matrices, so it starts as they land while the down matrices are still in flight. Local Code does the
+same thing in Metal. Its kernel's header comment reads "Gate / up share readiness; down can load while
+SwiGLU executes."
+
+The second is that a decode layer submits its own reads as soon as the router has named the misses,
+"before the input's quantization and the GPU's launch", and the coordinating thread polls the ring
+itself, so no read waits on a thread waking up.
+
+The third is the prefetch. While layer L's graph runs, it also applies layer L+1's router (its norm
+and gate matrix) to layer L's FFN input. That is `build_moe_prefetch_hint` in `llama-graph.cpp`,
+which ends in an `argsort_top_k` over the next layer's expert probabilities. The guess costs almost
+nothing, because the router matrix is small and already in memory. How often it is right, InferSSD
+does not publish; the engine measures it per prediction rank as it runs, and prices reads with it. Once layer L's own reads are done, the I/O
+thread reads the top guesses (up to `prefetch.depth`, default 64 ranks) into layer L+1's RAM slots
+until L+1's call begins. If L+1's router then picks them, they are cache hits.
+
+Two details make this careful rather than hopeful. The prediction is only a hint; the real router
+still decides, so a wrong guess costs bandwidth and never accuracy. That is the difference from
+[Edge0](/articles/edge0-streaming-moe), whose trained prerouter *is* the routing and needed a recovery
+LoRA to pay for it. And each speculative read is priced before it is issued.
+`prefetch_read_value` in `place/runtime-policy.h` takes p, the chance the next layer uses the guess,
+estimated per rank of the prediction by the rule of succession, `(selected + 1) / (novel + 2)`, and the
+idle gaps it has measured. A read that finishes inside the gap is worth p. One the gap ends during
+saves the part already read if the expert is used and steals the rest from the next layer's demand
+reads if not, which nets to p minus the unread share. So a long read for a weak guess is skipped, and
+the plan keeps the run of reads whose summed worth is largest. The calculator under the timeline is
+that rule.
+
+Prefill gets the same treatment at a larger scale (`prefill.lookahead`): every token of a prompt batch
+predicts its next-layer experts, the reads run while the GPU computes the next layer's attention, and
+when a layer's own slots are full the read-ahead borrows slots from layers the pass has already
+finished. At load, before the first request, the caches are filled from the drive in expert order, so
+the first prompt does not start cold.
+
+## InferSSD's numbers, and the ones that are missing
+
+The README publishes one benchmark: a 4K-token prompt, 256 output tokens, decode measured over tokens
+129 to 256, on four machines, against llama.cpp and against [Colibri](/articles/colibri). DeepSeek
+decode, tok/s:
+
+| Machine | llama.cpp | Colibri | InferSSD |
+|---|---|---|---|
+| MacBook Pro M5 Max, 48 GB | 0.873 | 0.437 | 2.874 |
+| RTX 5060 Ti, 8 GB RAM + 16 GB VRAM | 0.242 | 0.900 | 2.550 |
+| RTX 5090, 32 GB RAM + 32 GB VRAM | 0.867 | 1.878 | 7.270 |
+| DGX Spark, 128 GB unified | 1.608 | 0.356 | 7.260 |
+
+Prefill gains are larger, 4.85x to 46.70x. The read-ahead is built for prompt passes, but the archived
+runs also differ in batch size (4096 against llama.cpp's default 2048/512 on the Mac), so the table
+cannot say how much of the gain is which. The methodology page is unusually honest about what these are: the Mac runs used fresh
+processes "without warmup or OS page-cache purging" and "are not controlled cold-cache measurements";
+the Linux rows are "tester-reported summaries"; the comparisons "do not isolate the benefit of a
+single optimization". The llama.cpp baseline for DeepSeek is a community fork at default batch sizes,
+which is a soft target.
+
+The RTX 5090 row is worth one more step of arithmetic: InferSSD decodes DeepSeek there at 7.270 tok/s, against 0.867 for llama.cpp and 1.878 for Colibri. At 7.27 tok/s a token takes 137.6 ms. Even if
+the drive delivered 14 GB/s to these reads and the CPU did nothing else, that is 1.93 GB per token,
+so at most 43% of DeepSeek's 4.51 GB of routed experts can come off the drive: the caches must serve
+at least 57% of lookups. Yet the machine's 32 GB of RAM plus 32 GB of VRAM is 22% of the 288.78 GB of
+experts even if every byte were cache. Uniform routing cannot get there. The number only works if
+DeepSeek's routing is skewed hard and the 4K-token prompt that precedes the measured window has warmed
+the cache with the experts this conversation uses. Both are plausible, and the slider shows the
+20%-of-experts-for-80%-of-traffic pattern landing in that range. It also means the speed belongs to a
+workload, and a different conversation on a cold cache will be slower.
+
+What the README does not have is a single measured number for either model the post named. Qwen3.6
+arrived in 0.1.2 on 4 November and Flash Next in 0.1.4 on 10 November, both as "tested GGUF"
+entries, and the benchmark tables cover only DeepSeek and Muse. The post's claim is literally true
+(the launcher picks a `qwen35moe` or `qwen4exp` profile from the GGUF's architecture field and runs
+the unmodified files), and says nothing about speed. For Qwen3.6 the practical question is also
+different. A 22 GB file fits in the RAM of most machines that would run it, so streaming only matters
+on a GPU box with little system memory or a laptop that wants its RAM back.
+
+## Qwen3.6 on eight CPU cores with 8 GiB
+
+So I measured one. The machine was a workstation with an Intel Core i7-14700, a Samsung
+MZVLB2T0HALB 2 TB NVMe drive and cgroup v2 with the memory controller delegated. Its GPU was busy with
+someone else's training run, so I built InferSSD with the `linux-cpu` preset (no CUDA), set
+`vram.budget=0`, and pinned the job to CPUs 20 to 27 at nice 15. Every number below is CPU-only:
+the dense layers, attention and the routed experts all run on those 8 threads. A GPU box would decode
+faster, and the slowdown from streaming would show more, because there the CPU's compute would not
+hide it.
+
+The launcher's own choices are worth reading first. On those 8 CPUs it picked 8 decode threads and 7
+prefill threads, put its I/O thread on CPU 27, and measured one Q4_K expert route at 73.6 µs for one
+token (its `place.costs`: 37.1 µs fixed plus 36.55 µs a route). Its note says Q4_K "streams fastest
+at one token on 8 threads (29.5 GB/s)". On an i7-14700 the high-numbered logical CPUs are usually the
+efficiency cores, which would make this a slow CPU; the launcher saw "one CPU cluster" among the CPUs
+it was allowed, so it could not tell.
+
+The run used the Unsloth UD-Q4_K_XL file the README tests and the repo's own 512-token benchmark
+prompt (545 tokens after the chat template), with greedy decoding and 256 output tokens. There were
+two requests per configuration and a fresh server for each configuration. Reads are the server
+process's `read_bytes` from `/proc`, and they matched the drive's own counters to the megabyte:
+
+| Configuration | Prefill tok/s | Decode tok/s | GB read from the SSD per request |
+|---|---|---|---|
+| A: 8 GiB budget, prefetch on (default) | 22.6, 24.94 | 4.924, 5.056 | 43.333, 41.446 |
+| B: 8 GiB budget, `prefetch.depth=0` | 24.07, 24.07 | 4.894, 4.907 | 35.105, 33.351 |
+| D: InferSSD's default budget (the whole machine) | 23.27, 24.02 | 5.255, 5.592 | 0, 0 |
+
+**Streaming cost about a tenth of the speed here.** With every expert in RAM (D, peak resident 26.2
+GB) the second request decoded at 5.592 tok/s; squeezed to 8 GiB it was 5.056 with prefetch and 4.907
+without. The CPU is the bottleneck on this box, and the reads mostly overlap it. All three
+configurations wrote the same text, word for word, in the first 300 characters I logged, which is what
+greedy decoding should do when only the memory budget changes.
+
+**The drive was nowhere near its limit.** A request read 33 to 43 GB, about twice the 19.67 GB expert
+pool: a 545-token prompt touches most of the 256 experts in every layer, and an 8 GiB cache cannot
+keep them, so the prompt and the decode read much of the pool again. Over the 76.1 seconds of request
+A1 that averages 0.57 GB/s. I can't split the reads between prefill and decode from these counters, so
+the 0.16 to 0.17 GB a decoded token that the totals divide to is an upper bound, and it already
+includes the prompt.
+
+**Prefetch read more and bought little.** The read-ahead added about 8 GB a request (41.4 to 43.3
+against 33.4 to 35.1) for 0.6 to 3% more decode speed. That is the rule doing what it says: when the
+drive has slack, a speculative read that may be wasted costs nothing, so it issues them. On a machine
+whose drive is the bottleneck the same reads would be priced against demand reads, and this run can't
+show that case.
+
+**The 8 GiB budget was not an 8 GiB process.** The server's resident set peaked at 10.3 GB in A and
+B. Resident set size also counts file-backed pages of the memory-mapped GGUF, which the cgroup can
+reclaim, so this does not mean the limit was broken, but "8 GiB" is the cgroup's number, not what
+`top` will show.
+
+## Local Code: the same idea inside a Mac app
+
+[Local Code](https://getlocalcode.app) is a private agent app for Apple silicon from the Draw Things
+team, with Python, Node.js and a shell compiled into the app's sandbox. It is open source under GPL-3.0
+([drawthingsai/local-code-community](https://github.com/drawthingsai/local-code-community)), and its
+inference engine is the team's own Swift and Metal stack, not llama.cpp. It downloads its own
+quantized checkpoints: DeepSeek 4.1 Flash 1017 at "2-bit S" is 376 GB on disk, 203 GB of which is the
+Engram table both of its quantizations share.
+
+<Video
+  src="/articles/inferssd-and-local-code/clip1"
+  poster="/articles/inferssd-and-local-code/clip1-poster.jpg"
+  alt="A dark demo page titled Local Code: DeepSeek V4.1 Flash on a 64 GB Mac. On the left, three cards: experts used most kept in memory, all other experts read from the SSD, an agent in a sandbox. On the right, a streamed answer writes a Python merge_intervals function and a three-line explanation."
+  caption="The demo from the post: a page titled for a 64 GB Mac, streaming one request at a Weights Streaming setting of 48 GiB. Muted, 15 seconds (video from @ivanfioravanti's post on X)."
+/>
+
+The streaming lives in the model graph. In `DeepSeek4_1.swift`, a layer whose `expertResidentSlots`
+is smaller than its 384 experts loads the three expert banks on demand and routes through a
+`MoEWeightStreaming` op from liuliu's s4nnc and ccv libraries. That op keeps a per-layer pool of
+resident expert slots in Metal buffers, and a small GPU kernel plans each call: which routed experts
+are resident, which must load, and which slot each load evicts. The eviction rule in
+`MoEWeightsStreamingKernel.cpp` is a segmented LRU: "Evict the oldest expert not used since it
+loaded, then the oldest of the rest", with at most 90% of the pool allowed to count as reused. Misses
+are read with `pread` on a file opened `F_NOCACHE`, so it also skips the page cache. I found no
+next-layer prediction in that kernel or its Objective-C driver; reads are on demand, overlapped with
+the shared expert and with SwiGLU.
+
+So the two engines differ in where the math happens. Local Code computes every expert on the GPU from
+unified memory, and a miss is a read straight into a Metal buffer. InferSSD computes decode-time
+experts on the CPU next to where they land, and predicts the next layer to fill the drive's gaps.
+Unified memory makes Local Code's choice cheap on a Mac; InferSSD's has to work on a 16 GB discrete
+card too.
+
+How much memory the experts get is a setting, Weights Streaming, and the
+[docs](https://getlocalcode.app/docs/weights-streaming/) are specific about it. Automatic takes the
+Mac's memory less 32 GiB, rounded down to a step of 8 GiB, between 8 and 72 GiB: 8 GiB on a 32 or 36
+GB Mac, 16 GiB at 48 GB, 32 GiB at 64 GB. The setting is a ceiling, capped at load to three quarters of
+the memory then free. The docs give two measured tables. For DeepSeek 4 Flash 0731, replaying real
+conversations, 82% of expert lookups hit memory at 24 GiB and 94% at 40 GiB, so at 40 GiB only 6 lookups in every 100 wait for the drive. For GLM 5.3 Flash on an
+M5 Ultra:
+
+| Weights Streaming | Experts found in memory | Expert loads per token | Decode |
+|---|---|---|---|
+| Disabled, all in memory | All | None | 58.8 tok/s |
+| 48 GiB | 72.4% | 1,069 MiB | 25.8 tok/s |
+| 32 GiB | 58.8% | 1,596 MiB | 23.2 tok/s |
+| 16 GiB | 36.6% | 2,455 MiB | 20.5 tok/s |
+
+That curve is the shape the widget predicts: the first lost hits cost the most, because the step from
+zero reads to any reads puts the drive on the critical path. The demo page in the video quotes "their
+GLM 5.3 Flash test on an M5 Ultra" as 65.6 tok/s whole, 39.6 at 48 GiB and 33.0 at 32 GiB, which is
+not the table the docs publish today. Both may be real runs; they are not the same run.
+
+<Figure
+  src="/articles/inferssd-and-local-code/fig3.jpg"
+  alt="Still of the demo page. Left column: a 376 GB model on a 64 GB Mac, the Automatic setting gives the model 32 GiB. Right column header reads TTFT 03.4 s, 176 tok, 17.0 tok/s, with the note: one request, streamed from Local Code on this Mac, with Weights Streaming at 48 GiB."
+  caption="The numbers the demo shows: 176 tokens at 17.0 tok/s, Weights Streaming at 48 GiB, on a page titled for a 64 GB Mac (still from @ivanfioravanti's video on X)."
+/>
+
+Now hold the post against the video. The post says 32 GB, "Here with 64GB settings". The video's
+title says a 64 GB Mac, its left column says Automatic would give 32 GiB, and the request it streams
+ran at 48 GiB, which leaves 16 GB for macOS and the agent. Nothing in it runs on a 32 GB Mac. Local
+Code's own guide lists 32 GB as the minimum for DeepSeek 4.1 Flash 1017 and recommends 64 GB, and
+Automatic on a 32 GB machine gives the experts 8 GiB, which the docs give no speed for. The README's
+published decode numbers for this model are 18.7 tok/s on a 128 GB M5 Max with the setting at 56 GiB,
+and 58.9 tok/s on a 256 GB M5 Ultra where the weights fit. A 32 GB Mac will run it. How fast, nobody
+has published: the 17.0 tok/s in the post's video is a real reading, from a bigger machine at a bigger
+setting.
+
+<Figure
+  src="/articles/inferssd-and-local-code/fig2.png"
+  alt="Scatter plot of KL divergence on Wiki10k against weight size for DeepSeek 4.1 Flash 1017 quantizations. Local Code 2-bit S at 173 GB with KLD about 0.285, 3-bit S at 210 GB about 0.189; Unsloth UD-IQ2_XXS at 165 GB about 0.236 and UD-Q2_K_XL at 200 GB about 0.148; MLX-Serve 3.0bpw about 0.205; oMLX oQ2.5e about 0.269 and oQ3e at 249 GB about 0.135."
+  caption="What the small-Mac checkpoint gives up: Local Code's own KL-divergence comparison puts its 2-bit S (173.0 GB, 0.28516) above Unsloth's smaller UD-IQ2_XXS (165.3 GB, 0.23621) on Wiki10k (Local Code README, KLD chart)."
+/>
+
+The quality side deserves a line, because streaming rewards small quants: fewer bytes per expert is
+fewer bytes per miss. Local Code's README publishes its own KL-divergence table, and on Wiki10k its
+2-bit S checkpoint (0.28516 at 173.0 GB) sits behind Unsloth's UD-IQ2_XXS (0.23621 at 165.3 GB). On
+its conversation-trace set the gap is 0.050512 against 0.034424. It is to the team's credit that they
+published a chart where their own quant loses.
+
+<Figure
+  src="/articles/inferssd-and-local-code/fig1.png"
+  alt="Line chart of DeepSeek 4.1 Flash 1017 prefill speed on an M5 Ultra with 256 GB against context already in use, 0 to 128K. Local Code 2-bit S stays between about 4,600 and 3,840 tokens per second; MLX-Serve falls from about 1,945 to 1,087 and oMLX from about 1,529 to 1,335, with Local Code labelled 2.34x to 2.88x faster."
+  caption="Local Code's prefill comparison on a 256 GB M5 Ultra, where the weights fit and nothing streams: 4,600 tok/s at 8K of context in use (Local Code README, prefill chart)."
+/>
+
+## Which one, for what
+
+They are not competitors so much as two answers for two machines. If you have a Linux box with an
+NVIDIA card and not enough RAM for the model, or a Mac and you want an OpenAI-compatible server over
+plain GGUF files, InferSSD is the one to try, and its source is worth reading even if you never run
+it: the cgroup-sized cache, the direct-I/O ring and the priced read-ahead are the pieces any streaming
+engine needs. If you want an agent on a Mac and accept the team's own checkpoints, Local Code is the
+finished product, with a plainly documented memory knob.
+
+My view on the headline claims. "Qwen3.6-35B and Flash Next from plain GGUFs" is true. The release
+publishes no speed for either; on 8 CPU threads with an 8 GiB budget, Qwen3.6 decoded at about 5
+tok/s, within about a tenth of the same machine with everything in RAM. "DeepSeek V4.1 Flash on a 32 GB Mac" is a minimum spec quoted next to a video recorded
+on a 64 GB machine at a 48 GiB setting. Streaming makes big MoE models run on small machines. How
+fast is set by the cache hit rate, and that depends on how big the cache is and how skewed the
+conversation's routing is, and neither post measures it.
+
+A note on what I did. I read InferSSD at `ca8db2e`: the CPU sink, the expert cache, the placement
+policy, the graph hook that builds the prefetch hint, the launcher and its estimator. The CUDA tier's
+sizing, the prefill read-ahead's slot borrowing and the load-time preload I describe from its
+`docs/configuration.md` and the sink's header comments, not from reading that code line by line. I
+read Local Code at `b79d0f7`; the ccv streaming kernel I read on ccv's `unstable` branch, not at the
+exact revision Local Code's build pins. Bytes per token come from the GGUF headers by HTTP range
+request. I ran InferSSD once, CPU-only, on the i7-14700 workstation above, after the RTX 3090 box
+failed the cgroup check; I did not run Local Code. Every other benchmark number is the project's own,
+and the RTX 5090 hit-rate bound is my arithmetic on them.
