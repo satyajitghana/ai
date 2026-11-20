@@ -36,6 +36,7 @@ const TYPES: Record<string, string> = {
   ".svg": "image/svg+xml", ".avif": "image/avif", ".mp4": "video/mp4", ".webm": "video/webm",
   ".mov": "video/quicktime", ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav",
   ".glb": "model/gltf-binary",
+  ".spz": "application/octet-stream",
 }
 
 const args = process.argv.slice(2)
