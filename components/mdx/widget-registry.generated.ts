@@ -477,6 +477,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "gdp-ts/will-it-typecheck": () => import("@/components/articles/gdp-ts/will-it-typecheck"),
   "gem-4d/same-pixels": () => import("@/components/articles/gem-4d/same-pixels"),
   "gem-4d/task-success": () => import("@/components/articles/gem-4d/task-success"),
+  "gemini-4-neon/cost-per-task": () => import("@/components/articles/gemini-4-neon/cost-per-task"),
+  "gemini-4-neon/frontier": () => import("@/components/articles/gemini-4-neon/frontier"),
   "gemma-4/attn-strip": () => import("@/components/articles/gemma-4/attn-strip"),
   "gemma-4/kv-budget": () => import("@/components/articles/gemma-4/kv-budget"),
   "gemma-argon-vllm/fast-prefill-stack": () => import("@/components/articles/gemma-argon-vllm/fast-prefill-stack"),
