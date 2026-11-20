@@ -1125,6 +1125,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "open-3d-skills/stage-timeline": () => import("@/components/articles/open-3d-skills/stage-timeline"),
   "open-math-harness/tree-scorer": () => import("@/components/articles/open-math-harness/tree-scorer"),
   "open-math-harness/verify-gauntlet": () => import("@/components/articles/open-math-harness/verify-gauntlet"),
+  "open-models-roundup-nov-20/loop-depth": () => import("@/components/articles/open-models-roundup-nov-20/loop-depth"),
+  "open-models-roundup-nov-20/param-map": () => import("@/components/articles/open-models-roundup-nov-20/param-map"),
   "open-robotics-mapping-roundup/ambiguity-fix": () => import("@/components/articles/open-robotics-mapping-roundup/ambiguity-fix"),
   "open-robotics-mapping-roundup/floor-gate": () => import("@/components/articles/open-robotics-mapping-roundup/floor-gate"),
   "open-seo/mention-matcher": () => import("@/components/articles/open-seo/mention-matcher"),
