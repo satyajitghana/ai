@@ -1,0 +1,401 @@
+---
+title: "Mobile SLAM: a Livox Mid-360 on an iPhone, and the 1,180 lines of C++ that map with it"
+description: "schan's Mobile SLAM wires a Livox Mid-360 to an iPhone over a USB-C Ethernet adapter and does LiDAR-inertial mapping and NDT relocalisation on the phone. It is MIT-licensed, free on the App Store, and has an Android sibling. I read all of core/: the odometry is an independent rewrite of FAST-LIO's iterated error-state Kalman filter, with a 15-dimensional error state, a hash-voxel map in place of FAST-LIO2's ikd-tree, no loop closure, and a P2D-NDT localiser fused into the same filter as a pose measurement. I also traced how the Mid-360's UDP packets reach Swift without Livox's SDK, ran the repository's own Mid-360 simulator through the unmodified core on one desktop CPU core against ground truth (about 14 ms a scan, 1.5 cm of error that does not grow over 290 m in a closed room, and a relocalisation that, started 3 m off, locked on turned 180° the wrong way), and set out what a phone-hosted LiDAR rig does and does not give a scan-to-BIM workflow."
+date: 2026-11-16
+tags:
+  - slam
+  - lidar
+  - state-estimation
+  - point-cloud
+  - robotics
+  - on-device
+  - bim
+draft: false
+rating:
+  novelty: 1
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "The whole core read line by line: FAST-LIO's filter rewritten, a hash-voxel map, NDT relocalisation, the Mid-360's UDP path, and its own simulator run."
+topic: robotics
+kind: tool
+level: practitioner
+runsOn: phone
+licence: MIT
+---
+
+import { FilterStep } from "@/components/articles/mobile-slam-iphone/filter-step"
+import { NdtToy } from "@/components/articles/mobile-slam-iphone/ndt-toy"
+
+On 13 November schan, the CTO of the Japanese robotics company IndustryAlpha, posted ten seconds of video with one line:
+"[iPhone版できたわんー](https://x.com/sm0219370893504/status/2121264316888551485)", roughly "the iPhone version's done". An
+iPhone lies on a desk with a USB-C cable in its port and a point cloud of the room growing on its screen. The cable runs,
+through an Ethernet adapter, to a Livox Mid-360, a 265 g LiDAR with its own IMU. There is no laptop anywhere in the chain.
+
+<Video
+  src="/articles/mobile-slam-iphone/clip1"
+  poster="/articles/mobile-slam-iphone/clip1-poster.jpg"
+  alt="An iPhone lying on a wooden desk with a USB-C cable plugged into its port. On its screen a coloured point cloud of a room grows and rotates. A Livox Mid-360 with a finned grey base is partly visible at the top edge of the frame."
+  caption="The iPhone build mapping a room from a tethered Mid-360. Full 10 s clip, muted (video from @sm0219370893504's post on X)."
+/>
+
+Three days earlier he had done the same thing on an Android phone. I covered that post in the
+[open robotics mapping roundup](/articles/open-robotics-mapping-roundup). Back then it linked no code and named no algorithm,
+so I guessed it was a FAST-LIO2-style odometry. Since then the pieces have arrived one a day. On 12 November he showed a 3D-printed holder
+that bolts the sensor to the phone, and on 14 November a case for an iPad mini, designed with
+[SolidCraft](/articles/solidcraft) and Claude, after the app turned out to run on iPads too. The iOS app went live on the App Store on 14 November. On 15 November he published both
+repositories under MIT: [Mobile-SLAM-iOS](https://github.com/schan-lab/Mobile-SLAM-iOS) and the Android
+[Mobile-SLAM](https://github.com/schan-lab/Mobile-SLAM).
+
+<RepoCard repo="schan-lab/Mobile-SLAM-iOS" />
+
+The SLAM is in `core/`. It is six files and 1,180 lines of C++17 on top of Eigen 3.4, byte-identical between the two repositories
+apart from one comment. Swift, SwiftUI and Metal on iOS, and Kotlin with JNI on Android, wrap it. I read every line of `core/` and
+the iOS code that feeds it, at commit `13f2e30`. This article goes through what is in there, what I could measure, and what this
+rig would and would not do for the work I care about, which is turning a walk through a building into a model of it.
+
+## From the Ethernet jack to the filter
+
+The Mid-360 speaks 100BASE-TX Ethernet and nothing else. The phone needs a USB-C Ethernet adapter, or on a Lightning iPhone
+Apple's Lightning to USB 3 camera adapter with a USB one behind it. The README's setup is simple. Give the phone's wired
+interface the static address the Mid-360 sends to, which is `192.168.1.50/24` from the factory, and grant the app iOS's
+Local Network permission. Without that permission the packets never reach the app. The app triggers the prompt early with a
+throwaway Bonjour browse, which is the documented trick. The LiDAR draws 6.5 W from its own 9 to 27 V supply, so the phone
+only has to power the adapter.
+
+<Figure
+  src="/articles/mobile-slam-iphone/photo1.jpg"
+  alt="A hand holding a black 3D-printed holder. A Livox Mid-360 with its blue dome sits on top, and an Android phone below shows a point cloud and green status chips. A USB-C Ethernet adapter cable hangs from the bottom of the phone."
+  caption="The holder from 12 November, here with the Android phone: Mid-360 on top, a USB-C Ethernet adapter at the bottom, the sensor on its own power lead (photo from @sm0219370893504's post on X)."
+/>
+
+Nothing from Livox ships in the app. `LidarReceiver.swift` opens four plain BSD UDP sockets bound to `INADDR_ANY`:
+point cloud on 56301, IMU on 56401, status push on 56201 and discovery on 56001. Each gets a 4 MB receive buffer and its own
+thread at `userInteractive` priority. A fifth thread broadcasts a discovery request every three seconds so the app can show
+the sensor's serial number and IP. `Mid360Config.swift` speaks enough of Livox's SDK2 control protocol to read and rewrite the
+sensor's own address and destination, with command `0x0101` to read, `0x0100` to write and `0x0200` to reboot. Each command
+carries a CRC-16 over its header and a CRC-32 over its data. `THIRD_PARTY_NOTICES.md` calls all of this "an independent
+implementation; no Livox SDK code is included", and `tools/fake_mid360.py` is a stand-in control port for testing it.
+
+The packet decoder is 91 lines (`core/livox_packet.hpp`). A point packet has a 36-byte header. Its 64-bit nanosecond timestamp sits at
+byte 28, followed by `dot` points of 14 bytes each: three `int32` millimetre coordinates, a reflectivity byte and a tag byte. A
+point's time is the packet stamp plus its index times the packet's interval over `dot`. An IMU packet carries six floats,
+gyro in rad/s and acceleration in g, which the parser multiplies by 9.81.
+
+Points and IMU samples are stamped by the same clock inside the Mid-360. I think that is the best design decision in the project, and a
+large part of why it works at all: the phone's own clock, IMU and camera never enter the estimate, so there is no
+phone-to-sensor time synchronisation to get wrong. The phone is a computer with a screen and an Ethernet port. On the
+receive thread every packet is copied into a queue, and one worker thread drains it into the filter 256 packets at a time.
+
+## FAST-LIO's filter, written again
+
+`core/lio.hpp` opens with "LiDAR-inertial odometry following the FAST-LIO formulation (W. Xu, F. Zhang, 'FAST-LIO',
+RA-L 2021) … Independent implementation (not derived from the GPL reference code)". That matches what is in the file. It is the
+filter from [FAST-LIO](https://arxiv.org/abs/2010.08196), rebuilt small, with one idea from
+[FAST-LIO2](https://arxiv.org/abs/2107.06829) and a map from neither. If you have read my
+[FAST-LIO2 walkthrough](/articles/fast-lio2-lidar-inertial-odometry), here is the diff.
+
+| | FAST-LIO2 (paper and reference code) | Mobile SLAM `core/lio.cpp` |
+|---|---|---|
+| error state | 23-D: pose, LiDAR-IMU extrinsic, velocity, both biases, gravity on $S^2$ | 15-D: $\delta\theta, \delta p, \delta v, \delta b_g, \delta b_a$ |
+| gravity | estimated | fixed at 9.81 m/s², direction from the first second of IMU |
+| extrinsic | estimated online | fixed Mid-360 default, `t_LI = (-0.011, -0.02329, 0.04412)` m |
+| registration | raw points after a voxel filter, no features | raw points averaged per 0.2 m voxel, no features |
+| map | ikd-Tree, exact k-NN, a cube that slides with the sensor | hash of 0.2 m voxels, one point per voxel, 27-voxel k-NN, never trimmed |
+| update | iterated, information-form gain | the same, at most 4 iterations |
+| loop closure | none | none |
+
+Point for point, the measurement model is FAST-LIO's. Each downsampled point $p_b$ is moved into the world with the
+current estimate, $p_w = R\,p_b + t$. Its five nearest map points are fitted with a plane $n^\top x + d = 0$ by solving
+$A w = -\mathbf{1}$, and the fit is thrown out if any of the five sits more than 10 cm off it. The residual is the signed
+distance $r = n^\top p_w + d$. Then comes the gate FAST-LIO uses: keep the point only if
+
+$$
+s = 1 - \frac{0.9\,|r|}{\sqrt{\lVert p_b\rVert}} > 0.9 ,
+$$
+
+which tolerates a larger residual on a far point (about 22 cm at 4 m, 35 cm at 10 m). The Jacobian row is
+$\partial r/\partial\delta\theta = -n^\top R\,[p_b]_\times$ and $\partial r/\partial\delta p = n^\top$. Only the first six
+error states see a LiDAR measurement directly. Velocity and the biases get corrected through their covariance with pose.
+
+The update is the information form that makes FAST-LIO cheap, inverting a 15 × 15 matrix whatever the number of points:
+
+```cpp
+// core/lio.cpp, iekfUpdate(): one iteration
+Mat15 A = Pinv;
+A.block<6, 6>(0, 0) += HtH * inv_rm;               // P^-1 + H^T H / R
+Mat15 Ainv = A.inverse();
+KH.block<15, 6>(0, 0) = Ainv.block<15, 6>(0, 0) * HtH * inv_rm;
+Vec15 delta = -Ainv.block<15, 6>(0, 0) * Htr * inv_rm + (KH - Mat15::Identity()) * dx;
+```
+
+`dx` is how far the iterate has moved from the IMU prior. Each pass re-associates every point at the new estimate, so a
+scan that starts 20 cm off can snap into place over two or three passes. It stops after four iterations, or when the
+rotation step drops under 1e-4 rad and the position step under 1 mm. With fewer than 20 usable points the scan is counted as
+"degenerate" and the update is skipped. Only after the last pass does the covariance become $(I - KH)P$. The measurement noise
+is `laser_cov = 0.001`, FAST-LIO's default.
+
+The widget below runs that loop on a planar toy: three states instead of fifteen, walls instead of five-point plane fits, the
+gate and gain exactly as written. Step it in the room, then in the corridor.
+
+<FilterStep />
+
+The corridor is the case worth staring at. Every wall normal points across the corridor, so $H$ has nothing in the
+along-corridor column. The information form then leaves that axis at the prior: the IMU's error along the corridor survives
+the update untouched, and so does its σ. The code's `degenerate` counter does not notice, because it counts scans with
+fewer than 20 points, not scans whose points all say the same thing. FAST-LIO2's reference code has no check for this
+either. In 3D a real corridor usually offers a door frame, a light fitting or the end wall, which is enough. An office
+corridor with bare walls and a far end out of range is where handheld LiDAR mapping slides.
+
+## Propagation, deskewing and the first second
+
+The IMU path is plain strapdown propagation, not preintegration. `integrate()` takes the midpoint of consecutive samples,
+subtracts the biases, rotates acceleration into the world, adds gravity, and steps position, velocity and attitude. It
+propagates the covariance with the usual 15 × 15 transition and adds process noise as variance times $\Delta t^2$ on the
+diagonal. Every step records the state at its start in a `Seg`. That record is what removes the motion blur. A Mid-360 sweep
+takes 100 ms. For each point, the code finds the IMU segment its timestamp falls in, extrapolates that segment's pose to the
+point's own time, and re-expresses the point in the IMU frame at the end of the scan:
+
+$$
+p_{\text{end}} = R_{\text{end}}^\top\big(R_i\,(R_{LI}\,p_L + t_{LI}) + P_i - P_{\text{end}}\big).
+$$
+
+FAST-LIO walks backwards through the IMU samples to do this. Here the forward segments are kept and indexed. The result is the
+same per-point pose; it just keeps a small vector instead of re-integrating.
+
+Initialisation wants the sensor still. The first 200 IMU samples (one second at 200 Hz) are averaged: the mean gyro becomes
+the gyro bias, the mean acceleration's direction becomes "down", and its magnitude sets an accelerometer scale that forces it
+to read exactly 9.81. The stillness test leans on the gyro (variance under 0.01, mean rate under 0.15 rad/s, with a loose
+accelerometer variance bound of 1.0) because, the comment says, the Mid-360's motor vibration can make the accelerometer noisy while the device is stationary. After four failed half-second windows
+("~2.5 s", says the comment) it stops waiting and initialises anyway. In the app this is the orange "静止してください" (please keep still)
+banner you can see at the start of the screen recording below.
+
+<Video
+  src="/articles/mobile-slam-iphone/clip2"
+  poster="/articles/mobile-slam-iphone/clip2-poster.jpg"
+  alt="A phone screen recording of the Android app. It starts with an orange initialising banner, then a green mapping chip and a timer, and a coloured point cloud of a room fills in as the view rotates. The status chips read Ethernet, Mid-360 about 190k points per second, and IMU about 200 Hz."
+  caption="The Android app mapping a room with the holder: still for initialisation, then mapping. At 0:10 the overlay reads 146,581 points, Mid-360 193k点/s and IMU 199Hz. First 14.5 s of the 29 s recording, muted (video from @sm0219370893504's post on X)."
+/>
+
+## A map that only grows
+
+FAST-LIO2's ikd-Tree keeps a cube of map around the sensor. As you walk it deletes whole boxes behind you, so the search
+structure stays the same size however far you go. Mobile SLAM's registration map in `core/voxel_map.hpp` is a
+`std::unordered_map` from a packed 63-bit voxel key to one point. The voxels are 0.2 m, the point is the first one ever
+inserted there, and nothing is ever removed. The k-NN query looks in the 27 voxels around the query and sorts what it finds,
+so it returns at most 27 candidates from roughly a 60 cm cube. That is the iVox idea from
+[Faster-LIO](https://github.com/gaoxiang12/faster-lio) (which keeps several points per voxel and evicts old voxels), taken to its
+most frugal form. Lookups are constant time and the code is 96 lines. The cost is that the map's memory grows with the area
+covered, and its five "nearest neighbours" can be up to a voxel diagonal apart.
+
+A second store keeps the map you see and export. It holds one point per 5 cm voxel, again the first to arrive, with its
+reflectivity. "Save PCD" writes that store as binary `x y z intensity`. Two properties of it matter for anyone who wants the
+PCD as data rather than a picture:
+
+- **Nothing is averaged.** The point kept in each 5 cm cell is one raw return, deskewed and registered. The Mid-360's
+  spec page gives its range precision as 2 cm or better (1σ) at 10 m, and every exported point carries all of that noise.
+- **Nothing is revised.** A point is written with the pose of the scan it came from. With no loop closure and no pose graph,
+  if the pose drifts, the map keeps both versions of the wall.
+
+How big does it get? The in-app demo is a box room 15 × 10 × 4 m, which is 500 m² of floor, ceiling and walls. The demo map in
+the app's own App Store screenshot holds 204,166 points, about 408 per m² against the 400 per m² that one point per
+5 cm cell would give a flat surface. By my arithmetic, at roughly 48 bytes per display point in a `std::unordered_map` plus two
+vectors, that room costs about 10 MB, and a floor of a building with 10,000 m² of surface would cost about 200 MB before
+rendering. The renderer subsamples to at most 800,000 points, and a PCD loaded for localisation is subsampled to 6 million.
+Version 1.1, released on 16 November, lists "長時間使ったときにメモリ使用量が増え続ける問題を修正しました" (fixed memory
+use that kept growing during long sessions). The design is still append-only, so the map's own memory still grows with the
+ground you cover.
+
+<Figure
+  src="/articles/mobile-slam-iphone/fig2.jpg"
+  alt="The iOS app's PCD viewer showing a saved synthetic map from above: a teal rectangular floor with a few orange and yellow box obstacles standing on it. The header reads map_20261114_093012.pcd, 204,166 points, 15.1 by 10.1 by 4.0 metres, binary, 3 ms."
+  caption="The app's PCD viewer on a map built in demo mode, the simulated 15 × 10 × 4 m room: 204,166 points (App Store screenshot from the repository's AppStore/screenshots/ja, demo data, not a real scan)."
+/>
+
+## Finding yourself in a saved map
+
+Load a saved PCD, switch to 自己位置推定 (localisation), and the filter changes job. The LiDAR stops updating the
+map and stops feeding point-to-plane residuals. Instead, each scan is matched against the prior map with the
+Normal Distributions Transform, P2D-NDT after Magnusson's 2009 thesis, in `core/ndt.cpp` (131 lines), and the result is fed into the
+same Kalman filter as a pose measurement.
+
+NDT replaces the map's points with Gaussians. The prior map is cut into 1 m cells. Any cell with at least six points keeps
+its mean $\mu$ and covariance $\Sigma$. Small eigenvalues are lifted to 1 % of the largest so a flat wall does not produce a
+singular covariance. A scan point $x$, already moved by the candidate pose, scores against its own cell and the six face
+neighbours:
+
+$$
+\text{score} = \sum_{\text{points}} \sum_{\text{cells}} -d_1 \exp\!\Big(-\tfrac{d_2}{2}\,(x-\mu)^\top\Sigma^{-1}(x-\mu)\Big),
+$$
+
+with $d_1, d_2$ from Magnusson's fit for an outlier ratio of 0.55. The pose that maximises it is found with Gauss-Newton. Each
+step is clamped to 0.5 m and 0.2 rad, and there are up to 30 iterations while tracking. A point "matches" when its
+Mahalanobis distance to some cell is under 3σ ($q < 9$), and the match ratio is what the app shows as 一致 (match). On a scan
+voxelised at 0.4 m, tracking accepts a result at a match of 0.35 or better. Twenty failures in a row and the state goes to
+"lost".
+
+Unlike point-to-plane, NDT needs no nearest-neighbour search and copes with a sparse prior. Its weakness is the basin. A point
+only feels cells within one cell of where it lands, so a starting guess more than about a cell off has nothing to pull it
+the right way. The planar toy below is built from the same constants. Move the start and watch the scan converge or settle
+on the wrong walls, then switch on the global search.
+
+<NdtToy />
+
+The global search is how the app finds itself with no starting pose. You can tap a position on the map and drag a heading,
+or leave the heading out. The filter accumulates five scans while you stand still, levels them with its gravity estimate,
+and runs a coarse NDT of 12 iterations from every combination of 12 headings, 30° apart, and five positions: the guess and
+four points 1 m away. That is 60 starts. It refines the best-scoring one with 60 iterations and accepts it at a match of 0.45 or
+better, 45 % of points. If the search fails, the dead-reckoned position is pinned back to the guess so the IMU cannot carry it away
+while it waits.
+
+Once tracking, NDT's answer goes into the filter as a direct measurement of the first six error states. $H$ is a selector,
+the residual is $[\,\mathrm{Log}(R^\top R_m),\ p_m - p\,]$, and the measurement noise is $10^{-4}$ rad² and
+$4\times10^{-4}$ m², about 0.6° and 2 cm. Between scans the IMU carries the pose, so NDT always starts from a prediction
+100 ms old. That keeps it inside its basin while you walk.
+
+<Figure
+  src="/articles/mobile-slam-iphone/fig1.jpg"
+  alt="Two iPhone screenshots side by side. Left: mapping, with green chips reading Ethernet, Mid-360 161k points per second and IMU 200Hz, a timer at 0:11 and 42,116 points, over a coloured point cloud of a room. Right: localisation, with a chip reading 追跡中 (tracking) and 一致 99% (match 99%), the same room drawn from a loaded PCD and a red arrow for the sensor."
+  caption="The iOS app on a real Mid-360: mapping at 0:11 with 42,116 points and 161k points/s (left), and localising against a saved map with a 99% match (right) (App Store screenshots from the repository's AppStore/screenshots/ja)."
+/>
+
+## What the simulator says
+
+The repository ships a Mid-360 simulator, `MobileSLAM/Bridge/Mid360Synth.hpp`. It drives the app's demo mode and the
+`tools/mid360_sim.cpp` packet generator. It ray-casts a 15 × 10 × 4 m room with six boxes, at 100,000 points a second by
+default, in 96-point packets with the Mid-360's −7° to 52° vertical field. It also emits 200 Hz IMU packets in the
+sensor's own format. The sensor stands still for 3 s and then moves along a smooth closed path while turning. Because
+it is the simulator's own path, every scan has a true pose to compare with.
+
+I did not run any of it on my laptop. I wrote a harness that feeds the simulator's packets through the unmodified `core/`
+as fast as one CPU core allows and compares the filter's pose at each scan with the simulator's truth. I ran it on a
+Linux server, built with the Xcode target's flags (`-O3 -ffast-math`). The run measures two things. One is how fast the
+core is per scan on a desktop core. The other is how close the pose stays to the truth, mapping and relocalising, when the
+inputs are clean.
+
+The server is an Intel Core i7-6850K, one core pinned, with g++ 11.4.
+
+| run | per scan, filter and map | per scan, whole `step()` | pose error, rms / max | real time |
+|---|---|---|---|---|
+| mapping, 100,000 pts/s, 120 s | 13.97 ms mean, 17.25 ms p95 | 16.74 ms mean, 20.46 ms p95 | 1.38 cm / 1.62 cm | 5.3× |
+| mapping, 200,000 pts/s, 120 s | 18.35 ms mean, 23.72 ms p95 | 23.35 ms mean, 29.21 ms p95 | 1.44 cm / 1.74 cm | 3.6× |
+| mapping, 100,000 pts/s, 600 s | 13.95 ms mean, 17.32 ms p95 | 16.79 ms mean, 20.57 ms p95 | 1.51 cm / 1.68 cm | 5.3× |
+
+At the simulator's default rate a scan of about 9,800 points voxelises to about 4,446. Nearly all of them pass the gate (4,428 on
+average), and the filter converges in 1.78 iterations on average, well under its cap of four. Doubling the point rate to the
+Mid-360's real 200,000 a second costs a third more time per scan, not double, because the 0.2 m voxel filter absorbs most of
+the extra points. A scan arrives every 100 ms. On this desktop core the whole step takes about a quarter of that at the higher
+rate, which leaves a phone's performance cores some room but not a lot once Metal is drawing beside it. No scan was dropped
+and none counted as degenerate, but a synchronous harness cannot drop anything, so that line says nothing about the app's
+queues.
+
+The error does not grow. Over 600 s and 289.8 m of path it sits between 1.2 and 1.6 cm from the first checkpoint to the last, and
+heading stays within 0.035°. Most of that 1.5 cm is a constant offset, not drift: it is in place by 30 s and barely moves after.
+My guess is the simulator, which puts its IMU at the LiDAR's origin, disagreeing with the 4 to 5 cm extrinsic `core/` assumes,
+but I did not isolate it. The map is bounded because the room is. The registration map settles at 13,776 voxels, the display
+store at 272,311 points after 600 s, still creeping up as noise lands in new 5 cm cells, and peak resident memory for the whole
+process is 24.4 MB. That agrees with my estimate of about 10 MB for the display store of this room.
+
+Relocalisation used a 60 s map of 240,954 points, which takes 35 to 46 ms to turn into NDT cells. I rotated and shifted the map
+and started the localiser from six guesses:
+
+| case | map rotated | start offset from the map origin | guess error | result |
+|---|---|---|---|---|
+| A | 100° | 1.7 m | exact | tracking at 1.5 s, 1.42 cm rms |
+| B | 100° | 1.7 m | 1.0 m | tracking at 1.5 s, 1.42 cm rms |
+| C | 100° | 1.7 m | 3.0 m | **tracking at 4.0 s on the wrong pose**: 180° out, 3.79 m rms, mean match 0.918 |
+| D | 100° | 26.6 m | exact | same as A |
+| E | 105° | 1.7 m | exact | tracking at 1.5 s, first pose 9.3 cm and 12.7° out, then 1.55 cm rms |
+| F | 105° | 26.6 m | exact | same as E |
+
+Three things come out of that. First, the global search is the expensive scan. The 60 coarse starts and the refinement take about
+470 ms in one go, almost five scans' worth, after which tracking costs 3.2 to 5 ms of NDT per scan. Second, a heading 15° from the
+nearest coarse candidate is still found. The search's first answer is 12.7° out and accepted at a match of 0.459, just over the
+0.45 bar, and the IMU-plus-NDT tracking pulls it in over the following scans. My planar toy predicted that starting far from the
+map's origin would hurt, because the clamped steps rotate about it. Cases D and F show it does not, at least here. Third, and the
+one that matters: from 3 m away, outside the 1 m search pattern, the localiser accepted a pose turned round by 180° in a room that
+is nearly symmetric end to end, and then tracked it confidently, at an average match of 0.918. The match ratio measures whether the
+scan fits *a* place in the map. It cannot tell you whether that place is the right one. On site, that is the failure to watch for:
+the app reports 追跡中 (tracking) with a high match while you are standing at the other end of the room.
+
+Two caveats belong next to these numbers. The room is closed and the path is bounded, so the walls never leave view: this
+is tracking error in a best case, not drift over a walk through a building. And one desktop x86 core is not an A-series
+phone chip, under a phone's thermal limits, with Metal drawing 800,000 points beside it.
+
+## What a phone imposes
+
+The phone sets four limits, and the code meets some of them and not others.
+
+**Background.** iOS does not let the app run in the background, and the app does not try. Its plist declares no
+background modes. When the scene goes to `.background`, `deactivate()` stops the engine and closes the sockets. The map
+is kept and a recording is closed. Lock the phone or take a call mid-walk and mapping stops there. While the app is in
+front, it disables the idle timer so the screen does not sleep.
+
+**Falling behind.** There are two pressure valves. The packet queue drops point packets, never IMU, once it holds 2,500 of
+them. The source comment says that is about a second of data, and at 200,000 points a second in the simulator's
+96-point packets it is a little over one. The
+filter's own queue keeps at most five finished scans and drops the oldest. Both are counted and shown in the details panel
+as "drop scan" and "pkt". A dropped scan does not break the odometry, since the IMU bridges the gap. It is time the map does
+not see.
+
+**Heat.** I found no use of `ProcessInfo.thermalState` anywhere in the app. The core does not shed work when the phone gets
+hot, by thinning the scan or skipping iterations. It slows down, and the queues above take the overflow.
+
+**Memory.** This is the one that will end a long session, for the reasons in the map section. Nothing is evicted, and iOS
+kills an app that grows too far without asking.
+
+The app also records the raw stream. Tap 記録 (record) and every UDP payload is written to `raw/raw_<time>.livox`, one record
+per packet: a type byte, a 16-bit length and the packet bytes. It lands in the Files app, excluded from iCloud backup. It is the
+app's own format, not Livox's LVX, but it is the SDK2 packets verbatim, and the decoder for it is the 91 lines above.
+
+## What this rig means for scan-to-BIM
+
+My own capture work starts from 360° fisheye walks: rig structure from motion with IMU scale and gravity, then splats,
+meshes and point clouds, and from the clouds a building model. Cameras are cheap and pleasant to walk with, and they are
+at their worst exactly where buildings are: blank walls, repeated bays, low light, and metric scale that has to be argued for.
+A LiDAR on a stick fixes the last one outright. Ranges are metres, not a scale factor. A Mid-360 and a phone in a
+3D-printed holder is the cheapest honest version of that I have seen with code attached.
+
+It is not a survey instrument, and the gap is specific.
+
+- **No loop closure.** Walk a floor and come back to the door, and any heading error accumulated on the way stays in the map
+  as a doubled wall. [The Hilti SLAM datasets](/articles/hilti-slam-dataset) show what the gap looks like when it is measured:
+  even the datasets' dense reference trajectories scored 7 to 76 mm against surveyed marks, and those were produced with far
+  more machinery than a phone app. A scan-to-BIM modeller fitting walls to a doubled surface gets a wall in the wrong place,
+  or two.
+- **The export is raw.** One unaveraged return per 5 cm, at the sensor's 2 cm (1σ) range noise, makes a wall a band about
+  8 cm thick at ±2σ by my arithmetic. A survey-grade scanner gives you millimetres. Here you would fit planes through the
+  band, which works for a wall's position and not for its flatness.
+- **Fixed calibration and gravity.** The LiDAR-to-IMU transform is the Mid-360's factory default, and gravity's magnitude is
+  assumed. For the built-in IMU that is defensible. It is still not estimated or checked.
+- **No control.** There are no control points, no georeferencing and no colour. Kosmo, in
+  [my teardown of Hesai's handheld](/articles/hesai-kosmo), offers RTK and control-point management for exactly this reason.
+- **The 1.5 m blind radius.** By default every return within 1.5 m of the sensor is dropped, so the person holding it is not
+  mapped. In a riser shaft, a store room or a stair core, that is most of the room. The radius can be lowered in Settings.
+
+What I would use it for is the raw recorder, more than the map. Walk the site with the phone as a logger and a live coverage
+view, then run a proper pipeline offline. FAST-LIO2, or something with loop closure and control points, can read the same
+packets on a workstation. The live map tells you on site that you missed the plant room. The offline pass gives you the cloud
+you model from. The NDT localiser is useful too: walking an existing scan and seeing where you are on it is the start of a
+progress-capture workflow, as long as you give it a starting point and glance at the map before trusting it. In the
+simulator a guess 3 m off produced a confident lock turned the wrong way round.
+
+## Where I land
+
+This is good engineering at a small scale. It is FAST-LIO's filter in 590 lines that a person can read in an evening, a
+Livox wire protocol in a few hundred more, an NDT localiser fused properly rather than bolted on, and a simulator that lets
+an App Store reviewer, or anyone, exercise the whole stack without the hardware. The trade-offs are the right ones for
+a phone demo: a hash map instead of a tree, a fixed calibration, no back end. Every one of them is also a reason not to treat
+the PCD as a deliverable. For reality capture I would install it, record raw, and do the mapping somewhere else. For a
+robotics student who wants to see an iterated Kalman filter work with nothing between them and the maths, it is the best
+starting point I know of.
+
+**How I checked.** I read `core/` in full (`lio.cpp`, `lio.hpp`, `ndt.cpp`, `ndt.hpp`, `voxel_map.hpp`, `livox_packet.hpp`) and
+the iOS receiver, bridge, app model, simulator and project file at `13f2e30`, and diffed `core/` against the Android repository
+at `9dbb66b`. The Mid-360 figures are from Livox's spec page; the app's version and dates are from Apple's lookup API. The
+two widgets are planar toys I wrote with the code's constants. The simulator numbers come from my harness, run on an Intel i7-6850K server, not on a
+phone. I did not have a Mid-360, so nothing here is measured on the real sensor, and nothing is measured on an iPhone.

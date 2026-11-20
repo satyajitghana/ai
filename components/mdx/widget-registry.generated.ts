@@ -940,6 +940,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "mixture-of-experts-from-scratch/moe-routing": () => import("@/components/articles/mixture-of-experts-from-scratch/moe-routing"),
   "mlattice/lattice-explorer": () => import("@/components/articles/mlattice/lattice-explorer"),
   "mlattice/op-count": () => import("@/components/articles/mlattice/op-count"),
+  "mobile-slam-iphone/filter-step": () => import("@/components/articles/mobile-slam-iphone/filter-step"),
+  "mobile-slam-iphone/ndt-toy": () => import("@/components/articles/mobile-slam-iphone/ndt-toy"),
   "model-casting-sparse-ffn/ffn-skip": () => import("@/components/articles/model-casting-sparse-ffn/ffn-skip"),
   "modern-web-guidance-static-embeddings/embed-cost": () => import("@/components/articles/modern-web-guidance-static-embeddings/embed-cost"),
   "modern-web-guidance-static-embeddings/static-embed-demo": () => import("@/components/articles/modern-web-guidance-static-embeddings/static-embed-demo"),
