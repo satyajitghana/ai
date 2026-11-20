@@ -677,6 +677,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "kaggle-tpu-320b/hbm-budget": () => import("@/components/articles/kaggle-tpu-320b/hbm-budget"),
   "kaggle-tpu-320b/quant-ladder": () => import("@/components/articles/kaggle-tpu-320b/quant-ladder"),
   "kaggle-tpu-320b/qwen-hbm": () => import("@/components/articles/kaggle-tpu-320b/qwen-hbm"),
+  "kalman-filter/eskf-step": () => import("@/components/articles/kalman-filter/eskf-step"),
+  "kalman-filter/filter-tuner": () => import("@/components/articles/kalman-filter/filter-tuner"),
   "kalman-filter/kalman-fuse": () => import("@/components/articles/kalman-filter/kalman-fuse"),
   "kalman-filter/kalman-track": () => import("@/components/articles/kalman-filter/kalman-track"),
   "kandinsky-6-video/clip-timeline": () => import("@/components/articles/kandinsky-6-video/clip-timeline"),
