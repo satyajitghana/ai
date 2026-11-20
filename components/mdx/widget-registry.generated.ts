@@ -799,6 +799,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "lithos-metal/decode-budget": () => import("@/components/articles/lithos-metal/decode-budget"),
   "littlebit-0-1-bit/bpw-calculator": () => import("@/components/articles/littlebit-0-1-bit/bpw-calculator"),
   "littlebit-0-1-bit/init-error": () => import("@/components/articles/littlebit-0-1-bit/init-error"),
+  "llama-cpp-v1/gguf-map": () => import("@/components/articles/llama-cpp-v1/gguf-map"),
+  "llama-cpp-v1/quant-shelf": () => import("@/components/articles/llama-cpp-v1/quant-shelf"),
   "llama-modchip/codebook-explorer": () => import("@/components/articles/llama-modchip/codebook-explorer"),
   "llama-modchip/token-budget": () => import("@/components/articles/llama-modchip/token-budget"),
   "llamacpp-decision-models/cost-explorer": () => import("@/components/articles/llamacpp-decision-models/cost-explorer"),
