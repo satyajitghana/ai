@@ -1605,6 +1605,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "threejs-meshlets/cluster-grower": () => import("@/components/articles/threejs-meshlets/cluster-grower"),
   "threejs-meshlets/cone-cull": () => import("@/components/articles/threejs-meshlets/cone-cull"),
   "threejs-meshlets/draw-args": () => import("@/components/articles/threejs-meshlets/draw-args"),
+  "threert/api-coverage": () => import("@/components/articles/threert/api-coverage"),
+  "threert/path-lab": () => import("@/components/articles/threert/path-lab"),
   "tiel-coder-35b-a3b/active-budget": () => import("@/components/articles/tiel-coder-35b-a3b/active-budget"),
   "tiel-coder-35b-a3b/dynamic-recipe": () => import("@/components/articles/tiel-coder-35b-a3b/dynamic-recipe"),
   "tiel-coder-35b-a3b/quant-ladder": () => import("@/components/articles/tiel-coder-35b-a3b/quant-ladder"),
