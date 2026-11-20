@@ -290,6 +290,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "debim/box-overstatement": () => import("@/components/articles/debim/box-overstatement"),
   "debim/pixel-score": () => import("@/components/articles/debim/pixel-score"),
   "debim/token-ledger": () => import("@/components/articles/debim/token-ledger"),
+  "deepba-tfd-sfm/lm-stepper": () => import("@/components/articles/deepba-tfd-sfm/lm-stepper"),
+  "deepba-tfd-sfm/track-free-replay": () => import("@/components/articles/deepba-tfd-sfm/track-free-replay"),
   "deepgemm-ascend/megamoe-fusion": () => import("@/components/articles/deepgemm-ascend/megamoe-fusion"),
   "deepgemm-ascend/peak-bars": () => import("@/components/articles/deepgemm-ascend/peak-bars"),
   "deepgemm/accum-promote": () => import("@/components/articles/deepgemm/accum-promote"),
