@@ -1241,6 +1241,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "pytorch-2-15/probe-table": () => import("@/components/articles/pytorch-2-15/probe-table"),
   "quantui-rs/block-lab": () => import("@/components/articles/quantui-rs/block-lab"),
   "quantui-rs/path-finder": () => import("@/components/articles/quantui-rs/path-finder"),
+  "quark-165m/cache-ledger": () => import("@/components/articles/quark-165m/cache-ledger"),
+  "quark-165m/group-signal": () => import("@/components/articles/quark-165m/group-signal"),
   "qwen-audio-3-1/duplex-events": () => import("@/components/articles/qwen-audio-3-1/duplex-events"),
   "qwen-audio-3-1/price-math": () => import("@/components/articles/qwen-audio-3-1/price-math"),
   "qwen-audio-3-1/tokenizer-budget": () => import("@/components/articles/qwen-audio-3-1/tokenizer-budget"),

@@ -1,0 +1,447 @@
+---
+title: "quark: a 165M model with a 128K window, trained on tools by reward alone, and what its 'no SFT' covers"
+description: "Empero's quark is a 165M-parameter hybrid language model (12 sliding-window-plus-convolution layers, 4 global attention layers) pretrained on about 506B tokens on one 8xH100 node, extended to 131,072-token sequences, then post-trained with GRPO from the base with no supervised fine-tuning stage. The whole project cost about $4,200. I counted 165,254,528 parameters from the safetensors header, read the config and modeling code to see how the 128K window works (a RoPE base raised from 500,000 to 4,000,000 on the four global layers, and local layers that never look past 255 tokens), recomputed the KV-cache claim, range-read the trained blend gates and the size of the RL update, and read the report against the launch thread. On an RTX 3090 I ran both 128K checkpoints. Free-generation needle retrieval holds to 64K and misses every needle placed early in a 120K prompt. The measured cache matches the config to the byte. The base model already solves 39 of 40 arithmetic prompts in 16 samples, so RL sharpened that skill rather than creating it. Offered a calculator, the base calls it 19 times in 20 and the RL model never does. The benchmarks are best among base models trained on similar token budgets, and SmolLM2-135M still beats it. The RL result is real but narrower than the thread says: tool-call syntax was in pretraining, the RL objective keeps a small supervised term on code-written steps, and there is no comparison with a fine-tuned peer."
+date: 2026-11-16
+tags:
+  - small-models
+  - hybrid-attention
+  - long-context
+  - reinforcement-learning
+  - grpo
+  - pretraining
+  - agents
+draft: false
+rating:
+  novelty: 1
+  verification: 3
+  runnable: 3
+  explains: 2
+  takeaway: 2
+  durability: 1
+  reach: 1
+  unique: 2
+  why: "Counts quark from its header, explains how 4 global layers carry 128K, and separates what RL taught from what pretraining already planted."
+topic: training-rl
+kind: model
+level: practitioner
+runsOn: cpu
+licence: Apache-2.0
+---
+
+import { CacheLedger } from "@/components/articles/quark-165m/cache-ledger"
+import { GroupSignal } from "@/components/articles/quark-165m/group-signal"
+
+[Empero's launch thread on X](https://x.com/EmperoAI/status/2122016458821570943) opens with three claims in one line:
+"quark: a 165M-parameter language model with 128K context, post-trained with RL only. No SFT stage, no distillation."
+The second line is the one that got 302 bookmarks: "The whole project, failed first design included, cost about \$4,200
+of compute (about 1,300 H100-hours)." Then four open-weight checkpoints and a technical report.
+
+Each of those claims is a question. How does a model with 768-wide layers hold 131,072 tokens? What was it trained at?
+What does "RL only" mean for a model this small, when the usual worry about RL from a base model is that the base
+has to solve a task now and then before reward can teach it anything? And what do the evaluations show against peers
+that did get a fine-tuning stage?
+
+I read [the technical report](https://empero.org/research/quark) (a 14-page PDF by Leon Lehmann), the four model
+cards, `config.json` and `modeling_quark.py`, and I range-read the safetensors headers and a handful of small tensors
+straight off Hugging Face without downloading the weights. Then I ran both 128K checkpoints on an RTX 3090 for three
+things the report says it did not measure or did not show: free generation at long context, memory, and how much of what
+RL "taught" the base could already do. The checkpoint that matters most is the RL one:
+
+<ModelCard repo="empero-ai/Quark-150M-128K-Zero" />
+
+<Figure
+  src="/articles/quark-165m/post-cost.jpg"
+  alt="Bar chart titled 'The whole project cost about $4,200 of compute'. Pretraining, 128K extension and RL on 8xH100: $3,331. First design (discarded) and its ablations on 8xH100: $613. Data generation and speed tests on 1xH100, upper bound: at most $155. Evaluation on consumer GPUs, upper bound: at most $90. Language-model API calls: $1. Total about $4,200, about 1,300 H100-hours."
+  caption="The cost ledger from the thread, which is the report's Table 1 drawn as bars. The discarded first design cost $613; a reply from Empero says it was dropped after 'a failed ablation on positional encoding' (image from @EmperoAI's post on X)."
+/>
+
+## Counting the parameters
+
+The repositories are named `Quark-150M-*`, and the thread itself says "the names say 150M; the count is about 165M."
+The header agrees with the thread. Summing every tensor shape in `Quark-150M-128K-Zero/model.safetensors` gives
+**165,254,528** parameters, all float32, which is why the file is 661 MB (a reply from Empero puts it at "about 700MB
+in FP32"). Take out the embedding table, 32,896 rows of 768, and 139,990,400 are left: the card's "140.0M without
+embeddings". The 32K base has 128 fewer embedding rows and 165,156,224 parameters; the extension added four tool
+tokens and padded the table to a multiple of 128.
+
+Where those parameters sit, by tensor name:
+
+| Part | Parameters | Share |
+|---|---:|---:|
+| MLPs, 16 layers (squared-ReLU gated, hidden 2,048) | 75,497,472 | 45.7% |
+| Attention projections, QK norms and sinks | 34,605,200 | 20.9% |
+| Short convolutions, 12 local layers | 28,348,416 | 17.2% |
+| Token embedding, tied to the output | 25,264,128 | 15.3% |
+| Gated value residuals | 1,479,408 | 0.9% |
+| Layer norms and blend gates | 59,904 | 0.04% |
+
+A local layer is 9,564,188 parameters and a global one 6,334,640: the global layers have no convolution and a key-value
+projection a third the width (512 output rows against 1,536). The first layer is 119,952 smaller than the other local
+ones because it has no value-residual gate; it is where every later layer's values come from.
+
+## How four layers carry 131,072 tokens
+
+The model is 16 layers wide 768, in four repeats of three local layers and one global layer. The report's Figure 1
+draws it well:
+
+<Figure
+  src="/articles/quark-165m/fig1.png"
+  alt="Three-panel architecture diagram. Left: the model, token embedding 32,768 by 768, then a block of three local layers and one global layer repeated four times, then RMSNorm and an output projection tied to the embedding. Middle: a local layer, where sliding-window attention (window 256, 12 heads, RoPE) and a short gated convolution (kernel 4) run in parallel and are blended, followed by a squared-ReLU GLU MLP, each sublayer between two RMSNorms. Right: a global layer with full causal grouped-query attention, 12 query heads and 4 key-value heads, RoPE. Dashed arrows mark gated reuse of layer 1's values."
+  caption="Three local layers precede each global layer. The cache note at the bottom is the point: a local layer keeps a 256-token window plus a short convolution state, a global layer's cache grows with the context (quark report, Figure 1)."
+/>
+
+**A local layer** runs two token mixers side by side on the same normalized input. One is sliding-window attention:
+12 query heads, 12 key-value heads (`num_local_key_value_heads: 12`, so full multi-head, not grouped), a 256-token
+window, QK-norm, RoPE with base 10,000, and a learned "sink" logit per head that joins the softmax with a zero value,
+so a head can attend to nothing. The other is a depthwise causal convolution of kernel 4 wrapped in two gates:
+`in_proj` makes three 768-wide streams `b, c, u`, the convolution runs over `b * u`, and `c` gates its output. A learned
+per-channel weight blends the two, `lerp(y_conv, y_swa, sigmoid(mix))`.
+
+**A global layer** is plain full causal attention with grouped queries: 12 query heads share 4 key-value heads, with
+QK-norm and RoPE.
+
+The trained blend gates are in the weights, so I read them: 12 tensors of 768 floats, about 37 KB of range requests.
+The mean of `sigmoid(mix)` per layer is 0.079 in layer 1 and 0.285 in layer 3, so those two lean on the convolution. Every
+other local layer sits between 0.755 and 0.858, leaning on attention. The values are the same to two decimals in the
+32K base, the 128K base and the RL checkpoint. That is a weight on each branch's output, not a measured share of the
+signal, since the two branches can have different magnitudes before the sublayer's output norm. Still, the gate itself
+says the bottom of the network wanted the convolution most.
+
+Two pieces the report never ablated: every attention after layer 1 mixes in layer 1's values through a per-token,
+per-head gate, and the residual stream is a running average (the n-th write is
+`x_n = sqrt((n-1)/n)·x_{n-1} + h_n/sqrt(n)`), kept in float32, with an RMSNorm before and after every sublayer.
+
+### The positional trick is a base change
+
+The report says only that "the extension also adjusts positional encoding in its global layers for the longer
+context." The two configs say what that was. Diffing `Quark-150M-32K-Base/config.json` against the 128K one:
+
+```diff
+-  "max_position_embeddings": 32768,
++  "max_position_embeddings": 131072,
+-  "rope_theta_global": 500000.0,
++  "rope_theta_global": 4000000.0,
+-  "vocab_size": 32768
++  "vocab_size": 32896
+```
+
+No `rope_scaling` block, no YaRN, no position interpolation, no linear attention. The global layers' RoPE base went up
+eight times, and then the model trained for 10B tokens on 131,072-token sequences. The modeling code computes the
+rotation angles in float64 ("long contexts need the precision") and casts afterwards.
+
+Why a base change works: RoPE rotates each pair of a head's 64 dimensions at its own frequency, $\theta^{-2i/64}$ for
+pair $i$. Pairs that turn fast encode near positions; pairs that turn slowly are what lets a query tell a token
+100,000 positions back from one 30,000 back. My arithmetic on the two bases: at 500,000, 11 of the 32 pairs take
+longer than 32K tokens to complete one turn, and 7 take longer than 128K. At 4,000,000, 11 pairs take longer than
+128K. The extension buys back, at four times the length, the same number of slow pairs the model had at 32K. That is
+the reasoning behind "adjusted base frequency" in [Meta's long-context Llama 2 work](https://arxiv.org/abs/2309.16039), and quark applies it only where it
+is needed.
+
+The local layers never needed it. With a 256-token window, no query in a local layer ever sees a key more than 255
+positions away, however long the document. Their RoPE base stayed at 10,000, and nothing about their position handling
+changes between 2K and 128K. Only four layers out of sixteen have to generalize to long range. That, more than anything
+else in the design, is how a model this small holds a long window.
+
+### What the window costs in memory
+
+The thread says "At 128K that's about 0.5 GiB of KV cache in bf16, a quarter of what the same model would need with
+every layer global." The report says 0.55 GB. Both check out against the config, and the difference between them is
+the local layers:
+
+- A global layer keeps 2 (keys and values) × 4 heads × 64 × 2 bytes = 1,024 bytes per token. Four of them at 131,072
+  tokens hold 536,870,912 bytes, exactly 0.5 GiB.
+- A local layer keeps the last 255 tokens at 12 heads: 783,360 bytes, plus a 3 × 768 convolution state. Twelve of
+  them add about 9.4 MB.
+- Total cache for one 128K sequence, quark as built: 0.546 GB, which rounds to the report's 0.55.
+
+"A quarter" assumes the other 12 layers would turn global with 4 key-value heads, like the existing global ones: 16 ×
+1,024 bytes per token gives 2 GiB, four times the cache. Turn the local layers global with the 12 key-value heads they
+actually have and the cache is 40,960 bytes per token, 5.37 GB at 128K: about a tenth.
+
+The report says "We haven't measured latency or memory for this report," so I did, on an RTX 3090 with the weights in
+bfloat16 and the model's own Hugging Face code. At a 122,920-token prompt, the cache the code actually held was
+783,360 bytes in each local layer (255 tokens, as the config says) and 125,870,080 bytes in each global layer, 1,024
+bytes per token: 489.12 MiB in all, the arithmetic above to the byte. The cache is not what fills the card, though. Peak
+GPU memory during that prefill was 9.36 GiB, almost all of it activations from pushing 122,920 tokens through the
+network in one pass. Prefill took 5.4 seconds, and decoding ran at about 22 to 23 tokens a second at every length
+from 2K to 120K. That flat rate is Python and kernel-launch overhead for a 165M model at batch one, not memory
+bandwidth, so it says nothing about the architecture.
+
+<CacheLedger />
+
+## 500B tokens on one node
+
+The main run trains on 500B tokens in three context stages: a short 1K stage of "mostly simple synthetic narrative
+text", a dominant 4K stage that is "roughly half English web text, a quarter mathematics and 15% multilingual web
+text", and a 32K stage that is "about four fifths synthetic long-context tasks": needle retrieval, key-value
+lookup, variable and state tracking, event counting, ledger arithmetic, quote attribution and conversation recall. The
+same eight families are the long-context evaluation, with held-out seeds. The learning rate holds constant for most of
+the run and decays during the 32K stage.
+
+The 128K extension branches from a checkpoint inside the 32K decay, about 496B tokens in according to the card,
+and trains 10B tokens at 131,072-token sequences on roughly half natural long text (PG-19 and DOAB books, textbooks,
+FinePDFs, arXiv papers), a quarter synthetic long-context and tool-use sessions, and a quarter replay. The model saw
+about 506B tokens in all, "not 500B plus 10B."
+
+The report gives enough to estimate throughput. The main run took 86 hours on eight H100s. 500B tokens over that is
+about 202,000 tokens per second per GPU, which at six FLOPs per non-embedding parameter per token is roughly 170
+TFLOP/s per GPU, about a sixth of an H100's dense BF16 peak. That is my arithmetic and ignores attention FLOPs, which
+are not small at 32K, but it says the run was not compute-starved and not heroic either. At \$3,331 for 1,006
+H100-hours, the rental rate was about \$3.31 an hour.
+
+The node went down seven times. The run writes a checkpoint every few minutes, copies it off the node every ten, and
+after two manual resumes a watcher brought it back within two to four minutes of the node returning. Resume is exact
+because "the data order follows from the step count alone." The report finds no loss spike larger than four standard
+deviations in either run. For a single-node pretraining run that is the part I would copy first.
+
+If you train small models on synthetic long-context data, the report's Figure 3 has a warning. It shows the 32K stage dropping short-context scores: ARC-Easy fell from 55.1% at the end of the 4K stage to
+47.0%, HellaSwag from 37.9% to 35.0%. The main run recovered only partly (50.1% and 36.6%). The extension, with half
+natural text, climbed back to 55.4% and 38.3%. Four fifths synthetic data at 32K cost the model general skill that a
+natural-text mix gave back.
+
+## The benchmarks are base-model benchmarks
+
+Table 3 of the report compares the 128K base with open models of 120M to 170M parameters "trained on up to about 500B
+tokens", every one run by Empero through the same `lm-evaluation-harness` setup, zero-shot. The 128K base averages
+52.8 over nine tasks, against 50.6 for Mamba-130M, 48.7 for OPT-125M and 47.4 for GPT-2 124M. SmolLM2-135M, trained on
+2T tokens, averages 55.3 and beats quark on seven of nine.
+
+<Figure
+  src="/articles/quark-165m/fig4.png"
+  alt="Nine small dot plots, one per benchmark: LAMBADA, HellaSwag, PIQA, ARC-Easy, ARC-Challenge, WinoGrande, SciQ, OpenBookQA and BLiMP. quark 128K leads the token-matched models on HellaSwag (38.3), ARC-Easy (55.4), ARC-Challenge (27.7), WinoGrande (54.5), SciQ (84.3) and OpenBookQA (31.4). Mamba-130M leads LAMBADA (43.5) and PIQA (64.7). SmolLM2-135M, hollow and set apart, scores higher on most tasks."
+  caption="quark 128K scores highest of the token-matched models on six of nine benchmarks; SmolLM2-135M, trained on 2T tokens, is drawn hollow and set apart. Each panel has its own axis (quark report, Figure 4)."
+/>
+
+The comparison is honest in ways comparisons often are not. The baselines were rerun rather than copied, Mamba-130M
+lands within one point of its paper and Pythia-160M within three, and Pythia is shown in float32 because it collapses
+in bfloat16 (LAMBADA falls from 35.4 to 11.6). A 13-gram overlap check flags 16.7% to 18.5% of items in HellaSwag,
+ARC-Easy, ARC-Challenge and SciQ, which is a lot, but scoring only the clean items moves no result by more than 1.3
+points. The report also notes that SmolLM2 used about three times quark's training compute.
+
+Every model in that table is a base model. The table answers "is the pretraining good for its budget", and the answer
+is yes. It does not compare quark after RL with anything, which matters for the RL claim below.
+
+## Long context, scored by token checks
+
+The long-context suite scores each held-out synthetic item by teacher-forced token-check accuracy: the reference text
+is fed up to the answer, and the model's greedy next-token predictions must match the answer tokens. A model can pass
+that and still fail to get there when it generates freely, because it never has to produce the reasoning that leads up
+to the answer.
+
+<Figure
+  src="/articles/quark-165m/fig2.png"
+  alt="Heat map of teacher-forced token-check accuracy for eight task families at four settings: main model at 32K, extension at 32K, 64K and 128K. Needle retrieval and conversation recall are 100.0 everywhere. Key-value lookup falls from 95.8 at 32K to 75.0 at 64K and 50.0 at 128K for the extension. Quote attribution is 12.5, 8.3, 0.0 and 0.0. Event counting, ledger arithmetic and variable tracking reach 100.0 at 128K; state tracking 87.5."
+  caption="Retrieval and tracking hold to 128K; quote attribution fails at every length. Cells at 32K have 24 items, cells at 64K and 128K have eight (quark report, Figure 5)."
+/>
+
+Averaged over the eight families, the extension scores 84.4% at 32K, 84.4% at 64K and 79.7% at 128K. Key-value lookup
+shows the clearest length effect, 95.8% to 50%, and quote attribution is near zero at every length ("a skill the model
+lacks rather than a length limit"). The report flags the sample size: eight items per cell at 64K and 128K, so one item is 12.5 points. I would add a
+second caveat. These are the same eight task families that made up most of the 32K training stage, with new seeds,
+so they are in-distribution by construction. The report logs six free generations between 4K and 128K, of
+which five are correct, including a needle at 128K, and says six "are too few to estimate a generation success rate."
+
+So I ran more. I hid one sentence ("The access code for the amber vault is 9071.") in filler text at 10%, 50% and 90%
+of the way through prompts of 2K, 8K, 32K, 64K and 120K tokens, three needles per depth, asked for the code in the chat
+format, and decoded greedily. Both 128K checkpoints found 9 of 9 at every length up to 64K. At 120K the base found 5 of
+9 and the RL model 6 of 9, and both missed all three needles placed at 10% depth: the base answered "The access code for
+the olive vault is 3." and the RL model "0". Needles in the middle and near the end were found. One filler text and 45
+prompts per model make this a smoke test, not a benchmark. It agrees with the report's own picture: retrieval holds,
+and the far end of 128K is where it starts to slip. It also says the RL run did not hurt this kind of retrieval, even
+though the in-house suite's long-context family fell.
+
+## RL from the base: what was trained and how
+
+The post-training section is the reason the thread exists, and the report is more careful than the thread. Section 6
+says the RL run "starts from the extension's final weights, and no text written by another model was ever a training
+target." The model card names the algorithm: "GRPO with group-relative advantages and a token-level loss, on-policy
+samples at temperature 1, no KL penalty and no reference model." It ran under 1,300 optimizer steps in about 32 hours
+on the same node, was stopped early for budget while scores were still rising, and finished with a learning-rate
+anneal over the last 3%. Group size, batch size and learning rate are not published.
+
+Rewards: about 95% of reward groups were scored by code alone, through exact answers, format rules, unit tests and
+file checks in sandboxes. The rest also got a verdict from language-model judges: chat replies against a rubric,
+visual code by one of five vision models, value questions by a majority vote of three models from different labs for
+the last third of the run, and creative writing by "one decision model that checks coherence and topic." A judge only
+scores; it never writes text that quark trains on. The cost table's \$1 line is "language-model API calls"; a reply from Empero ties it to the decision model.
+
+### Why a group needs one success
+
+GRPO samples a group of $G$ replies to the same prompt, scores each, and uses the group itself as the baseline. Reply
+$i$ gets the advantage
+
+$$
+A_i = \frac{r_i - \bar r}{\sigma_r},
+$$
+
+and every token of reply $i$ is pushed in the direction of $A_i$. With a pass/fail reward, passing replies get a
+positive advantage and failing ones a negative advantage. If every reply in the group passes, or every reply fails,
+$\sigma_r = 0$, every advantage is zero, and the prompt contributes nothing that step. With a per-prompt solve rate
+$p$, a group carries signal with probability $1 - p^G - (1-p)^G$.
+
+That is the question a reply under the thread asked: "Usually RL needs a base that can already sample a correct
+answer now and then, so I'd like to see pass@k of the pretrained checkpoint before RL." The report's harness numbers
+read cleanly through this formula. I measured the other half of the question, pass@k, further down.
+
+<GroupSignal />
+
+### The terminal-task numbers
+
+Before RL, the base model already wrote tool calls. In an audit of 1,152 replies, about a third called a tool, "but
+the calls mostly used tools that didn't exist, opened files that weren't there or fetched made-up URLs. Three replies
+reached a correct answer after a call." RL then trained simple terminal tasks (count the rows in a file, find the log
+with an error, sum numbers, create or rename files) inside 15 emulated coding-agent harnesses, each with its own system
+prompt, tool definitions and result format, every command run in its own real sandbox.
+
+<Figure
+  src="/articles/quark-165m/fig3.png"
+  alt="Dot plot of replies solved per harness, first 100 trained steps against the last 100 steps of the run. Harnesses A to K mostly start near zero and finish between 39 and 90 percent; Harness B stays at 0. Harnesses L, M, N and O, added late, start between about 42 and 54 percent and finish at 58, 65, 39 and 61. quark's own format goes from about 20 to 77."
+  caption="Twelve of the 15 emulated harnesses finish between 58% and 90% solved, and harnesses added late start high. These are on-policy training rollouts at temperature 1, not a held-out test (quark report, Figure 6)."
+/>
+
+Table 4 of the report, all on-policy training rollouts at temperature 1:
+
+| Setting | First 100 steps | Last 100 steps |
+|---|---:|---:|
+| All 15 emulated harnesses | 2.6% | 64.5% |
+| Harnesses trained from early in the run | 0–22% | |
+| Harnesses added late in the run | 42–54% | |
+| quark's own tool-call format, same tasks | 20.4% | 77.1% |
+| Live web search | 4.6% | 10.7% |
+
+Through the formula, the pattern makes sense. At 2.6% and a group of eight, say, a group has about a one-in-five chance of
+containing a success. Learning starts slowly but does start. Harness B, at 0% at both ends, "never produced a valid
+call": with nothing to compare against, GRPO had no gradient for it at any step. Harnesses added late started at 42%
+to 54%, where nearly every group carries signal. The report reads the late harnesses' starting point as transfer, and
+it is: averaged over their first 100 trained steps, formats the model had not trained on before were already about
+half solved. Web
+search barely moved, and the report says "we don't claim it."
+
+The in-house suite of 15 task families (answered four times at temperature 1 with an 8K budget) moved from step 50 to
+the final step like this:
+
+<Figure
+  src="/articles/quark-165m/post-task-suite.jpg"
+  alt="Bar chart titled 'Correct answers on our task suite nearly tripled'. Step 50 against final step: well-formed replies 71% to 96%, correct answers 12.8% to 36.4%, replies cut off at the length limit 11.7% to 0.5%. A footnote says long-context tasks fell from 35% to 25%."
+  caption="The in-house task suite, step 50 against the final step. The suite grew during the run, and the long-context family fell from 35% to 25% (image from @EmperoAI's post on X)."
+/>
+
+Asking the model to always start in its private `[MONOLOGUE]` segment raised accuracy on 100 held-out commonsense
+tasks from 43.5% to 66.5%, a paired gain of 23.0 points with a 95% interval of ±10.0, against the suite's usual mix of
+direct answers and the model's own choice. The card adds that forcing a monologue lowers accuracy on questions about
+what other people know or believe.
+
+### Sharpening, measured
+
+The report has no pass@k for the base. I measured it on 40 two-number arithmetic prompts ("What is 52 + 30? Answer with
+the number only.", half additions, half multiplications by a single digit), 16 samples each at temperature 1, for the
+128K base and the RL model. Both models write the sum out ("52 + 30 = 82."), so I scored the last number in the reply.
+
+| Model | Mean pass@1 over 16 samples | Prompts with a correct sample |
+|---|---:|---:|
+| `Quark-150M-128K-Base` | 48.6% | 39 of 40 |
+| `Quark-150M-128K-Zero` | 76.7% | 37 of 40 |
+
+The base already gets almost every prompt right somewhere in 16 tries. RL raised how often it is right on one try, and
+slightly lowered how many prompts it can get right at all. That is what sharpening looks like, the pattern RL-from-base
+studies keep finding, and it contradicts Empero's reply that "It's all new capabilities!" For arithmetic, at least, it
+is not. The base also has a habit that last-number scoring punishes: after answering it often keeps going into an
+invented chat ("75 + 38 = 113. User: hey quark, hows it going?"). RL removed that, and the cleanup is part of the jump
+from 48.6% to 76.7%. Arithmetic is not the terminal tasks, and I did not rebuild the harnesses, so this says nothing
+direct about the 2.6% to 64.5%.
+
+### How far the weights moved
+
+I range-read five tensors from both the 128K base and the RL checkpoint and compared them: the key-value projections
+of layers 2, 4 and 16, the output projection of layer 16 and the final norm. The relative change, the norm of the
+difference over the norm of the base weights, is 0.75% to 0.81% for the four projections and 0.01% for the norm. For
+scale, the 32K base and the 128K base differ by 30% to 39% on the same projections, though those are sibling branches
+that split around 496B tokens, so that number is the distance between branches rather than what the extension did.
+Five tensors are a sample, not a census. They fit what RL from a base usually looks like: a small move that changes
+behaviour a lot. The [chicken-cue paper](/articles/chicken-reasoning-cues) found the same shape in Olmo, where RL's
+gains sat in the first few tokens of an answer and traced back to mid-training data.
+
+## What "RL only" covers
+
+The thread and the replies under it say more than the report does. Two of Empero's replies: "It's all new
+capabilities! Tool use and agentic behavior was not in the training distribution at all," and "Not even tool use or
+agentic traces in the distribution, both fully self-discovered in our RL loop."
+
+The report says otherwise, in Section 6.1: "Before reinforcement learning, quark's only exposure to tools was about
+0.4B tokens of simulated tool sessions, under 0.1% of its training." Empero's own simulator generated every call,
+result and answer in those sessions. The extension's mixture includes "examples of tool interaction", and the
+extension's tokenizer added `[TOOL_CALL]` and `[TOOL_RESULT]` as single tokens. The base model "learned the syntax but
+not the skill", which is why a third of its audited replies called a tool.
+
+I checked the format directly. I offered one `calculator` tool through the chat template and asked the model to "Use the
+calculator to compute" the product of two four-digit numbers, 20 times, with greedy decoding and no forced turn opener.
+The base model wrote a valid, parseable `[TOOL_CALL]` to `calculator` 19 times. In the replies I kept, the argument was
+the template's own placeholder, `"expression": "<expression>"`, copied from the example in the system turn: the syntax
+without the skill, as the report says. The RL model called the tool 0 times in 20. It thought in a monologue and
+answered directly, and wrongly ("7864080" for 8420 × 9723). On this prompt RL taught the model to skip a simple tool it
+could already format. One tool and one phrasing make this a probe, not a verdict.
+
+The fair reading: pretraining planted the
+format, and RL turned three correct answers in 1,152 replies into 64.5% of simple sandboxed tasks solved. That is a
+real result, and it is a different one from "self-discovered".
+
+"No SFT stage" also has a footnote. The RL objective "includes a small supervised term that trains only on
+code-generated intermediate steps", and the card lists what those are: "given solution steps on hard reasoning tasks,
+or the opening of a tool call." Those targets come from programs, not from another model or a human, so the
+no-distillation claim holds for post-training. It is still a supervised signal riding along with the reward.
+
+And pretraining was not free of synthetic text. The 1K stage is mostly synthetic narrative with smaller shares of
+synthetic mathematics and dialogue, the 4K stage includes "reasoning traces", the 32K stage is four fifths synthetic tasks, and the cost table
+has a line for data generation on one H100. The report doesn't say which model wrote the synthetic narrative and
+dialogue. Section 6's "no text written by another model was ever a training target" is about the RL run; the base model
+it started from is a different question.
+
+The comparison with fine-tuned peers is missing. Every number after RL is either an on-policy training rollout or the
+in-house suite, whose size grew during the run, and the report lists that in its limitations: "not on public or
+held-out agentic benchmarks; the agentic tasks are simple." There is no SmolLM2-135M-Instruct on the same tasks, and no
+SFT-then-RL arm of quark. So the result says RL from this base works for simple tool tasks. It does not say RL alone
+works better than fine-tuning first, and the report never claims it does.
+
+The card's own sample completions, which it says were not re-rolled or selected, show where the model is. "Hi! Who are
+you?" gets "I am quark, and I am here to chat with you." With thinking on, the bat-and-ball question gets a monologue
+that misreads the problem and answers \$2.10. Offered a web-search tool and asked about the Nobel Prize in Literature,
+it opens a `[TOOL_CALL]`, writes an answer inside it and closes with `[/ASSISTANT]`.
+
+## A careful testbed under a loud thread
+
+The engineering is the best part of this release. One node, one main run, a cost ledger down to the \$1 of API calls,
+exact resumes, a contamination check, baselines rerun instead of copied, and a limitations section that undercuts its
+own headline in places. Most small-model launches give you none of that. The architecture is a familiar mix (sliding
+window plus periodic global attention, a short convolution, value residuals), sized so only 4 of 16 layers have to
+learn long range, and the 128K window comes from an eightfold RoPE base change plus 10B tokens of real long sequences.
+
+The RL result I believe in its narrow form: a 165M base that already knew the tool syntax went from inventing results
+to solving about two thirds of simple sandboxed terminal tasks, and the skill carried to formats it had not trained on.
+I don't buy "all new capabilities" or "fully self-discovered". The report says the syntax came from pretraining, my
+pass@16 says the arithmetic was already there to be sharpened, and "RL only" needs its footnote about the code-written
+supervised term.
+
+If you want a tiny model for long-input retrieval experiments, either 128K checkpoint will do up to 64K. My needle
+test found no difference between them, but the card says the RL model's long-context family fell, so test both on your
+task, and don't trust either in the first part of a 120K prompt. If you want a small chat model, the comparison to run first is
+the one the report skipped, against SmolLM2-135M-Instruct on your own tasks.
+
+Related on this site: [KLM 1.6](/articles/klm-1-6) and [Raon-1 nano](/articles/raon-1-nano), two other sub-250M
+models counted from their headers; [Ring-Zero](/articles/ring-zero-trillion-scale-rl), the same RL-from-base recipe at
+a trillion parameters; [multi-harness RL](/articles/multi-harness-rl), which trains inside real coding-agent harnesses
+where quark emulates them; [the first-order view of token-level RL](/articles/first-order-rl), for what GRPO's
+token-level loss approximates; and [the full-attention census](/articles/full-attention-census) for how other open
+models mix global and local layers.
+
+<Callout type="note">
+How I checked. I counted parameters by summing the shapes in the safetensors headers of all three repositories (HTTP
+range requests), read `config.json` and `modeling_quark.py` at revisions `e670e11d` (128K-Base) and `7c1599b0`
+(128K-Zero), diffed the configs, and range-read the 24 blend and sink tensors of each checkpoint and five projection matrices to compare
+checkpoints. The KV-cache, throughput, RoPE-wavelength and compute figures are my arithmetic on those files and on the
+report. Every benchmark, cost and RL-training number is the report's or the card's.
+
+What I ran: both 128K checkpoints on an RTX 3090, in bfloat16, with `transformers` 5.23.0, torch 2.6.0 and Empero's
+modeling code at the revisions above. That covers the needle test (45 prompts per model, greedy), cache bytes read from
+the live cache object, peak memory with prefill and decode timing, pass@1 and pass@16 on 40 arithmetic prompts at
+temperature 1, and the 20-prompt calculator probe.
+</Callout>
