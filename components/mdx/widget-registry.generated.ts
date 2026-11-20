@@ -659,6 +659,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "jev-in-the-browser/browser-scorer": () => import("@/components/articles/jev-in-the-browser/browser-scorer"),
   "jev-system-one-models/confidence-cascade": () => import("@/components/articles/jev-system-one-models/confidence-cascade"),
   "jev-system-one-models/cost-latency-frontier": () => import("@/components/articles/jev-system-one-models/cost-latency-frontier"),
+  "jeveration/shared-state": () => import("@/components/articles/jeveration/shared-state"),
+  "jeveration/speedup-baseline": () => import("@/components/articles/jeveration/speedup-baseline"),
   "jevgrep/cost-ledger": () => import("@/components/articles/jevgrep/cost-ledger"),
   "jevgrep/frontier-walk": () => import("@/components/articles/jevgrep/frontier-walk"),
   "jina-ocr-v1/category-breakdown": () => import("@/components/articles/jina-ocr-v1/category-breakdown"),
