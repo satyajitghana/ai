@@ -1347,6 +1347,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "rea-video/fusion-pool": () => import("@/components/articles/rea-video/fusion-pool"),
   "reactive-optimizers/decision-planner": () => import("@/components/articles/reactive-optimizers/decision-planner"),
   "reactive-optimizers/recipe-margins": () => import("@/components/articles/reactive-optimizers/recipe-margins"),
+  "reality-capture-roundup-nov-20/reloc-search": () => import("@/components/articles/reality-capture-roundup-nov-20/reloc-search"),
+  "reality-capture-roundup-nov-20/wall-evidence": () => import("@/components/articles/reality-capture-roundup-nov-20/wall-evidence"),
   "recursive-harness-self-improvement/component-drift": () => import("@/components/articles/recursive-harness-self-improvement/component-drift"),
   "recursive-harness-self-improvement/search-cost": () => import("@/components/articles/recursive-harness-self-improvement/search-cost"),
   "recursive-language-models/context-in-window-vs-variable": () => import("@/components/articles/recursive-language-models/context-in-window-vs-variable"),
