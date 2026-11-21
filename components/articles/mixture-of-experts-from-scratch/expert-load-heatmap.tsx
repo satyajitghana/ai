@@ -43,7 +43,7 @@ export function ExpertLoadHeatmap() {
   const [err, setErr] = useState(false)
   const [domain, setDomain] = useState<(typeof DOMAINS)[number]>("code")
   const [vsAll, setVsAll] = useState(false)
-  const [sorted, setSorted] = useState(false)
+  const [sorted, setSorted] = useState(true)
   const [hover, setHover] = useState<Hover>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
   const box = useRef<HTMLDivElement>(null)
