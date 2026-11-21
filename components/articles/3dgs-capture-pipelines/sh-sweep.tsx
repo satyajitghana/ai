@@ -11,7 +11,13 @@ import { useState } from "react"
 
 type Run = { tag: string; label: string; sh: number; splats: number; plyBytes: number; psnr: number; ssim: number }
 
-export const RUNS: Run[] = []
+const RUNS: Run[] = [
+  { tag: "sh0", label: "SH0", sh: 0, splats: 245000, plyBytes: 16660416, psnr: 24.728, ssim: 0.8094 },
+  { tag: "sh1", label: "SH1", sh: 1, splats: 245000, plyBytes: 25480632, psnr: 24.791, ssim: 0.8102 },
+  { tag: "sh2", label: "SH2", sh: 2, splats: 245000, plyBytes: 40181006, psnr: 24.965, ssim: 0.8131 },
+  { tag: "sh3", label: "SH3", sh: 3, splats: 245000, plyBytes: 60761531, psnr: 25.077, ssim: 0.8151 },
+  { tag: "sh0_eqbytes", label: "SH0, 890k", sh: 0, splats: 890000, plyBytes: 60520416, psnr: 24.623, ssim: 0.8156 },
+]
 
 const A = "oklch(0.62 0.15 200)"
 const B = "oklch(0.66 0.16 40)"
@@ -33,12 +39,12 @@ export function ShSweep() {
   const Y1 = 24
   const maxB = Math.max(...RUNS.map((x) => x.plyBytes)) * 1.08
   const ps = RUNS.map((x) => x.psnr)
-  const lo = Math.floor(Math.min(...ps) - 0.5)
-  const hi = Math.ceil(Math.max(...ps) + 0.5)
+  const lo = Math.floor((Math.min(...ps) - 0.1) * 5) / 5
+  const hi = Math.ceil((Math.max(...ps) + 0.1) * 5) / 5
   const px = (b: number) => X0 + (b / maxB) * (X1 - X0)
   const py = (p: number) => Y0 - ((p - lo) / (hi - lo)) * (Y0 - Y1)
   const ticksY: number[] = []
-  for (let v = lo; v <= hi; v += 1) ticksY.push(v)
+  for (let k = 0; lo + k * 0.2 <= hi + 1e-9; k++) ticksY.push(Math.round((lo + k * 0.2) * 10) / 10)
   const ticksX: number[] = []
   for (let v = 0; v <= maxB; v += 50e6) ticksX.push(v)
   const line = RUNS.filter((x) => x.splats === RUNS[0].splats)
@@ -73,7 +79,7 @@ export function ShSweep() {
           {ticksY.map((v) => (
             <g key={v}>
               <line x1={X0} x2={X1} y1={py(v)} y2={py(v)} stroke={MUTED} strokeOpacity={0.15} />
-              <text x={X0 - 8} y={py(v) + 4} fontSize={10} textAnchor="end" className="fill-muted-foreground font-mono">{v}</text>
+              <text x={X0 - 8} y={py(v) + 4} fontSize={10} textAnchor="end" className="fill-muted-foreground font-mono">{v.toFixed(1)}</text>
             </g>
           ))}
           {ticksX.map((v) => (
@@ -99,7 +105,7 @@ export function ShSweep() {
           {r.label}: <span className="text-foreground">{r.splats.toLocaleString("en-US")}</span> splats,{" "}
           <span className="text-foreground">{mb(r.plyBytes)} MB</span> PLY ({(r.plyBytes / r.splats).toFixed(0)} B a splat),{" "}
           <span className="text-foreground">{r.psnr.toFixed(2)} dB</span> PSNR, SSIM <span className="text-foreground">{r.ssim.toFixed(3)}</span> on held-out
-          positions. As a 32-byte .splat it would be {mb(r.splats * 32)} MB, colour only.
+          positions (per-view spread about 2 dB). As a 32-byte .splat it would be {mb(r.splats * 32)} MB, colour only.
         </div>
       </div>
     </figure>

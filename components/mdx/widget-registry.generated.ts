@@ -17,6 +17,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "3dcodeverse/row-ledger": () => import("@/components/articles/3dcodeverse/row-ledger"),
   "3dgs-capture-pipelines/pipeline-stepper": () => import("@/components/articles/3dgs-capture-pipelines/pipeline-stepper"),
   "3dgs-capture-pipelines/ray-geometry": () => import("@/components/articles/3dgs-capture-pipelines/ray-geometry"),
+  "3dgs-capture-pipelines/room-viewer": () => import("@/components/articles/3dgs-capture-pipelines/room-viewer"),
+  "3dgs-capture-pipelines/sh-sweep": () => import("@/components/articles/3dgs-capture-pipelines/sh-sweep"),
   "3dgs-capture-pipelines/splat-budget": () => import("@/components/articles/3dgs-capture-pipelines/splat-budget"),
   "a6b-k-expansion/esft-select": () => import("@/components/articles/a6b-k-expansion/esft-select"),
   "a6b-k-expansion/gate-mass": () => import("@/components/articles/a6b-k-expansion/gate-mass"),
