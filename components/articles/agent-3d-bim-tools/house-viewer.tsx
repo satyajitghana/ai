@@ -10,6 +10,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import { ArrowsInSimpleIcon, ArrowsOutSimpleIcon } from "@phosphor-icons/react/dist/ssr"
+
 import { mediaUrl } from "@/lib/media"
 
 import type { Mode, Viewer } from "./house-gl"
@@ -61,6 +63,15 @@ const PLACES: HousePlace[] = [
 ]
 
 type Phase = "idle" | "loading" | "ready" | "error"
+/** what the loader is doing: the download, then decoding the atlases and building the buffers */
+type Stage = "download" | "build"
+
+const mb = (n: number) => (n / 1048576).toFixed(1)
+/** "about 6 MB" → bytes, the size to show progress against when the response has no content-length */
+const expectedBytes = (s: string) => {
+  const m = /([\d.]+)\s*MB/i.exec(s)
+  return m ? Number(m[1]) * 1048576 : 0
+}
 
 export function HouseViewer({
   src = GLB,
@@ -77,12 +88,20 @@ export function HouseViewer({
   const boxRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const [phase, setPhase] = useState<Phase>("idle")
-  const [pct, setPct] = useState(0)
+  const [got, setGot] = useState(0)
+  const [total, setTotal] = useState(0)
+  const [stage, setStage] = useState<Stage>("download")
+  const [isFull, setIsFull] = useState(false)
   const [error, setError] = useState("")
   const [mode, setMode] = useState<Mode>("orbit")
   const [place, setPlace] = useState(startView)
 
   useEffect(() => () => viewerRef.current?.dispose(), [])
+  useEffect(() => {
+    const onFs = () => setIsFull(document.fullscreenElement === boxRef.current)
+    document.addEventListener("fullscreenchange", onFs)
+    return () => document.removeEventListener("fullscreenchange", onFs)
+  }, [])
   // focus the canvas once it is shown, so the keys work without another click
   useEffect(() => {
     if (phase === "ready") canvasRef.current?.focus({ preventScroll: true })
@@ -91,27 +110,32 @@ export function HouseViewer({
   const start = useCallback(async () => {
     if (phase === "loading" || phase === "ready") return
     setPhase("loading")
+    setStage("download")
+    setGot(0)
+    setTotal(0)
     setError("")
     try {
       const probe = document.createElement("canvas").getContext("webgl2")
       if (!probe) throw new Error("This browser has no WebGL2, so the model cannot be shown here.")
       const [{ createViewer, parseGlb }, res] = await Promise.all([import("./house-gl"), fetch(mediaUrl(src), { mode: "cors" })])
       if (!res.ok) throw new Error(`The model did not download (HTTP ${res.status}).`)
-      const total = Number(res.headers.get("content-length")) || 0
+      // content-length is missing when the CDN compresses on the fly; fall back to the size we know
+      const size = Number(res.headers.get("content-length")) || expectedBytes(download)
+      setTotal(size)
       let buf: ArrayBuffer
       if (res.body) {
         // content-length is only a hint for the percentage: a compressed response announces fewer bytes than it yields
         const reader = res.body.getReader()
         const chunks: Uint8Array[] = []
-        let got = 0
+        let n = 0
         for (;;) {
           const { done, value } = await reader.read()
           if (done) break
           chunks.push(value)
-          got += value.length
-          if (total) setPct(Math.min(99, Math.round((got / total) * 100)))
+          n += value.length
+          setGot(n)
         }
-        const out = new Uint8Array(got)
+        const out = new Uint8Array(n)
         let at = 0
         for (const c of chunks) {
           out.set(c, at)
@@ -119,16 +143,21 @@ export function HouseViewer({
         }
         buf = out.buffer
       } else buf = await res.arrayBuffer()
+      setStage("build")
+      // let the "Preparing" state paint before the atlases are decoded
+      await new Promise((r) => requestAnimationFrame(() => r(null)))
       const scene = await parseGlb(buf)
       const canvas = canvasRef.current
       if (!canvas) return
       viewerRef.current = createViewer(canvas, scene, { onMode: setMode, start: startView, walkStart })
       setPhase("ready")
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      // a fetch that never got a response (offline, blocked, CORS) only says "Failed to fetch"
+      setError(/fetch|network|load failed/i.test(msg) ? "The model could not be downloaded. Check the connection and try again." : msg)
       setPhase("error")
     }
-  }, [phase, src, startView, walkStart])
+  }, [phase, src, startView, walkStart, download])
 
   const choose = (m: Mode) => {
     viewerRef.current?.setMode(m)
@@ -147,8 +176,8 @@ export function HouseViewer({
   const fullscreen = () => {
     const el = boxRef.current
     if (!el) return
-    if (document.fullscreenElement) void document.exitFullscreen()
-    else void el.requestFullscreen?.()
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+    else el.requestFullscreen?.().catch(() => {})
   }
 
   const btn = "rounded-md border px-2.5 py-1 font-mono text-xs transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -176,22 +205,47 @@ export function HouseViewer({
         {phase !== "ready" && (
           <div className="absolute inset-0 flex items-end justify-center bg-gradient-to-t from-black/50 via-transparent to-transparent p-4 sm:items-center sm:bg-black/10">
             {phase === "loading" ? (
-              <p className="rounded-md bg-background/90 px-3 py-2 font-mono text-xs" role="status">
-                Loading the model{pct ? ` ${pct}%` : ""}
-              </p>
+              <div role="status" aria-live="polite" className="flex w-64 max-w-[80%] flex-col gap-2 rounded-lg bg-background/95 px-4 py-3 shadow-md">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <span aria-hidden className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-foreground" />
+                  {stage === "download" ? "Downloading the model" : "Preparing the scene"}
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                  {stage === "download" && total ? (
+                    <div className="h-full rounded-full bg-foreground transition-[width] duration-200" style={{ width: `${Math.min(100, (got / total) * 100).toFixed(1)}%` }} />
+                  ) : (
+                    <div className="h-full w-1/3 animate-pulse rounded-full bg-foreground" />
+                  )}
+                </div>
+                <p className="font-mono text-[11px] text-muted-foreground">
+                  {stage === "download" ? (total ? `${mb(Math.min(got, total))} of ${mb(total)} MB` : `${mb(got)} MB`) : "decoding textures"}
+                </p>
+              </div>
             ) : (
               <div className="flex flex-col items-center gap-2">
+                {phase === "error" && (
+                  <p role="alert" className="max-w-xs rounded-md bg-background/95 px-3 py-2 text-center text-xs text-red-700 shadow-md dark:text-red-400">
+                    {error}
+                  </p>
+                )}
                 <button type="button" onClick={start} className="rounded-lg bg-background/95 px-4 py-2 text-sm font-semibold shadow-md hover:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                  Explore in 3D
+                  {phase === "error" ? "Try again" : "Explore in 3D"}
                 </button>
-                <span className="rounded bg-black/50 px-2 py-0.5 font-mono text-[11px] text-white">{phase === "error" ? error : `${download}, WebGL2`}</span>
+                {phase !== "error" && <span className="rounded bg-black/50 px-2 py-0.5 font-mono text-[11px] text-white">{`${download}, WebGL2`}</span>}
               </div>
             )}
           </div>
         )}
-        {phase === "ready" && (
-          <button type="button" onClick={fullscreen} className={`absolute right-2 top-2 bg-background/85 ${btn}`} aria-label="Toggle full screen">
-            Full screen
+        {/* rendered only after a click, so reading document here cannot mismatch the server render; iPhone Safari has no element full screen */}
+        {phase === "ready" && document.fullscreenEnabled && (
+          <button
+            type="button"
+            onClick={fullscreen}
+            className="absolute right-2 top-2 grid size-8 place-items-center rounded-md border bg-background/85 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label={isFull ? "Exit full screen" : "Full screen"}
+            title={isFull ? "Exit full screen" : "Full screen"}
+          >
+            {isFull ? <ArrowsInSimpleIcon className="size-4" /> : <ArrowsOutSimpleIcon className="size-4" />}
           </button>
         )}
       </div>

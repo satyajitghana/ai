@@ -149,13 +149,13 @@ export function MoeLoadBalance() {
         {collapsed ? (
           <>
             Three experts swallow ~83% of the tokens; four are all but dead. Those
-            experts get almost no gradient, never improve, and the model is quietly
-            a fraction of its advertised size. This is the failure mode you fight.
+            experts get almost no gradient, never improve, and the model is a
+            fraction of its advertised size. This is the failure mode you fight.
           </>
         ) : (
           <>
             Every expert sees a fair share, so all of them keep learning. Getting
-            here is not free — it takes the routing noise plus an auxiliary
+            here is not free. It takes the routing noise plus an auxiliary
             load-balancing loss that penalises lopsided routing during training.
           </>
         )}
