@@ -35,7 +35,7 @@ BESPOKE.define((() => {
       events: [{ step: 0, at: .2, type: 'ticks', n: 16, span: 1.4 }, { step: 1, at: .5, type: 'ding' }, { step: 3, at: .8, type: 'ding' }],
       motion: [{ step: 0, from: 0, to: 2.0 }, { step: 1, from: 0, to: 1.4 }, { step: 2, from: 0, to: 2.8 }, { step: 3, from: 0, to: 2.2 }],
     }),
-    stampAt: k => [1240, k.top + 40],
+    stampAt: k => [600, k.top + 50],
     draw(k) {
       const P = k.params, i = k.step
       const S = scores(k)
@@ -47,7 +47,7 @@ BESPOKE.define((() => {
 
       // axis
       k.seed('axis'); k.line([[X0 - 10, base], [X1 + 10, base]], 1.0, k.ink)
-      k.text(P.scores, X0, base + 50, { role: 'label', size: 28, min: 16, maxW: 700, lines: 1 })
+      k.text(P.scores, X0, base + 50, { role: 'label', size: 28, min: 16, maxW: 440, lines: 1 })
 
       const grow = k.thumb ? 1 : k.easeOut(k.p(0, 1.6, .1))
       const fade = k.thumb ? 1 : i >= 1 ? k.ease(k.p(1, .9, .2)) : 0
@@ -65,7 +65,7 @@ BESPOKE.define((() => {
         k.flat(k.rect(x + bw * .15, base - h, bw * .7, h), isTop && fade > 0 ? k.P.hi : k.P.a, isTop && fade > 0 ? 1 : .8)
         k.pop()
       }
-      if (fade > 0 && travel === 0) k.text(P.kept, X0, top - 6, { role: 'head', size: 34, min: 18, maxW: 700, lines: 1, col: k.P.hi, alpha: fade })
+      if (fade > 0) k.text(P.kept, X0 + 480, base + 50, { role: 'label', size: 28, min: 16, maxW: 380, lines: 1, col: k.P.hi, alpha: fade })
 
       // the 8 travel to the panel and are renormalised
       const scale = 1 / S.mass
@@ -80,7 +80,7 @@ BESPOKE.define((() => {
         const h = k.lerp(h0, h1, renorm)
         k.seed('kept' + j); k.shape(k.rect(at[0] - w / 2, at[1] - h, w, h), { fill: k.P.hi, op: 1, sw: .8 })
       })
-      if (renorm > 0) k.text(P.weights, panelX, top - 6, { role: 'head', size: 30, min: 16, maxW: 300, lines: 2, alpha: renorm })
+      if (renorm > 0) k.text(P.weights, panelX, top + 60, { role: 'label', size: 26, min: 14, maxW: 320, lines: 1, alpha: renorm })
 
       // weighted sum into the output
       if (sum > 0) {

@@ -23,6 +23,11 @@ BESPOKE.define((() => {
     const order = [5, 2, 7, 0, 3, 6, 1, 4]
     const sum = w.reduce((a, b) => a + b, 0)
     const out = []
+    if (!(s.skew > 0)) {                       // even routing: every expert gets exactly T / E tokens
+      for (let t = 0; t < T; t++) out.push(order[(t * 3) % E])
+      memo[key] = out
+      return out
+    }
     for (let t = 0; t < T; t++) {
       let u = r() * sum, e = 0
       while (u > w[e] && e < E - 1) { u -= w[e]; e++ }
