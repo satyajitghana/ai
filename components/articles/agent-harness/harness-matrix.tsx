@@ -42,7 +42,7 @@ const ROWS: Row[] = [
     src: "npm @earendil-works/pi-coding-agent 1.5.2 docs (how-pi-works, compaction, cli)",
     cells: {
       loop: "Native tool calls. A turn is one response plus its tool results; the run ends when a response has no tool call.",
-      tools: "Four by default: read, bash, edit, write. grep, find and ls exist but are off.",
+      tools: "Four by default: read, bash, edit, write. On the wire: a 600-token system prompt and 720 tokens of schemas; the first request is about 1,600 tokens.",
       edit: "edit takes exact {oldText, newText} pairs; no fuzzy match.",
       context: "Full history until context > window minus 16,384 reserved tokens, then one summary replaces older turns.",
       sandbox: "None built in. Tools run with the permissions of the pi process.",
@@ -58,11 +58,11 @@ const ROWS: Row[] = [
     src: "anomalyco/opencode v1.19.6 run.ts and config schema; caching read at v1.19.3 in the site's teardown",
     cells: {
       loop: "Native tool calls, streamed through an in-process server; `opencode run` exits when the session goes idle.",
-      tools: "The widest catalogue of the four (counted from the wire below), with a long system prompt.",
-      edit: "An edit tool with oldString/newString, plus write and a patch tool.",
+      tools: "Ten tools on every agent request; its first agent request is about 7,500 tokens before any history, plus a separate title request per run.",
+      edit: "An edit tool and a write tool; the model used edit 27 times and write 8 times here.",
       context: "Auto-compaction when the window fills (compaction.auto, on by default); optional pruning of old tool output.",
       sandbox: "A permission ruleset (allow / ask / deny per tool); no OS sandbox. In run mode unanswered asks are rejected.",
-      plan: "A todo tool and a task tool that spawns sub-agents; a plan agent.",
+      plan: "todowrite and task (sub-agents) are in its permission schema; neither was called in this run.",
       retry: "A doom_loop permission that trips on repeated identical calls.",
     },
   },
@@ -74,7 +74,7 @@ const ROWS: Row[] = [
     src: "PyPI mini-swe-agent 2.4.6 wheel: config/mini.yaml, agents/default.py, environments/",
     cells: {
       loop: "One bash tool. The run ends when the model echoes COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT.",
-      tools: "One: bash. Each command runs in a fresh subshell.",
+      tools: "One: bash, 65 tokens of schema. The 12-token system prompt hands the instructions to an 820-token first user message.",
       edit: "No edit tool: sed, heredocs and python scripts through bash.",
       context: "Linear history, never compacted; outputs over 10,000 characters keep the first and last 5,000.",
       sandbox: "Swappable environment: local, docker, singularity, bubblewrap.",
@@ -90,7 +90,7 @@ const ROWS: Row[] = [
     src: "PyPI aider-chat 0.86.2 wheel: args.py, coders/base_coder.py, models.py",
     cells: {
       loop: "No tool calls. The model writes SEARCH/REPLACE blocks in prose; aider applies them and stops.",
-      tools: "None. A tree-sitter repo map (1,024 tokens here) stands in for exploration.",
+      tools: "None. A 1,316-token system prompt plus a tree-sitter repo map (1,024 tokens here) stands in for exploration.",
       edit: "SEARCH/REPLACE blocks; a block that does not match is sent back as an error to fix.",
       context: "Chat history summarised past 1/16 of the input window (between 1,024 and 8,192 tokens).",
       sandbox: "None. Test and lint commands run as the user.",

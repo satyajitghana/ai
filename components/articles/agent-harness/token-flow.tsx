@@ -4,13 +4,14 @@ import { useState } from "react"
 
 import { cn } from "@/lib/utils"
 
-import { HARNESSES, KINDS, RUNS, SCHEMA, SUMMARY, TASKS, type Run } from "./data"
+import { FIRST_REQUEST, HARNESSES, KINDS, RUNS, SUMMARY, TASKS, type Run } from "./data"
 
 // Where each harness's tokens went, request by request, from the metering proxy on the beast2 run.
 // Pick a task: every harness's first attempt at it is drawn on one shared scale. Each bar is one
 // request to the model: the part llama.cpp served from its prompt cache, the part it had to prefill,
-// and what the model wrote back. The strip under it is the fixed cost: system prompt + tool schemas,
-// sent on every request. Nothing here is simulated; the numbers are the run's own.
+// and what the model wrote back. The line under it is the size of the harness's first agent request
+// (median over all 26 runs): system prompt, tool schemas and task, before any history. Nothing here
+// is simulated; the numbers are the run's own.
 //
 // SSR-safe: static data, no randomness, deterministic first render.
 
@@ -87,8 +88,7 @@ export function TokenFlow() {
           const prompt = turns.reduce((a, t) => a + t[0], 0)
           const cached = turns.reduce((a, t) => a + t[1], 0)
           const out = turns.reduce((a, t) => a + t[2], 0)
-          const sc = SCHEMA[h]
-          const fixed = sc ? sc.sys + sc.tools : 0
+          const first = FIRST_REQUEST[h]
           return (
             <div key={h}>
               <div className="flex flex-wrap items-baseline justify-between gap-x-3 font-mono text-xs">
@@ -124,9 +124,9 @@ export function TokenFlow() {
                   )
                 })}
               </svg>
-              {sc ? (
+              {first ? (
                 <p className="font-mono text-[10px] text-muted-foreground">
-                  fixed per request: system {k(sc.sys)} + {sc.nTools} tool schema{sc.nTools === 1 ? "" : "s"} {k(sc.tools)} = {k(fixed)} tokens
+                  first agent request, median of 26 runs: {fmt(first)} tokens before any history
                 </p>
               ) : null}
             </div>
