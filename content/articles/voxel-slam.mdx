@@ -1,0 +1,514 @@
+---
+title: "Voxel-SLAM: plane bundle adjustment from the FAST-LIO2 lab, built without ROS and measured"
+description: "Voxel-SLAM (HKU MaRS, arXiv 2410.08935) wraps a FAST-LIO2-style filter in three more layers of data association: a 10-scan LiDAR-inertial bundle adjustment on planes, BTC loop closure with a pose graph, and a hierarchical global BA when the session ends. This derives why a plane BA can fix what point-to-plane registration cannot (the plane drops out as an eigenvalue, and a scan's points collapse into three sums), shows how each module is solved, and then measures it. I built the C++ core with no ROS at all and ran odometry, odometry with local BA, and full SLAM on four public sequences with ground truth, beside the FAST-LIO2 numbers from the same harness."
+date: 2026-11-21
+tags:
+  - slam
+  - lidar
+  - state-estimation
+  - point-cloud
+  - benchmarks
+draft: false
+rating:
+  novelty: 1
+  verification: 3
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Voxel-SLAM derived (plane BA as an eigenvalue, point clusters), built with no ROS, and scored odometry vs local BA vs full SLAM on four sequences."
+topic: robotics
+kind: paper
+level: practitioner
+runsOn: cpu
+licence: GPL-2.0
+---
+
+import { PlaneBA } from "@/components/articles/voxel-slam/plane-ba"
+import { VsBench } from "@/components/articles/voxel-slam/vs-bench"
+import { MapViewer } from "@/components/articles/voxel-slam/map-viewer"
+
+Voxel-SLAM is what the HKU MaRS lab, the group behind FAST-LIO2, built when it wanted a map
+rather than an odometry. FAST-LIO2 registers each LiDAR sweep once, against a map that already
+contains every earlier mistake, and moves on. Voxel-SLAM keeps a filter of the same kind for that
+first registration and then goes back over the data three more times: a bundle adjustment over
+the last ten sweeps, loop closure against every place it has been, and a bundle adjustment over
+the whole session when the data ends. The paper (Liu et al.,
+[arXiv 2410.08935](https://arxiv.org/abs/2410.08935)) reports the most accurate results of any
+method it compares on 30 sequences, and the code is at
+[hku-mars/Voxel-SLAM](https://github.com/hku-mars/Voxel-SLAM). The site owner's verdict before I
+started was that it "apparently is really good". That is the claim this article tests.
+
+<RepoCard repo="hku-mars/Voxel-SLAM" />
+
+The first half is the mechanism: why a bundle adjustment on planes can correct a scan that
+point-to-plane registration has already got wrong, what makes it cheap enough to run on every
+sweep, and how each of the system's four layers of data association is solved. The second half
+is a measurement. Upstream is a ROS 1 Noetic package; I built its C++ core with no ROS at all,
+drove it from a small replay driver, and ran it on the four sequences of the site's LiDAR
+shootout, two of which are the ones the
+[FAST-LIO2 article](/articles/fast-lio2-lidar-inertial-odometry) used, with the same alignment
+and metrics. Each run was scored three ways: the odometry alone, the odometry with the local
+bundle adjustment, and the full system with loop closure and global BA.
+
+It held up. Full SLAM tracked a Hilti basement to 3.15 cm, a 283 m Oxford walk to 3.20 cm and two
+Sheldonian stairwells to 8.21 cm, untuned, with no resets; on the stairs a close cousin on the same
+plane map, [PV-LIO](/articles/pv-lio), lost 1.73 m. Most of that accuracy came from the loop closure
+and the end-of-session global BA, not the sliding window, and it costs about four times FAST-LIO2's
+time per scan and gigabytes of memory.
+
+## Four ways to reuse a measurement
+
+The paper frames the whole system around one idea borrowed from ORB-SLAM3: a SLAM system is better
+than an odometry to the extent that it associates a measurement with more than the map of the
+moment. It names four kinds of association, and Voxel-SLAM has one module for each.
+
+| association | what it links | Voxel-SLAM module | how it is solved |
+|---|---|---|---|
+| short-term | the newest scan to the current map | odometry | iterated EKF, point-to-plane on the voxel map's planes |
+| mid-term | the last 10 scans to each other and to the map | local mapping | LiDAR-inertial bundle adjustment over a sliding window |
+| long-term | the current place to every earlier visit | loop closure, global mapping | BTC place recognition, pose graph (GTSAM iSAM2), hierarchical BA |
+| multi-map | one session to an earlier one | the same two | the same, across sessions |
+
+FAST-LIO2 does the first row and nothing else. Every scan is registered once, against a map that
+already contains every earlier mistake, and then the scan becomes part of the map forever. That is
+fine while the map is good. When a scan is registered badly (a stairwell, a long corridor, a moment
+of fast rotation) the error is written into the map, and every later scan inherits it by being
+registered against it.
+
+Voxel-SLAM keeps FAST-LIO2's filter for the first row, nearly unchanged, and spends its effort on
+the other three. It runs three threads: odometry and local mapping in one, loop closure in a second,
+global mapping in a third.
+
+<Figure
+  src="/articles/voxel-slam/fig1.png"
+  alt="Voxel-SLAM system diagram. LiDAR scan and IMU enter Initialization, then Odometry (state prediction, state update, a divergence check that saves the session and restarts). Local mapping does keyframe loading and voxelisation, sliding-window BA and map marginalisation. Loop closure accumulates keyframes, extracts loop descriptors, detects loops across sessions and runs a multi-session pose graph. Global mapping runs keyframe BA, then at session end a global submap BA and a top-down optimisation. In the centre a voxel map, one voxel split into an octree, with a sliding window marginalised into a fix point. At the bottom the data pyramid: LiDAR scans merged into keyframes, keyframes into submaps, for the current and previous sessions."
+  caption="Five modules in three threads (grey boxes), one adaptive voxel map in the middle, and the data pyramid at the bottom: 10 scans make a keyframe, 10 keyframes make a submap (Voxel-SLAM paper, Figure 1)."
+/>
+
+## One map for every module: the adaptive voxel
+
+Everything in Voxel-SLAM is a plane, and planes live in one structure. Space is cut into root voxels
+of side $L_r$, kept in a hash table. A voxel's points are tested for flatness through the
+eigenvalues $\lambda_1 \le \lambda_2 \le \lambda_3$ of their covariance; a flat voxel is a plane, and
+one that is not flat splits into eight children and tries again, down to `max_layer`. The code's
+test (`plane_judge` in `voxel_map.hpp`) is
+
+```cpp
+return (eig_values[0] < min_eigen_value && (eig_values[0]/eig_values[2])<plane_eigen_value_thre[layer]);
+```
+
+With the shipped Hilti config (`hesai.yaml`) that is $L_r = 1$ m, `max_layer: 2` (so leaves of 1 m,
+0.5 m and 0.25 m), `min_eigen_value: 0.0025` (the points' spread across the plane under 5 cm RMS)
+and a ratio threshold of 1, which switches the second test off. The scans are downsampled to a
+0.1 m grid before any of this (`down_size`). The paper's Section X gives the rule it used for all
+its experiments: $L_r$ = 1 m and $L_d$ = 0.1 m indoors, 2 m and 0.25 m outdoors, 4 m and 0.5 m for a
+drone 100 m up.
+
+Odometry matches each new point to the plane in its voxel with the highest probability, using each
+point's own range-and-bearing covariance (the VoxelMap recipe). Local mapping runs its bundle
+adjustment on the same leaves. Loop closure builds its BTC descriptors from planes found the same
+way, and global mapping's hierarchical BA does too. One structure, four uses.
+
+## Why a plane BA beats point-to-plane
+
+Point-to-plane registration, FAST-LIO2's measurement, is a cost on one pose. A point $p$ seen from
+pose $T$ should land on a plane $(n, q)$ that the map already holds:
+
+$$
+r = n^\top (T p - q).
+$$
+
+The plane is a constant. If it was fitted to points that were placed wrongly, the new scan is pulled
+to the wrong place, and the error is now in two scans instead of one.
+
+Bundle adjustment makes the plane depend on every scan that sees it. Take all the points that fall
+in one leaf, from every scan in the window, placed by their current poses: $p_k = T_{i(k)} p'_k$.
+The best plane through them, and the sum of squared distances to it, have a closed form. The plane's
+centre is the mean $\bar p$; its normal is the eigenvector of the covariance
+
+$$
+C = \frac{1}{N} \sum_{k=1}^{N} (p_k - \bar p)(p_k - \bar p)^\top
+$$
+
+with the smallest eigenvalue; and the residual is
+
+$$
+\min_{n, q} \sum_{k=1}^{N} \bigl(n^\top (p_k - q)\bigr)^2 = N \, \lambda_{\min}(C).
+$$
+
+So the plane drops out of the problem. What is left is a cost on the poses alone, one eigenvalue per
+plane, and the paper's equation 2 adds IMU preintegration residuals between consecutive states:
+
+$$
+\min_{\mathcal{X}} \; \frac{1}{2} \sum_{i=1}^{N-1} \bigl\| r_{i,i+1}(\mathcal{X}) \bigr\|^2_{\Sigma_{i,i+1}^{-1}} \; + \; \sum_{j=1}^{M} \lambda_j^{\min}(\mathcal{X}),
+\qquad \mathcal{X} = [x_1, \dots, x_N, g].
+$$
+
+This is cheap enough to run every scan for a pair of reasons. One is that the eigenvalue is smooth in
+the poses, with an analytic gradient and Hessian (BALM2 derives them), so a second-order solver
+converges in a few iterations. The other is the point cluster. $C$ needs only $N$, $\sum p$ and
+$\sum p p^\top$, and for one scan's points transformed by $T = (R, t)$ those transform in closed
+form:
+
+$$
+\sum p = R \sum p' + N_i t, \qquad
+\sum p p^\top = R \Bigl(\sum p' p'^\top\Bigr) R^\top + R \Bigl(\sum p'\Bigr) t^\top + t \Bigl(\sum p'\Bigr)^\top R^\top + N_i \, t t^\top.
+$$
+
+Each scan contributes a 3-vector, a symmetric 3x3 and a count per leaf, however many points it put
+there. The optimiser never touches a point.
+
+<PlaneBA />
+
+The widget makes the difference concrete in 2D. Scan 2 has been registered with a 1.2 degree, 6 cm
+error that is now part of the map. Scan-to-map registration fixes scan 3 against that map and puts
+it on a wall that is not there; the window BA moves scans 2 and 3 together against the anchor and
+the wall comes back to the 2 cm of the noise. The cost is printed twice, from the 180 points and
+from the three clusters, and the numbers are the same.
+
+This is the core claim of the paper, and the place where Voxel-SLAM differs from every LIO in the
+[FAST-LIO2 article](/articles/fast-lio2-lidar-inertial-odometry). FAST-LIO2's iterated update is
+Gauss-Newton on one pose against a frozen map. Voxel-SLAM's local BA is Levenberg-Marquardt on ten
+poses, their velocities and biases, against planes it re-solves at every iteration.
+
+## The sliding window, and the points that stop moving
+
+Local mapping keeps the last `win_size: 10` scans as variables. When a new scan has been through
+the odometry, its points go into the voxel map, every voxel that received points is re-voxelised,
+and in each leaf the points are split into one point cluster per scan in the window plus one cluster
+for everything else. That last one, the "fix" cluster, is made of points from scans that have left
+the window and from old keyframes reloaded because the sensor is back near them. It enters the BA as
+a plane constraint with an identity pose: it anchors the window to the world without adding
+variables.
+
+After the optimisation the oldest scan is marginalised in the simplest possible way: its points
+are added to the fix clusters of their leaves, and its pose is handed to the loop-closure thread.
+That is the pose I call the local-BA pose below. It is the odometry estimate after ten scans of
+hindsight, and it is what the loop closure, the keyframes and the map are built from.
+
+The window also carries gravity. At initialisation, from the first second of data, the BA includes
+the gravity vector as a free 3-vector (its length too, since LiDAR gives metric scale), which is
+how the system starts while moving: it needs no stationary period. After that, gravity is held
+fixed in the window.
+
+The divergence check sits between odometry and local mapping. After each registration the planes
+used are tested for constraint in three independent directions; one degenerate scan is tolerated,
+`degrade_bound: 100` of them in a row reset the system, which saves the current session and
+starts a new one at a far-away origin. A later loop closure can join the two sessions.
+
+## Loops, and what happens to the window when one closes
+
+Every 10 marginalised scans form a frame. The frame becomes a keyframe if it moved more than a
+threshold (the code uses 5 degrees or 0.1 m), and the keyframe's points go to BTC, the lab's
+binary-triangle descriptor, which proposes a matching keyframe from this session or an earlier one
+with a 6-DoF transform. Before the match is believed, two more checks:
+
+- the ICP between the two keyframes has to be constrained in three directions (`icp_eigval`);
+- the implied drift has to be small compared with the distance travelled since the matched
+  keyframe: `ratio_drift: 0.01` in the config, 1%.
+
+The second check is a nice piece of engineering judgement. A place recogniser's false positives
+are usually far off; a system that drifts 1% of distance does not suddenly need a 10 m correction.
+For the first match into an earlier session there is no travelled distance to compare against, and
+the paper says the other checks are made stricter.
+
+A loop that passes adds an edge to a pose graph of all local-BA poses, and iSAM2 solves it. Then the
+system has a problem FAST-LIO2-with-loop-closure systems often ignore: the odometry thread has
+moved on. Scans have been marginalised since the graph was built, and ten more are in the window.
+
+<Figure
+  src="/articles/voxel-slam/fig5.png"
+  alt="Two rows of nodes before and after a pose graph optimisation. Red nodes are scans already in the pose graph, green nodes are scans marginalised from local mapping while loop closure was running, blue nodes are scans in the current sliding window. After the optimisation the red nodes move, and the green and blue nodes are all moved by the same correction, the pose change of the last red node."
+  caption="Scans in the graph (red), scans marginalised while the loop was being solved (green) and the live window (blue). All the scans beyond the graph get the last graph node's correction, and a new voxel map is built from them and the last five keyframes (Voxel-SLAM paper, Figure 5)."
+/>
+
+The answer is to apply the last graph node's correction to every scan beyond it, rebuild the local
+voxel map from the corrected window and the last five keyframes, and hand that map to the odometry.
+In the code, `loop_update()` runs at the top of the odometry loop whenever the loop thread raises
+`loop_detect`. To keep this from happening constantly, the optimisation only runs if the drift the
+loop reveals is over 0.10 m and at least `curr_halt: 10` keyframes have passed since the last one.
+
+## Global mapping: BA at three levels, once more at the end
+
+The pose graph only knows relative poses. Two scans of the same wall can be consistent with every
+edge in the graph and still disagree about where the wall is. The global mapping thread fixes that
+with HBA, the lab's hierarchical bundle adjustment:
+
+1. As keyframes arrive, a window of 10 keyframes, sliding by 5, is bundle-adjusted with its first
+   keyframe held at the pose-graph result, and merged into a submap.
+2. When the session ends, a BA over all submaps (coarse-to-fine voxels, no IMU, no gravity).
+3. A top-down pose graph pushes the submap corrections back to every scan.
+
+The data pyramid in Figure 1 is this: 10 scans per keyframe, 10 keyframes per submap, BA at every
+level. "Session end" means what it says. In the upstream code it is a ROS parameter,
+`rosparam set finish true`, typed by hand after the bag stops. My driver sets it when the data runs
+out.
+
+The paper's Table II gives the four stages on 13 Hilti sequences. On `exp09` ("hilti05", the cupola,
+narrow staircases) the ATE goes from 55 cm for FAST-LIO2 to 23 cm for Voxel-SLAM's odometry alone,
+15.9 cm with local mapping, 14.2 cm with loop closure, 13.8 cm with global mapping. On `exp15`
+("hilti07") the same columns read 72, 15.7, 9.8, 9.2 and 7.8 cm. Most of the gain over FAST-LIO2 is
+in the first two steps, before any loop is closed. That is the claim I wanted to test.
+
+<Figure
+  src="/articles/voxel-slam/fig10.jpg"
+  alt="Top: a top-down point cloud of a valley about 800 by 440 m, coloured by height, with the flight path in white and a degeneration point marked on the right. Middle: the same map from the front. Bottom: three close-ups of the same area: (c) FAST-LIO2's map, blurred and doubled; (d) Voxel-SLAM odometry with local mapping, sharper; (e) the full system with global mapping, sharpest."
+  caption="A 4.3 km drone flight over a valley (MARS-LVIG AMvalley03). The close-ups compare FAST-LIO2 (c), Voxel-SLAM's odometry with local mapping (d) and the full system with global mapping (e) on the same patch of ground (Voxel-SLAM paper, Figure 10)."
+/>
+## Building it without ROS
+
+Upstream is a ROS 1 Noetic catkin package: one executable, `voxelslam`, about 8,300 lines across
+`voxelslam.cpp`, `voxel_map.hpp`, `BTC.cpp` and seven more files, with GTSAM for the pose graphs.
+The rule for this run was no ROS in any form, not even a RoboStack prefix. That turned out to be a
+small job, because the code uses very little of ROS:
+
+- `ros::NodeHandle::param` for its configuration (45 calls), `subscribe` for one IMU and one
+  point-cloud topic, `ros::spinOnce()` at the top of the odometry loop, and `ros::Time::now()` as a
+  wall clock for its own timers;
+- `sensor_msgs::Imu` and `PointCloud2` read through `pcl::fromROSMsg`, plus a Livox message type
+  for a sensor I do not use;
+- publishers and a `tf` broadcaster that only feed RViz.
+
+So the port is a directory of stand-in headers at the paths the code includes (`ros/ros.h`,
+`sensor_msgs/Imu.h`, `pcl_conversions/pcl_conversions.h`, `tf/transform_broadcaster.h`, …):
+plain structs with the fields the code reads, a `NodeHandle` whose `param` reads a key-value file
+written from the repository's own YAML, publishers that do nothing, and a `spinOnce` that calls my
+feeder. `pcl::fromROSMsg` becomes PCL's own `fromPCLPointCloud2`. The upstream files are compiled
+as they are, with eleven edits applied by a script that checks each one matches exactly once:
+
+- nine instrumentation hooks: the include, per-scan timing and pose, the local-BA pose and the
+  points of each scan as it leaves the window, a line on each degeneracy reset, counters on
+  accepted loop edges and optimisations, and the pose-graph and global-BA poses captured just
+  before the loop thread deletes them;
+- a new `int gid` field on `ScanPose`, so the final poses can be joined to the scans;
+- upstream's `main()` renamed, with my driver appended;
+- and, outside those eleven, one substitution that touches scheduling. Upstream waits with `sleep(0.001)`, `sleep(0.01)` and
+  `sleep(0.1)`, which is `unistd`'s `sleep(unsigned int)`: the argument truncates to zero and all
+  three threads spin flat out when idle. I replaced them with `usleep` of the intended length, so a
+  timing pass pinned to four cores measures the estimator rather than three spinning threads.
+
+The driver reads the shootout's converted sequence (`imu.csv`, `scans.csv` and one binary file of
+points per sweep, with each point's time since sweep start), hands every message to Voxel-SLAM's
+own `imu_handler` and `pcl_handler` in timestamp order, and runs upstream's three threads unchanged.
+Points are handed over as x, y, z and a float time, which is the layout upstream's Velodyne reader
+takes, so the config's `lidar_type` is set to that reader; the deskew, downsampling and blind-radius
+logic after it is the same for every sensor. The feed is back-pressured: the next scan goes in only
+when the previous one has been consumed and the loop-closure queue holds no more than one window of
+scans, which is the state the system is in when it keeps up with a live sensor. When the data runs
+out, the driver raises `finish`, the parameter upstream expects someone to set by hand, and global
+mapping runs.
+
+The dependencies come from conda-forge inside the job directory: PCL 1.15, GTSAM 4.3, Eigen 5, TBB
+and a gcc 15 toolchain. Upstream targets PCL 1.10, GTSAM 4.0.3 and Eigen 3.3.7 on Ubuntu 20.04; it
+compiled against the newer ones with no source change beyond the edits above.
+## How I scored it
+
+Four sequences, all with a reference trajectory made without any of the systems under test,
+converted once by the shootout harness and read by every system the same way:
+
+| sequence | rig | length | what makes it hard |
+|---|---|---|---|
+| Hilti 2022 `exp14_basement_2` | Hesai PandarXT-32, 400 Hz IMU | 38 m, 74 s | a basement whose walls are a metre away |
+| Oxford Spires `keble-college-03` | Hesai QT64, 400 Hz IMU | 283 m, 286 s | a walk round a college quad, one big loop |
+| Hilti 2022 `exp16_attic_to_upper_gallery_2` | Hesai PandarXT-32, 400 Hz IMU | 117 m, 200 s | two narrow stairwells, about 8 m down and 8 m up |
+| Newer College 2021 `park` | Ouster OS0-128, 200 Hz IMU | 2.4 km, 26 min | a long loop through a park, start and end 0.4 m apart |
+
+The first two are the sequences the [FAST-LIO2 article](/articles/fast-lio2-lidar-inertial-odometry)
+used. The park has not run yet: its Ouster bags failed to convert (bad timestamps in the point
+records) and are being redone, so it is the one row still missing below. `exp16` is one of the three Hilti 2022 sequences with a dense public reference (the
+[Hilti datasets article](/articles/hilti-slam-dataset) explains how it is made), and the only one
+of them with stairs, which is where the paper says Voxel-SLAM gains most. The park is the long
+loop where closing it should matter.
+
+Every run went through one scoring script: each IMU pose moved into the reference's body frame,
+the reference interpolated at the estimate's timestamps, one SE(3) Umeyama fit without scale, ATE
+as the RMS position error after that fit, RPE over every metre of path with evo. A run is
+"diverged" if any error passes the larger of 10 m and a quarter of the path, or if its poses cover
+less than 80% of the reference. The machine is a 28-core Blackwell workstation, CPU only.
+
+Voxel-SLAM ran three ways, each from the repository's own config for the sensor (`hesai.yaml`,
+the authors' Hilti config, for both Hesai rigs; `ouster.yaml` for the Ouster):
+
+- **full SLAM** (`slam`): everything on. The poses are the final ones, after loop closure and the
+  global BA that runs when the data ends.
+- **odometry with local BA** (`odom`): loop acceptance switched off (`Loop/jud_default: 99`, above
+  any BTC score; there is no other switch). The pose of each scan is the one it had when it left
+  the sliding window.
+- **odometry alone** (`ekf`): the same run as `odom`, scored on the pose the EKF produced for each
+  scan before local BA touched it.
+
+The last of these is not quite the paper's "Odom" row. In the paper that ablation switches local
+mapping off; here local mapping runs, and the EKF registers each new scan against planes that the
+local BA has already refined. What the `ekf` row isolates is the pose before the window revisits
+it, not an odometry with no BA anywhere. Disabling local mapping would have meant editing the
+algorithm, which I did not do.
+
+Timing comes from a separate serial pass, one run at a time, pinned to four cores (`taskset -c
+0-3`), with the local BA's `thread_num` set to 4 (the config ships 5). The number is wall time per
+scan inside the odometry-and-local-mapping thread: from the moment a scan and its IMU are synced to
+the end of its local-BA and marginalisation step. The loop-closure and global-mapping threads run
+beside it and are not in that number; global BA after the session is reported separately. Peak
+memory is the process's high-water mark.
+
+The maps are built the same way for every variant, so they differ only by poses: each scan's
+deskewed, 0.1 m-downsampled points (0.4 m on the Ouster), as Voxel-SLAM kept them, placed by that
+variant's poses, then moved into the reference frame by the trajectory's own alignment and cut to a
+3 cm grid. Sharpness is the harness's wall test: the median RMS point-to-plane distance over 1 m
+patches that are planar. A clean map scores about 5 to 10 mm on it; a doubled wall scores tens.
+
+## What it did on three walks
+
+Every run finished, none reset, and every one is `ok` under the harness's rules. ATE is after one
+SE(3) alignment, without scale, against each dataset's reference:
+
+| ATE, RMSE | Hilti exp14 (38 m) | Oxford Spires (283 m) | Hilti exp16 (117 m, stairs) |
+|---|---|---|---|
+| Voxel-SLAM, odometry alone (`ekf`) | 3.38 cm | 6.79 cm | 9.62 cm |
+| Voxel-SLAM, odometry + local BA (`odom`) | 3.42 cm | 6.59 cm | 9.63 cm |
+| Voxel-SLAM, full SLAM (`slam`) | **3.15 cm** | **3.20 cm** | **8.21 cm** |
+| PV-LIO, its `hesai.yaml` (same harness) | 3.95 cm | 10.9 cm | 1.73 m |
+| FAST-LIO2, shipped config (beast2, another machine) | 50.1 cm | 7.2 cm | not run |
+| Super-LIO, shipped config (beast2, another machine) | 9.3 cm | 8.0 cm | not run |
+
+<VsBench />
+
+The full system is the most accurate thing the site has run on all three. On the Oxford walk it
+halves the odometry's error, from 6.59 to 3.20 cm, and the end-point drift (the last pose's error
+when the trajectory is aligned on its first 10 s only) falls from 29.4 cm to 7 mm. That is what a
+loop closure is for: the walk returns to its start, BTC proposed 45 candidates over the walk, 29
+passed the checks and were added as edges, and the pose graph was optimised once, at ScanPose
+2,731 of 2,857, when the drift those edges revealed finally crossed the 0.10 m bar.
+
+On the two Hilti sequences no loop was ever accepted (exp14 produced no BTC candidate at all, exp16
+two that failed the checks), and full SLAM is still better: 3.42 to 3.15 cm in the basement, 9.63
+to 8.21 cm through the stairwells. That gain is the global BA alone, which in the timing pass took 0.16 s at the end of
+exp14, 0.88 s at the end of exp16 and 4.4 s at the end of Spires. The paper claims exactly this:
+"Even in cases where no loop retrieval is detected... the global mapping can still improve the
+accuracy." It holds here.
+
+The comparison that matters most is exp16, the Sheldonian stairwells. PV-LIO runs the same kind of
+map (VoxelMap's probabilistic planes) under the same kind of filter, and with its shipped Hilti
+config it drifts to 1.73 m there; the [PV-LIO article](/articles/pv-lio) traces that to one event on
+the climb back to the attic. Voxel-SLAM's odometry, on planes the local BA keeps refining, holds
+the same stretch to 9.6 cm.
+
+<Figure
+  src="/articles/voxel-slam/fig9.jpg"
+  alt="A side section through the Sheldonian Theatre as a point cloud, coloured green to red by height: the roof truss and cupola at the top, the auditorium's tiers in the middle, and two narrow stairwells boxed in red at left and right, with the white trajectory spiralling up and down each of them."
+  caption="The paper's own map of the Sheldonian sequence it calls hilti05 (Hilti 2022 exp09), built by the full system. The boxed stairwells are the kind of place exp16 also walks through (Voxel-SLAM paper, Figure 9)."
+/>
+
+In the basement the two are close (3.42 against 3.95 cm). Outdoors,
+PV-LIO's Hilti config is the outlier, and its generic config reaches 4.71 cm, still behind
+Voxel-SLAM's 3.20.
+
+The FAST-LIO2 and Super-LIO rows come from the
+[FAST-LIO2 article](/articles/fast-lio2-lidar-inertial-odometry)'s runs on beast2, a different
+machine, through a ROS 2 harness with the same conversion and the same scoring. The same-machine
+FAST-LIO2 row for this shootout is still being built. On Spires the comparison is fair enough to
+read: odometry against odometry, 6.59 cm for Voxel-SLAM with local BA against 7.2 cm for FAST-LIO2,
+and then 3.20 cm once the loop closes, against the Spires paper's own 0.11 m (its Table 3) for
+Fast-LIO-SLAM on this sequence. In the basement, FAST-LIO2's 50.1 cm was its shipped 0.5 m map voxel,
+too coarse for a room; Voxel-SLAM's shipped Hilti config already uses 1 m root voxels split down to
+0.25 m planes on a 0.1 m-downsampled scan, which is the setting a room needs.
+
+### What does not show up
+
+The local BA does not move the ATE. `ekf` and `odom` are within 0.2 cm of each other on all three
+sequences (3.38 and 3.42, 6.79 and 6.59, 9.62 and 9.63). That looks like it contradicts the paper's
+Table II, where local mapping takes the cupola sequence from 23 to 15.9 cm. It does not, quite: as
+the method section says, the `ekf` pose here is registered against planes the local BA has already
+corrected, so the window's work reaches the online pose through the map one scan later. What these
+runs say is that on these sequences the refinement of the newest ten poses adds little on top of
+that. They do not say what Voxel-SLAM's odometry would do without local mapping at all.
+
+The maps do not separate the variants either. The harness's wall test gives 26.8 mm for full SLAM
+against 27.1 mm for odometry in the basement, 36.9 against 37.9 mm on Spires, 41.9 against 42.1 mm
+on exp16, all well above the 5 to 10 mm a clean map scores on it. The points behind those numbers
+are the ones Voxel-SLAM itself kept: one per 0.1 m voxel per scan, accumulated over hundreds of
+scans, which spreads a wall into a slab a few centimetres thick before any pose error enters. A few
+centimetres of ATE difference is invisible at that resolution, so the viewer below shows the
+full-SLAM map alone. Floors score better than walls everywhere but the basement, 5.0 mm on exp16 at best.
+
+<MapViewer />
+
+<Figure
+  src="/articles/voxel-slam/map-spires-top.png"
+  alt="Top-down point map of the Keble College quad coloured by height, cut below 1.6 m: a square lawn crossed by two paths, building facades all round in orange, with the reference path in black and the aligned full-SLAM estimate in red lying on top of it around the quad and into a side court."
+  caption="Oxford Spires from above: the full-SLAM map, reference path and aligned estimate (ATE 3.20 cm). Rendered by the shootout harness from my run."
+/>
+
+### What it costs
+
+| per scan, 4 pinned cores | Hilti exp14 | Oxford Spires | Hilti exp16 |
+|---|---|---|---|
+| mean / p95 / max, full SLAM | 11.2 / 20.8 / 47.1 ms | 55.6 / 79.8 / 332.7 ms | 21.3 / 53.1 / 83.3 ms |
+| peak memory, full SLAM | 378 MB | 4,263 MB | 1,176 MB |
+| global BA after the session | 0.16 s | 4.4 s | 0.88 s |
+
+These are from the serial timing pass: one run at a time, four cores, the local BA on four threads.
+The time per scan is the odometry-and-local-mapping thread only; loop closure and keyframe BA run
+in their own threads beside it. On the Hilti sequences the system has room to spare (the sweeps
+come every 100 ms). On Spires it averages 55.6 ms and stays under 100 ms to the 95th percentile,
+with the slowest scan at 332.7 ms. The paper's Table VI reports 8 ms of odometry and 13 ms of local
+mapping per scan on the Hilti sequences on an i7-10750H, which is in line with 11.2 and 21.3 ms
+here.
+
+Against FAST-LIO2 the bill is large. On Spires FAST-LIO2 took 12.7 ms a scan and 277 MB on
+beast2's four threads; Voxel-SLAM takes four times the time and fifteen times the memory. Most of
+the memory is long-term data association by design: every scan's points are kept, as keyframes for
+loop closure and as submaps for global BA. The paper's own memory column for Hilti is 1.068 GB on
+average.
+
+The shipped Hilti config is also the wrong one for a college quad, by the paper's own rule (1 m
+voxels and 0.1 m downsampling indoors, 2 m and 0.25 m outdoors). I ran that outdoor setting on
+Spires as a separate, labelled row: full SLAM 3.02 cm, odometry 6.29 cm, at 34.1 ms a scan and
+2,184 MB. Those timings came from the parallel pass, with other runs on the machine, so they are not
+directly comparable with the serial numbers above; the accuracy is. Going the other way in the
+basement, a 0.5 m root voxel (the low end of `hesai.yaml`'s own "indoor: 0.5-1" comment) gave 2.95
+cm for full SLAM and 3.40 cm for odometry.
+
+<Callout type="note">
+**Newer College park is not in this table yet.** It is the 2.4 km loop where loop closure should
+matter most. Its Ouster bags failed to convert (bad timestamps in the point records), the
+conversion is being redone, and the run is queued behind it. This section gets its row when that
+lands.
+</Callout>
+
+## Is it really good?
+
+Yes. On three public sequences with independent ground truth, Voxel-SLAM's full system is the most
+accurate thing this site has measured: 3.15 cm in a basement, 3.20 cm over 283 m outdoors with one
+loop closed, 8.21 cm down and up two stairwells, with no tuning and no resets. Where a cousin on the
+same plane map (PV-LIO) loses 1.73 m on the stairs, it does not. That is the paper's central claim,
+and it held.
+
+What I would qualify is where the accuracy comes from. On these walks the windowed BA hardly moves
+the error by itself; what moves it is loop closure when there is a loop, and the global BA at the
+end even when there is none. Both are batch steps that only finish when the session does. If you
+need a pose now, for a robot, you get Voxel-SLAM's odometry, and on Spires that is 6.6 cm: a little
+better than FAST-LIO2, not a different class. If you want the map, as I do for scans of buildings,
+the full system is the one to run. Budget four times FAST-LIO2's CPU and gigabytes of memory for a
+five-minute walk, and set the voxel for the place, as the paper says to.
+
+The code is GPL-2.0 and ROS 1 only, and the session end is a parameter you set by hand. None of
+that stopped it building against 2026 libraries with no ROS at all.
+
+## Notes on the method
+
+- **What I ran:** every number in the three measured tables, the benchmark widget and the map
+  viewer. That is Voxel-SLAM at commit `70fc8a28` (7 April 2025), built without ROS, nine runs
+  plus four labelled config variants, on the Blackwell box through the shootout harness. The first
+  build round failed on two errors in my own shim; the second built clean.
+- **What I read:** the Voxel-SLAM paper and code; the PV-LIO numbers are from the
+  [PV-LIO article](/articles/pv-lio)'s runs in the same harness; the FAST-LIO2 and Super-LIO numbers
+  are from the [FAST-LIO2 article](/articles/fast-lio2-lidar-inertial-odometry)'s beast2 runs. The
+  paper's tables, and the Spires paper's Table 3 are the authors'.
+- **What I changed in Voxel-SLAM:** the instrumentation and the `sleep` fix described above, the
+  config's extrinsic (from the dataset's calibration) and its `lidar_type` (to match the point
+  layout the driver hands over), and `thread_num` (4, from 5). Nothing in the estimator.
+- **What is not settled:** the park loop; Voxel-SLAM's odometry with local mapping switched off,
+  which would need an algorithm change; and a same-machine FAST-LIO2 row.
