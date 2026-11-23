@@ -188,6 +188,7 @@ export class NeuronScene {
   private selectedLayer = 0
   private selected: { layer: number; neuron: number } | null = null
   private dim = 1
+  private isolate = false
   // camera
   yaw = 0.78
   pitch = 0.3
@@ -301,14 +302,23 @@ export class NeuronScene {
   }
 
   setLayer(layer: number, focus = true) {
+    const changed = layer !== this.selectedLayer
     this.selectedLayer = layer
     this.buildPlanes()
+    if (changed && this.isolate) this.recolor()
     if (focus) this.focusLayer(layer)
     this.invalidate()
   }
 
   setDim(d: number) {
     this.dim = d
+    this.recolor()
+  }
+
+  /** Show only the current layer: the others fade to a faint trace and can't be clicked. */
+  setIsolate(on: boolean) {
+    if (this.isolate === on) return
+    this.isolate = on
     this.recolor()
   }
 
@@ -406,6 +416,15 @@ export class NeuronScene {
       }
       if (this.dim < 1 && this.styles.size) {
         a *= this.dim
+      }
+      if (this.isolate && !onSel) {
+        // drawn as a faint trace so the stack still reads as a stack
+        this.col[i * 4] = Math.round(P.dot[0] * 255)
+        this.col[i * 4 + 1] = Math.round(P.dot[1] * 255)
+        this.col[i * 4 + 2] = Math.round(P.dot[2] * 255)
+        this.col[i * 4 + 3] = Math.round((light ? 0.05 : 0.04) * 255)
+        this.size[i] = 0.9
+        continue
       }
       if (k) {
         c = P[k === "dim" ? "dot" : (k as keyof Palette) as "match"] as [number, number, number]
@@ -510,7 +529,10 @@ export class NeuronScene {
     let bestScore = Infinity
     const N = this.nPoints
     const W = this.W, H = this.H
-    for (let i = 0; i < N; i++) {
+    const NL = this.opts.neurons
+    const from = this.isolate ? this.selectedLayer * NL : 0
+    const to = this.isolate ? Math.min(N, from + NL) : N
+    for (let i = from; i < to; i++) {
       const x = this.pos[i * 3], y = this.pos[i * 3 + 1], z = this.pos[i * 3 + 2]
       const cw = m[3] * x + m[7] * y + m[11] * z + m[15]
       if (cw <= 0.01) continue

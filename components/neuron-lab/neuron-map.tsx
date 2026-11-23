@@ -20,6 +20,8 @@ export interface MapProps {
   onPick: (layer: number, neuron: number) => void
   onUnsupported: (why: string) => void
   resetKey: number
+  /** only the current layer is drawn in full and clickable */
+  isolate?: boolean
 }
 
 const COLS = 64
@@ -62,6 +64,10 @@ export function NeuronMap(p: MapProps) {
     }
   }, [p.meta.layers])
 
+  useEffect(() => {
+    scene.current?.setIsolate(!!p.isolate)
+  }, [p.isolate])
+
   // create the scene once
   useEffect(() => {
     const c = canvas.current
@@ -87,6 +93,7 @@ export function NeuronMap(p: MapProps) {
     scene.current = s
     s.setPalette(p.theme === "light" ? LIGHT : DARK)
     s.setLayer(p.layer, false)
+    s.setIsolate(!!p.isolate)
     const fit = () => {
       const r = w.getBoundingClientRect()
       setWidth(r.width)

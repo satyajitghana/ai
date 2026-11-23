@@ -8,6 +8,7 @@ import { loadEngine } from "./engine-loader"
 import { DEFAULT_MODEL, MODELS, MODEL_IDS, MODEL_NOTES, isModelId, modelOptionLabel, type ModelId } from "./lab-models"
 import { showToken } from "./data"
 import { DetailsPanel, FindPanel, InvestigatePanel } from "./inspect-panels"
+import { NeuronFinder, type Pick } from "./neuron-finder"
 import { NeuronGrid } from "./neuron-grid"
 import { NeuronMap } from "./neuron-map"
 import type { EdgeLine, Style } from "./scene"
@@ -102,6 +103,9 @@ export function NeuronLabApp() {
   const [resetKey, setResetKey] = useState(0)
   const [noGl, setNoGl] = useState("")
   const [wide, setWide] = useState(false)
+  const [isolate, setIsolate] = useState(false)
+  const [recent, setRecent] = useState<Pick[]>([])
+  const finderRef = useRef<HTMLInputElement>(null)
   const [names, setNames] = useState<Record<string, string>>({})
   const [engine, setEngine] = useState<NeuronEngine | null>(null)
   const [eng, setEng] = useState<EngineState>({ status: "none", frac: 0, msg: "", cached: "unknown" })
@@ -302,6 +306,7 @@ export function NeuronLabApp() {
       setSelected({ layer: l, neuron: n })
       setLayer(l)
       setIdText(`L${l} N${n}`)
+      setRecent((r) => [{ layer: l, neuron: n }, ...r.filter((x) => x.layer !== l || x.neuron !== n)].slice(0, 8))
     },
     [],
   )
@@ -374,12 +379,22 @@ export function NeuronLabApp() {
       } else if (e.key === "PageDown") {
         e.preventDefault()
         changeLayer(layer - 1)
-      } else if (e.key === "r") setResetKey((k) => k + 1)
+      } else if (e.key === "g") {
+        e.preventDefault()
+        finderRef.current?.focus()
+        finderRef.current?.select()
+      } else if ((e.key === "[" || e.key === "]") && meta) {
+        e.preventDefault()
+        const cur = selected && selected.layer === layer ? selected.neuron : -1
+        const n = Math.max(0, Math.min(meta.neurons - 1, cur + (e.key === "]" ? 1 : -1)))
+        select(layer, n)
+      } else if (e.key === "i") setIsolate((v) => !v)
+      else if (e.key === "r") setResetKey((k) => k + 1)
       else if (e.key === "?") setAbout(true)
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [about, layer, undo, changeLayer])
+  }, [about, layer, undo, changeLayer, meta, selected, select])
 
   // body scroll lock while the app overlay is up
   useEffect(() => {
@@ -531,6 +546,22 @@ export function NeuronLabApp() {
 
       <div className="nl-main" data-pane={pane} data-wide={wide}>
         <aside className="nl-left" aria-label="Neuron list">
+          {meta ? (
+            <NeuronFinder
+              layers={meta.layers}
+              neurons={meta.neurons}
+              cols={64}
+              layer={layer}
+              selected={selected}
+              recent={recent}
+              onLayer={changeLayer}
+              onPick={(l, n) => {
+                select(l, n)
+                setPane("panel")
+              }}
+              neuronInputRef={finderRef}
+            />
+          ) : null}
           <div className="nl-panelhead">
             {searching ? (
               <>
@@ -649,6 +680,7 @@ export function NeuronLabApp() {
                 theme={theme}
                 reducedMotion={reduced}
                 resetKey={resetKey}
+                isolate={isolate}
                 onPick={(l, n) => {
                   select(l, n)
                   setPane("panel")
@@ -676,6 +708,9 @@ export function NeuronLabApp() {
             <div className="nl-hud">
               <button className="nl-btn small" onClick={() => setResetKey((k) => k + 1)} title="Reset the camera ( r )">
                 reset view
+              </button>
+              <button className="nl-btn small" aria-pressed={isolate} onClick={() => setIsolate((v) => !v)} title="Show only the current layer, so clicks can't land on another one ( i )">
+                {isolate ? `only L${layer}` : "isolate layer"}
               </button>
               <span>drag orbit · scroll zoom · shift+drag pan · click a dot</span>
             </div>
@@ -820,7 +855,8 @@ export function NeuronLabApp() {
             <ul style={{ paddingLeft: 18 }}>
               <li><span className="nl-kbd">/</span> or <span className="nl-kbd">Ctrl K</span> search · <span className="nl-kbd">PgUp</span>/<span className="nl-kbd">PgDn</span> change layer · <span className="nl-kbd">r</span> reset view</li>
               <li><span className="nl-kbd">Ctrl Z</span> undo a recipe change · <span className="nl-kbd">Esc</span> deselect · <span className="nl-kbd">Enter</span> in the prompt runs</li>
-              <li>Grid view: arrow keys move between neurons.</li>
+              <li><span className="nl-kbd">g</span> jump to a neuron by number · <span className="nl-kbd">[</span>/<span className="nl-kbd">]</span> previous/next neuron · <span className="nl-kbd">i</span> isolate the current layer in 3D</li>
+              <li>Grid view: arrow keys move between neurons, <span className="nl-kbd">Home</span>/<span className="nl-kbd">End</span> jump to the first and last; pick a bigger cell size to aim more easily.</li>
             </ul>
             <button className="nl-btn primary" onClick={() => setAbout(false)}>
               Got it
