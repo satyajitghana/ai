@@ -1790,6 +1790,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "whistle-stt/keyword-bias-beam": () => import("@/components/articles/whistle-stt/keyword-bias-beam"),
   "windows-local-coding-models/weight-budget": () => import("@/components/articles/windows-local-coding-models/weight-budget"),
   "windows-local-coding-models/where-it-runs": () => import("@/components/articles/windows-local-coding-models/where-it-runs"),
+  "wllama-v4/bench-bars": () => import("@/components/articles/wllama-v4/bench-bars"),
+  "wllama-v4/placement-planner": () => import("@/components/articles/wllama-v4/placement-planner"),
   "worldclaw/height-field": () => import("@/components/articles/worldclaw/height-field"),
   "worldclaw/model-stack": () => import("@/components/articles/worldclaw/model-stack"),
   "worldcrafter/revisit-map": () => import("@/components/articles/worldcrafter/revisit-map"),

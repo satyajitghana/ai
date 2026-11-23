@@ -1,0 +1,197 @@
+---
+title: "wllama v4.0.0: the wasm build finally compiles its SIMD kernels, and big models ride ggml-rpc between workers"
+description: "wllama 4.0.0 puts llama.cpp in a browser tab up to 2.8x faster on Chrome, loads GGUF files over 4 GB as they are, and mixes CPU and WebGPU for models that do not fit on the GPU. I read the 4.0.0 source, the pull requests and the author's benchmark. Most of the speed comes from two build changes: v3.13.0 compiled ggml's generic C kernels because Emscripten reports the target as x86, and v4 compiles the hand-written wasm SIMD kernels with relaxed-SIMD dot products, on 32-bit memory instead of Memory64. The size limit goes the other way: every wasm instance is capped at 4 GiB, so v4 splits big files into virtual shards and runs extra copies of the wasm in workers as ggml-rpc servers, joined by SharedArrayBuffer ring buffers, with llama.cpp's own fit deciding which layers go to which instance and which stay on WebGPU. A widget plays out those placement rules, and my headless-Chrome run on a 2016 Intel desktop reproduces the gain on x86 (2.0x to 2.3x prompt, 2.3x to 2.6x generation, CPU only, since headless Chrome there found no hardware WebGPU adapter), loads a 4.59 GB Gemma 4 E4B over 2 rpc workers that v3 cannot load, and puts the tab roughly 7x to 10x behind native llama.cpp on prompt processing."
+date: 2026-11-23
+tags:
+  - llama-cpp
+  - webgpu
+  - webassembly
+  - browser-ml
+  - on-device
+  - inference
+  - gguf
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 3
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Traces wllama 4's 2.8x to a build flag and relaxed SIMD, explains the rpc-worker split from source, and measures v4 vs v3 vs native on one box."
+topic: inference-serving
+kind: tool
+level: practitioner
+runsOn: browser
+licence: MIT
+---
+
+import { BenchBars } from "@/components/articles/wllama-v4/bench-bars"
+import { PlacementPlanner } from "@/components/articles/wllama-v4/placement-planner"
+
+Xuan-Son Nguyen, a Hugging Face engineer who created wllama, [posted](https://x.com/ngxson/status/2124581211280404803) the release on 22 November: "wllama v4.0.0 is out! Up to 2.8x faster on Chrome, support video input and full-duplex realtime audio. Hybrid CPU + WebGPU support on Chrome and Firefox, allow using bigger models!" [wllama](https://github.com/ngxson/wllama) is llama.cpp compiled to WebAssembly, with a TypeScript wrapper that downloads and caches GGUF files and serves an OpenAI-shaped API from inside a web worker. No server and no extension: the model runs in the tab.
+
+<Figure
+  src="/articles/wllama-v4/fig1.png"
+  alt="A dark release card: 'wllama v4.0.0, llama.cpp in the browser, much faster, any model size', with three orange figures, 2.8x faster prefill and 2.5x faster generation, both up to and on Chrome, and 2.8x faster loading from the OPFS cache. Below, chips for: no size limit (GGUF over 4GB as-is), CPU plus WebGPU for big models, LoRA adapters, speculative decoding (MTP, DFlash, Eagle3), full-duplex realtime audio and video input. Footer: vs v3.13.0, Chrome 157, CPU, Apple M5 Max."
+  caption="The release card attached to the post. The footer matters: the multipliers are against v3.13.0, on Chrome's CPU path, on an Apple M5 Max (wllama 4.0.0 release notes, card 1)."
+/>
+
+I read the source at the `4.0.0` tag, the 44 commits since `3.13.0`, the pull requests behind each headline, and the benchmark the author posted in [issue #338](https://github.com/ngxson/wllama/issues/338#issuecomment-7062438290). Then I ran both versions in headless Chrome on an RTX 3090 box, beast2, next to native llama.cpp built from the same commit. What follows is how each claim works, in the order a model meets it: the CPU kernels, the 4 GiB wall, the GPU split, then video and audio.
+
+<RepoCard repo="ngxson/wllama" note="Read at the 4.0.0 tag (2944227, 22 November 2026), llama.cpp submodule at 0b51bb2. The rpc transport is cpp/wllama-rpc-transport.cpp and src/workers-code/rpc-transport.js; the placement logic is count_rpc_workers() and fit_rpc_workers() in cpp/wllama-context.h." />
+
+## What a browser tab gives llama.cpp to work with
+
+A native llama.cpp process gets the machine: AVX2 or AVX-512 or NEON, a 64-bit address space, as many threads as there are cores, `mmap` on the model file, and CUDA or Metal if they exist. A tab gets less, and each of the limits below shapes the v4 design.
+
+- **Memory.** WebAssembly memory is one linear array. With 32-bit addressing an instance can reach 4 GiB, no more. Memory64 lifts that, at a cost in speed that comes up below.
+- **Vectors.** Wasm SIMD is 128 bits wide, a quarter of AVX-512. *Relaxed* SIMD adds instructions whose exact results may differ by platform, among them an 8-bit dot product (`i32x4.relaxed_dot_i8x16_i7x16_add`) that maps onto the hardware's own int8 dot products.
+- **Threads.** A wasm thread is a web worker sharing one `WebAssembly.Memory`. Shared memory needs `SharedArrayBuffer`, and the browser only hands that out on a page that is *cross-origin isolated*: it must be served with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. Without those two headers wllama runs single-threaded.
+- **Blocking calls.** llama.cpp is synchronous C++, so it expects `fread()` to block. In a browser, reading a `Blob` is asynchronous. wllama bridges the two with JSPI (JavaScript Promise Integration), which lets a wasm call suspend on a promise and resume; browsers without JSPI get a "compat" build that uses Asyncify instead.
+- **GPU.** WebGPU, reached through Dawn's Emscripten bindings (`emdawnwebgpu`) and llama.cpp's WebGPU backend, which Reese Levine maintains.
+
+`README-dev.md` describes the threading. There is a single wasm build. At start-up wllama tests for shared memory with a tiny module that uses an atomic instruction; if it validates and a `SharedArrayBuffer` can be posted, the Emscripten pthread pool is sized to `n_threads` (by default half of `navigator.hardwareConcurrency`), and otherwise to zero. The pool never grows past ggml's threadpool, because a worker cannot start while a wasm thread is blocked waiting on it, and the page would hang. The build is chosen at runtime too: `needCompat()` falls back to the compat build when JSPI or relaxed SIMD is missing (Safari today, older Firefox).
+
+## Where the 2.8x came from
+
+The release notes credit two pull requests: [#331](https://github.com/ngxson/wllama/pull/331), "enable wasm SIMD kernels and relaxed SIMD", and [#347](https://github.com/ngxson/wllama/pull/347), "use 32-bit memory for the main build". #331 has a one-line description, "close #299", and [issue #299](https://github.com/ngxson/wllama/issues/299) is where the speed was hiding.
+
+ggml chooses its CPU kernels in CMake by architecture. `ggml/src/ggml-cpu/CMakeLists.txt` adds `arch/wasm/quants.c`, the hand-written wasm SIMD dot products for every quant type, only when `CMAKE_SYSTEM_PROCESSOR MATCHES "wasm"`. Emscripten's CMake toolchain sets that variable to `x86` unless `EMSCRIPTEN_SYSTEM_PROCESSOR` is passed. So the wllama build configured with `Unknown CPU architecture. Falling back to generic implementations` and `-DGGML_CPU_GENERIC`: the quantized matmuls ran ggml's portable scalar C, which the compiler auto-vectorized as well as it could under `-msimd128`. The issue's author, daveycodez, rebuilt 3.8.1 and got a `wllama.js` byte-identical to the published one, so the shipped package was affected. The `3.13.0` compose file still does not pass the flag. At `4.0.0`, `scripts/docker-compose.yml` passes `-DEMSCRIPTEN_SYSTEM_PROCESSOR=wasm` to both builds.
+
+The flag on its own was worth little. In the issue, LFM2.5-1.2B Q4_K_M on an M3 Ultra went from 40 to 48 tokens/s of prompt processing and from 26 to 30 of generation. The jump came from the relaxed-SIMD dot products on top of the kernels: 111 to 113 and 47. Here is the Q4_0 kernel at the llama.cpp commit v4 pins, `0b51bb2`:
+
+```c
+#   if defined(__wasm_relaxed_simd__)
+        // unsigned nibbles (0..15) in the 7-bit operand, then subtract 8*sum(y)
+        v128_t dp0 = wasm_i32x4_relaxed_dot_i8x16_i7x16_add(y0_l, v0_0l, wasm_i32x4_splat(0));
+        dp0 = wasm_i32x4_relaxed_dot_i8x16_i7x16_add(y0_h, v0_0h, dp0);
+        v128_t ys0 = wasm_i32x4_relaxed_dot_i8x16_i7x16_add(y0_l, s8b, wasm_i32x4_splat(0));
+        ys0 = wasm_i32x4_relaxed_dot_i8x16_i7x16_add(y0_h, s8b, ys0);
+        dp0 = wasm_i32x4_sub(dp0, ys0);
+#   else
+```
+
+The `#else` branch widens every int8 to int16 and runs four `i32x4.dot_i16x8` per 32 weights. The relaxed path does four 8-bit dot products and one subtraction instead. The comment explains why: a Q4_0 weight is a nibble from 0 to 15 that stands for the value minus 8, and the relaxed instruction is only defined on every platform when its second operand fits in 7 bits. So the kernel feeds the unsigned nibble, computes $\sum_i y_i q_i$, and takes off $8 \sum_i y_i$ afterwards:
+
+$$\sum_i y_i (q_i - 8) = \sum_i y_i q_i - 8 \sum_i y_i$$
+
+The issue records why that matters. The first relaxed kernels passed signed values to the 7-bit operand; they were right on ARM and wrong on x86 under V8. As the author of [llama.cpp #19590](https://github.com/ggml-org/llama.cpp/pull/19590) wrote there, ARM lowers the instruction to `sdot`, which treats that operand as signed, while V8 on x64 lowers it to `pmaddubsw` or `vpdpbusd`, which read it as unsigned. The corrected kernels keep it in 0 to 127. At `0b51bb2`, nine dot-product kernels have a relaxed path (Q4_0, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, Q2_K, Q3_K). wllama's `CMakeLists.txt` applies `-mrelaxed-simd` to `quants.c` alone, with a comment saying why: on the whole build, clang also emits relaxed multiply-adds and min/max, "which give different results on x86 and ARM". Relaxed for the kernels whose rounding the authors control, strict everywhere else.
+
+The second change goes against intuition. v3.13.0's main build was Memory64 (`-sMEMORY64=1`), and it still capped memory at 4096 MB, so it paid for 64-bit pointers without getting more room. v4 goes back to 32-bit memory. The PR #347 benchmark, Chromium on Apple Silicon with 4 threads, shows how much that saves and how unevenly. LFM2 450M Q8_0 gained 22% in prompt processing (256.7 to 313.9 tokens/s) and 21% in generation. Qwen2.5-Omni 3B Q4_K_M gained 2% and 4%. The CMake comment says "about 12% faster", and the author's reply under the post says "up to 22%". Both are true; they describe different kernels.
+
+<Figure
+  src="/articles/wllama-v4/fig2.png"
+  alt="Two bar charts, v3.13.0 in grey and v4.0.0 in orange, tokens per second on Chrome 157, CPU with 6 threads, Apple M5 Max, bars relative to v3.13.0. Prefill on a 270-token prompt: LFM2 350M Q4_K_M 2.4x (247 to 598 t/s), LFM2.5 1.2B Q4_K_M 2.8x (73 to 207 t/s), Qwen2.5-Omni 3B Q4_K_M 2.6x (25 to 66 t/s). Generation of 64 tokens: 2.1x (135 to 277), 2.4x (49 to 118), 2.5x (17 to 42). Footer: Gemma 4 E4B (5.15 GB), v3.13.0 cannot load it, v4.0.0 runs it at 56 t/s prefill, 18.9 t/s generation."
+  caption="The author's benchmark, Chrome 157 on an M5 Max, CPU only. The headline 2.8x is LFM2.5 1.2B prefill; Firefox gains 2.0x to 2.3x and Safari's compat build up to 1.4x (wllama 4.0.0 release notes, card 2)."
+/>
+
+The author's notes in issue #338 say plainly what the benchmark can and cannot show. The speedup "most likely comes from the wasm SIMD / relaxed SIMD kernels (#331) and the 32-bit memory main build (#347), not from the llama.cpp bump", and "I did not measure each change on its own". Each number is the median of two runs, on one machine, with another CPU-heavy job using about one core during the runs. Apple's cores may also be a kind case for relaxed SIMD, since the instruction lowers to ARM's native `sdot`. An x86 desktop lowers it differently, which is one reason I ran it on one.
+
+## The 4 GiB wall, and how v4 climbs it
+
+Going back to 32-bit memory makes the size problem worse: one instance now holds 4 GiB, period. v3 could not load the author's 5.15 GB Gemma 4 E4B file in any browser (`RangeError: Invalid typed array length` on Chrome). v4 loads it in three steps.
+
+**Virtual shards.** llama.cpp addresses file offsets with `size_t`, which is 32 bits on wasm32. So `src/gguf-split.ts` reads the GGUF header in JavaScript and, for a single file of 4 GiB minus one byte or more, cuts it into shards of about 2 GiB along tensor boundaries, with the metadata in the first shard. This is the layout `llama-gguf-split` writes, built from `Blob.slice()` views: no bytes are copied. llama.cpp sees `model-00001-of-00003.gguf` and the rest.
+
+**Measure first.** For any model of 2.5 GiB or more (`RPC_CONFIG.autoMinSize`), the wasm loads the metadata without allocating anything and asks llama.cpp what the CPU would have to hold: weights, KV cache and compute buffers, with the user's own `n_gpu_layers`. If that is over `mainMemMax`, 3584 MiB, `count_rpc_workers()` returns a worker count and the load returns early. JavaScript starts the workers and loads again.
+
+```cpp
+const size_t worker_mem = SIZE_MAX / 1024 - RPC_MEM_MARGIN;
+const size_t n = (mem.kib.back() + worker_mem - 1) / worker_mem;
+return (int)std::min({n, (size_t)GGML_RPC_MAX_SERVERS, llama_max_devices() - mem.devs.size()});
+```
+
+Everything there is in KiB. `SIZE_MAX / 1024` is 4 GiB expressed in KiB, and `RPC_MEM_MARGIN` is `1024 * 1024` KiB, 1 GiB. So it is one worker for every 3 GiB on the CPU, at most 16 (`GGML_RPC_MAX_SERVERS`). The arithmetic is done in KiB because, on wasm32, llama.cpp sums buffer sizes in a 32-bit `size_t`, and "6GB of layers on one device reads as 2GB" (`README-dev.md`, "Fit on wasm32"). Three link-time `--wrap` patches report sizes in KiB while the measurement runs.
+
+**Workers are ggml-rpc servers.** Each worker runs the same `wllama.wasm`, with its own 4 GiB, as a ggml-rpc server (`wllama_rpc_serve`). llama.cpp in the main instance sees each one as an RPC device, the same as `llama-server --rpc host:port` against a second machine. Nothing in llama.cpp is changed. wllama swaps out the transport: CMake marks ggml-rpc's own `transport.cpp` as header-only and compiles `cpp/wllama-rpc-transport.cpp` in its place. In it, the "sockets" are `SharedArrayBuffer`s.
+
+`startRpcWorkers()` allocates one buffer per worker: a 64-byte header of `Int32` slots plus two rings of 16 MiB each (`RING_BYTES = 16 * 1024 * 1024`), one per direction. Head and tail are byte counters that wrap at $2^{31}$, so `(head - tail) | 0` is always the number of bytes in flight. A sender copies from its wasm heap into the ring, moves `head` forward with `Atomics.store`, and calls `Atomics.notify`. A reader with nothing to read sleeps in `Atomics.wait` on the head slot, waking every 100 ms to check that the connection is still open. That is one copy into the ring and one copy out. "One buffer accessible by 2 workers", as the author replied to a question under the post. The rings are power-of-two sized, so the write position is `head & (cap - 1)`.
+
+Two ggml-rpc bugs only show up on a 32-bit host ([#340](https://github.com/ngxson/wllama/issues/340)), and the transport fixes both on the wire instead of patching llama.cpp. ggml-rpc writes message sizes as `size_t` and reads them back as `uint64_t`, so the sender follows the framing (`[cmd 1B][size][payload]`) and widens each size field to 8 bytes. `serialize_graph` copies each node pointer with `sizeof(uint64_t)`, so on wasm32 the high half of each id is really the next pointer; `fix_graph_node_ids()` zeroes those 4 bytes in every `GRAPH_COMPUTE` message. On the main instance, ggml-rpc does the I/O for each server in a thread of its own, which is why the pthread pool gets `n_threads` plus one thread per worker, the one place the "never grow the pool" rule is relaxed.
+
+The placement comes from llama.cpp's own fit (`common/fit.cpp`, what `llama-server --fit` uses). The device order is `[RPC0, ..., RPCn, WebGPU]`, and the first layers go to the first device. The fit fills devices from the last one: WebGPU gets exactly `n_gpu_layers` (wllama measures what those layers need and hands that to the fit as WebGPU's memory limit), each worker takes layers until 1 GiB of its 4 GiB is left, and whatever remains stays in the main instance together with `token_embd`. Because the worker count is "CPU bytes divided by 3 GiB", and those CPU bytes include an embedding table that never leaves the main instance, one worker can end up empty. [PR #358](https://github.com/ngxson/wllama/pull/358) reports exactly that for Qwen3.5-4B BF16 with 8 layers on WebGPU: three workers started, one held nothing.
+
+<PlacementPlanner />
+
+The widget runs these rules on a made-up model of 32 equal layers. Its Gemma preset (4.59 GB, CPU only) picks two workers, which matches the "2 workers (picked automatically)" in [PR #352](https://github.com/ngxson/wllama/pull/352). The Qwen3.5-4B BF16 preset picks three, and with 8 layers on WebGPU one worker stays empty, as PR #358 found. Untick the COOP/COEP box and anything over 3.5 GiB fails, because workers are threads.
+
+There is a cost, and the author's own table shows it. Loading through rpc workers runs at 0.32 to 0.52 GiB/s for Gemma 4 E4B, against 3.66 GiB/s for a 2 GB model on Chrome, because that path does not yet read from the OPFS cache with a sync access handle. Peak memory was 7.0 to 8.1 GiB for a 4.80 GiB file. And "no size limit" means 16 workers of 3 GiB each, plus whatever the GPU holds: about 48 GiB on the CPU side, which a browser will refuse long before.
+
+## Hybrid: what moves to the GPU, and what had to be patched to make it fast
+
+WebGPU was already in v3 ([PR #215](https://github.com/ngxson/wllama/pull/215)), and so was `n_gpu_layers`. The default is `99999`: every layer on the GPU. Set a smaller number and llama.cpp keeps the first layers on the CPU and offloads the rest, as it does natively. What v4 adds is that this works when the CPU part is itself larger than one wasm instance. Before PR #358, rpc workers were switched off whenever WebGPU was in use, so a model too big for the GPU and too big for one instance had nowhere to go. Now the CPU layers spread over workers and the GPU keeps its share. PR #358's numbers for Qwen3.5-4B BF16 (8.4 GB) on Chrome 156 show how lopsided the split is:
+
+| Placement | Load | Generation |
+|---|---|---|
+| CPU only, 3 workers | 11.4 s | 2.1 tok/s |
+| 8 layers on WebGPU | 11.5 s | 3.1 tok/s |
+| 20 layers on WebGPU (5.1 GB on GPU) | 10.4 s | 5.4 tok/s |
+| WebGPU only | 6.6 s | 41.3 tok/s |
+
+Twenty of the layers on the GPU buys 2.6x over CPU only. All of them buys 20x. Hybrid is how you run a model at all, not how you run it fast; anything that fits on the GPU should go entirely on the GPU.
+
+Several v4 patches make the GPU path cheaper, all done from outside llama.cpp with `-Wl,--wrap`:
+
+- **Uploads through small buffers.** llama.cpp copied each GPU tensor through a CPU staging buffer as big as the tensor, and a wasm heap never shrinks, so that peak stayed allocated as page memory for the life of the tab. A patch reports async, events and host-buffer capabilities for WebGPU while a model loads, and llama.cpp then uploads through four 1 MB buffers. [PR #348](https://github.com/ngxson/wllama/pull/348): Qwen3.5 2B Q4_K_M, wasm heap after load 875 MB to 350 MB.
+- **Token embedding on the GPU.** llama.cpp keeps `token_embd` on the CPU for the input lookup even when the output layer is on the GPU. With all layers on WebGPU and no workers, `keep_tok_embd_on_gpu()` moves it to the GPU if WebGPU supports `GET_ROWS` for its type.
+- **A 2 GB buffer cap.** `wgpuAdapterGetLimits` is wrapped to cap `maxBufferSize` at 2 GB, because ggml sums the tensors of one buffer in `size_t` and a limit near 4 GB wraps around on wasm32.
+- **One queue wait per token instead of fifteen.** `ggml_backend_synchronize()` waits for the GPU queue about 15 times per decoded token, and on the web each wait is a JavaScript promise. The patch counts submits and records completions, and returns at once when nothing is outstanding. [PR #341](https://github.com/ngxson/wllama/pull/341) measured Chrome generation on Qwen3-1.7B Q4_K_M going from 118.6 to 133.4 tok/s.
+
+Firefox needed one more trick. It resolves WebGPU promises only when it polls the device, on a 100 ms timer ([bug 1870699](https://bugzilla.mozilla.org/show_bug.cgi?id=1870699)), so each of those waits cost 100 ms and generation ran below 1 tok/s. Reading back a WebGPU canvas forces a poll. So `src/patch/webgpu-poll.js` clears a 1x1 WebGPU canvas and draws it into a 2D canvas after every `onSubmittedWorkDone()` and `mapAsync()`. On Firefox 160 that took Qwen3-1.7B from 0.83 to 59.2 tok/s, still about half of Chrome. It depends on Firefox internals, and `loadModel()` still logs a warning that WebGPU on Firefox is slower. "Hybrid on Chrome and Firefox" is true; it is not equally fast on both.
+
+## Video and audio go through llama-server's own code
+
+wllama does not have a separate multimodal stack. It compiles llama.cpp's `tools/server` sources (`server-context.cpp`, `server-task.cpp`, `server-chat.cpp` and others) into the wasm and calls them directly, which is why the API matches `llama-server` field for field and why a realtime session "uses the same events as the OpenAI realtime API and the `/v1/realtime` route of llama-server" (README). Images and audio go through `mtmd` with an `mmproj` file, as they do natively.
+
+**Video** ([PR #324](https://github.com/ngxson/wllama/pull/324)) needs no video decoder in the wasm. `sampleVideo()` in `src/video.ts` plays the file in an `HTMLVideoElement`, seeks to evenly spaced times (default 2 fps, at most 32 frames, at least 4, longest edge 512 px, never upscaled), draws each frame onto a canvas and packs the raw RGB into a small container: a 24-byte header with the magic `WLVF`, width, height, frame count and fps, then the frames. `cpp/wllama-video.h` is the matching decoder for `mtmd`, about a hundred lines, mostly a bilinear resize. Any format the browser can play works; the audio track is ignored; and a model with its own video layout, such as Qwen3-VL, gets the frames with timestamps. Each frame costs context tokens, so `maxFrames` has to fit `n_ctx`. Since it uses the DOM, it cannot run inside a worker.
+
+**Realtime audio** had a threading problem. llama-server's realtime session wants a thread of its own and blocking reads; wllama has one wasm thread and polls. So `wllama-context.h` includes `server-realtime.cpp` directly and steps `realtime_conversation` itself (`handle()` for each client event, `on_result()` per step) instead of calling its `run()` loop. The README lists four kinds of session: a conversation, per-buffer transcription, live ASR, and full duplex for models with `has_audio_duplex`, such as Kyutai's Hibiki (French to English speech translation). Duplex has no turns: "every 80 ms of input audio gives 80 ms of output audio and the text of the translation". [PR #361](https://github.com/ngxson/wllama/pull/361) brought it over from llama-server, with one fix specific to the web. llama-server waits up to 10 s after a duplex `response.cancel` for results that arrive on another thread; in wllama they arrive on the same thread through `get_result`, so every cancel would have blocked for the full 10 s. The PR says duplex was checked by hand with Hibiki-1B, too big for CI: the session streams audio and `response.cancel` returns in 1 ms. I did not run either path.
+
+The release also adds speculative decoding (MTP, DFlash, DSpark, Eagle3 or a smaller model of the same family), which the v4 guide says makes WebGPU generation about 1.2x faster and is "usually slower" on CPU, plus LoRA adapters, `saveSlotState()`, and downloads split over several connections that resume after an interruption.
+
+## On an x86 box from 2016, in headless Chrome
+
+The author's numbers come from one of the fastest laptop chips there is, on the ARM side of the relaxed-SIMD story. I wanted the other end: an Intel i7-6850K (Broadwell-E, 2016, AVX2, no AVX-512 and no VNNI) with 12 hardware threads and an RTX 3090. The harness serves both npm packages, `@wllama/wllama` 3.13.0 and 4.0.0, from a local server that sends COOP/COEP, and drives Chrome for Testing 158 headless through Playwright. Every run reloads the page, loads the model from the OPFS cache with `loadModelFromUrl()`, and runs one completion: the same fixed prompt (288 to 293 tokens, depending on the tokenizer), 64 generated tokens with `ignore_eos`, temperature 0, seed 42, `n_ctx` 1024, 6 threads, prompt cache off. The numbers are llama.cpp's own `timings`, the median of 3 runs, with the version order alternated each round. For a ceiling I built `llama-server` natively from the commit 4.0.0 pins, `0b51bb2`, once for CPU (`GGML_NATIVE`) and once with CUDA, and sent it the same prompt with the same settings.
+
+WebGPU was the gap. Headless Chrome on that box returned no adapter with the Vulkan flags, and only SwiftShader (`isFallbackAdapter: true`) through ANGLE's EGL path, so every browser number below is CPU only. I did not count a software rasteriser as "hybrid". The GPU rows are native CUDA, which is a different ceiling from WebGPU and is there only for scale.
+
+| Model | Version | Prompt tok/s | Generation tok/s |
+|---|---|---|---|
+| LFM2 350M Q4_K_M | wllama 3.13.0 | 36.54 | 21.23 |
+| | wllama 4.0.0 | 75.37 | 55.03 |
+| | native CPU | 579.97 | 122.45 |
+| LFM2.5 1.2B Q4_K_M | wllama 3.13.0 | 9.10 | 5.46 |
+| | wllama 4.0.0 | 20.80 | 13.60 |
+| | native CPU | 213.71 | 46.57 |
+| Qwen2.5-Omni 3B Q4_K_M | wllama 3.13.0 | 3.41 | 2.25 |
+| | wllama 4.0.0 | 6.70 | 5.13 |
+| | native CPU | 64.78 | 16.17 |
+| Gemma 4 E4B Q4_0, 4.59 GB | wllama 3.13.0 | fails to load | fails to load |
+| | wllama 4.0.0 | 8.69 | 2.29 |
+| | native CPU | 61.33 | 9.95 |
+
+<BenchBars />
+
+The release holds up in direction and roughly in size. v4 over v3 is 2.1x, 2.3x and 2.0x in prompt processing and 2.6x, 2.5x and 2.3x in generation (the 2.6x is noisy: v3's three LFM2 350M generation runs spread from 12.22 to 28.99 tok/s), close to the author's 2.4x to 2.8x and 2.1x to 2.5x on the M5 Max. The relaxed dot product lowers to different instructions on this Intel chip and still pays. Greedy output was identical across the runs of each version, and differed between versions, which is expected with different kernels and a different llama.cpp.
+
+Gemma 4 E4B reproduced the size claim exactly. v3.13.0 failed with `RangeError: Invalid typed array length: 1163217991`, the error the author reports on Chrome. v4 logged "The model does not fit in one wasm instance, using 2 rpc workers", started two ggml-rpc servers and generated. Loading took 36 s from the OPFS cache, against 0.8 to 3.3 s for the smaller models: the slow rpc load path the author's own notes flag.
+
+The native column is the part the release does not show. On the same cores, native llama.cpp processed the prompt roughly 7x to 10x faster than wllama 4.0.0 and generated roughly 2x to 4x faster. Those are approximate, for a reason below. My reading of why the two gaps differ, which I did not profile: prompt processing is compute-bound matrix multiplication, where native code gets 256-bit AVX2 and ggml's repacked x86 kernels and the browser gets 128-bit wasm SIMD. Generation is closer to memory-bound, a pass over every weight per token, and a narrower vector unit matters less when both are waiting on DRAM. Against the RTX 3090 through CUDA it is no contest: LFM2.5 1.2B generates at 608.49 tok/s natively against 13.60 in the tab.
+
+Two caveats on my numbers. The box was not idle: the load average was 10.3 on 12 threads when the job started, and from the LFM2.5 runs onward `nvidia-smi` reported total GPU utilisation near 100% and rising memory use, none of it from these CPU-only runs. v3 and v4 alternated run by run, so their ratio is the solid result. The native runs came first, as one block, before that load appeared, so the native gap is approximate and probably flatters native somewhat, and the absolute browser tok/s are a floor. And the M5 Max runs these models about 8x faster than this Broadwell does in the tab (598 against 75 tok/s prefill on LFM2 350M), so "how fast is wllama" depends on the visitor's CPU more than on anything in the release.
+
+## Should you use it
+
+If you need a model to run on the visitor's machine, with no server and no install, wllama 4.0.0 is the version to start from, and upgrading from 3.x costs nothing: the API did not change, and the guide's migration section is mostly about what you can stop doing (splitting files into 512 MB chunks, passing a separate worker file to `setCompat`). The doubling is real on x86 as well as on Apple silicon. The size limit is gone in the sense that matters for a 4 to 8 GB quantized model.
+
+Be clear about what it costs. Without COOP/COEP on the page you get one thread and no workers, and those headers change how the rest of the page may load cross-origin images, scripts and iframes. A tab is still several times slower than the same library run natively, and on CPU alone a 3B model generating 5 tokens a second on a desktop is a demo, not a product. The release that matters most for real use is the GPU path: put the whole model on WebGPU when it fits, and treat hybrid and rpc workers as a way to load something rather than a way to run it fast. I would ship a 1B-class model on WebGPU with this today, and I would not ship anything that depends on the CPU path being quick.
+
+<Callout type="note">
+**What I ran and what I read.** Ran, on beast2 (Intel i7-6850K, RTX 3090, driver 580.126.09): both npm packages in headless Chrome for Testing 158 via Playwright, CPU only, three models plus Gemma 4 E4B; native `llama-server` at `0b51bb2` for CPU and CUDA. The harness is mine; wllama, llama.cpp and the models are third-party and ran on that server, not on my laptop. Read: the 4.0.0 tag (`CMakeLists.txt`, `src/utils.ts`, `src/wllama.ts`, `src/gguf-split.ts`, `src/video.ts`, `src/workers-code/rpc-transport.js`, `cpp/wllama-context.h`, `cpp/wllama-rpc-transport.cpp`, `cpp/wllama-video.h`, `README-dev.md`), the 3.13.0 `CMakeLists.txt`, `arch/wasm/quants.c` at `0b51bb2`, pull requests #331, #341, #347, #348, #352, #358 and #361, issues #299 and #338, and the post's replies. Not run: WebGPU, video input, realtime audio, Firefox and Safari.
+</Callout>
+
+## Related
+
+[llama.cpp v1.0.0](/articles/llama-cpp-v1) covers what the C API promise does and does not include; the commit wllama 4.0.0 pins, `0b51bb2`, is 278 commits past that tag. [LFM3-Omni-2B in a browser tab](/articles/lfm3-omni-webgpu) is the same idea from the Transformers.js side, with custom WebGPU kernels instead of ggml's. [Tiny browser models](/articles/tiny-browser-models) is the other end of the scale, and [decision models in llama.cpp](/articles/llamacpp-decision-models) explains the `/v1/systemone` path that wllama exposes as `createSystemOne`.
