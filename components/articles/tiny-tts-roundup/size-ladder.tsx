@@ -5,6 +5,8 @@ import { useState } from "react"
 import { mlog10 } from "@/lib/dmath"
 
 // Small TTS models on one log axis. Every number is from a primary file:
+//   - Verba-TTS-Indic-Zero: initializers of the four ONNX graphs its demo serves (1,849,298 elements, 40 of
+//     them normalisation buffers), 7,580,214 bytes in all, per the demo's manifest.json (added 23 Nov).
 //   - tiny-voca: model card table (4,537,291 parameters by component), tiny-voca.pt 18.2 MB fp32.
 //   - Kitten TTS 2 Mini: safetensors header of kitten_tts_2_mini.safetensors (81,763,410 elements,
 //     grouped by top-level module), kitten_tts_2_mini.onnx 82,711,386 bytes (int8 weights).
@@ -35,6 +37,21 @@ type Row = {
 }
 
 const ROWS: Row[] = [
+  {
+    id: "verba",
+    name: "Verba-TTS-Indic-Zero",
+    params: 1_849_258,
+    bytes: 7_580_214,
+    fmt: "fp32 ONNX, four graphs",
+    hl: true,
+    parts: [
+      { label: "FARGAN vocoder step", n: 746_325 },
+      { label: "text encoder and duration predictor", n: 733_889 },
+      { label: "autoregressive feature decoder (weights)", n: 298_772 },
+      { label: "FARGAN conditioning network", n: 70_272 },
+    ],
+    partsNote: "The back 44% has FARGAN's layer shapes, the vocoder Opus uses. No weights download, card or licence; read from the demo's graphs.",
+  },
   {
     id: "tinyvoca",
     name: "tiny-voca",
