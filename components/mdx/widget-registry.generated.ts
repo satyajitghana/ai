@@ -1116,6 +1116,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "nfsmw-web-port/load-waterfall": () => import("@/components/articles/nfsmw-web-port/load-waterfall"),
   "nfsmw-web-port/port-placer": () => import("@/components/articles/nfsmw-web-port/port-placer"),
   "nfsmw-web-port/wasm-explorer": () => import("@/components/articles/nfsmw-web-port/wasm-explorer"),
+  "nopeworld-non-penetrating-world-models/candidate-fan": () => import("@/components/articles/nopeworld-non-penetrating-world-models/candidate-fan"),
+  "nopeworld-non-penetrating-world-models/route-tracks": () => import("@/components/articles/nopeworld-non-penetrating-world-models/route-tracks"),
   "nous-hermes-moa/moa-cost": () => import("@/components/articles/nous-hermes-moa/moa-cost"),
   "nous-hermes-moa/moa-network": () => import("@/components/articles/nous-hermes-moa/moa-network"),
   "nous-hermes-moa/moa-roundtable": () => import("@/components/articles/nous-hermes-moa/moa-roundtable"),
