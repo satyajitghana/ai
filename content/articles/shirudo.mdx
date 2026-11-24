@@ -1,0 +1,198 @@
+---
+title: "Shirudo: signed eBPF shields for a running kernel, with the agent left outside the repo"
+description: "OpenAI and Cisco open-sourced Shirudo, a Linux runtime in which agents write eBPF controls that block an exploit while a service keeps running. I read the source at commit 154afee. The repository holds no agent: it is the trusted delivery path an agent's code has to pass through. A shield is a few lines of BPF C on an LSM hook; shirudo compiles it into a signed in-kernel loader (ML-DSA-87), a BPF LSM of 48 programs refuses every other bpf() load even from root, each load and unload extends a TPM register, and a signed, digest-bound unload directive takes it back out. Approval is whoever holds the signing key; the correctness of a shield is out of the threat model. Two widgets play the repo's own Copy Fail shields against a workload and walk a load through its phases. The costs: a bpf-next kernel with five unmerged patches, a TPM, and no Cilium or Tetragon on the same host."
+date: 2026-11-24
+tags:
+  - security
+  - agents
+  - sandboxing
+  - infrastructure
+  - open-source
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Reads Shirudo from the source: what a shield is, how a load is signed, gated and measured, who approves it, and where the agent story stops."
+topic: security
+kind: tool
+level: practitioner
+runsOn: cpu
+licence: BSD-2-Clause
+---
+
+import { ShieldPicker } from "@/components/articles/shirudo/shield-picker"
+import { LoadGate } from "@/components/articles/shirudo/load-gate"
+
+OpenAI [announced Shirudo](https://x.com/OpenAI/status/2124980590717911527) on 23 November as "an open-source Linux runtime allowing agents to defend systems without downtime. It lets agents write dynamic eBPF controls to shield systems from exploits, giving defenders more time to test and roll out patches." Greg Brockman [reposted it](https://x.com/gdb/status/2124985602722676794) as a runtime "to empower defenders to defend systems at machine speed without downtime." Cisco built it with them, through Isovalent, the team behind Cilium and Tetragon.
+
+<Figure
+  src="/articles/shirudo/fig1.jpg"
+  alt="A box diagram. At the top, 'Guardian agent'. An arrow labelled OBSERVE comes up into it from a box 'Generated eBPF instruments' (supported kernel and network hooks, per-process system calls, new signal on demand, insert new detection logic, generate as needed). An arrow labelled ACT goes down to a box 'Generated eBPF controls' (block a vulnerable action, scoped precise mitigation, generate as needed). Both boxes sit on a wide bar, 'Programmable kernel and network (eBPF)'."
+  caption="The picture in the announcement: an agent that writes its own instruments to observe and its own controls to act, both as eBPF. Keep it in mind; the repository holds the bottom bar and the path into it, not the agent at the top (image from @OpenAI's post on X, also in the OpenAI blog post)."
+/>
+
+I read the repository at commit `154afee` (24 November), its documentation tree, the shields it ships under `upatches/`, the [OpenAI post](https://openai.com/index/introducing-shirudo/) and the [Isovalent post](https://isovalent.com/blog/post/cisco-openai-shirudo/) by Thomas Graf and Liz Rice. I did not run it. A target needs a kernel and a TPM my machines do not have, and its own unit tests need clang 23, OpenSSL 3.5 and tpm2-tss 4, which I could not install without root on the one Linux box I had.
+
+<RepoCard repo="shirudo-dev/shirudo" note="Read at 154afee (24 November 2026). Shields: upatches/kernel-cve/, upatches/java-base64/, upatches/app-sandbox/. The load path: Documentation/start/how-it-works.rst and internals/signed-loader.rst. The threat model: Documentation/security/threat-model.rst." />
+
+The first thing to know is what is in the tree. The README calls shirudo "a BPF-based security platform for Linux. After boot-time initialization, it restricts BPF program loads from userspace to signed loaders." Its `AGENTS.md` describes one plain-C binary with two roles: an operator host that holds an ML-DSA-87 signing key and builds signed artifacts, and a target that verifies, loads and measures them and "is agentless: no daemon, no listening socket." There is no agent loop in it, no model call, no Codex integration. The agent in the announcement writes code; shirudo is what that code has to get through before it touches a kernel. That makes it a more interesting piece of engineering than the headline suggests, and a less autonomous one.
+
+## The gap a shield fills
+
+The OpenAI post puts the problem in one sentence: "Testing and deploying a patch can still take days or weeks. Protecting a service in the meantime can be challenging because an exploit and a legitimate request may rely on the same Linux operation." Blocking the operation takes the service down with the attacker.
+
+Linux already has a way to change a running kernel: livepatch. shirudo's `concepts/comparisons.rst` is careful about the difference. A live patch is a kernel module that redirects a function to a replacement through ftrace. It can carry the actual fix, but it is native code that no verifier checks, built for one kernel build, and not measured into the TPM. A shirudo upatch (the project's word for a shield, short for "µpatch" or "micropatch") "cannot replace a function body." It can refuse a call before the function runs, observe, or filter. In exchange the verifier checks it, CO-RE lets one artifact load on more than one kernel build, and every load is measured. The docs suggest using both: a upatch blocks the path until a live patch or a fixed kernel lands, then a signed unload removes it.
+
+So a shield is a bet that you can find a narrow condition, checkable at some hook, that the exploit needs and real traffic does not. That is the hard part, and it is the part they want an agent for.
+
+## Where a BPF program can stand
+
+eBPF lets you load small programs into the kernel and attach them to points where the kernel calls out. The verifier checks each program before it runs: bounded loops, memory accesses it can prove safe, only the helpers its program type allows. It bounds one run of a program. It says nothing about whether the program does the right thing.
+
+The attach point decides what a program can do. `upatches/write/attach-kinds.rst` lists what `shirudo build` accepts:
+
+- `lsm/<hook>`: a BPF program on a Linux Security Module hook (`socket_create`, `file_open`, `bprm_check_security` and the rest). A negative return refuses the operation. This is where shields enforce.
+- `fentry/` and `fexit/`: run at a kernel function's entry or return, with its arguments (and at exit, its return value). Cheap, BTF-typed, good for counting.
+- `fmod_ret/`: change a function's return value. The pitfalls page says not to enforce here: "A run the kernel skips returns nothing, and the call goes through as if the program had returned 0", and another task can arrange that skip on purpose. "Refuse an operation in an `lsm` program, which the kernel runs every time its hook is reached."
+- `kprobe/`, `kretprobe/`, `kprobe.multi/`: attach to almost any kernel symbol, at a cost, and only with `CONFIG_KPROBES`. `bpf_override_return()` from a kprobe needs `CONFIG_BPF_KPROBE_OVERRIDE`.
+- `uprobe/<path>:<function>`: the same for a userspace binary, pinned to the binary's GNU build ID.
+- `tp_btf/`, `cgroup_skb/`, `netfilter`, `xdp/`: tracepoints and the network path.
+
+Seccomp, the other filter people reach for, is not on that list. A seccomp filter is classic BPF, installed per process with `prctl` or `seccomp()`, and it never goes through `bpf()`. shirudo's interoperability page says so plainly: classic BPF "does not go through `bpf()` and is not affected." It is a tool a process applies to itself; a shield is applied to the whole machine from outside. The [Claude Code sandbox teardown](/articles/claude-code-sandbox-internals) walks through a real seccomp program if you want to see the other side.
+
+## Copy Fail, shielded three ways
+
+The best way into the design is the one kernel CVE the repo ships actual blocks for. CVE-2026-31431, "Copy Fail", is in the kernel's `AF_ALG` sockets, the interface that lets userspace use kernel crypto. The comment at the top of the repo's shield explains the bug: "The algif_aead copy-failure path writes back into its source scatter-gather pages; the bug is reachable only when those pages are foreign ones aliased into the AF_ALG socket by a zero-copy splice (MSG_SPLICE_PAGES), never when the data was copied in by an ordinary sendmsg." Splice a file's page-cache page into an AEAD socket, make the decrypt fail, and the kernel scribbles on a page it does not own.
+
+`upatches/kernel-cve/sources/cve-2026-31431-crypto-algif-aead-copy-fail/` holds a reproducer, a detector and two mitigations. The blunt one is the whole program, minus includes:
+
+```c
+// mitigation/cve-2026-31431-af-alg-block.bpf.c
+SEC("lsm/socket_create")
+int BPF_PROG(cve_2026_31431_af_alg, int family, int type, int protocol,
+	     int kern)
+{
+	if (family == AF_ALG)
+		return -EPERM;
+	return 0;
+}
+```
+
+It removes `AF_ALG` from the machine. The precise one waits until a send and looks at its flags:
+
+```c
+// mitigation/cve-2026-31431-alg-splice-block.bpf.c
+SEC("lsm/socket_sendmsg")
+int BPF_PROG(cve_2026_31431_alg_splice, struct socket *sock,
+	     struct msghdr *msg, int size)
+{
+	if (BPF_CORE_READ(sock, sk, __sk_common.skc_family) != AF_ALG)
+		return 0;
+	if (BPF_CORE_READ(msg, msg_flags) & MSG_SPLICE_PAGES)
+		return -EACCES;
+	return 0;
+}
+```
+
+Its comment says why it stops there and not somewhere narrower. The operation and algorithm "live in the crypto module's private af_alg_ctx, which carries no BTF, so a shield cannot read them without hard-coded offsets." The zero-copy flag lives in `struct sock` and `struct msghdr`, which do have BTF, "so this is the narrowest condition a CO-RE shield can enforce." That sentence is the whole craft in miniature. The ideal shield would refuse only a failing AEAD decrypt over spliced pages. The one you can actually write portably refuses every splice into `AF_ALG`, and a few honest workloads pay for it.
+
+The detector refuses nothing. It marks an `AF_ALG` socket in socket-local storage when a send carries `MSG_SPLICE_PAGES`, and at `fexit/aead_recvmsg` it counts every AEAD operation in an `activity` map and, for a marked socket whose operation failed, one `hits`. Its comment admits that a hit "over-approximates to any error on a splice-fed op, which is the narrowest the generic return value allows." Run the detector first and you learn whether anyone on your fleet splices into `AF_ALG` before you decide which block to ship.
+
+<ShieldPicker />
+
+Pick each shield in turn. "Block AF_ALG" stops the exploit and every legitimate use of the socket family with it. "Block splice" stops the exploit and one honest pattern (hashing a file by splicing it), and leaves copying sends alone. The detector leaves the exploit landing and tells you it happened. The workload rows are mine; the rules are the programs'.
+
+The reproducer prints one word, and the live-patching guide shows the shield flipping it. Before: `SPLICE_OK`. After the operator appends the splice block to the tree and the target syncs (the guide says at most 10 seconds on the test VM): `SPLICE_BLOCKED`. "The upatch refuses the splice in an LSM hook, and every other use of the socket goes on as before. The kernel is the one that booted."
+
+## What an agent writes, and what it gets to touch
+
+The Isovalent post describes the agent loop, with Codex as "the control plane". It finds or is handed a vulnerability, generates a reproducer and validates the exploit, evaluates "the most effective mitigation point (eBPF, Java runtime, ...)", validates the mitigation and repeats "until a successful mitigation is found." The shield is then signed and rolled out: "This particular step can be designed to be more or less autonomous." Afterwards the hit counters show exploitation attempts. The post argues agents should write code rather than policy: "Instead of limiting agents to what a human-oriented policy language defines, agents must be able to develop mitigations at machine speed with code." Shirudo, it says, "has its roots in Tetragon, rewritten for the agentic era."
+
+The CVE directory looks like the output of that loop: a reproducer, a detector, two mitigations, Beefiles whose tree selector loads the shield only where `CONFIG_CRYPTO_USER_API_AEAD` is `y` or `m`. The `manifest.json` beside them reads like pipeline output too. It lists three detector shields for three other CVEs, each with `"health_status": "passed"`, `"status": "loaded_health_passed"` on kernel `7.2.0-shirudo-7.2`, and `"predicate_status": "source_derived_unvalidated"`. They loaded and the host stayed healthy. Whether they detect the bug is marked unvalidated, and I take the label at its word.
+
+<Figure
+  src="/articles/shirudo/fig3.png"
+  alt="A terminal UI titled ShirudoDev. A menu on the left: SBOM, Nodes, Shields, Deployment, Explore, Agent (selected). Status bars: Security 100%, App health 86%. The main pane is a Codex session 'querying through xtop': it lists edge-sfo-01 as bad and k8s-worker-sfo-04 as healthy, runs a SQL query against tree_ops, and concludes that edge-sfo-01 is blocked by a TPM measurement failure at operation 16 on shield openssh-cve-2026-63361 v3, that it cannot repair the TPM, and that the only supported action is reboot. A task panel on the right shows 'may: reboot_node' and 'actions (2 done, 0 refused)'. An agent log runs along the bottom."
+  caption="The agent console from the Isovalent post: Codex answers through xtop's queries 'with your keys and RBAC, no credentials, shell or net', and its one permitted action is reboot_node. The repo's tools/xtop has Nodes, Shields and SBOM views; the Agent, Deployment and Explore panes shown here are not in the public tree (Isovalent blog, Cisco and OpenAI introduce Shirudo)."
+/>
+
+What stands out in that screenshot is how little the agent may do: queries through `xtop`, and `reboot_node`. When it finds a node stuck on a refused TPM measurement, it says it cannot repair the TPM and stops. That is the right instinct for an agent near a kernel. It also lives in a tool you cannot download.
+
+What the repository does give an agent is a skill. `.agents/skills/upatch/SKILL.md`, which Codex reads from `.agents/skills/` and Claude Code through a `.claude/skills` link, tells an agent how to write a shield well: CO-RE only, "never a hard-coded struct offset, which signs fine and is refused by the verifier on another kernel", enforce in `lsm` and never in `fmod_ret`, attach to "the narrowest hook that sees the event, `tp_btf`, `fentry` or `lsm` rather than `kprobe`", count in per-CPU maps, measure the cost with `kernel.bpf_stats_enabled=1` before shipping, and ask which preemption model the target kernels use before writing anything that shares state. It is a good checklist for a human too.
+
+A reply under Brockman's post linked [msolnik/runtime-vuln-mitigation](https://github.com/msolnik/runtime-vuln-mitigation), a Claude Code plugin from July that does the agent half of this for userspace: research a CVE, reproduce it, write a [bpftime](https://github.com/eunomia-bpf/bpftime) "virtual patch" that runs in-process, verify the exploit is blocked. Its README says it has been exercised mainly on one nginx CVE. It is a useful contrast: it has the loop and none of the signing, gating or measurement. Shirudo is the reverse. The other link in the replies, `Mavericksantander/praetore`, is an unrelated authorization library.
+
+## Signing a program the kernel rewrites
+
+Signing BPF sounds simple until you notice that the bytes you build are not the bytes the kernel checks. libbpf rewrites an object while loading it: it patches in map descriptors, resolves CO-RE relocations against the target's BTF, resolves kernel symbols. A signature over the built instructions would not match.
+
+The kernel's signed-BPF design, which shirudo builds on, signs a loader instead. `shirudo build` compiles the shield with clang and has libbpf generate a `BPF_PROG_TYPE_SYSCALL` program that performs those load steps inside the kernel, with the shield's instructions, map values and BTF as its data. It appends signed sections the loader never reads but the target decides on (the name, the attach metadata, an unload digest, Lua decoders, policy labels), signs "the loader instructions followed by the data with the operator's ML-DSA-87 key", and writes a `.upatch` file. A post-quantum signature is not small: the overhead page gives 8.4 KiB for a upatch with one small program, 4,627 B of it the signature. The live-patching guide's build log for the splice block prints `insns=992 sig=4853 data=39256`; I assume the extra 226 bytes over 4,627 are the CMS envelope, which the docs do not spell out.
+
+<Figure
+  src="/articles/shirudo/fig2.png"
+  alt="Two large panels. Operator machine (holds the private signing key): BPF source, then shirudo-build (clang to libbpf gen_loader to CMS sign), then .upatch (signed loader plus payload), then .bee package (Beefile manifest, bpm build, bpm push), and a note that the private signing key never leaves this host. In the middle, an OCI registry (signed index plus digests) with push and pull arrows and a note that shirudo implements no transport, no fleet state, no registry of its own. Target machine (holds only the public certificate): in userspace a one-shot shirudo CLI run by systemd timers; in the kernel CMS signature verification against the sealed shirudo keyring, the BPF LSM admission gate (lsm/bpf, lsm/bpf_prog_load) with unsigned BPF from userspace denied, the signed loader executing, links and maps pinned in a private bpffs, and a TPM2 NV-extend chain measuring every state transition."
+  caption="The operator and target split. Only the operator host holds the signing key; the registry is untrusted storage; the target's kernel does the checking (Isovalent blog, Cisco and OpenAI introduce Shirudo)."
+/>
+
+On the target the load is a sequence of phases, and `reference/failure-categories.rst` names each and every way it can stop. `shirudo upatch load` copies the loader's data into an array map, freezes it, and makes it usable only by a loader whose instructions hash to a named SHA-256. Then `BPF_PROG_LOAD` with the signature and the `.bpf` keyring. The kernel checks one signature over the instructions and the frozen map before its verifier runs. Two of shirudo's own BPF LSM programs bracket that check: `lsm/bpf` admits a userspace program load only for a signed `BPF_PROG_TYPE_SYSCALL` program, and `lsm/bpf_prog_load` only when the kernel recorded the signature as verified against that keyring. The loader then runs in kernel context, loading each shield program through the verifier. shirudo attaches each one from userspace, compares the link the kernel reports with the site the signed metadata names, pins it in a private BPF filesystem, archives the artifact for the next boot, and extends the TPM register.
+
+<LoadGate />
+
+Two of those cases matter more than the rest. "Root calls `bpf()` with its own program" is not a shirudo command failing; it is the gate that makes the rest mean anything. The security model names its main adversary as "root on the target without the signing key: a compromised administrator account, a container escape, a persistence implant." Capabilities do not stop root, so shirudo does not rely on them. Authority comes only from executing a file on a dm-verity image whose root hash the signed kernel image pinned. The other is the TPM case. If the archive copy or the extension fails, "shirudo undoes the load rather than leave it unmeasured."
+
+The measurement is what makes the fleet auditable. The register starts at zero each boot and depends only on the trusted certificates, the upatches restored at boot, the tree position and the events since, "so the operator can compute it without the target's history." `shirudo attest --nonce` returns a TPM quote and a TPM certification of the register; `shirudo attest verify` on the operator host replays the eventlog to the certified value and compares it with what `attest predict` says the shipped artifacts should produce. The docs are blunt about telemetry: a keepalive "is still the target's own account", and only the TPM-signed evidence is evidence.
+
+## Who approves, and how a shield comes back out
+
+The OpenAI post says "Once an operator approves the shield, it can be deployed while the service continues running" and "Security teams control what gets deployed." In the code, approval has one concrete form: the signing key. Whoever holds the operator's ML-DSA-87 key decides what loads. Delivery is pull-based. The operator pushes a `.bee` package to an OCI registry and appends an `add` operation to a signed upatch tree; targets run `shirudo bpm tree sync` from a systemd timer every minute and apply the operations whose selectors match them. There is no push channel, no SSH, no fleet state, and `AGENTS.md` tells contributors not to add any. An agent with no access to the key can propose, test in a VM and open a pull request. It cannot ship.
+
+That puts the whole safety case on the human at the key and on testing, because the threat model's out-of-scope list includes "The correctness or safety of a upatch an authorized signer built." The ADV-F entry, for a compromised or revoked key, is unsentimental: "A upatch does what its author wrote, disabling enforcement included." The overhead page adds that shirudo bounds neither how many programs a upatch brings nor how often they run, and "A badly written upatch can slow the target down or use much of its memory." The verifier keeps a shield from crashing the kernel. Nothing keeps it from refusing your database's `connect()`.
+
+The OpenAI post also says teams "can monitor how a proposed shield would affect applications before enforcing it." I found no audit or monitor-only mode for an enforcing program in the tree. What exists is the pattern above: ship a detector upatch first, read its maps through `shirudo upatch map` (exported every 5 seconds to an OpenTelemetry collector if one is configured), then ship the block. A upatch can also carry a `shirudo_test__<id>` program that runs once after attach, with a negative return failing the load. Those are tools for a careful operator, not a dry-run switch.
+
+Rollback is designed as carefully as the load. `shirudo build --unload <name> --payload-sha256 <digest>` builds a signed unload directive bound to one build of one shield. On the target, the directive's loader is loaded only so the kernel verifies its signature, and never runs. shirudo then compares the signed digest with the one recorded on the shield's pin directory and refuses with `payload_mismatch` if they differ, "so a directive removes the exact build its signer made it for and nothing else." The unload is measured before the pins go, so an interrupted unload leaves a register "that records more than happened, never a detach the register does not know." In a tree, removal is a `delete` appended to a log that only grows. The guide's final step runs the reproducer again after the delete and gets `SPLICE_OK` back.
+
+## The Java shield is a different mechanism
+
+The headline demo in both posts is not eBPF. The OpenAI post: "Using OpenAI's Codex, the team generated a shield that added an input check to Java's Base64 decoder and attached it directly to a running Elasticsearch process." The Isovalent post shows the Elasticsearch 9.5.5 log line, `Base64 guard rejected candidate: length=65, padding=1, remainder=1, alphabet=standard`, logged on 18 November. The shield is `upatches/java-base64`, a `java.lang.instrument` agent that rewrites `java.util.Base64$Decoder.decode0` with the JDK Class-File API.
+
+shirudo signs Java agents too, but its signed path reaches a JVM only at startup. `java-agents.rst`: the target verifies the jar, seals it under `/run/shirudo-java/`, and writes a `-javaagent` option into `JAVA_TOOL_OPTIONS` through `environment.d`. "A JVM reads `JAVA_TOOL_OPTIONS` when it starts. One already running keeps the agents it started with until it restarts." For a running JVM, the package README gives a second way in: "the same jar attaches to a running process: `java -jar java-base64.jar <pid>`." That is Java's own dynamic attach, outside shirudo's loader, keyring and register. The Elasticsearch log shows the guard installed on the `Attach Listener` thread, which is that path. So the no-restart demo used the unmeasured route, and the measured route needs a restart. Both are real and useful. They are not the same claim.
+
+The docs are honest about the weaker boundary either way: "An agent does what Java code in the JVM can do: it is a mitigation inside the application, not a boundary the kernel enforces. A BPF upatch is the tool for a policy that root must not be able to step around."
+
+The third shipped shield, `app-sandbox`, is the one closest to this site's usual subject. It is a BPF LSM upatch that confines every task that executed a labelled binary, and its children, in what they may execute, which networks they may connect to, and which file names they may create, rename or write. It ships sandboxes for Apache and PHP-FPM against two PHP advisories, and the index page names "LLM agents" among the things to confine with it. Compared with [Anthropic's sandbox-runtime](/articles/sandbox-runtime) or [OpenShell](/articles/openshell), it is coarser per process, and root cannot detach it, because the policy is a signed, measured kernel program and not a wrapper the agent's own user started. Its README is careful about the other direction: a sandbox "is not a boundary against root outside the sandbox."
+
+## What it costs to run
+
+"Without downtime" has a prerequisite with downtime in it. From `operate/plan/system-requirements.rst`: "The target runs a bpf-next kernel with the signed-loader ABI," and "shirudo has no compatibility mode and no fallback for an older kernel." The test kernel reports `7.4.0-rc1-bpf-next+`. `internals/kernel-patches.rst` lists five carried patches (a TPM command LSM hook, xattr reads and more sleepable inode hooks for BPF LSM programs, a trusted `d_parent`, a remote-mm check) that are not in bpf-next at commit `57fae4059380`. Add a TPM 2.0, Secure Boot with a signed unified kernel image, and module signature enforcement. A fleet gets there by rebooting into a new kernel, once. After that, shields come and go without restarts.
+
+The second cost is everyone else's BPF. On an enforcing target, `interoperability.rst` says Tetragon and Falco's eBPF drivers "cannot load their programs", and "A network plugin built on BPF cannot run." That includes Cilium, on a project co-built by Cilium's own team. The advice is to ship what those tools do as upatches, or keep them off enforcing hosts. For a Kubernetes node today that is a large ask.
+
+The runtime cost is small, and documented with its method: the overhead page measured commit `ba550c6` in a QEMU/KVM guest with 4 vCPUs on a Ryzen 9 3950X, a software TPM (swtpm), and the kernel's own BPF statistics.
+
+| What shirudo adds | Figure from `operate/plan/overhead.rst` |
+|---|---|
+| Guards in the kernel | 48 BPF LSM programs on 39 hooks; 28,281 B JIT-compiled; 196 KiB of locked memory |
+| `fork()` and `execve()` of `/bin/true` | 3.2 µs of BPF time |
+| Open, read and close a file | 0.15 µs |
+| Create, write, rename, unlink a file | 0.65 µs |
+| `mmap()` | 37 ns |
+| Timers on an idle target | 0.43 s of CPU per minute, 0.71 % of one vCPU (with a 5 s keepalive, since changed to 60 s) |
+| One small signed upatch | 8.4 KiB on disk, 29.7 MiB peak RSS while loading |
+
+Those are the guards and the timers, before any shield of your own. A shield on `socket_sendmsg` runs on every send on the machine; the skill's advice to return early on the cheapest test is not decoration.
+
+## What I think
+
+The part of Shirudo that exists is good. The signed-loader path, the gate on `bpf()` that holds against root, the measured register with offline verification, the digest-bound unload, and a threat model that lists its own residual risks by number: this is the trusted path that agent-written kernel code was always going to need, and I have not seen it done this carefully in the open. The Copy Fail shields show the craft in two files, including the honest note about why the precise shield cannot be more precise.
+
+The agent part is a demo and a direction. The loop, the console and the permission model in the screenshots are not in the repo. The shipped detectors are marked unvalidated. The Java demo that carries the headline ran through the path shirudo does not sign. None of that is hidden; it takes reading the docs rather than the posts to see it.
+
+If you run a fleet on stock distribution kernels, there is nothing to deploy yet. Read `security/threat-model.rst` anyway: it is a good template for any system that lets an agent change production. If you build agent tooling, the lesson I would take is the one the design encodes: let the agent write all the code it likes, and make the signing key the only door. If you can run the VM quickstart, the live-patching tutorial is the fastest way to see a shield go in and come out.
+
+**How I checked.** I read the source and docs at `154afee` and the three posts. Every quote above is from those files. The overhead and per-hook numbers are the project's own measurements. The widget rules come from the three BPF programs in `upatches/kernel-cve/sources/`; its traffic rows are illustrative. I ran nothing from the repository.

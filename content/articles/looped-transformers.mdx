@@ -1,0 +1,347 @@
+---
+title: "Looped transformers: Inkling 2 Mini and GLM-5.4 run the same layers more than once"
+description: "In one week two labs shipped looped transformers. Thinking Machines' Inkling 2 Mini stores 24 layers and runs its middle twelve three times, so a token passes through 48 layers from a 26.4B-parameter file. Z.ai's GLM-5.4 retrofits a loop onto its 750B GLM-5 base, running 28 layers twice. This page explains the mechanism from the config and the GGUF header up: what a loop buys (depth without parameters), what it costs (weight reads and KV cache, every pass), why it is the opposite trade to a mixture of experts, how you train one from scratch or bolt it onto a trained model, what changes when you turn the loop count at inference, and what Thinking Machines found when it asked whether looping hides reasoning from a chain-of-thought monitor. The 'laptop architecture' claim gets checked against the bytes: Mini is a looped MoE, and the loop saves 14.7 GB of storage at Q4 while adding nothing to per-token reads that an untied model would not also pay."
+date: 2026-11-24
+tags:
+  - looped-transformers
+  - mixture-of-experts
+  - inference
+  - on-device
+  - interpretability
+draft: false
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 2
+  why: "Unrolls Inkling 2 Mini from its config and GGUF header, prices the loop in bytes against MoE, and reads GLM-5.4's retrofit and the monitorability study."
+topic: llm-architecture
+kind: model
+level: practitioner
+runsOn: consumer-gpu
+licence: Apache-2.0
+---
+
+import { LoopUnroll } from "@/components/articles/looped-transformers/loop-unroll"
+import { MemoryCompute } from "@/components/articles/looped-transformers/memory-compute"
+import { LoopDial } from "@/components/articles/looped-transformers/loop-dial"
+
+A normal transformer runs each of its layers once per token. A looped transformer stores a block of layers once and runs it several times, feeding the block its own output. The idea is old: [Universal Transformers](https://arxiv.org/abs/1807.03819) shared one layer across depth in 2018, and the recent line runs through [recurrent depth](https://arxiv.org/abs/2502.05171) and a stack of 2026 scaling papers this site has covered ([SMELT](/articles/looped-transformers-matched-compute), [LOOM](/articles/loom-looped-moe), [what separates Ouro from Huginn](/articles/looped-models-done-right)). Small open looped models have shipped before: [Nanbeige4.2-3B](/articles/nanbeige-4-2-3b) loops twice, and NVIDIA's [Dory1.0-4B](/articles/nemotron-dory) runs one 20-layer block up to four times. What changed this month is scale and intent: a frontier lab built its small model around a loop, and Z.ai put one in its flagship.
+
+- **Inkling 2 Mini**, from Thinking Machines on 20 November, open weights under Apache 2.0. 26.4B parameters, 3.4B active, "5.4B weight activations per token to account for looping" ([launch post](https://thinkingmachines.ai/news/inkling-2-mini/), [model card](https://huggingface.co/thinkingmachines/Inkling-2-Mini)). Its middle twelve layers run three times.
+- **GLM-5.4**, from Z.ai on 23 November, which the lab calls "our first loop transformer". It loops 28 layers of the GLM-5 base model twice, at 750B scale ([Z.ai's blog](https://z.ai/blog/glm-5.4)). The weights are not out; the post says they will follow "after completing necessary safety hardening".
+
+[Inkling 2 Small](/articles/inkling-2-small#20-november-inkling-2-mini-runs-its-middle-twelve-layers-three-times) has a short section on Mini's facts and a search leaderboard's view of it. This page is the long one: the mechanism, the cost in bytes, the two ways to train a loop, and the loop count as a dial.
+
+## One block, many passes
+
+Write a transformer as a stack of functions. Layer $\ell$ takes the residual stream $x$ and returns $x + f_\ell(x)$. With $L$ layers, a token's hidden state goes through $L$ distinct functions, and the model stores $L$ sets of weights.
+
+A looped model splits the stack in three, the way the recent literature does:
+
+- a **prelude** that runs once and maps tokens into the model's working space,
+- a **core** whose weights are applied $P$ times,
+- a **coda** that runs once and maps back to logits.
+
+The hidden state after pass $p$ of the core is $s_p = \mathrm{Core}(s_{p-1}, s_0)$, where $s_0$ is the prelude's output. Most designs feed $s_0$ back in on every pass (input injection) so a deep loop does not forget the token it started from. The depth a token sees is $L_\text{prelude} + P \cdot L_\text{core} + L_\text{coda}$. The parameter count is $L_\text{prelude} + L_\text{core} + L_\text{coda}$ layers' worth, whatever $P$ is.
+
+That is the whole trick: **effective depth without extra parameters**. What it buys is serial computation per token. A transformer can only do a fixed number of sequential steps before it must emit a token; looping raises that number without growing the file.
+
+What it costs is that the depth is real. Every pass multiplies the core's matmuls, re-reads the core's weights from memory and, unless the design shares caches across passes, writes a fresh set of keys and values. A loop is a model that is cheap to store and exactly as expensive to run as the unrolled one.
+
+Here is Inkling 2 Mini unrolled, from its released `config.json`. Drag the pass count.
+
+<LoopUnroll />
+
+Thinking Machines drew the same picture in its post:
+
+<Figure
+  src="/articles/looped-transformers/fig1.png"
+  alt="Diagram: a prelude stack of six layers on the left feeds three passes. Each pass runs blocks 2 and 3, drawn as two blue stacks. Arrows labelled Message carry each pass's output down to the next pass. After pass 3, the output goes to a final block of six layers that runs once."
+  caption="Inkling 2 Mini's loop: the prelude feeds every pass, and passes 2 and 3 also receive the previous pass's output, which the lab calls the message (Thinking Machines' Inkling 2 Mini post, Figure 5)."
+/>
+
+## Inside Inkling 2 Mini
+
+The config fills in what the post describes in prose. It has 24 layers at a hidden size of 2,304, 24 query heads and 8 key-value heads of 128 dimensions, and a 128-expert MoE in every layer with 8 routed per token and no shared expert (`n_routed_experts` 128, `num_experts_per_tok` 8, `n_shared_experts` 0). The loop is one small object:
+
+```json
+"loop_config": { "core_start": 6, "core_end": 18, "num_passes": 3, "gate_rank": 64, "is_varloop": false }
+```
+
+Layers 6 to 17 are the core. Attention alternates five sliding-window layers (1,024 tokens) with one global layer, so the global layers are 5, 11, 17 and 23: two in the core, two outside it. That matters for the cache, below.
+
+Three design choices are worth reading closely.
+
+**Which layers to loop.** The post's reasoning is that middle layers "carry more abstract reasoning", while the first and last translate between embeddings and internal representations. It tested that: looping the middle twelve beat looping the last twelve on 27 of 28 evaluations. At training step 2,000 the no-loop baseline would have needed 1.51 to 1.91 times the compute to match the middle loop's loss, against 1.24 to 1.36 times for the last loop.
+
+<Figure
+  src="/articles/looped-transformers/fig9.png"
+  alt="Two horizontal ranges. Middle layers (7 to 18): 1.51 to 1.91 times. Last layers (13 to 24): 1.24 to 1.36 times. The axis runs from 1 to 2 times."
+  caption="Compute-equivalent gain from looping the middle twelve layers against the last twelve, three passes each, equal training compute (Thinking Machines' Inkling 2 Mini post, Figure 4)."
+/>
+
+**How passes talk to each other.** Mini uses attention residuals: instead of one running residual sum, each layer reads the outputs of earlier blocks and learns its own mix of them (`n_layers_per_attn_res_block` 6 in the config). Every pass starts from the prelude's output. Passes 2 and 3 also read the previous pass's output of the middle blocks, "the message", through a learned gate (the config's `loop_config` carries a `gate_rank` of 64, which I take to be that gate's rank; the post does not say). The gate "initially blocks the entire message", so each loop starts out behaving like a non-looped model, and the gain opens during training. The post says this "allows us to introduce looping during training in a stable manner"; it does not say at which step the loop was introduced.
+
+**What it bought.** The ablation in the post compares an unpruned looped model against the unpruned non-looping model on the same scaling ladder: the non-looping model "cost 7.5% less compute to train, but required 140% more inference compute to match the looped version's loss on 512k-token agentic traces". I read that as the clearest single number for the trade. Training the loop costs a little. The model it produces does per token what a model with more than twice the inference compute would.
+
+Mini is also pruned. It started training with 384 experts per layer and 8 routed; "at a single point during midtraining" the lab kept the 128 most-used experts per layer, deleted the rest, and healed the model on 1T tokens distilled from a larger internal Inkling. Most of the weights were trained and ship in NVFP4, the last four layers in MXFP8, about 20 GB in all. Post-training was SFT, then RL over 2.2T tokens and 2,000 steps.
+
+The card's accounting of active parameters follows from that: 3.4B active at one pass, and each extra pass through the core adds about 1.0B effective active parameters, so three passes make 5.4B per token.
+
+## The loop is the opposite trade to a mixture of experts
+
+One of the reposts that sent me here put it bluntly:
+
+<Video
+  src="/articles/looped-transformers/clip1"
+  poster="/articles/looped-transformers/clip1-poster.jpg"
+  alt="Two animated panels. Top, Mixture of experts, tagged Datacenter: a wide grid of grey expert cells with two lighting up per token, a long black Memory bar and a short Compute bar. Bottom, Looped transformer, tagged Laptop: a small block with a loop arrow marked times N, a short Memory bar and a Compute bar that fills as the loop runs."
+  caption="Memory against compute for a mixture of experts and a looped transformer, as drawn in the post that called MoE 'a datacenter architecture' and loops 'a laptop architecture' (video from @zhengyaojiang's post on X)."
+/>
+
+His argument: "MoE trades memory for compute: huge weights, but only a few active per token. That works with big batches and big GPUs. On your laptop the batch size is 1 ... Looped transformers make the opposite trade: reuse the same weights, spend more compute, need far less memory."
+
+The direction of each trade is right. A mixture of experts stores many parameters and touches few per token. A loop stores few and touches them several times. The framing breaks on the model it was posted about: **Inkling 2 Mini is both.** It is a 128-expert MoE, and it loops. The useful question is what each half contributes on a machine that decodes one sequence at a time.
+
+At batch 1, memory bandwidth sets a ceiling on decoding: every generated token streams the weights it uses through the memory bus. Real runtimes land well under that ceiling (Unsloth's table, below, has one GPU decoding the same 4-bit file at 81 or 125 tokens per second depending on the build), but the ceiling is what the architecture controls. So two quantities matter, and they are different:
+
+- **bytes held**: the file, which has to fit in RAM or VRAM;
+- **bytes read per token**: what the bus moves for each token, which sets the speed ceiling.
+
+I read the tensor table out of the header of Unsloth's `UD-Q4_K_M` GGUF (16.61 GB, the mainline-layout file) by HTTP range request and split it by layer group. The six prelude and six coda layers hold 0.361 GB of attention and other dense weights and 7.899 GB of experts. The twelve core layers hold 0.475 GB dense and 6.880 GB of experts. The embedding table and the output head are 0.492 GB each.
+
+For one token at three passes, the bus reads the once-run dense weights, 8/128 of the once-run experts, the output head, and then three times the core's dense weights plus 8/128 of its experts. That is 1.347 + 0.905 × 3 = 4.06 GB per token, by my arithmetic. At one pass it would be 2.25 GB.
+
+Now the counterfactuals, all at the same quantization:
+
+| Design | Held | Read per token, batch 1 |
+|---|---|---|
+| Inkling 2 Mini, 3 passes | 16.6 GB | 4.06 GB |
+| Untied twin: 48 distinct layers, same 48 applications | 31.3 GB | 4.06 GB |
+| Mini forced to 1 pass | 16.6 GB | 2.25 GB |
+| A dense model with Mini's file size | 16.6 GB | 16.1 GB |
+
+Read the rows in pairs. **Mini against its untied twin** isolates the loop: same compute, same per-token reads, and the loop saves 14.7 GB of storage. **Mini against the dense model** isolates the MoE: same storage, and the experts cut per-token reads by a factor of four. The laptop story needs both. The loop gets the file under a laptop's RAM; the MoE gets per-token traffic low enough to be fast once it is there.
+
+<MemoryCompute />
+
+The batch slider shows the datacenter side. With uniform routing, a batch of 32 sequences touches 87% of each layer's experts per step, so the step reads almost the whole file, but that read is shared across 32 tokens. That is why big MoE models want big batches. A loop does not benefit the same way: its extra reads are per pass, and every pass re-reads the core's dense weights however big the batch. The routing assumption in the widget is a simplification; real routers concentrate on popular experts, so the touched fraction grows more slowly.
+
+The speed ceilings are bandwidth divided by bytes. At 936 GB/s, NVIDIA's listed memory bandwidth for the RTX 3090, Mini's ceiling is about 230 tokens per second at three passes and 415 at one. Thinking Machines' own coding chart plots "theoretical tokens per second" the same way, at 614 GB/s with BF16 weights and batch size 1, "including repeated reads across loops": 54.4 for Mini against 11.4 for the dense Qwen3.8-27B. That gap is the MoE, not the loop.
+
+So where does "laptop architecture" land? The memory claim holds for the loop as a storage trick. The compute claim needs one correction: the loop is paid for in reads per token, and at batch 1 reads set the speed ceiling. Mini spends 80% more bytes per token for its second and third passes than it would at one (4.06 against 2.25 GB). The bet is that those passes buy more than the tokens they cost, which is what the next sections test, and what the 3090 sweep at the end is built to measure. And the architecture does not stay on laptops: GLM-5.4 loops a 750B model.
+
+Thinking Machines' own demo is the laptop case. Its researchers ran Mini offline on a 48 GB MacBook Pro on a flight and had it build a flight simulator:
+
+<Video
+  src="/articles/looped-transformers/clip2"
+  poster="/articles/looped-transformers/clip2-poster.jpg"
+  alt="A browser window titled Plane Sim showing a low-poly aircraft flying over green and brown hills under a blue sky, with an inset camera view of a laptop on an airline seat tray running the same simulator."
+  caption="The end of the lab's airplane-mode demo: the flight simulator Mini wrote, running on the MacBook Pro (M5 Pro, 48 GB) it was written on. The original plays at up to 15 times real time (Thinking Machines' Inkling 2 Mini post)."
+/>
+
+## What fits where
+
+The post says Mini supports "any Mac system (MacBook, Mac Mini) with at least 32GB RAM via Ollama" at launch. Unsloth's quoted post says it "runs on 16GB RAM". Both can be true, at different quantizations. Unsloth's own table lists every quant against its 8-bit `UD-Q8_K_XL` reference (22.87 GB):
+
+| Quant | Size | Mean KLD vs Q8_K_XL | Same top token |
+|---|---|---|---|
+| UD-IQ1_S | 7.76 GB | 0.0911 | 89.4% |
+| UD-Q2_K_XL | 9.14 GB | 0.0595 | 91.6% |
+| UD-Q3_K_XL | 13.63 GB | 0.0174 | 96.3% |
+| UD-Q4_K_M | 16.61 GB | 0.0108 | 97.9% |
+| UD-Q4_K_XL | 17.63 GB | 0.0107 | 98.0% |
+
+On a 16 GB machine, with the OS and a KV cache to hold as well, the realistic files are the 2-bit and 3-bit ones, where one token in twelve to one in twenty-seven differs at the top from the 8-bit file. The 4-bit files want 24 GB or more. A 24 GB RTX 3090 holds `UD-Q4_K_M` with room for a long cache.
+
+The loop also has a cache cost that the parameter count hides. In llama.cpp's `inkling2_loop` implementation, according to the GGUF card ggml-org published for the variable-loop model, "each pass keeps its own KV and convolution cache". Mini's four global attention layers become eight global layer applications at three passes (layers 5 and 23 once, 11 and 17 three times). At 8 KV heads of 128 dimensions in F16, that is 4 KiB per application per token, so 32 KiB per token: 4 GiB at a 131,072-token context, twice what the same model without a loop would need. The sliding-window layers add a fixed 160 MiB. This is my arithmetic on the config, and it assumes llama.cpp's per-pass layout; the post does not say how Thinking Machines' own serving stack handles the cache.
+
+That cost is exactly what Z.ai engineered around.
+
+## Retrofitting a loop: GLM-5.4
+
+Z.ai did not train GLM-5.4 from scratch. Its reasoning, from the blog: "while weight sharing improves parameter efficiency, looped models trained from scratch still lag behind unshared models under the same pre-training compute budget. Instead of pre-training from scratch, we adapted an already pre-trained base model into a Loop Transformer through continued training."
+
+<Figure
+  src="/articles/looped-transformers/fig5.png"
+  alt="Block diagram. Input embedding feeds a prelude of layers 1 to 26. Loop pass 1 runs layers 27 to 54 and ends in Damp Gate 1, x1 = x0 + beta1 (h1 minus x0). A per-layer cache of KV latent and top-k indices, k = 2048, feeds loop pass 2, which runs the same layers 27 to 54 with shared weights, no indexer, and two-bank sparse MLA over the pass-1 prefix plus a 128-token pass-2 sliding window, ending in Damp Gate 2. A coda of layers 55 to 78 leads to a final RMSNorm and the LM head."
+  caption="GLM-5.4: a 26-layer prelude, layers 27 to 54 run twice with shared weights and damped gates, a 24-layer coda. Pass 2 reuses pass 1's sparse KV and top-k indices and keeps only its own 128-token window (Z.ai's GLM-5.4 blog, architecture figure)."
+/>
+
+The diagram shows three changes, which the post describes as made "to balance performance gains with deployment costs at the 750B scale".
+
+**Gated progressive updates.** Looping the middle of an already trained network and overwriting its hidden state "causes activation norms to blow up across iterations", and the layers downstream receive inputs outside the range they were trained on. So each pass writes back through a per-token gate: $x_p = x_{p-1} + \beta_p (h_p - x_{p-1})$. With $\beta$ near zero the loop is a no-op and the network is the one it was trained as; Mini's message gate, closed at initialization, does the same job. Z.ai reports the trained gates split the work: the first pass writes conservatively with small gates, the second "opening the gates to write full updates", and harder tokens get larger first-pass writes.
+
+**Hybrid KV cache.** Instead of a full cache per pass, the second pass attends over the first pass's sparse KV plus its own sliding window. "As a result, an extra loop only costs one sliding window of KV cache rather than a full context cache." Against the 2x global cache in the llama.cpp layout above, this is the difference that matters at a 1M-token context.
+
+**Sparse index reuse.** GLM-5's sparse attention has an indexer that picks which past tokens each query attends to. The second pass reuses the first pass's indices, which the post says "performs nearly identically to recomputing indices on every pass".
+
+The evidence for the loop is a controlled ablation on a 30B model "with the exact same architecture as our 750B base": identical parameter counts and "only ~10% more total training compute".
+
+<Figure
+  src="/articles/looped-transformers/fig6.png"
+  alt="Table with columns Benchmark, Baseline, plus Loop, Improvement and Average length change. AIME25 19.17 to 30.42, plus 11.3, minus 635 tokens (minus 2%). GPQA-Diamond 47.58 to 56.26, plus 8.7, minus 2,473 tokens (minus 11.7%). AA-LCR 40.33 to 47.67, plus 7.3, minus 539 tokens (minus 9.7%). MMLU-Pro 71.65 to 75.05, plus 3.4, minus 863 tokens (minus 14.9%). IFBench 50.20 to 53.47, plus 3.3, minus 763 tokens (minus 13.0%)."
+  caption="GLM-5.4's iso-parameter ablation on a 30B model after long-context SFT, thinking on: the looped model scores higher on all five benchmarks and writes shorter answers (Z.ai's GLM-5.4 blog, ablation table)."
+/>
+
+Two things in that table I would want checked. First, it is one 30B run against one baseline, with no seeds or intervals. Second, if the 30B model mirrors the 750B layout, "~10% more compute" for a model that runs 28 of 78 layers twice is less than the 36% more forward compute the extra layer applications would cost if the loop ran from the start of training, which fits continued training: the loop is only paid for during the retrofit. The length column is the other result: output 2% to 15% shorter, which the post reads as "part of the reasoning shifts from explicit output tokens into the implicit depth of the loop". Thinking Machines found the same thing, below.
+
+Nothing about GLM-5.4 beyond the blog can be checked yet. "Intelligence levels comparable to 2T-3T parameter models" has no table behind it in the post. There are no weights, no config and no API.
+
+## Why retrofit, and why two loops
+
+[The Benefit of Looping Twice](https://xjxyys.github.io/blog/looping-twice/) turned up in the replies to Z.ai's announcement on X. It is a blog post by researchers at HKU and Yale on their scaling study, [Truncate or Not?](https://arxiv.org/abs/2610.26030). It is not Z.ai's work, and nothing in it describes GLM-5.4, but it explains the retrofit argument with numbers.
+
+Its scaling law, fitted to nearly 600 training runs, prices a loop in effective parameters: $N_\text{eff} = N_\text{once} + g(T, B)\,N_\text{rec}$, where the recurrent block counts $g$ times for $T$ forward loops trained through $B$ of them. Two fully trained loops make the block worth $g(2,2) \approx 1.91$ copies of itself, and $g$ saturates at about 3.0 however many times the block loops. Finite weights store finite information.
+
+The compute side is the plain count: a looped model trains like a model with $N_\text{once} + \frac{T+2B}{3} N_\text{rec}$ parameters. Since the loop always costs at least what it is worth, **at fixed training compute the best model has no loop**. Z.ai's reason for not training from scratch says the same thing in one line. What a loop buys instead is a discount on parameters, paid for in compute:
+
+<Figure
+  src="/articles/looped-transformers/fig7.png"
+  alt="Scatter plot of parameter reduction rate against training compute to reach the same loss, relative to no looping. (1, 1), no looping, sits at zero. A thick line rises to (2, 2) at about 32% for barely more compute, labelled two fully trained loops: most of the parameter saving with little extra compute. A dashed full-backpropagation curve continues through (4, 4), (8, 8) and (16, 16), flattening near 50% at over four times the compute. Truncated settings such as (4, 1), (8, 1) and (16, 1) sit below it."
+  caption="At the loss of the best unlooped model, every loop setting costs some training compute and saves some parameters; two fully trained loops are the knee of the frontier (HKU and Yale's The Benefit of Looping Twice, Figure 5, from arXiv 2610.26030)."
+/>
+
+| Loops (full backprop) | Extra training compute | Parameters saved |
+|---|---|---|
+| 2 | +3.1% | 31.6% |
+| 4 | +43% | 43.3% |
+| 8 | +138% | 47.8% |
+| 16 | +334% | 49.6% |
+
+Two loops save a third of the parameters for 3% more training compute; sixteen save half for more than four times the compute. In the paper's dense experiments, a 344M looped model beats the best 471M unlooped model at 8% more compute. In mixture-of-experts models, sharing the experts across two passes matches the untied twin with 17% fewer parameters for 9% more compute per token.
+
+Put the two releases on that frontier. GLM-5.4 loops twice: the knee. Mini loops three times, past it. Its own ablation compares three passes against none, so it says the loop as a whole paid off in inference compute; it does not price the third pass on its own. These are different bets. A two-pass loop is a cheap parameter discount; a three-pass loop on a small model is buying serial depth for reasoning.
+
+The blog post's closing sentence is the framing I'd keep: "A loop therefore moves the cost of a model from memory to computation. That trade pays whenever the parameters, rather than the training compute, are the binding budget." On a laptop, parameters are the binding budget. At 750B in a datacenter, the binding budget is KV memory at long context, and that is why Z.ai's three engineering changes are all about the cache and the indexer.
+
+## Turning the dial at inference
+
+Inkling 2 Mini runs exactly three passes. Thinking Machines also released a research checkpoint that can run a different count: [TML-d24-varloop-research](https://huggingface.co/thinkingmachines/TML-d24-varloop-research). Its card: it shares pretraining and the first stage of midtraining with Mini; for the rest of midtraining it ran 1 to 5 passes "sampled in a 1:2:6:2:1 ratio"; then it was post-trained at 3. Three passes dominated, so "performance at other pass counts may understate what models trained specifically at those counts could achieve". Its config is Mini's with `is_varloop: true`.
+
+In llama.cpp the count is a GGUF key. ggml-org's [GGUF of the research model](https://huggingface.co/ggml-org/TML-d24-varloop-research-GGUF) documents it:
+
+```bash
+llama serve -hf ggml-org/TML-d24-varloop-research-GGUF:IQ4_NL \
+  --override-kv inkling2_loop.loop.count=int:2
+```
+
+It accepts 1 to 6, fixed at load time. Mini's own GGUF carries the same `inkling2_loop.loop.count = 3` key, with `loop.varying = False`; overriding it there runs the model at a depth it never trained at.
+
+The card's table runs the research model at every count from 1 to 5. A selection:
+
+<LoopDial />
+
+Three patterns stand out.
+
+**One pass is a different model.** DeepSWE goes from 0.7% at one pass to 47.4% at three. ARC-AGI-2 goes from 0.8% to 22.1%. The core was trained to be run more than once, and running it once leaves the model short of depth it relies on.
+
+**Most of the gain is in by three.** DeepSWE is 47.4%, 46.9% and 48.2% at three, four and five passes. GPQA Diamond peaks at three (84.2%). The exceptions are long-context retrieval, MRCR v2 at 256K to 512K, which climbs to 93.4% at four, and ARC-AGI-2, which reaches 27.1% at five.
+
+**Knowledge does not move.** SimpleQA Verified is 6.3% at one pass and 6.7% at five. The post says it directly: "looping improves the model's reasoning, it doesn't enable its weights to store more facts". Extra passes are compute, and recall lives in parameters.
+
+The post's own probe of serial depth is cleaner than any benchmark. N-Hop Lookup gives the model several tables of fictional entries and asks it to chain lookups with no chain of thought; five options, so guessing scores 20%.
+
+<Figure
+  src="/articles/looped-transformers/fig2.png"
+  alt="Line chart of accuracy against number of hops, 1 to 10, for 1, 2, 3, 5 and 10 passes. At 1 pass, accuracy falls from 91.6% at one hop to 15.5% at four. Each extra pass shifts the curve right: 3 passes scores 95.1% at three hops and 65.9% at four; 10 passes scores 89.2% at four hops and 43.4% at six, near chance from seven hops on."
+  caption="N-Hop Lookup with no chain of thought: each extra pass lets the variable-loop model follow a longer chain, out to ten passes, twice what it was trained with (Thinking Machines' Inkling 2 Mini post, Figure 7)."
+/>
+
+From the chart's own data labels: at three hops, accuracy is 33.6% at one pass, 70.9% at two, 95.1% at three and 99.2% at ten. At six hops, three passes are near chance (23.8%) while ten passes still score 43.4%. Ten passes help on this task even though the model never trained past five.
+
+## Does a loop hide its reasoning?
+
+This is the part of the release I think matters most beyond the model itself. A chain-of-thought monitor works because a standard transformer can only do so many serial steps per token, so a long computation has to be written out where it can be read. A loop raises that limit. If a looped model can think more without writing it down, a CoT monitor sees less of what it does.
+
+Thinking Machines measured three things with the variable-loop model.
+
+**How much more it can do silently.** On Think Fast, which estimates the length of task (in human seconds) a model completes at 50% reliability with no chain of thought, the no-CoT time horizon rises from 16 seconds at one pass to 26 at two and 37 at three, then flattens: 42 at five, 40 at ten.
+
+<Figure
+  src="/articles/looped-transformers/fig3.png"
+  alt="Dot plot with 95% intervals. Inkling 2 Mini at 3 passes: 41 seconds. TML-d24-varloop-research: 16 seconds at 1 pass, 26 at 2, 37 at 3, 42 at 5, 40 at 10. The intervals are wide, spanning roughly 0 to 60 seconds."
+  caption="No-CoT time horizon by pass count. More passes do let the model do more without writing anything, and the gain stops after three (Thinking Machines' Inkling 2 Mini post, Figure 6)."
+/>
+
+The intervals are wide (Mini's runs from 3 to 59.4 seconds), so I read this as a direction, not a size.
+
+**Whether the written reasoning gets worse.** It gets shorter. On GPQA Diamond questions the model answered correctly at every count, mean reasoning was 3,703 tokens at one pass, 1,731 at three and 1,661 at five. Legibility did not change: 8.9, 8.7 and 8.7 words per sentence, and 94.6%, 94.5% and 94.4% of words in an English dictionary. What dropped was hedging: "wait", "actually" and "hmm" fell from 9.7 to 3.9 to 3.6 per answer. The post's worked example is a calendar question answered in 582 reasoning tokens at one pass with mistakes and backtracking, and in 240 at five passes, reaching the same answer by the same calculation.
+
+<Figure
+  src="/articles/looped-transformers/fig4.png"
+  alt="Two scatter plots of accuracy against mean reasoning tokens on a log scale. GPQA Diamond: the 1-pass points sit lowest, 61.4% to 71.4% at 5,343 to 12,083 tokens; the 3- and 5-pass points reach 77.5% to 84.1% at 2,082 to 7,157 tokens. DeepSWE v1.1: 1-pass points at 0% to 0.2%; 2 passes 20.4% to 29.9%; 3 and 5 passes 32.5% to 49.5%."
+  caption="Accuracy against reasoning tokens at 1, 2, 3 and 5 passes: more passes reach higher accuracy with fewer written tokens, with diminishing returns after three (Thinking Machines' Inkling 2 Mini post, Figure 8)."
+/>
+
+GLM-5.4's table shows the same shift from text into depth: 10% to 14% shorter outputs on most benchmarks. Two labs, two designs, one effect.
+
+**Whether it can evade a monitor.** Two tests. CoT-Control-QA asks a model to reshape its chain of thought to satisfy a constraint, such as never mentioning a keyword from the question. Among CoTs of 750 to 1,250 tokens, Mini and the research model at three passes complied at most 0.1% of the time, against 0.3% for Inkling 2 Small, 0.4% for Inkling-Small and 1.3% for Qwen3.8-27B. All of these are tiny, so the test cannot separate pass counts.
+
+LinuxArena asks a model to complete a malicious side task during a real software task without a monitor noticing. With a weaker monitor (Qwen3.6-35B-A3B, threshold set for a 1% false positive rate, 184 task pairings) that sees only tool calls and outputs, the research model's stealth rate was 1.0%, 2.5%, 4.0%, 2.8% and 5.0% at one to five passes. With the reasoning visible to the monitor, it was 0.3%, 0.4%, 0.6%, 0.3% and 0.0%. The post says there is "no clear trend with the number of looped passes".
+
+I'd stop short of "looping is safe for monitoring". The study is careful about its own limits: RL ran at three passes only, so "a model trained with RL at a higher pass count ... might compress its reasoning more aggressively", and this is a 26B model. What it does show is that, at this scale, a loop shortens the visible reasoning by removing backtracking rather than by hiding steps, and that the tool-call-only stealth numbers (1.0% to 5.0%) are the ones to watch as loops get deeper. Visible reasoning brought every count to 0.6% or below. That is the argument for keeping chain-of-thought visible to the monitor, stated in data.
+
+## Running it: the GGUFs, the forks and the 1.9x
+
+The two GGUF layouts are a trap worth knowing about. Unsloth's root files use its own looped layout and need Unsloth Studio or Unsloth's llama.cpp prebuilts. The `Mainline_Support/` folder holds the same tensors "byte for byte" in the `inkling2_loop` layout that mainline [llama.cpp](https://github.com/ggml-org/llama.cpp) reads, renamed `.gguf_file` so tools do not mix them up. Its README has the warning I would put in bold: builds older than b12611 "lose the per-expert NVFP4 scales on the second and third passes through the looped layers and give wrong output (perplexity about 130 instead of 7.65)". A loop bug only shows from pass two onwards, which is why a model can load, run and talk nonsense.
+
+```bash
+hf download unsloth/Inkling-2-Mini-GGUF \
+  --include "Mainline_Support/Inkling-2-Mini-UD-Q4_K_M.gguf_file" --local-dir mini
+mv mini/Mainline_Support/Inkling-2-Mini-UD-Q4_K_M.gguf_file mini/Inkling-2-Mini-UD-Q4_K_M.gguf
+./build/bin/llama-server -m mini/Inkling-2-Mini-UD-Q4_K_M.gguf --jinja -ngl 99 -c 32768 \
+  --temp 1.0 --top-p 1.0 --top-k 0 --min-p 0.0
+```
+
+The sampling settings are the ones both cards recommend. Reasoning effort is a chat-template variable from `none` (0.0) to `max` (0.99); the model card warns that the minimum "does not fully disable reasoning".
+
+Unsloth's post says "We made Inkling 2 Mini run ~1.9x faster locally" and "125 tokens/s on a RTX Pro 6000". Those are two different rows of its own table. On the RTX PRO 6000 Blackwell, its new build decodes `UD-Q4_K_XL` at 125.24 tokens per second against 81.35 for mainline b12649: 1.54x. On a B200 the ratio is 1.63x, on an A100 1.49x, on an L4 1.20x. The 1.87x figure is an AMD Ryzen AI Max on Windows, comparing Unsloth's b12631 build with mainline. "Up to 1.9x" is accurate. "1.9x" on an NVIDIA card is not what the table shows. "No accuracy loss" is supported for the layouts (Unsloth's mainline and root files reach perplexity 7.653 and 7.651) and is not a claim about quantization: the 4-bit files differ from 8-bit on the top token about one time in fifty.
+
+### On a 3090
+
+I wrote a job for beast2's RTX 3090 (24 GB) that builds mainline llama.cpp and fetches Unsloth's prebuilt, then runs two models one at a time:
+
+- Inkling 2 Mini, `UD-Q4_K_M` (16.61 GB): `llama-bench` prompt processing and generation on both builds, VRAM, wikitext-2 perplexity, and a fixed eval of 120 no-CoT N-hop lookups, 32 closed-book multiple-choice questions and 30 GSM8K problems at reasoning effort 0.2.
+- The research model's `IQ4_NL` (17.63 GB) at 1 to 6 passes through `--override-kv`, with the same speed, perplexity and eval at each count, and the KV buffer at a 65,536-token context for 1, 3 and 5 passes.
+
+The N-hop set mirrors the lab's probe at hops 1 to 8. The closed-book questions are there to stay flat. On 24 November the job was queued behind other runs on the box. This page will be updated with its numbers when it finishes. Until then, every speed and score above is the lab's, Unsloth's, Z.ai's or my arithmetic on the configs and headers.
+
+## The reception
+
+Mini was the top trending model on Hugging Face the day after launch, with Unsloth's GGUF second, [Clem Delangue posted](https://x.com/ClementDelangue/status/2124209139337331158). Arena's [Agent Arena Index](https://x.com/arena/status/2124981167279546382) placed it 18th among open models and third among U.S. open-weight models, at 996 points against Inkling 2 Small's 1117 and Inkling-Small's 873, with a median cost per task of 0.15 dollars against 0.21 for Small. On Arena's Tool Use Index it is 18 points behind a model 22 times its size. For a 26.4B file, that is the result I find most convincing, because it is a third party's and it is about agentic work, which is what the loop was for.
+
+## Where I land
+
+A loop is a storage trick with a compute bill. It gives a model depth it does not have to store, pays for that depth in reads and cache on every token, and does nothing for knowledge. That makes it a good fit for exactly the case Thinking Machines built for: a reasoning-heavy, tool-using model that has to fit in 20 GB and can look facts up.
+
+The "MoE is datacenter, loop is laptop" line is half right. Mini needs its MoE as much as its loop: the experts are why it reads 4 GB per token instead of 16. And GLM-5.4 shows the loop is not a laptop thing: at 750B, Z.ai used it to buy depth cheaply on a model it had already trained, and spent its engineering on making the second pass cheap in cache rather than in parameters.
+
+What I would watch next is the dial. [Dory1.0-4B](/articles/nemotron-dory) already lets you pick its loop count at load time; TML-d24-varloop-research is the first model at this capability level where you can, and it was trained for it. Either way, you choose how hard the model thinks per token, independently of how long it thinks in text. Z.ai says it is working on "adaptive compute so harder tokens dynamically get more iterations". When that ships, the loop count stops being an architecture constant and becomes an inference setting, like reasoning effort, and the monitorability question stops being academic.
+
+<ModelCard repo="thinkingmachines/Inkling-2-Mini" note="24 layers, hidden 2,304, 128 experts with 8 routed; loop_config core_start 6, core_end 18, num_passes 3, gate_rank 64 (config.json). 26.4B total, 3.4B active, 5.4B per token with looping (model card). NVFP4, last four layers MXFP8. Apache-2.0." />
+
+<ModelCard repo="thinkingmachines/TML-d24-varloop-research" note="Mini's architecture with is_varloop true; midtrained at 1 to 5 passes in a 1:2:6:2:1 ratio, post-trained at 3. A research artifact, not for production (model card)." />
+
+<ModelCard repo="unsloth/Inkling-2-Mini-GGUF" note="Root files in Unsloth's looped layout; Mainline_Support/ holds the same tensors for mainline llama.cpp b12611 or later. UD-Q4_K_M is 16.61 GB: 16.6 GB of tensors, of which the loop core is 7.36 GB (read from the GGUF header)." />
+
+<ModelCard repo="ggml-org/TML-d24-varloop-research-GGUF" note="Pass count set at load with --override-kv inkling2_loop.loop.count=int:N, 1 to 6. IQ4_NL is 17.6 GB: IQ4_NL experts in layers 0 to 19, everything else Q8_0 (README)." />
+
+<RepoCard repo="ggml-org/llama.cpp" note="The inkling2_loop architecture and the loop.count GGUF key; per-pass KV and convolution caches." />
+
+<RepoCard repo="unslothai/llama.cpp" note="Unsloth's fork, with the prebuilts its 1.54x to 1.87x decode table compares against mainline." />
+
+Related on this site: [Mixture of Experts, from scratch](/articles/mixture-of-experts-from-scratch) builds the router and the expert layer that Mini's loop re-runs; [Inkling 2 Small](/articles/inkling-2-small) covers Mini's 594B sibling; [A 200 GB MoE on one RTX 3090](/articles/big-moe-one-3090) is the other answer to fitting a big model on small hardware, with the experts in system RAM; and [GLM-5.3](/articles/glm-5-3) covers the release GLM-5.4 follows.
+
+## How this was checked
+
+Read for this page on 24 November: Thinking Machines' Inkling 2 Mini post (text, tables and the figures' own data labels), the Mini and TML-d24-varloop-research model cards and `config.json` files, Z.ai's GLM-5.4 blog, the HKU and Yale blog post and its arXiv abstract, Unsloth's run guide and both GGUF READMEs, ggml-org's GGUF card for the research model, and the five posts on X through the fxtwitter mirror.
+
+Computed: the tensor sizes of `UD-Q4_K_M` by layer group, from the GGUF header fetched by HTTP range request (no weights downloaded), and from them the bytes held and read per token, the untied twin's size and the bandwidth ceilings. The KV sizes come from the config's head counts and layer pattern. Each ratio quoted from a table (Unsloth's 1.54x, the HKU frontier) is the source's own number or a division of two of them. The figures are rendered from the post's own chart markup, or downloaded from Z.ai's and the HKU blog's pages, and flattened onto white.
+
+Not run yet: the model. The 3090 job is described above and queued.
