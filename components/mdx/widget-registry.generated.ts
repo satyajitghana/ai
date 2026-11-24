@@ -1673,6 +1673,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "timestral/quantile-fan": () => import("@/components/articles/timestral/quantile-fan"),
   "tinfield-1/engram-lookup": () => import("@/components/articles/tinfield-1/engram-lookup"),
   "tinfield-1/score-lattice": () => import("@/components/articles/tinfield-1/score-lattice"),
+  "tiny-2-1-dos-transformer/memory-map": () => import("@/components/articles/tiny-2-1-dos-transformer/memory-map"),
+  "tiny-2-1-dos-transformer/speaker-voice": () => import("@/components/articles/tiny-2-1-dos-transformer/speaker-voice"),
   "tiny-browser-models/inference-cost-model": () => import("@/components/articles/tiny-browser-models/inference-cost-model"),
   "tiny-browser-models/size-capability-scatter": () => import("@/components/articles/tiny-browser-models/size-capability-scatter"),
   "tiny-tts-roundup/card-samples": () => import("@/components/articles/tiny-tts-roundup/card-samples"),
