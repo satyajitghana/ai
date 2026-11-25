@@ -1697,6 +1697,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "toks-tokenizer/merge-order": () => import("@/components/articles/toks-tokenizer/merge-order"),
   "toks-tokenizer/speed-cells": () => import("@/components/articles/toks-tokenizer/speed-cells"),
   "tools-and-papers-roundup-nov-24/alpha-loss": () => import("@/components/articles/tools-and-papers-roundup-nov-24/alpha-loss"),
+  "tools-and-papers-roundup-nov-25/frame-split": () => import("@/components/articles/tools-and-papers-roundup-nov-25/frame-split"),
   "torch-profiler/schedule-strip": () => import("@/components/articles/torch-profiler/schedule-strip"),
   "torch-profiler/trace-lanes": () => import("@/components/articles/torch-profiler/trace-lanes"),
   "torchtpu/dispatch-modes": () => import("@/components/articles/torchtpu/dispatch-modes"),
