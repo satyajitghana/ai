@@ -350,8 +350,8 @@ export function searchSnippetsPayload(query?: string) {
 
 // ── ask_satyajit (grounded RAG answer) ──────────────────────────────────────
 
-// Same grounded persona+corpus prompt as /api/chat and /api/ask, via the AI SDK
-// (OpenAI provider). Returns `json` on success so the answer is a clean payload.
+// Same grounded agent as /api/chat and /api/ask, via the AI SDK on Cloudflare
+// Workers AI (lib/chat.ts). Returns `json` on success so the answer is a clean payload.
 export async function askSatyajitPayload(question: string) {
   const { buildSystemPrompt, generateWithFallback, isChatOnline } = await import(
     "@/lib/chat"
@@ -362,13 +362,12 @@ export async function askSatyajitPayload(question: string) {
     )
   }
 
-  // Routed to a GPT-5.4-family model with fallback down the ladder, using the
-  // same small tool set as the site agent — it retrieves the pages it needs
-  // rather than reasoning over a corpus stuffed into the prompt.
+  // The same small tool set as the site agent: it retrieves the sections it
+  // needs rather than reasoning over a corpus stuffed into the prompt.
   const { text, model } = await generateWithFallback({
     question,
     system: await buildSystemPrompt(),
-    maxOutputTokens: 1024,
+    maxOutputTokens: 900,
   })
 
   return json({

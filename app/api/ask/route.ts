@@ -7,13 +7,12 @@ import {
   generateWithFallback,
   isChatOnline,
   offlinePayload,
-  routeTier,
 } from "@/lib/chat"
 import { ASK_LIMIT, clientKey, rateLimit, tooMany } from "@/lib/rate-limit"
 
 // ask_satyajit for other people's agents: POST {question} → {answer, model}.
-// Same grounded system prompt as /api/chat, non-streaming. The question is
-// routed to a GPT-5.4-family model and falls back down the ladder on error.
+// Same grounded agent as /api/chat (Cloudflare Workers AI, lib/chat.ts),
+// non-streaming, with a fallback model on error.
 export const maxDuration = 60
 
 const bodySchema = z.object({ question: z.string().min(1).max(4000) })
@@ -21,7 +20,7 @@ const bodySchema = z.object({ question: z.string().min(1).max(4000) })
 export function GET() {
   return Response.json({
     online: isChatOnline(),
-    model: chatModelId("mini"),
+    model: chatModelId(),
     usage: 'POST {"question": "..."} → {"answer": "...", "model": "..."}',
   })
 }
@@ -48,11 +47,11 @@ export async function POST(req: Request) {
     const { text, model } = await generateWithFallback({
       question: parsed.data.question,
       system: await buildSystemPrompt(),
-      maxOutputTokens: 1024,
+      maxOutputTokens: 900,
     })
-    return Response.json({ answer: text, model, routed: routeTier(parsed.data.question) })
+    return Response.json({ answer: text, model })
   } catch (error) {
-    // Upstream (OpenAI) failure after exhausting the fallback chain.
+    // Upstream (Workers AI) failure after exhausting the fallback chain.
     const message = error instanceof Error ? error.message : String(error)
     return problem({
       code: "bad_gateway",

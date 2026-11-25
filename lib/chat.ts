@@ -1,15 +1,15 @@
-import { createOpenAI } from "@ai-sdk/openai"
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import {
   generateText,
   stepCountIs,
   streamText,
   tool,
+  type LanguageModelUsage,
   type ModelMessage,
 } from "ai"
 import { z } from "zod"
 
 import { profile } from "@/data/profile"
-import { getAllContent } from "@/lib/content"
 import { contentMarkdown, dataPageMarkdown } from "@/lib/markdown"
 import { searchContent } from "@/lib/search"
 import { siteUrl } from "@/lib/site"
@@ -17,140 +17,133 @@ import { siteUrl } from "@/lib/site"
 // Shared chat plumbing for /api/chat (streaming), /api/ask (one-shot), and the
 // MCP ask_satyajit tool.
 //
-// PROVIDER: routed through the Vercel AI SDK (`@ai-sdk/openai`). A small router
-// picks one of the OpenAI GPT-5.4 family (nano / mini / 5.4) per question, and
-// every call falls back down the ladder on error. Override the per-tier models
-// with CHAT_MODEL_NANO / CHAT_MODEL / CHAT_MODEL_MAIN and the key with
-// OPENAI_API_KEY.
+// PROVIDER: Cloudflare Workers AI through its OpenAI-compatible endpoint
+// (`@ai-sdk/openai-compatible`), so this runs from Vercel with no Workers
+// binding. Credentials: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (a token
+// with Workers AI read/run). Optional CLOUDFLARE_AI_GATEWAY_ID routes the calls
+// through an AI Gateway for logs, caching and rate limits. Swapping provider is
+// this one constructor: the routes and tools only see an AI SDK model.
 //
-// HARNESS: this is a small tool-using agent, not a corpus dump. Earlier the whole
-// content corpus rode inside the system prompt on every request; now the prompt
-// carries only a compact *catalog* (titles + slugs) and the agent pulls the bodies
-// it needs through tools. Three tools, deliberately few (cf. the pi coding agent's
-// "four tools are all you need"): search_content (BM25 retrieval), get_content
-// (fetch one page's markdown), and think (a reasoning scratchpad, per Anthropic's
-// "think tool"). Loading context on demand instead of upfront is the Kimi
-// dynamic-loading idea applied to *context*: fewer tokens per turn, and the model
-// sees only what's relevant to the question instead of the entire site.
+// MODELS: free-tier models only (Workers AI gives 10,000 Neurons a day on every
+// plan). glm-4.7-flash first (5,500 Neurons per M input tokens, tool calling,
+// 131K context), llama-4-scout as the fallback. Override with CHAT_MODEL /
+// CHAT_MODEL_FALLBACK.
+//
+// HARNESS, built to spend few tokens: the system prompt is a few hundred tokens
+// (no site catalog; search finds pages), get_content returns one section or an
+// outline instead of a whole page, MDX imports and widgets are stripped, the
+// history is trimmed, and the loop is bounded. Each request logs its token usage.
 
-// A mix of the OpenAI GPT-5.4 family, cheap → strong. A small router picks the
-// starting tier from the question (no extra LLM round-trip — just a heuristic),
-// and every call falls back down the ladder if a model errors (rate limit,
-// transient 5xx, access), so one bad model never takes the agent offline.
-export type ModelTier = "nano" | "mini" | "main"
+export const PRIMARY_MODEL = process.env.CHAT_MODEL ?? "@cf/zai-org/glm-4.7-flash"
+export const FALLBACK_MODEL =
+  process.env.CHAT_MODEL_FALLBACK ?? "@cf/meta/llama-4-scout-17b-16e-instruct"
 
-const LADDER = ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"] as const
+// search → read one or two sections → answer is 3-4 steps; 5 leaves one spare.
+export const AGENT_MAX_STEPS = 5
 
-const TIER_MODEL: Record<ModelTier, string> = {
-  nano: process.env.CHAT_MODEL_NANO ?? "gpt-5.4-nano",
-  mini: process.env.CHAT_MODEL ?? "gpt-5.4-mini",
-  main: process.env.CHAT_MODEL_MAIN ?? "gpt-5.4",
-}
+// A page section handed to the model is capped at this many characters
+// (about 2.5K tokens); longer pages come back as an outline to pick from.
+const SECTION_CHARS = 9000
+const WHOLE_PAGE_CHARS = 9000
+const OUTLINE_MAX = 60
 
-// The agent loop is bounded: search → read a page or two → (think) → answer is
-// ~4 steps; 6 leaves headroom without letting a confused run spin.
-export const AGENT_MAX_STEPS = 6
+// History: the last few turns are enough context; older assistant turns are
+// clipped hard, since the model can re-fetch anything it needs.
+const HISTORY_MESSAGES = 8
+const OLD_ASSISTANT_CHARS = 600
 
-// Data pages aren't in the content layer but are fetchable by the same tool.
 const DATA_PAGES = ["about", "resume", "health", "now", "uses", "reading"] as const
 
 export function isChatOnline(): boolean {
-  return Boolean(process.env.OPENAI_API_KEY)
+  return Boolean(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_API_TOKEN)
 }
 
-// The router: a cheap, deterministic heuristic. Short factual lookups go to
-// nano; comparative / explanatory / long or multi-part questions to the strong
-// model; everything else to mini. Deliberately not an LLM call — routing should
-// cost nothing.
-export function routeTier(question: string): ModelTier {
-  const q = question.trim()
-  const complex =
-    /\b(compare|compared|versus|vs\.?|why|how|explain|deriv|prove|trade-?off|differ|difference|relationship|walk through|architecture|design|reason|implication|nuance)\b/i.test(
-      q,
-    )
-  const multiPart = (q.match(/\?/g)?.length ?? 0) > 1 || /\band\b[^.?!]*\band\b/i.test(q)
-  if (q.length > 320 || (complex && multiPart)) return "main"
-  if (q.length < 90 && !complex) return "nano"
-  return "mini"
+export function modelChain(): string[] {
+  return PRIMARY_MODEL === FALLBACK_MODEL ? [PRIMARY_MODEL] : [PRIMARY_MODEL, FALLBACK_MODEL]
 }
 
-// The fallback chain for a tier: the routed model first, then the rest of the
-// ladder (deduped), so an error drops to the next-best model.
-export function modelChain(tier: ModelTier): string[] {
-  const start = TIER_MODEL[tier]
-  const chain = [start]
-  for (const m of LADDER) if (m !== start) chain.push(m)
-  return chain
+export function chatModelId(): string {
+  return PRIMARY_MODEL
 }
 
-export function chatModelId(tier: ModelTier = "mini"): string {
-  return TIER_MODEL[tier]
+// Created per call so importing this module never throws when the credentials
+// are absent (offline mode handles that).
+function provider() {
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID
+  const gateway = process.env.CLOUDFLARE_AI_GATEWAY_ID
+  return createOpenAICompatible({
+    name: "workers-ai",
+    baseURL: `https://api.cloudflare.com/client/v4/accounts/${account}/ai/v1`,
+    apiKey: process.env.CLOUDFLARE_API_TOKEN,
+    headers: gateway ? { "cf-aig-gateway-id": gateway } : undefined,
+    includeUsage: true,
+  })
 }
 
-// A configured LanguageModel for the AI SDK. Created lazily so importing this
-// module never throws when the key is absent (offline mode handles that).
-export function chatModel(tier: ModelTier = "mini") {
-  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  return openai(TIER_MODEL[tier])
+function logUsage(route: string, model: string, usage: LanguageModelUsage | undefined, steps: number) {
+  if (!usage) return
+  console.log(
+    `[chat] ${route} model=${model} steps=${steps} in=${usage.inputTokens ?? "?"} out=${usage.outputTokens ?? "?"} cached=${usage.inputTokenDetails?.cacheReadTokens ?? 0}`,
+  )
 }
 
-// ── router + fallback runners ─────────────────────────────────────────────────
+// Keep the last few messages; clip older assistant replies.
+export function trimHistory<T extends { role: string; content: string }>(messages: T[]): T[] {
+  const tail = messages.slice(-HISTORY_MESSAGES)
+  return tail.map((m, i) =>
+    m.role === "assistant" && i < tail.length - 2 && m.content.length > OLD_ASSISTANT_CHARS
+      ? { ...m, content: `${m.content.slice(0, OLD_ASSISTANT_CHARS)} …` }
+      : m,
+  )
+}
 
-// One-shot answer (/api/ask, MCP ask_satyajit): route by the question, then walk
-// the fallback chain until a model succeeds. Returns the answer and the model
-// that actually produced it.
+// ── fallback runners ──────────────────────────────────────────────────────────
+
 export async function generateWithFallback(args: {
   question: string
   system: string
   maxOutputTokens?: number
 }): Promise<{ text: string; model: string }> {
-  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  const chain = modelChain(routeTier(args.question))
+  const cf = provider()
   let lastErr: unknown
-  for (const id of chain) {
+  for (const id of modelChain()) {
     try {
-      const { text } = await generateText({
-        model: openai(id),
+      const { text, totalUsage, steps } = await generateText({
+        model: cf(id),
         system: args.system,
         prompt: args.question,
         tools: agentTools(),
         stopWhen: stepCountIs(AGENT_MAX_STEPS),
-        maxOutputTokens: args.maxOutputTokens ?? 1024,
+        maxOutputTokens: args.maxOutputTokens ?? 900,
       })
+      logUsage("ask", id, totalUsage, steps.length)
       return { text, model: id }
     } catch (err) {
       lastErr = err
-      console.warn(
-        `[chat] model ${id} failed, falling back:`,
-        err instanceof Error ? err.message : err,
-      )
+      console.warn(`[chat] model ${id} failed, falling back:`, err instanceof Error ? err.message : err)
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("all models failed")
 }
 
-// Streaming answer (/api/chat): route by `tier`, walk the chain, and only fall
-// back if a model errors *before* emitting any text — once tokens are on the
-// wire we can't safely restart, so a mid-stream error propagates. `onModel`
-// reports which model actually answered (first successful chunk).
+// Streaming: fall back only if a model errors before emitting any text; once
+// tokens are on the wire a mid-stream error propagates.
 export async function* streamWithFallback(args: {
-  tier: ModelTier
   system: string
   messages: ModelMessage[]
   maxOutputTokens?: number
   onModel?: (id: string) => void
 }): AsyncGenerator<string> {
-  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  const chain = modelChain(args.tier)
+  const cf = provider()
   let lastErr: unknown
-  for (const id of chain) {
+  for (const id of modelChain()) {
     const result = streamText({
-      model: openai(id),
+      model: cf(id),
       system: args.system,
       messages: args.messages,
       tools: agentTools(),
       stopWhen: stepCountIs(AGENT_MAX_STEPS),
-      maxOutputTokens: args.maxOutputTokens ?? 1500,
+      maxOutputTokens: args.maxOutputTokens ?? 1200,
     })
     let emitted = false
     try {
@@ -161,10 +154,12 @@ export async function* streamWithFallback(args: {
         }
         yield chunk
       }
+      const [usage, steps] = await Promise.all([result.totalUsage, result.steps])
+      logUsage("chat", id, usage, steps.length)
       return
     } catch (err) {
       lastErr = err
-      if (emitted) throw err // tokens already sent — can't restart on another model
+      if (emitted) throw err
       console.warn(
         `[chat] stream model ${id} failed pre-output, falling back:`,
         err instanceof Error ? err.message : err,
@@ -174,10 +169,6 @@ export async function* streamWithFallback(args: {
   throw lastErr instanceof Error ? lastErr : new Error("all models failed")
 }
 
-// A superset of the original `{ error, detail }` shape — the existing keys are
-// untouched so the chat UI keeps working, with the RFC 9457 members added
-// alongside so an agent gets the same machine-readable contract it gets from
-// every other failure on the site.
 export const offlinePayload = {
   error: "chat offline",
   detail:
@@ -190,123 +181,127 @@ export const offlinePayload = {
   docs: "https://ai.satyajit.si/openapi.json",
 } as const
 
+// ── page text for the model ──────────────────────────────────────────────────
+
+// MDX → prose the model can use: drop import/export lines, replace self-closing
+// JSX (widgets, figures, cards) with its caption or alt text when it has one.
+export function agentText(md: string): string {
+  return md
+    .replace(/^(import|export)\s.*$/gm, "")
+    .replace(/<([A-Z][A-Za-z0-9.]*)\b(?:[^>"]|"[^"]*")*?\/>/g, (tag) => {
+      const cap = tag.match(/\b(?:caption|alt|title)=(?:"([^"]*)"|\{`([^`]*)`\})/)
+      const text = cap?.[1] ?? cap?.[2]
+      return text ? `[figure: ${text}]` : ""
+    })
+    .replace(/\n{3,}/g, "\n\n")
+}
+
+type Section = { heading: string; level: number; text: string }
+
+function sections(md: string): Section[] {
+  const out: Section[] = []
+  let cur: Section = { heading: "(top)", level: 1, text: "" }
+  let inFence = false
+  for (const line of md.split("\n")) {
+    if (/^```/.test(line)) inFence = !inFence
+    const h = !inFence && line.match(/^(#{2,4})\s+(.*)$/)
+    if (h) {
+      out.push(cur)
+      cur = { heading: h[2].trim(), level: h[1].length, text: `${line}\n` }
+    } else cur.text += `${line}\n`
+  }
+  out.push(cur)
+  return out.filter((s) => s.text.trim())
+}
+
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+
+// A whole short page, one requested section, or a long page's opening plus its
+// outline, never more than SECTION_CHARS.
+export function pageForAgent(md: string, section?: string): Record<string, unknown> {
+  const text = agentText(md)
+  if (!section && text.length <= WHOLE_PAGE_CHARS) return { markdown: text }
+  const secs = sections(text)
+  if (section) {
+    const want = norm(section)
+    const hit =
+      secs.find((s) => norm(s.heading) === want) ??
+      secs.find((s) => norm(s.heading).includes(want) || want.includes(norm(s.heading)))
+    if (hit) {
+      // include the subsections that belong to it
+      const i = secs.indexOf(hit)
+      let body = hit.text
+      for (let j = i + 1; j < secs.length && secs[j].level > hit.level; j++) body += secs[j].text
+      const clipped = body.length > SECTION_CHARS
+      return { section: hit.heading, markdown: body.slice(0, SECTION_CHARS), ...(clipped ? { clipped: true } : {}) }
+    }
+  }
+  // A very long page lists only its top-level headings (capped); any heading,
+  // including a deeper one search returned, still works as `section`.
+  let heads = secs.slice(1)
+  if (heads.length > OUTLINE_MAX) heads = heads.filter((s) => s.level === 2)
+  const more = Math.max(0, heads.length - OUTLINE_MAX)
+  return {
+    ...(section ? { note: `no section matching "${section}"` } : {}),
+    opening: secs[0]?.text.slice(0, 2500) ?? "",
+    outline: heads.slice(0, OUTLINE_MAX).map((s) => `${"  ".repeat(Math.max(0, s.level - 2))}${s.heading}`),
+    ...(more ? { more: `${more} more headings; search_content finds sections directly` } : {}),
+    hint: "Long page: call get_content again with `section` set to one heading from the outline.",
+  }
+}
+
 // ── the tool set ────────────────────────────────────────────────────────────
 
-// Built fresh per request; the closures are cheap and hold no request state.
 export function agentTools() {
   return {
     search_content: tool({
       description:
-        "Search the whole site — articles, blog, logs, projects, arXiv digests, snippets, notes — with BM25 over contextualized chunks. Returns ranked matches, each with the matching section heading and a snippet. Start here when you don't already know the exact page from the catalog.",
+        "BM25 search over every page on the site (articles, blog, logs, projects, arXiv digests, snippets, notes). Returns kind/slug, the matching section heading and a snippet.",
       inputSchema: z.object({
-        query: z
-          .string()
-          .min(1)
-          .describe("keywords or a natural-language query"),
-        limit: z.number().int().min(1).max(10).optional(),
+        query: z.string().min(1).describe("keywords or a short question"),
+        limit: z.number().int().min(1).max(8).optional(),
       }),
-      execute: async ({ query, limit }) => {
-        const results = searchContent(query, limit ?? 6)
-        return {
-          count: results.length,
-          results: results.map((r) => ({
-            kind: r.kind,
-            slug: r.slug,
-            url: r.url,
-            section: r.field,
-            snippet: r.snippet,
-            score: Number(r.score.toFixed(2)),
-          })),
-        }
-      },
+      execute: async ({ query, limit }) => ({
+        results: searchContent(query, limit ?? 5).map((r) => ({
+          page: `${r.kind}/${r.slug}`,
+          section: r.field,
+          snippet: r.snippet,
+        })),
+      }),
     }),
 
     get_content: tool({
       description:
-        "Fetch the full markdown of one page. `kind` is a content kind (articles, architectures, blog, logs, projects, arxiv, snippets, notes) plus its `slug`, OR a data page (about, resume, health, now, uses, reading) — for data pages the slug is ignored. Read the actual page with this before you rely on its details; don't answer from the snippet alone.",
+        "Read a page. `page` is kind/slug from search (e.g. articles/memonce) or a data page (about, resume, health, now, uses, reading). Pass `section` (a heading, e.g. the one search returned) to read just that part; long pages without a section return an outline to choose from.",
       inputSchema: z.object({
-        kind: z.string().describe("content kind or data-page name"),
-        slug: z.string().optional().describe("page slug; omit for data pages"),
+        page: z.string().describe("kind/slug, or a data page name"),
+        section: z.string().optional().describe("a heading on that page"),
       }),
-      execute: async ({ kind, slug }) => {
+      execute: async ({ page, section }) => {
+        const [kind, ...rest] = page.replace(/^\/+/, "").split("/")
+        const slug = rest.join("/")
         if ((DATA_PAGES as readonly string[]).includes(kind)) {
           const md = await dataPageMarkdown(kind)
-          return md ? { markdown: md } : { error: `no data page "${kind}"` }
+          return md ? pageForAgent(md, section) : { error: `no data page "${kind}"` }
         }
-        if (!slug) return { error: `slug is required for kind "${kind}"` }
+        if (!slug) return { error: `use kind/slug, e.g. articles/memonce` }
         const md = contentMarkdown(kind, slug)
-        return md
-          ? { markdown: md }
-          : { error: `no ${kind}/${slug} — check the catalog or search_content` }
+        return md ? pageForAgent(md, section) : { error: `no page ${kind}/${slug}; search first` }
       },
     }),
-
-    think: tool({
-      description:
-        "Think out loud: plan which pages to fetch, note what the site does and doesn't cover, or check a draft answer against the sources you've read. It records the thought and returns nothing new — use it to reason between tool calls, not to answer the user. Especially useful for multi-part questions.",
-      inputSchema: z.object({
-        thought: z.string().describe("a thought to reason through"),
-      }),
-      execute: async ({ thought }) => ({ ok: true, thought }),
-    }),
   }
 }
 
-// ── the system prompt: persona + rules + a compact catalog ───────────────────
-
-let cachedCatalog: string | undefined
-
-function buildCatalog(): string {
-  if (cachedCatalog) return cachedCatalog
-  const byKind = new Map<string, string[]>()
-  for (const item of getAllContent()) {
-    const title = String(item.title ?? item.slug)
-    const desc = String(
-      (item as { description?: unknown }).description ?? ""
-    )
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 140)
-    const line = `- ${item.kind}/${item.slug} — ${title}${desc ? ` · ${desc}` : ""}`
-    const list = byKind.get(item.kind)
-    if (list) list.push(line)
-    else byKind.set(item.kind, [line])
-  }
-  const sections = [...byKind.entries()].map(
-    ([kind, lines]) => `### ${kind} (${lines.length})\n${lines.join("\n")}`
-  )
-  const dataPages =
-    "### data pages\n" +
-    DATA_PAGES.map((p) => `- ${p} (get_content kind="${p}")`).join("\n")
-  cachedCatalog = [dataPages, ...sections].join("\n\n")
-  return cachedCatalog
-}
+// ── the system prompt ─────────────────────────────────────────────────────────
 
 let cachedSystemPrompt: string | undefined
 
 export async function buildSystemPrompt(): Promise<string> {
   if (cachedSystemPrompt) return cachedSystemPrompt
-
   cachedSystemPrompt = [
-    `You are the AI assistant embedded on ${siteUrl} — the personal site of ${profile.name} (${profile.title} @ ${profile.company.name}, ${profile.location}).`,
-    "",
-    "You answer questions about Satyajit — his work, projects, articles, daily arXiv digests, resume, patents, health panel. The site's content is NOT in this prompt; you retrieve it with tools.",
-    "",
-    "Tools:",
-    "- search_content(query): BM25 search across everything. Use it when you don't already know the exact page.",
-    "- get_content(kind, slug): read one page's full markdown. Fetch before you rely on specifics.",
-    "- think(thought): reason between steps — plan what to fetch, or check a draft answer against what you read.",
-    "",
-    "Rules:",
-    "- Ground every claim in content you fetched THIS turn. Prefer fetching 1–3 pages over guessing. If search + get_content don't cover it, say so plainly and point to a relevant page or his contact links. Never invent facts about him.",
-    "- Cite sources as markdown links to the site page (the canonical URL is in each fetched page's header, and every catalog entry is `kind/slug` → `/kind/slug`).",
-    "- Use think() for multi-part questions or when you must reconcile several sources.",
-    "- Voice: precise, engineer-first, concise. No marketing fluff. Answer in whatever language the visitor uses.",
-    "",
-    "Catalog of everything on the site (titles + slugs; fetch bodies with get_content):",
-    "",
-    buildCatalog(),
-  ].join("\n")
-
+    `You answer questions on ${siteUrl}, the personal site of ${profile.name} (${profile.title} at ${profile.company.name}, ${profile.location}): his articles, projects, papers digests, resume, patents and health panel.`,
+    "The site's content is not in this prompt. Use search_content to find pages, then get_content to read the part you need (pass the section heading search gave you). Data pages: about, resume, health, now, uses, reading.",
+    "Rules: ground every claim in what you read this turn; read before relying on a snippet; if nothing covers it, say so and point to a relevant page. Never invent facts about him. Cite pages as markdown links to their site path (/kind/slug). Be precise and brief, engineer to engineer. Answer in the visitor's language.",
+  ].join("\n\n")
   return cachedSystemPrompt
 }

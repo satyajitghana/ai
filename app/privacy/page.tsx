@@ -66,7 +66,7 @@ export default function Page() {
           The chat box on the homepage and the{" "}
           <code className="font-mono text-xs">/api/ask</code> endpoint send your question, plus
           context assembled from this site&rsquo;s own published pages, to a third-party model
-          provider so an answer can be generated. That provider processes the question under its
+          provider (Cloudflare Workers AI) so an answer can be generated. That provider processes the question under its
           own terms and retention policy. The site does not store your questions, does not
           associate them with an identity, and does not use them for training anything.
         </p>

@@ -7,14 +7,13 @@ import {
   isChatOnline,
   modelChain,
   offlinePayload,
-  routeTier,
   streamWithFallback,
+  trimHistory,
 } from "@/lib/chat"
 import { CHAT_LIMIT, clientKey, rateLimit, tooMany } from "@/lib/rate-limit"
 
-// Streaming RAG chat via the Vercel AI SDK (OpenAI provider).
-// The latest user turn is routed to a GPT-5.4-family model, with fallback down
-// the ladder if a model errors before emitting any text.
+// Streaming RAG chat via the Vercel AI SDK on Cloudflare Workers AI (see
+// lib/chat.ts), with a fallback model if the first errors before emitting text.
 // NO-KEY MODE: returns 503 + a pointer to the static agent surfaces.
 export const maxDuration = 60
 
@@ -40,7 +39,7 @@ const bodySchema = z.object({
 
 // Lets the UI (and curious agents) check availability without spending tokens.
 export function GET() {
-  return Response.json({ online: isChatOnline(), model: chatModelId("mini") })
+  return Response.json({ online: isChatOnline(), model: chatModelId() })
 }
 
 export async function POST(req: Request) {
@@ -61,7 +60,7 @@ export async function POST(req: Request) {
   // Page context rides in the volatile `messages` channel (not the cached system
   // prefix): prepend a short note to the latest user turn so the model knows where
   // the reader is and can resolve "this page / this article / here".
-  const messages = parsed.data.messages.map((m) => ({ ...m }))
+  const messages = trimHistory(parsed.data.messages.map((m) => ({ ...m })))
   const ctx = parsed.data.context
   if (ctx && (ctx.path || ctx.title)) {
     let lastUser = -1
@@ -88,24 +87,18 @@ export async function POST(req: Request) {
     parts: [{ type: "text", text: m.content }],
   }))
 
-  // Route on the reader's latest question (not the context-annotated copy).
-  const lastQuestion =
-    parsed.data.messages.filter((m) => m.role === "user").at(-1)?.content ?? ""
-  const tier = routeTier(lastQuestion)
   const modelMessages = await convertToModelMessages(uiMessages)
 
   // Manual text stream so an upstream failure (quota / model access) becomes
   // visible text instead of a silent empty reply; streamWithFallback drops to
-  // the next model if one errors before any token is emitted.
+  // the fallback model if the first errors before any token is emitted.
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
         for await (const chunk of streamWithFallback({
-          tier,
           system,
           messages: modelMessages,
-          maxOutputTokens: 1500,
         })) {
           controller.enqueue(encoder.encode(chunk))
         }
@@ -122,8 +115,7 @@ export async function POST(req: Request) {
   return new Response(stream, {
     headers: {
       "content-type": "text/plain; charset=utf-8",
-      "x-model": modelChain(tier)[0],
-      "x-routed-tier": tier,
+      "x-model": modelChain()[0],
     },
   })
 }

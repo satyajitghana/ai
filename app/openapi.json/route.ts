@@ -321,8 +321,7 @@ const S = {
     required: ["answer", "model"],
     properties: {
       answer: { type: "string", description: "Grounded answer with inline citations to site pages." },
-      model: { type: "string" },
-      routed: { type: "string", description: "Which tier the question was routed to." },
+      model: { type: "string", description: "The Workers AI model that answered." },
     },
   },
   AskStatus: {
