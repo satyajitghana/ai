@@ -522,8 +522,62 @@ export class NeuronScene {
     return this.projectXYZ(layer * this.spacing, h + 0.12, w + 0.05)
   }
 
+  /**
+   * Exact pick on one layer: cast the cursor's ray, intersect it with that
+   * layer's plane, and read the grid cell under it. Returns null when the ray
+   * misses the plane or meets it nearly edge-on.
+   */
+  private pickOnPlane(px: number, py: number, layer: number): { layer: number; neuron: number; t: number } | null {
+    const { cols, rows, neurons } = this.opts
+    const e = this.eye()
+    let fx = this.target[0] - e[0], fy = this.target[1] - e[1], fz = this.target[2] - e[2]
+    const fl = Math.hypot(fx, fy, fz) || 1
+    fx /= fl; fy /= fl; fz /= fl
+    // right = f × up(0,1,0), up' = right × f (same basis as lookAt)
+    let rx = -fz, rz = fx
+    const rl = Math.hypot(rx, rz) || 1
+    rx /= rl; rz /= rl
+    const ux = -rz * fy, uy = rz * fx - rx * fz, uz = rx * fy
+    const th = Math.tan(0.62 / 2)
+    const asp = this.W / Math.max(1, this.H)
+    const nx = (px / this.W) * 2 - 1, ny = 1 - (py / this.H) * 2
+    const dx = fx + rx * nx * th * asp + ux * ny * th
+    const dy = fy + ny * th * uy
+    const dz = fz + rz * nx * th * asp + uz * ny * th
+    const plane = layer * this.spacing
+    const dl = Math.hypot(dx, dy, dz)
+    if (Math.abs(dx) / dl < 0.08) return null // edge-on: cells collapse, fall back
+    const t = (plane - e[0]) / dx
+    if (t <= 0) return null
+    const y = e[1] + dy * t, z = e[2] + dz * t
+    const step = this.cell * (64 / cols)
+    const c = Math.round(z / step + (cols - 1) / 2)
+    const r = Math.round((rows - 1) / 2 - y / step)
+    if (c < 0 || c >= cols || r < 0 || r >= rows) return null
+    const n = r * cols + c
+    return n < neurons ? { layer, neuron: n, t } : null
+  }
+
   pick(px: number, py: number, radius = 10): { layer: number; neuron: number } | null {
     this.matrices()
+    // The current layer first, exactly: a dot from a layer behind can no longer
+    // win just because it projects closer to the cursor.
+    const own = this.pickOnPlane(px, py, this.selectedLayer)
+    if (own) return { layer: own.layer, neuron: own.neuron }
+    if (this.isolate) return null
+    // Off the current layer: the nearest plane the ray actually crosses.
+    let front: { layer: number; neuron: number; t: number } | null = null
+    for (let l = 0; l < this.opts.layers; l++) {
+      if (l === this.selectedLayer) continue
+      const h = this.pickOnPlane(px, py, l)
+      if (h && (!front || h.t < front.t)) front = h
+    }
+    if (front) return { layer: front.layer, neuron: front.neuron }
+    return this.pickNearestDot(px, py, radius)
+  }
+
+  /** Screen-distance pick, for views where the planes are seen edge-on. */
+  private pickNearestDot(px: number, py: number, radius: number): { layer: number; neuron: number } | null {
     const m = this.vp
     let best = -1
     let bestScore = Infinity

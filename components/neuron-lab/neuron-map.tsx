@@ -36,7 +36,8 @@ export function NeuronMap(p: MapProps) {
   const selRef = useRef(p.selected)
   const layerRef = useRef(p.layer)
   const topSeen = useRef(new Set<number>())
-  const [tip, setTip] = useState<{ layer: number; neuron: number; x: number; y: number } | null>(null)
+  // x/y: the cursor (for the tooltip); rx/ry: the hovered neuron itself (for its ring)
+  const [tip, setTip] = useState<{ layer: number; neuron: number; x: number; y: number; rx: number; ry: number } | null>(null)
   const [width, setWidth] = useState(600)
   const pickRef = useRef(p.onPick)
   useEffect(() => {
@@ -82,8 +83,14 @@ export function NeuronMap(p: MapProps) {
         rows: Math.ceil(p.meta.neurons / COLS),
         reducedMotion: p.reducedMotion,
         onPick: (l, n) => pickRef.current(l, n),
-        onHover: (h) => setTip(h),
-        onCamera: updateLabels,
+        onHover: (h) => {
+          const pos = h && scene.current?.project(h.layer, h.neuron)
+          setTip(h && pos?.visible ? { ...h, rx: pos.x, ry: pos.y } : null)
+        },
+        onCamera: () => {
+          setTip(null) // the hover ring would be left behind by the move
+          updateLabels()
+        },
       })
     } catch (e) {
       console.warn("neuron map: scene setup failed", e)
@@ -174,6 +181,13 @@ export function NeuronMap(p: MapProps) {
       />
       <div ref={labelHost} className="nl-labels" aria-hidden />
       <div ref={ring} className="nl-ring" aria-hidden />
+      {tip && !(p.selected && p.selected.layer === tip.layer && p.selected.neuron === tip.neuron) ? (
+        <div
+          className="nl-ring nl-ring-hover"
+          aria-hidden
+          style={{ display: "block", transform: `translate(${tip.rx}px, ${tip.ry}px) translate(-50%, -50%)` }}
+        />
+      ) : null}
       {tip && t ? (
         <div
           className="nl-tip"
