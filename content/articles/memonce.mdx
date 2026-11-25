@@ -1,0 +1,186 @@
+---
+title: "MemOnce: keep 64 final-layer states per turn, decode them into every attention layer's KV when asked"
+description: "MemOnce gives a frozen Qwen3.5-4B a memory of past turns. Each turn leaves one block of 64 final-layer hidden states, the question picks the top 64 blocks once by cosine similarity, and per-layer projections decode those blocks, plus a 16-block window of recent turns, into K and V for the model's 8 attention layers. I read the paper, the code and the released 71M-parameter adapter. The headline 1,313x compares 32 GB of full KV with 25 MB of undecoded states; the decoded KV the model actually attends over is 160 MiB, and the whole offloaded pool at 1M tokens is 640 MiB, 51x smaller than full KV. The 6.9x prefill is 13x fewer FLOPs run at half the hardware throughput, and at 32K MemOnce prefills slower than the baseline. Recall rides on retrieval: a block that misses the top 64 is invisible, the decoded keys are never rotated by RoPE, and the linear layers carry no recurrent state from the past. On an RTX 3090 I measured the released checkpoint against its own frozen backbone on synthetic history: the decoded KV is 160 MiB at any length, writing scales linearly (36.56 s against 79.98 s for full prefill at 128K), and in a three-depth needle check MemOnce missed once with the right block retrieved, while full context answered all three. Two widgets size the caches from the config files and walk one question through write, index and read."
+date: 2026-11-24
+tags:
+  - kv-cache
+  - long-context
+  - agent-memory
+  - inference
+  - hybrid-attention
+rating:
+  novelty: 2
+  verification: 2
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Traces MemOnce's 1,313x and 6.9x to what they compare, sizes every cache from the released configs, and recomputes the benchmark table from its result files."
+topic: llm-architecture
+kind: paper
+level: research
+runsOn: consumer-gpu
+licence: Apache-2.0
+---
+
+import { CacheCalculator } from "@/components/articles/memonce/cache-calculator"
+import { MemoryWalk } from "@/components/articles/memonce/memory-walk"
+
+[@HuggingPapers posted](https://x.com/HuggingPapers/status/2124897785296064812) MemOnce on 23 November: "Caches compact final-layer memory states once, retrieves them once per query, and decodes layer-specific KV caches on demand. 1313× smaller cache, 6.9× faster prefill at 1M context, +5.77% memory performance." The paper is [arXiv 2611.27973](https://arxiv.org/abs/2611.27973), from Chang Nie, Chaoyou Fu, Songlin Liu, Yiqing Hu and Caifeng Shan at Nanjing University and USTC, submitted 20 November. The [code](https://github.com/Clare-Nie/MemOnce) and a [post-trained checkpoint](https://huggingface.co/ClareNie/MemOnce) are out.
+
+I read the paper, the post-training model code, the inference and benchmark scripts, the released result files, and the checkpoint's config and tensor headers. Every number below says which of those it came from. What I found: the mechanism is clean and the memory benchmarks check out against the released generations, but the two headline multipliers compare things that are not quite the same kind of thing.
+
+<ModelCard repo="ClareNie/MemOnce" />
+
+<RepoCard repo="Clare-Nie/MemOnce" note="Read at 9a1d63c (23 November 2026). The post-training model is post-training/model.py (_generate_memory_blocks, _update_state, _retrieve, _build_memory_cache); the read loop is eval/post-training/inference.py (MemOnceChat). The repository has no licence file; the checkpoint on Hugging Face is Apache-2.0." />
+
+## Why history is expensive in a hybrid model
+
+A transformer remembers by keeping, for every past token, a key and a value in every attention layer. For Qwen3.5-4B that bill is smaller than for a pure transformer, because only 8 of its 32 layers are full attention (every fourth one, per its `config.json`); the other 24 are Gated DeltaNet layers that fold history into a fixed-size state. Each attention layer keeps 4 KV heads of 256 dimensions, so 1,024 numbers for K and 1,024 for V per token. In bf16 that is
+
+$$
+8 \text{ layers} \times 2 \times 1024 \times 2\ \text{bytes} = 32\ \text{KiB per token},
+$$
+
+and a million tokens is 32 GiB. The paper's Table 14 measures 32.05 GB for the baseline at 1M, which matches.
+
+The linear layers cost nothing extra per token, and that is their problem: a fixed state forgets details. The paper's framing is a trade-off between "Transformers [that] accumulate layer-wise, token-level KV caches" and "linear-time architectures [that] compress history into fixed-size states, but struggle to retain fine-grained details." The [full-attention census](/articles/full-attention-census) on this site counts how many open models still keep some full attention for exactly that reason. MemOnce keeps the hybrid model and changes what the attention layers attend to.
+
+## Three functions: write, index, read
+
+The paper writes the method as three functions, and the checkpoint's README uses the same names:
+
+```
+G_t = g_θ(x_{1:t-1})      # write:  encode history once
+M_t = i_θ(x_t, G_t)       # index:  describe and retrieve blocks
+C_t = u_θ(M_t)            # read:   decode selected blocks into KV
+```
+
+<Figure
+  src="/articles/memonce/fig1.png"
+  alt="Architecture diagram. On the left, a hybrid backbone repeated L times: a stage of three linear blocks (for example GDN) with FFNs, then one Memory Sparse Attention block with an FFN, topped by an LM head producing y_t from final-layer states h_t^L. On the right, a Memory Encoder-Decoder: final-layer states are cached as memory slots m_1 to m_s (long-term) and m_s+1 to m_k (short-term, k = N/r). A top-K similarity between the query state and the memory slots selects long-term slots, which are concatenated with the short-term ones into the memory representation, projected by K_Proj^l and V_Proj^l into per-layer K^l and V^l, and placed in the KV cache feeding the attention block."
+  caption="MemOnce's architecture. Final-layer states are cached once, split into a long-term pool and a short-term window, retrieved once per input, and decoded into each attention layer's KV cache (MemOnce paper, Figure 2)."
+/>
+
+**Write.** Each turn of the conversation runs through the model once. `_generate_memory_blocks` in `post-training/model.py` keeps the final-layer hidden states of the turn's last 64 tokens, "left-zero-padded" if the turn is shorter, and throws the rest away. The paper's argument for keeping only the tail is that "the interleaved linear blocks and causal attention continuously aggregate sequential context toward later positions, allowing the trailing token states … to encapsulate the semantics of the entire segment." In the post-trained model the write pass runs with a LoRA adapter switched on (rank 128, on the q, k, v and o projections), so the backbone learns to push a turn's content into its tail. A turn longer than 4,096 tokens is split, and each piece writes its own block.
+
+So the compression ratio is not fixed. It is the turn length divided by 64. The paper reports results at `r = 8`, which on this checkpoint means turns of about 512 tokens; the appendix says so ("$D=2560$, $n_i=512$, $r=8$"). A single 4,096-token document turn is compressed 64 to 1.
+
+Each block of 64 states is 64 × 2,560 × 2 bytes = 320 KiB, the "320 KB" in the paper's Appendix B. The blocks go into a pool that only grows and can live in CPU memory or on disk. The most recent 16 blocks (1,024 states, `short_state_tokens` in the config) also form a first-in, first-out window on the GPU. That window serves a second purpose: when the next turn is written, the window is decoded and placed in front of it, so a block is written knowing the recent past. Linear-layer recurrent state is not carried from one write pass to the next (a pass covers up to 4,096 tokens of turns), which the paper's Table 8 ablates: carrying it over versus discarding it is 0.5255 against 0.5235 average accuracy at `r = 8`.
+
+**Index.** When a question arrives, it is written like a turn, and the last state of that block goes through `mem_to_emb`, a two-layer MLP from 2,560 to 1,024 dimensions. Every pool block already has a key made the same way from its last state. One cosine-similarity pass scores all of them, and `_retrieve` takes the top 64, sorted back into time order. The 16 blocks in the window are excluded from the pool for this search, since they are read anyway. "Once" in the name means this routing happens one time per question and is reused by every attention layer and every generated token. M+, the closest prior work, retrieves inside every layer; the paper's Table 10 puts that at 772.50 ms at 128K tokens against 64.24 ms for MemOnce's encode plus search.
+
+**Read.** `_build_memory_cache` takes the 64 retrieved blocks plus the 16 window blocks, 5,120 states in all, and for each of the 8 attention layers runs them through that layer's own RMSNorm, a K projection with its key norm, and a V projection. These readout weights started as fp32 copies of the frozen layer's own `k_proj` and `v_proj` and were then trained. The result goes straight into the KV cache. The question and the answer are then processed by the plain frozen Qwen3.5-4B, adapter off, attending over those 5,120 decoded positions as if they were earlier tokens.
+
+<MemoryWalk />
+
+The widget runs that loop on a toy conversation of 32 turns. Pick a topic for the question and lower K: blocks about the topic that do not make the top-K vanish from every layer at once, because the one routing decision feeds all of them. That is the price of "once".
+
+The released checkpoint is exactly these pieces and nothing else. The safetensors header lists LoRA A and B matrices on q, k, v and o in layers 3, 7, 11, 15, 19, 23, 27 and 31 (the attention layers only), `readout_ln`, `readout_kproj`, `readout_knorm` and `readout_vproj` for the same 8 layers, and `mem_to_emb`. Hugging Face counts 70,803,456 parameters, 264 MB. The 4B backbone is downloaded separately and never changed.
+
+## What the 1,313× compares
+
+The paper's headline is that MemOnce "reduces memory state cache by 1313× … at 1M context". Table 14 shows where it comes from: Qwen3.5's 32.05 GB of active cache against MemOnce's 25.0 MB. And the appendix spells out the 25 MB: 16 window blocks are 5.0 MB, 64 retrieved blocks are 20.0 MB. Those are 5,120 final-layer states, 2,560 numbers each, before decoding.
+
+But attention does not run on those states. It runs on what `_build_memory_cache` makes of them: K and V of 1,024 numbers each, for 8 layers. That is
+
+$$
+5120 \times 8 \times 2 \times 1024 \times 2\ \text{bytes} = 160\ \text{MiB},
+$$
+
+my arithmetic from the config shapes, and what my run below measured. In the released `inference.py` that cache is built once per question and kept for the whole answer. The paper counts the other thing; its footnote 1 says "only the active memory state $M_{t}\in\mathbb{R}^{C\times D}$ is maintained in GPU cache as historical context cache." Against 32 GiB that is about 205×, still very good, and it does not grow with the history. The 25 MB figure is the right number for what has to be fetched from the pool per question (the paper's "transfers only 20.0 MB over PCIe"); it is the wrong number for what the GPU holds while it generates.
+
+The other comparison the headline leaves out is the pool itself. At 1M tokens Table 14 lists 640.0 MB offloaded: 2,048 blocks of 320 KiB. Against 32 GiB of full KV that is 51× (my division). Persistent memory per token goes from 32 KiB to 640 bytes. The paper's "$Lr\times$" compression, 8 × 8 = 64, counts layers and tokens; in bytes it is 51× on this model because a 2,560-wide hidden state is wider than one layer's 2,048 K-plus-V numbers.
+
+<CacheCalculator />
+
+The calculator reproduces all three from the two config files. At 1M tokens, 512-token turns and K = 64, it gives 32 GiB, 640 MiB, 25 MiB and 160 MiB. Move the turn size and watch the pool change while the active states do not; that is the property that matters for a long-running agent, and it holds whichever ratio you quote.
+
+## What the 6.9× compares
+
+Prefill at 1M is 286.86 s for the baseline and 41.36 s for MemOnce in Table 14, 6.9×. The same table shows where that comes from, and where it stops.
+
+First, the work. The baseline's 1M prefill is 97.10 PFLOPs run at 338 TFLOP/s; MemOnce's is 7.37 PFLOPs at 178 TFLOP/s. MemOnce does 13× less arithmetic and runs it at about half the hardware throughput. The paper gives no reason; my guess is the many short segments, which keep the GPU less busy than one long sequence. Writing is linear in the history: each segment attends only to itself and the 1,024 window states. The baseline's attention is quadratic in the 8 layers that have it.
+
+Second, the short end. At 32K tokens MemOnce takes 1.38 s and the baseline 0.87 s. MemOnce is slower there. The two cross somewhere before 128K (5.11 s against 6.66 s), and the gap opens from there: 20.98 s against 77.47 s at 512K. If your sessions are tens of thousands of tokens, the prefill win is not yours; the bounded decode-time cache still is.
+
+Decoding is the other headline: 29.3 tokens per second at 1M against 8.4 for the baseline, 3.5×. The baseline slows as its KV cache grows (26.5 tokens per second at 32K); MemOnce attends over the same 5,120 memory positions at every length and stays between 29.0 and 29.4. A caveat sits in the table caption: "Single-GPU (80GB H100) out-of-memory (OOM) baselines are evaluated with multi-GPU." And Qwen3.5-4B's `config.json` sets `max_position_embeddings` to 262,144. I found nothing in the paper on how the full-context baseline was run at 512K and 1M, which is past that.
+
+## What is lost against full KV
+
+The benchmark story is good, so it is worth being precise about what the design gives up.
+
+**Everything but the tail.** A fact in the middle of a long turn survives only if the adapted forward pass carried it into the last 64 states. A 4,096-token document turn has 64 states to hold it all. I found no experiment in the paper that tests recall as a function of where in a long turn the fact sat.
+
+**Anything retrieval misses.** The question's single key picks 64 blocks. A multi-hop question whose second hop only becomes relevant after the first is answered still gets one retrieval, made before generation starts. The paper's Table 9 shows how much rides on this step: with no retrieval (window only) the five-benchmark average is 36.83; with K = 16 it is 59.72; K = 64 gives 60.07; K = 128 falls to 58.86.
+
+**Order.** In Qwen3.5's attention (transformers 5.22, `modeling_qwen3_5.py`), a new key gets its rotary position embedding before it goes into the cache. `_build_memory_cache` writes the decoded memory keys into the cache directly, and nothing rotates them. The retrieved blocks are sorted by time and sit at positions 0 to 5,119, but the keys themselves carry no position. Time comes from the content (the benchmark scripts prefix turns with timestamps) and from the sort.
+
+**The linear layers.** Memory enters only the 8 attention layers as KV. The 24 Gated DeltaNet layers start every answer with an empty recurrent state. Past the first attention layer (layer 3) they still see memory indirectly, through a residual stream that attention has already mixed it into, but they hold none of it themselves.
+
+**Generality.** The adapter is trained for one frozen backbone; a new model needs new readouts and a new LoRA. The paper's own limitations section says agent use "remains to be fully validated, particularly in complex scenarios such as long-horizon interactive coding and multi-step tool use."
+
+Against other ways of shrinking KV on this site, MemOnce sits at the far, lossy end. [KVzip](/articles/kvzip-kv-compression) and quantization schemes such as [TurboQuant](/articles/turboquant-kv-cache) keep per-token, per-layer KV and cut it by eviction or by bits, a few times smaller and query-agnostic. [SGLang's HiCache](/articles/sglang-hicache) keeps everything and moves it between GPU, host memory and disk, losing nothing but bandwidth. [UNREAL](/articles/unreal-retrieval-long-context) and the agent-memory systems such as [Hy Memory](/articles/hy-memory) retrieve text and re-read it. MemOnce retrieves learned states and skips the re-read. It is closest in spirit to YOCO, which also caches one layer's states and decodes KV for the rest; MemOnce adds the retrieval and the tail compression.
+
+## Does it remember better than reading everything?
+
+The paper's Table 3 is the claim that MemOnce "is the first native memory model to surpass full-context baselines". At 4B it averages 60.07 over five benchmarks against 54.30 for Qwen3.5-4B reading the whole history.
+
+<Figure
+  src="/articles/memonce/fig4.png"
+  alt="Table: response accuracy on MemBench (about 4K tokens), LoCoMo (about 21K), LongMemEval (about 115K), PersonaMem-128 (about 128K) and PersonaMem-1M. Full-context Qwen3.5-2B averages 49.33 and Qwen3.5-4B 54.30. Native memory models delta-Mem, EvoEmbedding, Metis and M+ average between 27.80 and 41.39, retrained versions between 29.95 and 38.74. MemOnce 2B averages 51.17 (+1.84) and MemOnce 4B 60.07 (+5.77), with 84.34 on MemBench, 67.01 on LoCoMo, 47.40 on LongMemEval, 53.60 on PersonaMem-128 and 48.00 on PersonaMem-1M."
+  caption="Memory benchmarks from 4K to 1M tokens. Note LoCoMo, where full-context Qwen3.5-4B (69.55) still beats MemOnce (67.01) (MemOnce paper, Table 3)."
+/>
+
+The repo ships the per-question results for the 4B model, so I recomputed each column. MemBench (1,999 questions) averages 84.34, LoCoMo (1,540) 67.01, LongMemEval (500) 47.40, PersonaMem-128 (1,000) 53.60 and PersonaMem-1M (500) 48.00: all five match the table, and their mean is 60.07. One detail: the two PersonaMem columns are multiple-choice, and `bench.py` scores them "by option-letter rules", which in the released files gives 49.9 and 46.8. The table's 53.60 and 48.00 are the `score_ds` field of the companion `.dsjudge.jsonl` files, the DeepSeek-V4.1-Flash judge the paper says it used "across all methods". With the rule scores the average is 59.09. Still above the baseline, if the baselines were judged the same way, which the paper says they were and I cannot check.
+
+The win is also uneven. The 4B model beats its full-context baseline by a lot on LongMemEval (47.40 against 42.20) and PersonaMem-1M (48.00 against 33.60), where the baseline is drowning in a long context, and loses on LoCoMo (67.01 against 69.55). That pattern fits the paper's own explanation, that "query-conditioned sparse retrieval filters out irrelevant historical context and mitigates the attention dilution inherent to ultra-long sequences." Retrieval helps most where reading everything hurts.
+
+<Figure
+  src="/articles/memonce/fig2.png"
+  alt="Two plots. Left: memory state cache against context length from 4K to 1M for Transformer (144.0 G at 1M), Hybrid Qwen3.5 (32.0 G), KV sharing YOCO (5.0 G), linear GDN (66.0 M) and MemOnce (25.0 M), with arrows marking 4.5 times lower and 1313 times lower. Right: overall memory performance against prefill time at 1M on a log axis: MemOnce 60.07 at about 41 s and 29.3 tokens per second, baseline Qwen3.5-4B 54.30 at about 287 s and 8.4 tokens per second, M+ 41.39 at about 1,480 s, EvoEmbedding 39.15, delta-mem 29.28 and Metis 27.80."
+  caption="The paper's summary figure. On the left the 25.0 M point is undecoded states; the decoded KV is 160 MiB, still flat in context length (MemOnce paper, Figure 1)."
+/>
+
+The pre-training results are a separate experiment, and the code shows how separate. `pre-training/memonce.py` trains a 3:1 Gated DeltaNet and attention model from scratch where "every span of span tokens appends its last mem_tokens hiddens" (128 to 16, so 8×), with sequences of 4,096 tokens. At about 400M parameters, MemOnce at `r = 8` reaches 10.89 validation perplexity and 52.35% average zero-shot accuracy against 10.97 and 51.85% for a 365M transformer (Table 2). That is evidence that tail compression does not hurt a model trained with it, at 4K context. It says nothing about million-token recall.
+
+<Figure
+  src="/articles/memonce/fig3.png"
+  alt="Three plots from 32K to 1M tokens. (a) Prefill time: M+ reaches about 1,480 s at 1M, delta-mem and others about 1,000 s, the Qwen3.5 baseline about 287 s, MemOnce lowest at about 41 s. (b) Memory state cache in MB: the transformer line reaches about 147,000 MB, the baseline about 32,000, MemOnce flat near zero. (c) Decoding throughput: MemOnce flat near 29 tokens per second, the baseline falling from about 26 to 8.4, the transformer to about 3."
+  caption="Inference scaling on H100s. The prefill panel hides the short end, where MemOnce (1.38 s) is slower than the baseline (0.87 s) at 32K (MemOnce paper, Figure 4; the numbers are its Table 14)."
+/>
+
+## What I measured on an RTX 3090
+
+I ran the released checkpoint on beast2, a 24 GB RTX 3090, with torch 2.6.0, transformers 5.24.0 and the repo's own `MemOnceChat`, against the same frozen Qwen3.5-4B with its adapter switched off and its full KV cache. The history is synthetic: user turns of about 500 tokens of random shipping-ledger words, so one 64-state block per turn, the paper's `r = 8` shape. This is timing and memory on made-up text, not a reproduction of any benchmark.
+
+Two caveats before the numbers. transformers fell back to its reference PyTorch code for the Gated DeltaNet recurrence and the causal convolution (its log says so on every run), so both models are slower than they would be with the fused kernels, and the absolute seconds are not the paper's. And from 64K on, the baseline's single-pass prefill ran out of memory, so the script redid it in 8K-token chunks with the cache carried over.
+
+The repo's `--self-test` passed, and its multi-hop demo answered both questions right: Elena Voss designed the Amber Spire and studied in Port Kellen, and the 'Voss blue' tint is the export named after her family.
+
+| History (tokens) | MemOnce write | Full prefill | Full KV cache | MemOnce pool | Decoded KV | Decode, MemOnce / full |
+|---|---|---|---|---|---|---|
+| 32,825 | 9.14 s | 9.84 s | 1026.4 MiB | 20.31 MiB | 130.00 MiB | 15.6 / 15.6 tok/s |
+| 66,155 | 17.92 s | 27.43 s | 2068.0 MiB | 40.94 MiB | 160.00 MiB | 15.5 / 14.9 tok/s |
+| 132,310 | 36.56 s | 79.98 s | 4135.3 MiB | 81.88 MiB | 160.00 MiB | 15.4 / 14.4 tok/s |
+| 264,620 | 73.96 s | not run | | 163.75 MiB | 160.00 MiB | 15.1 tok/s |
+
+What the run confirms:
+
+- **Writing is linear.** 9.14 s, 17.92 s, 36.56 s, 73.96 s: each doubling of history doubles the write time, and the extra GPU memory during the write stayed between 2818 and 2963 MiB at every length. The baseline goes from even at 32K to 2.2× slower at 128K (79.98 s against 36.56 s), the same shape as the paper's Table 14 on a slower card.
+- **The decoded KV is 160 MiB.** The script measured 160.00 MiB of decoded K and V once 64 blocks were retrieved, and the GPU allocator grew by 160.0 MiB when it was built, which is the arithmetic above. At 32K only 49 blocks were retrievable, so it was 130.00 MiB. The undecoded active states were 25.00 MiB, the paper's figure. At 128K the baseline's cache was 4135.3 MiB, 25.8 times the decoded KV.
+- **The pool grows at 320 KiB a turn**: 81.88 MiB for 262 turns, 163.75 MiB for 524. The retrieval keys add 0.512 MiB at 128K.
+- **Getting ready to answer is cheap.** Retrieval, decoding the KV, reading the question and the first token took 0.222 to 0.295 s at every length.
+- **Decoding stays flat.** MemOnce held 15.1 to 15.6 tokens per second from 32K to 256K. The baseline slipped from 15.6 to 14.4 by 128K. With the reference GDN code dominating, the gap is far smaller than the paper's 3.5× at 1M.
+
+The needle check is the more interesting result. I planted one sentence, "The access code for vault Kestrel is 7314.", inside one turn of a 66,155-token history, at three depths, and asked both models for the code. The full-context baseline answered 7314 every time (its output ran on after the number because my greedy loop does not stop at the end-of-turn token). MemOnce answered 7314 at depths 0.1 and 0.8, and 4321 at depth 0.5. In all three runs the needle's turn was among the 64 retrieved blocks. So the miss was not retrieval. The block was read, and the 64 tail states of that turn did not carry the number. Three questions prove nothing statistically, but this is exactly the failure the design predicts: "Everything but the tail" above, observed once.
+
+## What I think
+
+The mechanism is worth knowing about. Cache one compact layer, retrieve once, decode per layer: it cleanly separates what must persist (640 bytes per token here) from what must be on the GPU (a constant 160 MiB), and it bolts onto a frozen model with a 71M-parameter adapter. For an agent that lives for weeks of turns, that split is the right shape, and the released result files do support the memory numbers.
+
+I would quote it differently. "51× less to store, a fixed 160 MiB to attend over, 3.5× faster decoding at 1M" is what the paper's own tables and configs say. "1,313×" compares a full cache with a pre-decode intermediate, and "6.9× faster prefill" holds at 1M but reverses at 32K. And the design is honest about one bet it makes: everything rides on one retrieval made before the first token is generated. If the question's key does not find the block, no layer ever sees it. My one needle miss on the 3090 shows the other bet: even a block that is found holds only what the turn pushed into its last 64 states.
+
+**How I checked.** I read the paper, `post-training/model.py`, `eval/post-training/inference.py` and `bench.py` at `9a1d63c`, the checkpoint's `config.json` and safetensors header (by HTTP range request), and Qwen3.5-4B's `config.json`. The cache sizes are my arithmetic from those shapes, and the RTX 3090 run measured them. The benchmark columns are recomputed from the result files in `eval/post-training/results/`. The 3090 timings and the needle check are mine, on synthetic history; the paper's prefill, decode and Table 3 baselines are the paper's.
