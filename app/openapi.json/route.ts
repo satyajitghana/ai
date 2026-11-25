@@ -28,7 +28,7 @@ const ERROR_DESCRIPTIONS: Record<ErrCode, string> = {
   "405": "Method not allowed on this path.",
   "429": "Rate limited. Wait for Retry-After, then resume.",
   "500": "Unexpected server error.",
-  "502": "Upstream model error after the fallback chain was exhausted.",
+  "502": "Upstream model error (Workers AI).",
   "503": "Model-backed endpoint is offline. Static surfaces are unaffected.",
 }
 

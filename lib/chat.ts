@@ -19,15 +19,18 @@ import { siteUrl } from "@/lib/site"
 //
 // PROVIDER: Cloudflare Workers AI through its OpenAI-compatible endpoint
 // (`@ai-sdk/openai-compatible`), so this runs from Vercel with no Workers
-// binding. Credentials: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (a token
-// with Workers AI read/run). Optional CLOUDFLARE_AI_GATEWAY_ID routes the calls
+// binding. Credentials: WORKERS_AI_ACCOUNT_ID + WORKERS_AI_API_TOKEN (a token
+// with Workers AI read/run). Optional WORKERS_AI_GATEWAY_ID routes the calls
 // through an AI Gateway for logs, caching and rate limits. Swapping provider is
 // this one constructor: the routes and tools only see an AI SDK model.
 //
-// MODELS: free-tier models only (Workers AI gives 10,000 Neurons a day on every
-// plan). glm-4.7-flash first (5,500 Neurons per M input tokens, tool calling,
-// 131K context), llama-4-scout as the fallback. Override with CHAT_MODEL /
-// CHAT_MODEL_FALLBACK.
+// MODEL: glm-4.7-flash, on Workers AI's free allocation (10,000 Neurons a day on
+// every plan; this model costs 5,500 Neurons per M input tokens), with tool
+// calling and a 131K context. Of the free tool-calling models it was the only
+// one that reliably read pages and cited them (llama-4-scout answered from
+// snippets and leaked tool calls as text; gpt-oss-20b errored on tools), so
+// there is no fallback model: an error is better than a wrong answer.
+// Override with CHAT_MODEL.
 //
 // HARNESS, built to spend few tokens: the system prompt is a few hundred tokens
 // (no site catalog; search finds pages), get_content returns one section or an
@@ -35,8 +38,6 @@ import { siteUrl } from "@/lib/site"
 // history is trimmed, and the loop is bounded. Each request logs its token usage.
 
 export const PRIMARY_MODEL = process.env.CHAT_MODEL ?? "@cf/zai-org/glm-4.7-flash"
-export const FALLBACK_MODEL =
-  process.env.CHAT_MODEL_FALLBACK ?? "@cf/meta/llama-4-scout-17b-16e-instruct"
 
 // search → read one or two sections → answer is 3-4 steps; 5 leaves one spare.
 export const AGENT_MAX_STEPS = 5
@@ -54,12 +55,20 @@ const OLD_ASSISTANT_CHARS = 600
 
 const DATA_PAGES = ["about", "resume", "health", "now", "uses", "reading"] as const
 
+// Not CLOUDFLARE_*: the cf CLI reads CLOUDFLARE_API_TOKEN from the environment,
+// and the chat's token would override the CLI's own login.
+const env = {
+  account: () => process.env.WORKERS_AI_ACCOUNT_ID,
+  token: () => process.env.WORKERS_AI_API_TOKEN,
+  gateway: () => process.env.WORKERS_AI_GATEWAY_ID,
+}
+
 export function isChatOnline(): boolean {
-  return Boolean(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_API_TOKEN)
+  return Boolean(env.account() && env.token())
 }
 
 export function modelChain(): string[] {
-  return PRIMARY_MODEL === FALLBACK_MODEL ? [PRIMARY_MODEL] : [PRIMARY_MODEL, FALLBACK_MODEL]
+  return [PRIMARY_MODEL]
 }
 
 export function chatModelId(): string {
@@ -69,16 +78,74 @@ export function chatModelId(): string {
 // Created per call so importing this module never throws when the credentials
 // are absent (offline mode handles that).
 function provider() {
-  const account = process.env.CLOUDFLARE_ACCOUNT_ID
-  const gateway = process.env.CLOUDFLARE_AI_GATEWAY_ID
+  const account = env.account()
+  const gateway = env.gateway()
   return createOpenAICompatible({
     name: "workers-ai",
     baseURL: `https://api.cloudflare.com/client/v4/accounts/${account}/ai/v1`,
-    apiKey: process.env.CLOUDFLARE_API_TOKEN,
+    apiKey: env.token(),
     headers: gateway ? { "cf-aig-gateway-id": gateway } : undefined,
     includeUsage: true,
+    // GLM reasons before answering by default, and the reasoning counts against
+    // max tokens: answers came back cut off or empty. Retrieval answers don't
+    // need it. (Ignored by models whose template has no such switch.)
+    transformRequestBody: (body) => ({ ...body, chat_template_kwargs: { enable_thinking: false } }),
   })
 }
+
+// The last allowed step gets no tools at all (with tools merely disabled, GLM
+// writes its call as text), and is told to answer, so a run that spent its
+// budget searching still ends with an answer.
+const FINAL_NOTE =
+  "\n\nYou have no more tool calls. Answer now from what you have read; say what you could not find."
+const finalStepAnswers =
+  (system: string) =>
+  ({ stepNumber, messages }: { stepNumber: number; messages: ModelMessage[] }) =>
+    stepNumber >= AGENT_MAX_STEPS - 1
+      ? {
+          toolChoice: "none" as const,
+          activeTools: [] as never[],
+          system: system + FINAL_NOTE,
+          messages: flattenToolTurns(messages),
+        }
+      : {}
+
+// Tool calls and results as plain text: with no tool-call structure left in the
+// history, a model has no call format to imitate on the answering step.
+function flattenToolTurns(messages: ModelMessage[]): ModelMessage[] {
+  const out: ModelMessage[] = []
+  const notes: string[] = []
+  const flush = () => {
+    if (notes.length) out.push({ role: "user", content: `What your tool calls returned:\n\n${notes.join("\n\n")}` })
+    notes.length = 0
+  }
+  for (const m of messages) {
+    if (m.role === "tool") {
+      for (const part of m.content) {
+        if (part.type !== "tool-result") continue
+        const o = part.output as { type: string; value?: unknown }
+        const v = o.type === "text" || o.type === "error-text" ? String(o.value) : JSON.stringify(o.value)
+        notes.push(`[${part.toolName}]\n${v}`)
+      }
+      continue
+    }
+    if (m.role === "assistant" && Array.isArray(m.content)) {
+      const text = m.content.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("")
+      if (text.trim()) {
+        flush()
+        out.push({ role: "assistant", content: text })
+      }
+      continue
+    }
+    flush()
+    out.push(m)
+  }
+  flush()
+  return out
+}
+
+// Defensive: drop any tool-call markup a model writes as text.
+const stripToolMarkup = (t: string) => t.replace(/<tool_call>[\s\S]*?(<\/tool_call>|$)/g, "").trim()
 
 function logUsage(route: string, model: string, usage: LanguageModelUsage | undefined, steps: number) {
   if (!usage) return
@@ -97,7 +164,7 @@ export function trimHistory<T extends { role: string; content: string }>(message
   )
 }
 
-// ── fallback runners ──────────────────────────────────────────────────────────
+// ── runners ─────────────────────────────────────────────────────────────────
 
 export async function generateWithFallback(args: {
   question: string
@@ -107,17 +174,19 @@ export async function generateWithFallback(args: {
   const cf = provider()
   let lastErr: unknown
   for (const id of modelChain()) {
+    const read = new Set<string>()
     try {
       const { text, totalUsage, steps } = await generateText({
         model: cf(id),
         system: args.system,
         prompt: args.question,
-        tools: agentTools(),
+        tools: agentTools(read),
         stopWhen: stepCountIs(AGENT_MAX_STEPS),
+        prepareStep: finalStepAnswers(args.system),
         maxOutputTokens: args.maxOutputTokens ?? 900,
       })
       logUsage("ask", id, totalUsage, steps.length)
-      return { text, model: id }
+      return { text: withSources(stripToolMarkup(text), read), model: id }
     } catch (err) {
       lastErr = err
       console.warn(`[chat] model ${id} failed, falling back:`, err instanceof Error ? err.message : err)
@@ -137,12 +206,15 @@ export async function* streamWithFallback(args: {
   const cf = provider()
   let lastErr: unknown
   for (const id of modelChain()) {
+    const read = new Set<string>()
+    let streamed = ""
     const result = streamText({
       model: cf(id),
       system: args.system,
       messages: args.messages,
-      tools: agentTools(),
+      tools: agentTools(read),
       stopWhen: stepCountIs(AGENT_MAX_STEPS),
+      prepareStep: finalStepAnswers(args.system),
       maxOutputTokens: args.maxOutputTokens ?? 1200,
     })
     let emitted = false
@@ -152,8 +224,11 @@ export async function* streamWithFallback(args: {
           emitted = true
           args.onModel?.(id)
         }
+        streamed += chunk
         yield chunk
       }
+      const tail = withSources(streamed, read).slice(streamed.trimEnd().length)
+      if (tail) yield tail
       const [usage, steps] = await Promise.all([result.totalUsage, result.steps])
       logUsage("chat", id, usage, steps.length)
       return
@@ -252,7 +327,15 @@ export function pageForAgent(md: string, section?: string): Record<string, unkno
 
 // ── the tool set ────────────────────────────────────────────────────────────
 
-export function agentTools() {
+// Pages the agent actually read this request, appended as sources when the
+// model's answer carries no links of its own (small models often skip them).
+export function withSources(text: string, read: Set<string>): string {
+  if (!read.size || /\]\(\/[a-z]/.test(text)) return text
+  const list = [...read].slice(0, 5).map((p) => `[/${p}](/${p})`).join(" · ")
+  return `${text.trimEnd()}\n\nSources: ${list}`
+}
+
+export function agentTools(read?: Set<string>) {
   return {
     search_content: tool({
       description:
@@ -282,10 +365,12 @@ export function agentTools() {
         const slug = rest.join("/")
         if ((DATA_PAGES as readonly string[]).includes(kind)) {
           const md = await dataPageMarkdown(kind)
+          if (md) read?.add(kind)
           return md ? pageForAgent(md, section) : { error: `no data page "${kind}"` }
         }
         if (!slug) return { error: `use kind/slug, e.g. articles/memonce` }
         const md = contentMarkdown(kind, slug)
+        if (md) read?.add(`${kind}/${slug}`)
         return md ? pageForAgent(md, section) : { error: `no page ${kind}/${slug}; search first` }
       },
     }),
@@ -301,7 +386,7 @@ export async function buildSystemPrompt(): Promise<string> {
   cachedSystemPrompt = [
     `You answer questions on ${siteUrl}, the personal site of ${profile.name} (${profile.title} at ${profile.company.name}, ${profile.location}): his articles, projects, papers digests, resume, patents and health panel.`,
     "The site's content is not in this prompt. Use search_content to find pages, then get_content to read the part you need (pass the section heading search gave you). Data pages: about, resume, health, now, uses, reading.",
-    "Rules: ground every claim in what you read this turn; read before relying on a snippet; if nothing covers it, say so and point to a relevant page. Never invent facts about him. Cite pages as markdown links to their site path (/kind/slug). Be precise and brief, engineer to engineer. Answer in the visitor's language.",
+    "Rules: ground every claim in what you read this turn; read before relying on a snippet; if nothing covers it, say so and point to a relevant page. Never invent facts about him. Cite pages as markdown links to their site path (/kind/slug). Call tools silently: no \"let me check\" before a tool call; write only the answer. Be precise and brief, engineer to engineer. Answer in the visitor's language.",
   ].join("\n\n")
   return cachedSystemPrompt
 }

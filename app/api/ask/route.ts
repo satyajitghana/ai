@@ -12,7 +12,7 @@ import { ASK_LIMIT, clientKey, rateLimit, tooMany } from "@/lib/rate-limit"
 
 // ask_satyajit for other people's agents: POST {question} → {answer, model}.
 // Same grounded agent as /api/chat (Cloudflare Workers AI, lib/chat.ts),
-// non-streaming, with a fallback model on error.
+// non-streaming.
 export const maxDuration = 60
 
 const bodySchema = z.object({ question: z.string().min(1).max(4000) })
@@ -51,11 +51,11 @@ export async function POST(req: Request) {
     })
     return Response.json({ answer: text, model })
   } catch (error) {
-    // Upstream (Workers AI) failure after exhausting the fallback chain.
+    // Upstream (Workers AI) failure.
     const message = error instanceof Error ? error.message : String(error)
     return problem({
       code: "bad_gateway",
-      detail: `Upstream model error after exhausting the fallback chain: ${message}`,
+      detail: `Upstream model error: ${message}`,
       hint: "Retry after a short backoff. The static content APIs under /api/* and the markdown twins do not depend on a model and stay available.",
       instance: "/api/ask",
     })

@@ -14,9 +14,9 @@ vercel link        # or import satyajitghana/ai in the Vercel dashboard
 |---|---|---|
 | `SITE_URL` | canonical base for llms.txt/JSON-LD/sitemap | defaults to `https://ai.thesatyajit.com` |
 | `GITHUB_TOKEN` | live GitHub stats (GraphQL, hourly revalidate) | dummy seed data + "seed data" footnote |
-| `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` | RAG chat + `/api/ask` + MCP `ask_satyajit` go live on Workers AI (token needs Workers AI read + run) | graceful 503 / offline notice |
-| `CLOUDFLARE_AI_GATEWAY_ID` | route the model calls through that AI Gateway (logs, caching, rate limits) | calls go straight to Workers AI |
-| `CHAT_MODEL` / `CHAT_MODEL_FALLBACK` | override the Workers AI models | `@cf/zai-org/glm-4.7-flash` / `@cf/meta/llama-4-scout-17b-16e-instruct` (both free-tier) |
+| `WORKERS_AI_ACCOUNT_ID` + `WORKERS_AI_API_TOKEN` | RAG chat + `/api/ask` + MCP `ask_satyajit` go live on Workers AI (token needs Workers AI read + run) | graceful 503 / offline notice |
+| `WORKERS_AI_GATEWAY_ID` | route the model calls through that AI Gateway (logs, caching, rate limits) | calls go straight to Workers AI |
+| `CHAT_MODEL` | override the Workers AI model | `@cf/zai-org/glm-4.7-flash` (free allocation) |
 
 Server-only — never `NEXT_PUBLIC_`.
 

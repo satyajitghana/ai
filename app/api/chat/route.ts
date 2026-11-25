@@ -13,7 +13,7 @@ import {
 import { CHAT_LIMIT, clientKey, rateLimit, tooMany } from "@/lib/rate-limit"
 
 // Streaming RAG chat via the Vercel AI SDK on Cloudflare Workers AI (see
-// lib/chat.ts), with a fallback model if the first errors before emitting text.
+// lib/chat.ts).
 // NO-KEY MODE: returns 503 + a pointer to the static agent surfaces.
 export const maxDuration = 60
 
@@ -90,8 +90,8 @@ export async function POST(req: Request) {
   const modelMessages = await convertToModelMessages(uiMessages)
 
   // Manual text stream so an upstream failure (quota / model access) becomes
-  // visible text instead of a silent empty reply; streamWithFallback drops to
-  // the fallback model if the first errors before any token is emitted.
+  // visible text instead of a silent empty reply; an upstream error
+  // shows up as text in the reply.
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -100,14 +100,19 @@ export async function POST(req: Request) {
           system,
           messages: modelMessages,
         })) {
+          if (req.signal.aborted) return
           controller.enqueue(encoder.encode(chunk))
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         console.error("[chat] stream error:", message)
-        controller.enqueue(encoder.encode(`\n[chat error] ${message}`))
+        if (!req.signal.aborted) controller.enqueue(encoder.encode(`\n[chat error] ${message}`))
       } finally {
-        controller.close()
+        try {
+          controller.close()
+        } catch {
+          // the reader went away first
+        }
       }
     },
   })
