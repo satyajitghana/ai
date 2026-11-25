@@ -194,6 +194,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "chimera-diffusion/hetero-p-drift": () => import("@/components/articles/chimera-diffusion/hetero-p-drift"),
   "chimera-diffusion/length-extrapolation": () => import("@/components/articles/chimera-diffusion/length-extrapolation"),
   "chimera-diffusion/rope-unbundling": () => import("@/components/articles/chimera-diffusion/rope-unbundling"),
+  "claude-artifact-apps-and-webmcp/app-gallery": () => import("@/components/articles/claude-artifact-apps-and-webmcp/app-gallery"),
+  "claude-artifact-apps-and-webmcp/cart-tools-lab": () => import("@/components/articles/claude-artifact-apps-and-webmcp/cart-tools-lab"),
   "claude-code-sandbox-internals/argv-explorer": () => import("@/components/articles/claude-code-sandbox-internals/argv-explorer"),
   "claude-code-sandbox-internals/policy-resolver": () => import("@/components/articles/claude-code-sandbox-internals/policy-resolver"),
   "claude-code-sandbox-internals/sandbox-cutaway": () => import("@/components/articles/claude-code-sandbox-internals/sandbox-cutaway"),
