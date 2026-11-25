@@ -1,0 +1,213 @@
+---
+title: "Hy4 flash: 63 billion parameters a token looks up instead of multiplies"
+description: "Tencent's Hy4 flash stores 220.25B parameters and computes with 11.27B. A quarter of what it stores sits outside the mixture-of-experts: four Engram tables, 660,006,416 rows of 96 numbers, of which each token reads 64 rows chosen by hashing its last two and three tokens. I read the release's headers, config, the transformers and llama.cpp ports, and the tensors that drive the hash, then reproduced the addressing: canonical token ids (the 120,818-token vocabulary folds to 92,620), one odd multiplier per position, a rolling XOR, and 64 distinct primes near 10.31 million. With it I fetched the exact rows that 'Alexander the Great' reads from the 440 GB checkpoint with 64 HTTP range requests, 12,288 bytes in all. The module departs from DeepSeek's Engram paper in ways the card does not mention. The missing convolution and the square-root gate come from DeepSeek's own V4.1 release; the per-row normalisation and a per-stream offset no gate multiplies are Tencent's, and at the last Engram layer that offset keeps the memory switched on at every token. I also ran an ablation on CPU with llama.cpp: turning the tables off raises perplexity 17% on prose and 12% on code, and scrambling their addresses raises it 86%, so wrong memory hurts far more than none. Quantizing the rest of the model makes the tables a bigger share of the download (28.8% of the BF16 files, 44.1% of the FP8 release, 40.8% of the Q3_K GGUF), and every port keeps them off the accelerator. Three interactives: the real hash, the memory map, and the gate's range per layer."
+date: 2026-11-24
+tags:
+  - hunyuan
+  - mixture-of-experts
+  - engram
+  - conditional-memory
+  - inference
+  - flagship-models
+rating:
+  novelty: 2
+  verification: 3
+  runnable: 2
+  explains: 3
+  takeaway: 2
+  durability: 2
+  reach: 2
+  unique: 3
+  why: "Reproduces Hy4 flash's Engram addressing from its tensors, reads the gate's offsets, and ablates the tables on CPU: off, and scrambled."
+topic: llm-architecture
+kind: model
+level: practitioner
+runsOn: workstation
+licence: custom
+---
+
+import { MemoryMap } from "@/components/articles/hy4-flash/memory-map"
+import { EngramLookup } from "@/components/articles/hy4-flash/engram-lookup"
+import { GateOffset } from "@/components/articles/hy4-flash/gate-offset"
+
+Hy4 flash has two parameter counts that matter and a third that misleads. It computes with 11.3B parameters a token. It stores 220.25B. And 63.36B of those stored parameters are not weights in the usual sense: nothing multiplies them by an activation. They are rows in four hash tables, and a token reads 64 of them, 12,288 bytes in BF16, out of 126.7 GB.
+
+That is the part of the model I care about here. Tencent's model card gives it three lines ("N-gram embedding (Engram). The backbone is augmented with learned bigram and trigram representations, retrieved via multi-head hash lookups."), and my [roundup of the week](/articles/open-models-roundup-nov-20) gave it a paragraph. The design comes from DeepSeek's [Engram paper](https://arxiv.org/abs/2601.07372), which this site explains in [the n-gram memory explainer](/architectures/ngram-memory). What follows is what Tencent actually shipped, read from the release's own files: the safetensors headers, `config.json`, the integer tensors that drive the hash, the [transformers port](https://github.com/huggingface/transformers/pull/50903) and the [llama.cpp port](https://github.com/ggml-org/llama.cpp/pull/32517). Neither port is merged yet.
+
+<ModelCard repo="tencent/Hy4-flash" />
+
+## Where the 220 billion parameters are
+
+I summed the 1,964 tensors across the 148 shard headers. The total is 220,251,201,958, and the card's breakdown holds up once you know which of its numbers include what.
+
+| Part | Parameters | A token reads |
+|---|---:|---|
+| Routed experts, 512 per layer in 41 MoE layers | 148.58B | 16 per layer, 4.64B |
+| Everything else in the backbone (attention, shared experts, the dense layer, embeddings, output head) | 6.90B | all but the 0.37B input embedding |
+| Engram tables | 63.36B | 64 rows of 96 values |
+| Engram projections and norms | 0.095B | all of them, at four layers |
+| Vision encoder and projector | 0.47B | only with an image |
+| DFly2 drafter | 0.85B | while drafting |
+
+The backbone is 148.58B + 6.90B = 155.48B, the card's "155.5B". The tables alone are 63,360,615,936 parameters, the card's "Embedding Table Parameters 63.4B"; with their projections the Engram modules are 63.46B, which is the card's other figure, "Engram Parameters 63.5B". The introduction's "64B" and "12B active" are those numbers rounded up. My active count is 11.27B: the routed experts' 4.64B (each expert is 7,077,888 parameters working in a 1,536-wide latent), the rest of the backbone minus the input embedding table, the Engram projections, and 6,144 table values. The card says 11.3B.
+
+Each expert's three matrices are 1,536 by 1,536, so the expert bank is LatentMoE: two shared projections per layer take the 3,072-wide hidden state down to 1,536 and back, and the experts never see the full width. That keeps 512 experts per layer affordable. It is also why the expert bank, at 148.58B, is only a little over twice the size of the tables.
+
+<MemoryMap />
+
+The release formats move that picture in a direction worth noticing. Tencent's `Hy4-flash-FP8` repository quantizes the backbone and leaves the tables in BF16, so the tables go from 28.8% of the BF16 files (126.7 of 440.5 GB) to 44.1% of the FP8 files (126.7 of 287.1 GB). AngelSlim's [GGUF repository](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) stores the tables as a single tensor, `per_layer_token_embd.weight`, shape `[96, 660006416]`, type `F8_E4M3`, alone in the second shard of every build: 63.36 GB of the 155.37 GB Q3_K files, 40.8%. Whoever quantizes the experts harder makes the lookup table a larger share of the download.
+
+## Four tables, 64 primes
+
+The config puts an Engram module in front of four layers, `engram_layer_ids: [2, 12, 22, 32]`. Those ids are one-based (the transformers code tests `layer_idx + 1 in config.engram_layer_ids`), so the modules sit at `model.layers.1`, `.11`, `.21` and `.31`, every tenth layer from the second. The card's table says the same with zero-based indices, 1, 11, 21, 31.
+
+Each module owns one table. Its rows are 96 values wide and its row count is the sum of 16 primes, one per hash head: eight heads for the bigram ending at the current token and eight for the trigram. At `model.layers.1` the primes run from 10,312,007 to 10,312,259, which adds up to 164,994,380 rows, 31.68 GB in BF16. The other three layers continue upward through the primes to 10,313,201, so all 64 heads have distinct moduli. Four layers times 16 heads times about 10.31M rows times 96 values is the 63.36B.
+
+<Figure
+  src="/articles/architectures/ngram-memory/fig1.png"
+  alt="Left: a Transformer stack over the sentence Only Alexander the Great could tame the horse Bucephalus; an Engram module sits inside one block before Attention and MoE, each with a residual add. Right, the module opened: the 2-gram the Great and the 3-gram Alexander the Great each pass through h hash heads into stacks of 2-gram and 3-gram embedding tables; the retrieved rows are concatenated, two linear projections make a key and a value, a scaled dot product with the input hidden state forms a gate that multiplies the value, and a convolution finishes the output."
+  caption="The Engram module as DeepSeek drew it. Hy4 flash keeps the hashing, the concatenation and the key-value gate, and drops the convolution on the right (Engram paper, Figure 1)."
+/>
+
+## How a token becomes sixteen row numbers
+
+The address of every row a token reads is a function of token ids and nothing else. Here is the whole computation, from `HYV4FlashEngramLayer.hash_ngrams` and checked against llama.cpp's `engram_hash`, which does the same arithmetic in C++.
+
+**Canonical ids first.** Byte-level BPE gives " the", " The", "The" and " THE" four different ids, and a lookup table keyed on raw ids would learn four copies of every phrase. So the checkpoint ships a frozen map, a 120,818-entry `int32` tensor called `lookup_table`, identical at all four layers. I downloaded it by range request. It folds the vocabulary to 92,620 canonical ids, 23.3% fewer, close to the 23% the paper reports for its own 128K tokenizer. 78,507 tokens keep a class to themselves. The rest merge by case, leading space and accents: the class of " the" has 11 members, including " The", "THE", " thé" and the Vietnamese " thể" and " thế", which lose their diacritics on the way in. The largest class, 81 tokens, is everything that normalises to nothing: runs of spaces, tabs and newlines, a non-breaking space, stray combining accents. Positions before the start of a document read as the pad token, whose canonical id is 91,804.
+
+**One odd multiplier per position.** Each layer has three, drawn once with NumPy's `default_rng(seed + 10007 * layer_id)` and forced odd, below a bound that keeps the product with any canonical id inside a signed 64-bit integer. The GGUF stores them as metadata; at `model.layers.1` they are 81,853,575,799,317, 39,690,085,502,883 and 24,229,915,018,165.
+
+**A rolling XOR.** Multiply the canonical ids of the current token and the two before it by those three multipliers. The bigram key is the first product XOR the second; the trigram key is the bigram key XOR the third. The trigram extends the bigram rather than being hashed separately.
+
+**Sixteen moduli.** Each bigram head takes the bigram key modulo its prime, each trigram head the trigram key modulo its own. Add the head's offset into the shared table, and that is the row.
+
+```python
+# HYV4FlashEngramLayer.hash_ngrams (transformers PR 50903), the clamping of unknown ids left out
+mixed = compressed.long() * self.hash_multipliers
+hash_ids = []
+for ngram_size in range(2, self.max_ngram_size + 1):
+    mix = mixed[..., 0]
+    for offset in range(1, ngram_size):
+        mix = torch.bitwise_xor(mix, mixed[..., offset])
+    order_start = (ngram_size - 2) * self.n_head_per_ngram
+    moduli = self.head_vocab_sizes[order_start : order_start + self.n_head_per_ngram]
+    hash_ids.append(mix.unsqueeze(-1) % moduli)
+return torch.cat(hash_ids, dim=-1)
+```
+
+Here `compressed` holds the canonical ids of $[x_t, x_{t-1}, x_{t-2}]$, and `head_vocab_sizes` the layer's 16 primes.
+
+The widget does the same arithmetic in the browser with `BigInt`, on the release's own constants. I checked its output against a Python reimplementation of the reference for all four layers.
+
+<EngramLookup />
+
+Why sixteen heads and not one? A single table of 10.3 million rows has to hold every bigram anyone writes, so unrelated bigrams collide and share a row forever. With eight heads, each reducing the same key by a different prime, two bigrams that collide in one head almost never collide in the others too. The concatenation of the eight rows still identifies the phrase even when one of them is shared with something else, and the gate downstream can discount the head that went wrong. Neighbouring primes differ by as little as 2, so this is not about table sizes. Distinct moduli are what make the collisions independent.
+
+## Fetching the rows over HTTP
+
+Because the address needs nothing but token ids, I could compute it on my laptop for a phrase and read exactly those rows out of Tencent's checkpoint without downloading it. For " Great" after "Alexander the" the bigram is " the Great" and the trigram " Alexander the Great". At `model.layers.1` the first three bigram heads point at rows 2,246,561, 6,805,932 and 8,019,341 of their slices. Each table is a single tensor in its own shard (`model-00004-of-00148.safetensors` holds `model.layers.1`'s), so a row is at a fixed byte offset: the header length, the tensor's start, plus 192 bytes times the row. Sixty-four HTTP range requests returned 12,288 bytes, every row this token reads at all four layers, in 61 seconds on my connection, most of it in request latency.
+
+"Alexander the great", in lower case, lands on the same 64 rows, because " great" and " Great" share canonical id 2,693.
+
+That is the system property the paper builds on, and it is the reason the tables can live somewhere slow. An expert's index comes out of the router, which needs the hidden state, so it is known only when the layer runs. A row's index is known the moment the token is. A server can compute all 64 addresses before the first layer starts and have the rows in flight while the layers in front of each Engram module run.
+
+## What Hy4 flash changed, and what it inherited
+
+The card describes Engram in one sentence, so the differences are only visible in the code and the weights. There are two references to compare against: the paper, and DeepSeek's own shipped module in DeepSeek-V4.1-Flash, which llama.cpp ports in `src/models/deepseek41.cpp` from DeepSeek's `inference/engram.py`. Some of what looks new in Hy4 flash is DeepSeek's release departing from DeepSeek's paper.
+
+**No convolution, from DeepSeek's release.** The paper's module ends with a depthwise causal convolution of width 4 over the gated values. There is no convolution tensor in any of Hy4 flash's Engram modules; the headers list key and value projections, norms, the table, the token map, a gamma and four per-stream scales, and the forward pass uses exactly those. DeepSeek-V4.1's module, as llama.cpp ports it, has no convolution either: it adds the gated value straight to the streams.
+
+**A square-root gate, also from DeepSeek's release.** As in the paper, the memory is projected once to a value $v_t$ shared by the four residual streams, and once per stream $c$ to a key $k_{t,c}$. Each stream's gate comes from its own hidden state $h_{t,c}$:
+
+$$
+d_{t,c} = \frac{\mathrm{RMSNorm}(h_{t,c})^\top \mathrm{RMSNorm}(k_{t,c})}{\sqrt{3072}}, \qquad
+g_{t,c} = \sigma\!\left(\operatorname{sign}(d_{t,c})\sqrt{|d_{t,c}|}\right)
+$$
+
+The paper's gate is a plain sigmoid of $d$. The signed square root is in DeepSeek-V4.1's port in exactly this form, and the llama.cpp port of Hy4 flash says so: "the gate is deepseek41's". The transformers code explains it as keeping "the gate responsive once the dot product grows": the square root compresses large values so the sigmoid keeps a slope.
+
+**Every row is normalised before use, which is Tencent's.** Each of the 16 looked-up rows goes through its own RMSNorm with a learned 96-wide weight (`lookup_per_head_norms`) before the rows are concatenated into a 1,536-wide memory vector. The llama.cpp port marks this as the difference: "unlike deepseek41, each looked-up row is RMS-normed and scaled by its head weight". A row's magnitude never reaches the model, only its direction. The value is RMS-normed too, and scaled by a learned $\gamma$.
+
+**An offset the gate does not multiply, also Tencent's.** This is the change that matters. DeepSeek-V4.1 adds $g_{t,c} \cdot v_t$ to each stream. What Hy4 flash adds to stream $c$ is
+
+$$
+\Delta_{t,c} = (g_{t,c} + s_c) \odot \gamma\,\mathrm{RMSNorm}(v_t)
+$$
+
+where $s_c$ is a learned 3,072-wide vector per stream (`unified_per_hc_scales`). In the paper and in DeepSeek's release, a gate near zero switches the memory off. Here the multiplier only reaches zero if $s_c$ lets it. I read all 16 of those vectors from the checkpoint, 6 KB each. They are close to constant within a stream (the 5th to 95th percentile spread is at most 0.04) and almost all negative.
+
+<GateOffset />
+
+At `model.layers.1` the offsets are tiny, between -0.026 and 0.005, so the first Engram layer behaves like the paper's: the gate decides between roughly nothing and roughly all of the memory. They grow with depth. At `model.layers.31`, stream 0 has $s \approx -1.10$, so its multiplier runs from about -1.10 (gate shut) to -0.10 (gate open). That stream always receives the memory, with a negative sign, and the gate only decides how much. Streams are mixed again before attention reads them, so the sign by itself means little. The point is that at the deepest Engram layer the context gate is not a switch. A collision or a wrong sense of a word cannot be fully rejected there. I do not know whether Tencent intended that or training found it; the card does not mention the term.
+
+**Placement.** The paper's sweep favoured early layers, and its Engram-27B put two modules at layers 2 and 15. Hy4 flash spreads four across the depth, the last in the final quarter of the network. The paper argues early placement lets the memory relieve the backbone of reconstructing phrases, and later placement gives the prefetch more time. Hy4 flash does both, and its last two modules, where the offsets are large, look less like gated lookups and more like an always-on n-gram feature.
+
+The transformers port also carries an optional FP8 round trip on the looked-up rows, whose docstring says it quantizes "as Engram embeddings were trained to be read". The shipped config sets `engram_fp8_embedding: false`, and the GGUF stores the table in `F8_E4M3`. Which of those matches training, the release does not say.
+
+## Turning the tables off
+
+Tencent publishes no ablation, so I ran one. The llama.cpp port (PR 32517 at commit `a09e624`, built for CPU) got a two-line patch with two switches. `HY4_ENGRAM_OFF` builds no Engram gathers at all, so the tables are never read and nothing is added to the streams. `HY4_ENGRAM_SCRAMBLE` adds a constant to every hash before the prime modulus, so each n-gram reads 16 real, trained rows that belong to other n-grams: wrong memory instead of no memory. The model was AngelSlim's Q3_K GGUF (backbone quantized, table in `F8_E4M3`), on an Intel i7-14700 with 28 threads and 123 GB of RAM, CPU only. The box was shared with other jobs, so the run sat in a systemd scope capped at 95 GB (soft) and 105 GB (hard), at nice 10; the kernel could and did reclaim mapped pages mid-run, which makes every timing below noisy.
+
+Perplexity with `llama-perplexity`, 512-token windows, scored on the second half of each window. Wikitext-2 is 40 windows (20,480 tokens), code is 20 windows of llama.cpp's own C++ (10,240 tokens). The ratio is per window, paired against the normal run.
+
+| | Wikitext-2 PPL | vs normal | Same top token | Code PPL | vs normal | Same top token |
+|---|---:|---:|---:|---:|---:|---:|
+| Engram on | 23.20 | | | 2.51 | | |
+| Engram off | 27.07 | 1.167 ± 0.028 | 66.1% | 2.81 | 1.120 ± 0.021 | 86.1% |
+| Rows scrambled | 43.07 | 1.856 ± 0.048 | 63.7% | | | |
+
+Absolute perplexities are high for a model this size: this is the instruct model reading raw text in short windows at 3-bit, so only the ratios mean anything. I did not run a second normal pass as a noise floor for the top-token agreement, so read that column as rough.
+
+Two results matter. Without its tables the model is 17% worse on prose and 12% worse on code (the ratios above, rounded), so the backbone did not learn to work around them; they carry part of the load. And wrong memory is much worse than no memory: perplexity with scrambled rows is 1.86 times normal, against 1.17 with the tables off. A gate that could fully reject a row that disagrees with the context would make the scrambled run look like the off run. It does not, which is what the offsets above predict: at the deeper Engram layers the multiplier cannot reach zero, so a wrong row gets in.
+
+Greedy completions (40 tokens, raw prompt, no chat template) show the same thing one sample at a time, so treat them as illustrations. "Alexander the Great was born in" gives "356 BC" normally, "July 356 BC" with the tables off and "546 BC" with them scrambled. "In 1969, Neil Armstrong became the first person to" is "set foot on the moon" in the first two and, scrambled, "be issued a traffic ticket by a female police officer in Toronto". The first line of Li Bai's 静夜思 is continued correctly with the tables on; with them off the model repeats the first line over and over, and scrambled it switches to describing the line.
+
+Speed did not move measurably. `llama-bench` gave 18.83 ± 0.51 tokens a second for a 512-token prompt and 2.33 ± 0.03 for generation with the tables on, against 17.14 ± 2.29 and 2.36 ± 0.07 with them off. Sixty-four row reads are noise next to 11B parameters of matmuls on a CPU.
+
+The page cache shows what the tables cost in practice. I evicted the table shard from the page cache before each run and asked the kernel afterwards how much of it was resident. With the tables off: 0 bytes, so the switch works and nothing else touches the file. With them on, after 20,480 tokens: 2.75 GB of the 63.36 GB shard. Replaying the hash in Python over the same tokens explains the number. Those tokens read 867,849 distinct rows across the four layers, 83.3 MB of row data, but the rows are scattered by design, so each one costs its own 4 KiB page: 843,570 distinct pages, which by my arithmetic is 3.46 GB. The measured 2.75 GB is below that because the memory cap reclaimed some pages during the run. Code repeats itself more: on 10,240 tokens of C++, 73.4% of row reads hit a row the same text had already read, against 33.8% for prose, and the most-read 1% of rows took 30.0% of reads against 17.1%. A server caching hot rows will do better on code than on chat.
+
+## Experts against memory
+
+The paper's central result is a U-curve. Hold total and active parameters fixed, let $\rho$ be the share of the inactive parameter budget given to routed experts, and the rest to Engram tables. Validation loss is lowest at $\rho \approx 75\%$ to 80%, in both of the paper's compute regimes, and worse at 100% (pure MoE) and as $\rho$ falls further.
+
+<Figure
+  src="/articles/architectures/ngram-memory/fig3.png"
+  alt="Left: validation loss against the allocation ratio rho for two compute budgets, 2e20 and 6e20 FLOPs; both curves are U-shaped, with the minimum near rho of 75 to 80 percent, below the pure-MoE point at 100 percent. Right: validation loss against the number of Engram embedding slots on a log axis, falling in a straight line for Engram and less steeply for the OverEncoding baseline."
+  caption="Left, loss against the share of the sparse budget given to experts; right, loss as the table grows at fixed compute (Engram paper, Figure 3)."
+/>
+
+Hy4 flash, measured the paper's way: its inactive expert parameters are 148.58B minus the 4.64B a token uses, 143.94B, and its tables are 63.36B. That puts $\rho$ at 69.4%, a little further toward memory than the paper's optimum. The paper's sweeps were at 2e20 and 6e20 FLOPs with models around 10B parameters, so I would not read Tencent's choice as off the curve; it is in the flat bottom of a U measured at a much smaller scale. What I would like to see is Tencent's own sweep. The card mentions "extensive scaling ladder experiments" and shows none of them.
+
+The one pretraining figure on the card is not that ablation.
+
+<Figure
+  src="/articles/hy4-flash/fig1.png"
+  alt="Scatter plot of bits per byte on internal code and agent validation sets against active parameters, lower is better: DeepSeek v4 Flash-Base 0.232, Kimi-K2-Base 0.235, Hy3-Preview-Base 0.219, MiMo-V2.5-Pro-Base 0.223, DeepSeek v4 Pro-Base 0.209, and Hy4 Flash Base at 0.198 and Hy4 Base at 0.185 joined by a dashed line."
+  caption="Bits per byte on Tencent's internal code and agent validation sets: Hy4 flash Base at 0.198 with about 12B active, below every other base model shown, including DeepSeek v4 Pro-Base at 0.209 (Hy4 flash model card, pretrained-model-bpb.png)."
+/>
+
+It compares whole models trained on different data, on Tencent's own validation set, so it says nothing about what the tables contribute. Every architectural change in the model (hybrid attention, LatentMoE, Engram, self-distillation from Hy4) is folded into the one dot.
+
+## Serving: the tables do not need to be near the math
+
+A token at batch size one reads about 22.5 GB of BF16 weights through the matmuls (11.27B parameters, two bytes each) and 12,288 bytes from the tables. The tables are 126.7 GB. Putting them in accelerator memory buys nothing, and every port of the model avoids it.
+
+- The transformers port lists the table in `_no_placement_params`, with the comment "Each Engram table is ~32 GB in bf16; skip placing it on accelerators" when a GPU cannot fit the layer. The embedding moves only the looked-up rows to the device.
+- The llama.cpp port computes every Engram layer's row ids on the host before the first gather, "so a lazily read table gets one batched readahead", and calls `llama_prefetch_rows` on them.
+- AngelSlim's Apple-silicon notes for the Q4_K_M build say "Keep the GGUF on a local SSD (the ~59 GiB Engram table is lazily mapped)". The file is 156.79 GiB and the weights that get wired into GPU memory are "~97.4 GiB", which is how a 128 GB M5 Max runs a model whose files would not fit in its memory. They report 48.13 tokens a second at 4K context with multi-token-prediction drafting.
+
+The paper measured the cost of the slow tier on H800s: a 100B-parameter table held entirely in host memory and prefetched over PCIe took a 4B dense model from 9,031.62 to 8,858.28 tokens a second, and an 8B one from 6,315.52 to 6,140.02, under 3%. The traffic scales with the rows a token reads, not the table's size.
+
+For a team serving Hy4 flash on GPUs, this changes the arithmetic of the memory budget. The FP8 release is 287.1 GB, but 126.7 GB of it can sit in host DRAM, leaving about 160 GB for the accelerators plus KV cache. Tencent's own vLLM and SGLang recipes still launch `tencent/Hy4-flash-FP8` across eight GPUs with tensor parallelism 8, and I have not checked where those engines place the tables.
+
+## A storage number and a compute number
+
+Hy4 flash joins DeepSeek-V4.1-Flash and Qwen3.8-Flash-Next as a large open model with a hashed n-gram table, and its tables are the largest share of the three: 28.8% of the parameters, against 28.4% for Qwen's single table and more than a quarter for DeepSeek's two. The "220B" on the model card is a storage number. The model's compute class is an 11B-active MoE, and its memory class is "155B of weights near the accelerator, 63B anywhere".
+
+The part I did not expect is the offset. The paper, and DeepSeek's release, treat Engram as memory the hidden state can veto. In Hy4 flash, the deepest module's veto is partial on every stream and absent on one, and the ablation agrees: scrambled rows cost more than missing ones, so the gate does not clean up after a bad lookup. That makes the hash collisions and the canonical folding (" the" and " thể" sharing rows) more consequential than the paper's framing suggests. It also means the tables are not optional furniture. Turning them off costs 17% in perplexity on prose. If you are choosing where to put this model, put the tables on the host, budget page cache for the rows a workload actually touches (a few GB per twenty thousand tokens of prose, at 4 KiB a row), and plan the GPUs around the 160 GB that is left.
+
+<ModelCard repo="AngelSlim/Hy4-flash-GGUF" />
+
+## Sources, and what was run
+
+Read from the release: the 148 safetensors headers of `tencent/Hy4-flash` and the four table shards' headers in `tencent/Hy4-flash-FP8` (by HTTP range request); `config.json`; the GGUF headers of the Q3_K build's two shards; the `lookup_table` tensors (4 x 483 KB), the 16 `unified_per_hc_scales` tensors and 64 table rows, all by range request. The hash was reimplemented in Python from the transformers port and checked against the llama.cpp port's C++; the hash multipliers in the GGUF match a fresh NumPy draw with the reference's seed rule at all four layers, and the widget's `BigInt` version reproduces the row ids. Run: the ablation above, on the Q3_K GGUF under llama.cpp PR 32517, CPU only, on a shared box under a memory cap. Paper numbers are from the arXiv HTML of 2601.07372. Benchmarks and the GGUF speeds on Apple silicon are the publishers'.
