@@ -1,9 +1,11 @@
+import { createGoogleGenerativeAI } from "@ai-sdk/google"
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import {
   generateText,
   stepCountIs,
   streamText,
   tool,
+  type LanguageModel,
   type LanguageModelUsage,
   type ModelMessage,
 } from "ai"
@@ -32,12 +34,21 @@ import { siteUrl } from "@/lib/site"
 // there is no fallback model: an error is better than a wrong answer.
 // Override with CHAT_MODEL.
 //
+// CHAT_PROVIDER=google switches to the Gemini API (GEMINI_API_KEY). Tested
+// 25 Nov 2026 on the free tier: gemini-3.5-flash-lite gave the best answers of
+// any model tried, but took 53-264 s per question and then failed with "high
+// demand"; gemini-3.8-flash failed on quota every time. Free-tier Gemini input
+// is also used to improve Google's products. Worth it on a paid key, not free.
+//
 // HARNESS, built to spend few tokens: the system prompt is a few hundred tokens
 // (no site catalog; search finds pages), get_content returns one section or an
 // outline instead of a whole page, MDX imports and widgets are stripped, the
 // history is trimmed, and the loop is bounded. Each request logs its token usage.
 
-export const PRIMARY_MODEL = process.env.CHAT_MODEL ?? "@cf/zai-org/glm-4.7-flash"
+// CHAT_PROVIDER picks the backend: "google" (Gemini API) or "workers-ai".
+export const CHAT_PROVIDER = process.env.CHAT_PROVIDER === "google" ? "google" : "workers-ai"
+const DEFAULT_MODEL = { google: "gemini-3.8-flash", "workers-ai": "@cf/zai-org/glm-4.7-flash" } as const
+export const PRIMARY_MODEL = process.env.CHAT_MODEL ?? DEFAULT_MODEL[CHAT_PROVIDER]
 
 // search → read one or two sections → answer is 3-4 steps; 5 leaves one spare.
 export const AGENT_MAX_STEPS = 5
@@ -64,7 +75,9 @@ const env = {
 }
 
 export function isChatOnline(): boolean {
-  return Boolean(env.account() && env.token())
+  return CHAT_PROVIDER === "google"
+    ? Boolean(process.env.GEMINI_API_KEY)
+    : Boolean(env.account() && env.token())
 }
 
 export function modelChain(): string[] {
@@ -77,7 +90,11 @@ export function chatModelId(): string {
 
 // Created per call so importing this module never throws when the credentials
 // are absent (offline mode handles that).
-function provider() {
+function provider(): (id: string) => LanguageModel {
+  if (CHAT_PROVIDER === "google") {
+    const google = createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY })
+    return (id) => google(id)
+  }
   const account = env.account()
   const gateway = env.gateway()
   return createOpenAICompatible({
@@ -116,7 +133,7 @@ function flattenToolTurns(messages: ModelMessage[]): ModelMessage[] {
   const out: ModelMessage[] = []
   const notes: string[] = []
   const flush = () => {
-    if (notes.length) out.push({ role: "user", content: `What your tool calls returned:\n\n${notes.join("\n\n")}` })
+    if (notes.length) out.push({ role: "user", content: `Here is what you read on the site. Answer the question from it now, in prose.\n\n${notes.join("\n\n---\n\n")}` })
     notes.length = 0
   }
   for (const m of messages) {
@@ -125,7 +142,7 @@ function flattenToolTurns(messages: ModelMessage[]): ModelMessage[] {
         if (part.type !== "tool-result") continue
         const o = part.output as { type: string; value?: unknown }
         const v = o.type === "text" || o.type === "error-text" ? String(o.value) : JSON.stringify(o.value)
-        notes.push(`[${part.toolName}]\n${v}`)
+        notes.push(v)
       }
       continue
     }
@@ -171,13 +188,13 @@ export async function generateWithFallback(args: {
   system: string
   maxOutputTokens?: number
 }): Promise<{ text: string; model: string }> {
-  const cf = provider()
+  const llm = provider()
   let lastErr: unknown
   for (const id of modelChain()) {
     const read = new Set<string>()
     try {
       const { text, totalUsage, steps } = await generateText({
-        model: cf(id),
+        model: llm(id),
         system: args.system,
         prompt: args.question,
         tools: agentTools(read),
@@ -203,13 +220,13 @@ export async function* streamWithFallback(args: {
   maxOutputTokens?: number
   onModel?: (id: string) => void
 }): AsyncGenerator<string> {
-  const cf = provider()
+  const llm = provider()
   let lastErr: unknown
   for (const id of modelChain()) {
     const read = new Set<string>()
     let streamed = ""
     const result = streamText({
-      model: cf(id),
+      model: llm(id),
       system: args.system,
       messages: args.messages,
       tools: agentTools(read),
