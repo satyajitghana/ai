@@ -144,6 +144,8 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "big-moe-one-3090/offload-ceiling": () => import("@/components/articles/big-moe-one-3090/offload-ceiling"),
   "biollm-8b/mea-pipeline": () => import("@/components/articles/biollm-8b/mea-pipeline"),
   "biollm-8b/write-control": () => import("@/components/articles/biollm-8b/write-control"),
+  "bispectrum-selective-g-bispectra/shift-lab": () => import("@/components/articles/bispectrum-selective-g-bispectra/shift-lab"),
+  "bispectrum-selective-g-bispectra/size-calc": () => import("@/components/articles/bispectrum-selective-g-bispectra/size-calc"),
   "bitcoin-0-1-rebuilt/pe-map": () => import("@/components/articles/bitcoin-0-1-rebuilt/pe-map"),
   "blender-5-3-gaussian-splats/dof-toy": () => import("@/components/articles/blender-5-3-gaussian-splats/dof-toy"),
   "blender-5-3-gaussian-splats/splat-inspector": () => import("@/components/articles/blender-5-3-gaussian-splats/splat-inspector"),
