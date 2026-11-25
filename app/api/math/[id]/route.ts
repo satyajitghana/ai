@@ -18,7 +18,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     return problem({
       code: "not_found",
       detail: `No openai/math result family with id "${id}".`,
-      hint: "Ids are three digits, 001 to 372. List them at /api/math.",
+      hint: "Ids are three digits, 001 to 380, with gaps. List them at /api/math.",
       instance: `/api/math/${id}`,
     })
   return Response.json(r)

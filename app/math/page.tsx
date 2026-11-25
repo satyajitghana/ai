@@ -21,7 +21,7 @@ import { MathWall } from "./math-wall"
 
 const TITLE = MATH_COLLECTION
 const DESCRIPTION =
-  "Mathematics produced or claimed by AI systems: a short narrated video for each of the 372 result families in OpenAI's openai/math release. Each comes with the claim as we read it, our verdict, its Lean status and its manuscripts, from claimed landmarks to technical lemmas."
+  "Mathematics produced or claimed by AI systems: a short narrated video for each of the 375 result families in OpenAI's openai/math release. Each comes with the claim as we read it, our verdict, its Lean status and its manuscripts, from claimed landmarks to technical lemmas."
 
 export const metadata = seo("/math", TITLE, DESCRIPTION)
 

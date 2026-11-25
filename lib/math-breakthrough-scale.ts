@@ -1,6 +1,6 @@
 // The breakthrough scale on its own: dimensions, anchors, weights, tiers and
 // the formula, with no data. Client code imports this (the wall's badges and
-// sort); lib/math-breakthrough.ts adds the 372 scored families on top.
+// sort); lib/math-breakthrough.ts adds the 375 scored families on top.
 // Integer arithmetic only, so server and client agree exactly.
 
 export type BreakthroughEntry = {

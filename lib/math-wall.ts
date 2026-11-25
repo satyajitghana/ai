@@ -1,6 +1,6 @@
 // The records behind /math, "AI breakthroughs in mathematics": one short narrated
 // video (a "reel" internally, made by brand-crew/skills/math-reels) per result
-// family of openai/math (372). Composed at import time from four committed
+// family of openai/math (375). Composed at import time from four committed
 // sources:
 //
 //   components/articles/openai-math/catalogue-data.ts  our grades (discipline,
@@ -250,7 +250,7 @@ export function summarize(r: MathResultDetail): MathResult & { detail: string } 
 }
 
 /**
- * The slim tile the client wall gets for every family. Short keys: 372 of these
+ * The slim tile the client wall gets for every family. Short keys: 375 of these
  * are serialized into the page.
  */
 export type WallTile = {

@@ -130,7 +130,7 @@ export function GET() {
       : []),
     "## AI breakthroughs in mathematics",
     "",
-    `- [AI breakthroughs in mathematics](${absoluteUrl("/math")}): mathematics produced or claimed by AI systems, as a filterable wall of short narrated videos, one per result family of OpenAI's openai/math release (372 claimed results, some checked in Lean), each with the claim as we read it, our verdict, its Lean status and its manuscripts. As JSON: ${absoluteUrl("/api/math")} (one family in full: ${absoluteUrl("/api/math/107")}). The write-up: ${absoluteUrl("/articles/openai-math.md")}`,
+    `- [AI breakthroughs in mathematics](${absoluteUrl("/math")}): mathematics produced or claimed by AI systems, as a filterable wall of short narrated videos, one per result family of OpenAI's openai/math release (375 claimed results, some checked in Lean), each with the claim as we read it, our verdict, its Lean status and its manuscripts. As JSON: ${absoluteUrl("/api/math")} (one family in full: ${absoluteUrl("/api/math/107")}). The write-up: ${absoluteUrl("/articles/openai-math.md")}`,
     "",
     "## Daily logs (latest)",
     "",
