@@ -1,0 +1,240 @@
+---
+title: "llm.asm: a Qwen3-0.6B forward pass in 12 KB of x86-64, and a 24 KB OS that runs nothing else"
+description: "Alexey Fateev's llm.asm runs Qwen3-0.6B from a static 12,120-byte NASM binary with no libc: Q8_0 weights mapped from a 614 MiB file, an AVX2 INT8 kernel, a clone()-and-futex thread pool, Taylor-polynomial expf, and a BPE tokenizer that probes a 524,288-slot Fibonacci hash. A second build boots as a Multiboot kernel with 2 MiB pages and every core spinning on the model. I read all of it at commit 48feccb, read llama.cpp's CPU path at b12760, and built and ran both on an i7-14700. The binaries come out at exactly the stated sizes, and output is bit-identical across eight thread counts. On a busy machine llm.asm decoded 1.29x faster than llama.cpp at one thread and 1.45x at four, and lost prefill by about 3x. The INT8 trick is the same one llama.cpp uses; the lead comes from loop shape, fused projections and 141 barriers a token, and the same spin barriers collapsed to 2 tok/s when the threads outnumbered free cores. The bare-metal 31 to 54% splits into the Linux build's own margin times 11 to 14% from the OS, measured as a KVM guest. The tokenizer skips Qwen's pre-tokenizer: 5 of 12 strings tokenized differently from Hugging Face, all runs of whitespace, which includes indented code. A dense sweep put expf's error at 2.19e-7, above the README's 1.394e-7. The 64-token match with PyTorch FP32 reproduced at the stated 0.9996517 cosine; over 256 tokens the two drifted apart after 45 to 88."
+date: 2026-11-26
+tags:
+  - kernels
+  - performance
+  - llama-cpp
+  - quantization
+  - inference
+  - qwen
+rating:
+  novelty: 2
+  verification: 3
+  runnable: 2
+  explains: 2
+  takeaway: 2
+  durability: 2
+  reach: 1
+  unique: 2
+  why: "Builds and runs llm.asm against llama.cpp, reads both kernels, splits the 54% headline, and finds the whitespace inputs its tokenizer gets wrong."
+topic: gpu-systems
+kind: teardown
+level: practitioner
+runsOn: cpu
+licence: MIT
+---
+
+import { ByteBudget } from "@/components/articles/llm-asm/byte-budget"
+import { Q8Dot } from "@/components/articles/llm-asm/q8-dot"
+import { ThreadScaling } from "@/components/articles/llm-asm/thread-scaling"
+import { ExpfPoly } from "@/components/articles/llm-asm/expf-poly"
+import { BpeHash } from "@/components/articles/llm-asm/bpe-hash"
+
+On 25 November [@superalesha posted](https://x.com/superalesha/status/2125563464424862044): *"I built a full Qwen3-0.6B inference engine in 12,120 bytes of pure x86-64 assembly. ZERO libc, ZERO libm, ZERO shared libraries."* 3,688 lines of NASM, a static ELF where `readelf -d` prints *"There is no dynamic section in this file"*, 105 tok/s on an AMD EPYC 7642, and all 64 greedy tokens matching PyTorch FP32. Eight hours later [the second post](https://x.com/superalesha/status/2125682626056839259) went further: *"I deleted Linux completely, baked Qwen3-0.6B into a 24 KB pure x86-64 assembly OS, and it runs up to 54% faster than native Linux llama.cpp."*
+
+The author is Alexey Fateev, whose hand-drawn canvas animation skill this site already vendors for its films. The repository is [alesha-pro/llm.asm](https://github.com/alesha-pro/llm.asm), MIT, three commits all made on 25 November: the initial release (`86cca09`), a multi-turn chat commit, and `48feccb`, which added the INT8 kernel the second post's numbers come from. A third part, a Mini-GPT trainer with a full backward pass and a Braille TUI in 32 KB, I mention once and leave alone.
+
+<RepoCard repo="alesha-pro/llm.asm" note="Read at 48feccb (25 November 2026), with the initial release 86cca09 for the 12 KB numbers. The Linux engine is shared/*.asm plus 01-qwen3-inference/main.asm; the OS adds 02-baremetal-os/*.asm; the exporter and parity harness are scripts/export_weights.py and scripts/verify_ref.py." />
+
+<ModelCard repo="Qwen/Qwen3-0.6B" />
+
+I read every file in the Linux engine and the OS at `48feccb`, the first release's sources at `86cca09`, and llama.cpp's CPU matmul path at tag b12760 (`d9dae034`) to see what the comparison is against. I rebuilt the merge hash table from Qwen's `tokenizer.json` in Python and re-implemented the asm tokenizer's merge loop. Then I built llm.asm (both kernels, the first release and the OS) and llama.cpp on an Intel i7-14700, exported the weights with the repository's own script, and ran decode, prefill, determinism, tokenizer and numerics checks. That machine was shared with other work for the whole run, which matters for the thread counts above four and is spelled out where it does. The OS I could not boot: the box has no QEMU. Its numbers are the author's.
+
+<Video
+  src="/articles/llm-asm/elf-build"
+  poster="/articles/llm-asm/elf-build-poster.jpg"
+  alt="A terminal running make clean and make inference: nasm assembles seven files and ld links build/asm-llm. ls shows 12120 bytes, file reports a statically linked stripped ELF, readelf says there is no dynamic section, and a run answers a question about CPU caches at 98.62 tok/s decode with 32 threads."
+  caption="The build from the first post: seven nasm invocations and one ld line, no compiler anywhere, then the 12,120-byte binary answering a prompt. The bar at the bottom is a coding-agent session asking, in Russian, to run build/asm-llm and show the output. (@superalesha, 25 November.)"
+/>
+
+## Twelve kilobytes, and what is not in them
+
+The Makefile is short enough to read whole. Each `.asm` file goes through `nasm -f elf64`, and the objects go through `ld --gc-sections -s -z noexecstack -z noseparate-code` with no `-l` anything. There is no C runtime to link, so there is no `_start` from crt1, no `libc.so`, and no interpreter path; `main.asm` defines `_start` itself and reads `argc` and `argv` off the stack. `-s` strips symbols. `-z noseparate-code` is the quiet size trick: without it, modern `ld` puts read-only data and code in separate segments padded to 4 KiB page boundaries, which alone would cost more than the program.
+
+I built all three Linux binaries with NASM 2.16.03 and GNU ld 2.46 and got the stated sizes to the byte: 12,120 for the first release, 14,712 for the current default (`FAST_Q8=1`), 14,008 with the legacy kernel, and 24,252 for the OS. `readelf -d` prints the promised *"There is no dynamic section in this file."* The 12,120 bytes are 9,891 of `.text` and 1,625 of `.rodata` (as the README says), and the remaining 604 are the ELF header, two program headers and alignment. The current build has 12,062 bytes of code and 2,039 of constants. By source file, the forward pass is 2,754 bytes of instructions, the matmul kernels 1,657, the thread pool 942, and the whole tokenizer, chat template and output decoder 539. I count 3,698 lines in the first commit's Linux engine with `wc -l`, `constants.inc` included, against the post's 3,688; close enough that it is a counting choice.
+
+<ByteBudget />
+
+What the bytes buy is everything between the weight file and stdout. Syscalls are raw `syscall` instructions with numbers from `constants.inc` (`openat`, `fstat`, `mmap`, `write`, `clone`, `futex`, `exit_group`). Number printing, argument parsing, the Qwen3 chat template, and the `--chat` REPL over `read(0)` are all hand-written. The "zero libm" part is literal: `expf`, `sin`, `cos`, `log` and `exp` in double precision for the RoPE frequencies are polynomials in `math.asm`.
+
+Twelve kilobytes is also a small fraction of the problem. The program reads a 643,469,504-byte file. Its code is about two thousandths of a percent of what it touches every token.
+
+## The weights are a file the binary points at
+
+`scripts/export_weights.py` converts the BF16 safetensors and `tokenizer.json` into one `.asmbin` file, offline, in NumPy. The binary opens it, `fstat`s it, `mmap`s the whole thing `MAP_PRIVATE` read-only, and closes the descriptor. No `MAP_POPULATE`, no `madvise`: pages arrive on first touch, which happens during the first token, and stay mapped after that.
+
+The layout is where a lot of the later speed comes from. Every section, matrix and row starts on a 64-byte boundary. A Q8_0 row of `K` weights is stored *split*: `K` int8 values first, then `K/32` block scales after them, FP16 in the v2 format the current build prefers. GGUF's Q8_0 interleaves a 2-byte scale with every 32 bytes of weights, 34-byte blocks that never line up with anything. Here the row strides for `K` of 1,024, 2,048 and 3,072 are 1,088, 2,176 and 3,264 bytes, all multiples of 64, so every 32-byte weight load is aligned and every row starts a cache line. Bytes per weight are identical to GGUF: one int8 plus two bytes of scale per 32 weights, a sixteenth of a byte each.
+
+Inside each of the 28 layers the seven matrices sit in order (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`) with no padding between them. That turns Q, K and V into one 4,096-row matrix and gate and up into one 6,144-row matrix, and each becomes a single parallel matmul with one barrier instead of three or two. A layer is 16,720,896 bytes. The tied embedding and LM head is stored once: 151,936 rows of 1,088 bytes, 157.65 MiB.
+
+## One block of 32 weights
+
+Decoding one token is a sequence of matrix-vector products, and for a 0.6B model at Q8_0 nearly every one of them streams more bytes than it computes on. The original engine (now `FAST_Q8=0`) kept activations in float32: for each 32-weight block it sign-extends the bytes to int32 (`vpmovsxbd`), converts them to float, and multiplies against the activations with FMAs. That is about 14 vector instructions per 32 weights per row, before the scale.
+
+The `48feccb` kernel quantizes the activation vector once per matmul, before the thread pool is woken: `quantize_x_q8_0` finds the largest magnitude in each block of 32, sets the block scale to `max/127`, and rounds into an int8 buffer that fits in L1. Then every row runs the integer path.
+
+<Q8Dot />
+
+The core is four instructions. `vpmaddubsw` multiplies 32 unsigned bytes by 32 signed bytes and adds adjacent pairs into 16 saturating int16 lanes. Activations are signed, so first `vpabsb` takes their absolute value and `vpsignb` moves their sign onto the weights; the product does not change. Because both sides are clamped to ±127, the largest pair sum is $2 \times 127 \times 127 = 32{,}258$, under the int16 limit, so the saturation never fires. `vpmaddwd` against a vector of ones then sums int16 pairs into eight int32 lanes, `vcvtdq2ps` converts them, and one FMA by the product of the two block scales accumulates them. About 10 instructions per 32 weights, counting the prefetch and the scale handling amortised over the four-block unroll.
+
+This is the same trick llama.cpp uses. In llama.cpp at b12760 a Q8_0 weight tensor has `vec_dot_type = GGML_TYPE_Q8_0`, so it too quantizes activations to Q8_0, and its AVX2 `ggml_vec_dot_q8_0_q8_0` calls `mul_sum_i8_pairs_float`, which is `_mm256_sign_epi8` twice and then the `maddubs`/`madd` pair:
+
+```c
+// ggml/src/ggml-cpu/arch/x86/quants.c, ggml_vec_dot_q8_0_q8_0, AVX2 branch
+for (; ib < nb; ++ib) {
+    const __m256 d = _mm256_set1_ps(GGML_CPU_FP16_TO_FP32(x[ib].d) * GGML_CPU_FP16_TO_FP32(y[ib].d));
+    __m256i qx = _mm256_loadu_si256((const __m256i *)x[ib].qs);
+    __m256i qy = _mm256_loadu_si256((const __m256i *)y[ib].qs);
+    const __m256 q = mul_sum_i8_pairs_float(qx, qy);
+    acc = _mm256_fmadd_ps( d, q, acc );
+}
+```
+
+So the kernels agree on arithmetic and differ in shape. llama.cpp's loop is one block per iteration into a single accumulator, a dependent FMA chain whose latency bounds the loop when nothing else does, with two FP16 scale conversions per block and unaligned loads from 34-byte blocks. llm.asm unrolls four blocks (128 bytes, two cache lines) into four independent accumulators, converts four FP16 scales with one `vcvtph2ps`, multiplies them by the four activation scales in one instruction, prefetches `K` bytes ahead of each load (the row's own scales, then the start of the next row, so the stream never jumps), and reduces the eight lanes once per row. Two other llama.cpp paths exist and neither applies to a decoded token on x86. llamafile's tinyBLAS takes Q8_0 matmuls, but `llamafile_sgemm` returns early when the activation has fewer than two columns, so prompt processing uses it and decode falls back to the loop above. And in `repack.cpp` the repacked Q8_0 layouts are selected only for ARM NEON (dotprod or i8mm) and RISC-V vectors.
+
+That is the one place where llm.asm's lead cannot be about threads. At one thread the README has llama.cpp at 16.63 tok/s and `FAST_Q8=1` at 20.70; one core streaming 633 MB of weights per token at 20.70 tok/s is about 13.1 GB/s by my arithmetic. The old float32 kernel reads exactly the same bytes and managed 7.18 tok/s on the same table, so on one core the instruction count per byte decides the speed, not DRAM, and a loop that keeps four FMA chains in flight beats one that waits on a single chain. The float32 kernel was the engine in the first post: well under half of llama.cpp. On my i7-14700 the gap between the two kernels at one thread was much smaller, 28.40 against 20.64 tok/s, a 1.38x where the EPYC showed 2.88x. The i7's cores clock up to 5.4 GHz against the EPYC's 2.3 GHz base, and how much the instruction count matters depends on the core it runs on. The 12 KB engine did not beat llama.cpp. The 14.7 KB one does, and the comparison exists because [a reply to the first post](https://x.com/MyDaebakCafe/status/2125570810265973110) asked *"What does llama.cpp Q8_0 get on that EPYC?"* The author answered that he had been *"just vibing"* and would test it; the second post is the result.
+
+What quantizing the activations costs is measurable with the repository's own harness. I ran `verify_ref.py` against Transformers in FP32 on the README's prompt. The NumPy Q8_0 reference (Q8_0 weights, float activations) matches PyTorch's final logits at a cosine of 0.9998394; the `FAST_Q8=1` binary, which also rounds activations to int8, at 0.9996517. Both produce the same 64 greedy tokens as PyTorch. Over longer generations they do not stay together. I generated 256 greedy tokens from the binary and from PyTorch for two prompts: they shared the first 88 tokens on the cache prompt and the first 45 on a prompt asking for a short story, after which each picked a different near-tied token and the texts went their own ways. Greedy decoding amplifies any difference into a different continuation, so this is what any Q8_0 engine does against FP32, and I did not run the float-activation build or llama.cpp over the same 256 tokens to separate how much is the weights and how much the activations.
+
+## Threads without pthreads
+
+`threads.asm` is 439 lines. `tp_init` maps a private stack for each worker with anonymous `mmap`, writes the worker's id at the top of it, and calls `clone` with `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD`. In the child, `clone` returns zero on the new stack, so the worker pops its id and falls into its wait loop. That is all a thread is without libc: a stack, a shared address space, and code that never returns.
+
+Dispatch is a generation counter. The main thread stores the matmul's arguments in globals, does `lock xadd` on `tp_gen`, and wakes the futex only if a worker has registered itself as sleeping. Workers spin on `tp_gen` with `pause` for up to 200,000 iterations, then register as waiters, re-check, and `futex(FUTEX_WAIT)`. During generation the next job always arrives inside the spin window, so the hot loop makes no syscalls; in `--chat` mode, waiting for you to type, workers go to sleep and the process sits at 0% CPU.
+
+Completion is the part with care in it. Each worker writes the generation it finished to its own slot in `tp_done_arr`, 64 bytes apart, with a plain store; on x86's TSO ordering a plain store after the work is a release. The main thread does its own slice, then walks the slots. No shared atomic counter is hammered from every core, which on a chip made of many CCXs means no cache line ping-ponging across the fabric 141 times a token.
+
+141 is my count: per layer, one fused QKV matmul, one parallel attention over heads, `o_proj`, the fused gate and up, and `down_proj`, five barriers, times 28 layers, plus the LM head. RMSNorm, QK-Norm, RoPE, the KV-cache copy and SwiGLU run on the main thread between them; they are small next to a 4,096-row matmul.
+
+Partitioning is static and is why the outputs are identical across thread counts. Thread `t` of `N` takes rows `ceil(t·M/N)` to `ceil((t+1)·M/N)`. Every output row is a dot product computed start to finish by one thread, in one fixed order of loads and adds, so which thread computes it cannot change the bits. Attention splits the same way over heads. Deterministic results across 1 to 47 threads, as the first post says, are a property of the design, not luck. I ran 64 greedy tokens at 1, 3, 4, 7, 8, 13, 16 and 28 threads and hashed both the token ids and the dumped logits: one hash each, across all eight.
+
+llama.cpp's CPU backend works differently. It runs the ggml graph node by node, every op a parallel step with `ggml_barrier` after it (a few op pairs are fused now), `mul_mat` adds one more barrier after quantizing the activations, and its `mul_mat` splits rows into 64-row chunks for a vector input; when there are at least four chunks per thread they are handed out dynamically from a shared atomic counter, otherwise by thread id. For the 151,936-row LM head at four threads that is 2,374 chunks claimed through one atomic. Neither choice is wrong. llm.asm's is cheaper for one small model with one sequence.
+
+<ThreadScaling />
+
+The same numbers as a table, decode tok/s from the README (AMD EPYC 7642, 34 prompt and 64 generated tokens, three-run means; the OS column is the KVM guest):
+
+| Threads | FP32 activations | llama.cpp Q8_0 | FAST_Q8=1 | Bare-metal OS |
+|---:|---:|---:|---:|---:|
+| 1 | 7.18 | 16.63 | 20.70 | 23.67 |
+| 4 | 28.12 | 51.08 | 69.24 | 78.89 |
+| 8 | 53.09 | 80.79 | 103.64 | 118.08 |
+| 16 | 77.50 | 103.03 | 121.86 | 134.94 |
+| 24 | 91.88 | 104.11 | 123.72 | 132.90 |
+| 32 | 96.63 | 103.82 | 122.51 | 133.75 |
+| 40 | 98.50 | 105.08 | 125.86 | not run |
+
+## On a busy i7-14700
+
+I ran both engines on an Intel Core i7-14700: 8 performance cores with two threads each plus 12 efficiency cores, 28 hardware threads, AVX2 and AVX-VNNI but no AVX-512. So the EPYC's instruction set, a different microarchitecture, and a hybrid core layout. I built llama.cpp twice at b12760, once for the native CPU and once restricted to AVX2, FMA and F16C, and ran `llama-bench -p 34 -n 64 -r 3` beside three runs of `asm-llm` on the README's 34-token prompt with 64 generated tokens. The machine was running other work the whole time, at a load average between 13 and 28, so absolute numbers carry noise and the ratios from back-to-back runs are what I trust.
+
+| Decode, tok/s | 1 thread | 4 threads | 8 threads |
+|---|---:|---:|---:|
+| llm.asm `FAST_Q8=1` | 28.40 | 65.81 | 61.61 |
+| llm.asm `FAST_Q8=0` (FP32 activations) | 20.64 | 50.63 | 41.62 |
+| llama.cpp, AVX2-only build | 22.06 | 45.26 | 27.64 |
+| llama.cpp, native build | 13.23 ± 9.45 | 49.01 | 32.86 |
+
+Against the AVX2-only llama.cpp, the build with the same instructions available, llm.asm decoded 1.29x faster at one thread and 1.45x at four; against the native build at four threads, 1.34x. The native build's one-thread number has a standard deviation of 9.45 over three runs, which is the load, not the code. That is the README's 18 to 36% reproduced in direction and roughly in size on a different CPU. At eight threads both engines were slower than at four. Read that as the other work on the box, not as either engine's scaling.
+
+Prefill is a different story, and the README says so in a footnote. llama.cpp hands a 34-token prompt to llamafile's tinyBLAS as one matrix-matrix product; llm.asm runs it as 34 separate matrix-vector products. At one thread llama.cpp's native build prefilled at 111.02 tok/s against llm.asm's 37.80, and at four threads 314.07 against 86.64, about 3x and 3.6x. For a chat with long prompts, that is most of the latency.
+
+At 16 and 28 threads llm.asm fell off a cliff. At 16, two of three runs decoded at 1.51 and 8.56 tok/s and the third at 66.44; at 28 all three sat at 2.2. llama.cpp on the same box decoded at 45.27 and 22.77. The load average was 17.77 and 28.46 when those runs started. With the machine's 28 hardware threads already partly busy, some workers were sharing a core with something else, and llm.asm's barrier has no way to step aside: every one of the 141 barriers a token waits for its slowest worker, the waiting threads spin rather than yield, and a worker that gets descheduled holds up all the others for a scheduler time slice. A few milliseconds lost at each barrier is a few hundred milliseconds a token. llama.cpp also spins, but it degraded gradually where llm.asm collapsed by 30x. On a quiet machine with one thread per free core this never shows, and the README's EPYC runs were presumably that. On a shared one, set `-t` well under the number of idle cores.
+
+The INT8 kernel, the OS and llama.cpp all flatten past 16 threads, which is what a memory-bound workload does; the float32 kernel is still climbing at 40 because it runs out of instructions before it runs out of bandwidth. At its 40-thread peak of 126.81 tok/s the `FAST_Q8=1` engine streams about 80 GB/s of weights by my arithmetic, ignoring the KV cache (which at position 66 adds about 15 MB a token, 2.4% more). The plateau sits in the same place for both engines, which is what a shared memory limit looks like.
+
+## Polynomials instead of libm
+
+Softmax and SiLU need `exp`. `fast_expf_avx2` does what every vectorised `expf` does. Clamp `x` to [−87.34, 88.38]. Take `k = round(x · log₂e)`, and reduce `r = x − k·ln2` in two steps, with `ln2` split into a high part (0.693359375, exact in a few bits) and a small correction, so `k·ln2_hi` is exact and the subtraction loses nothing (Cody and Waite's method). Now `|r| ≤ ln2/2`, about 0.3466. Evaluate a polynomial in `r` by Horner's rule with FMAs. Build `2^k` by adding 127 to `k` and shifting it into the float exponent field, and multiply.
+
+The polynomial is plain Taylor, coefficients $1/n!$ up to $r^6/720$, not a minimax fit. Truncation is largest at the ends of the range. Relative to the true value, it is $8.8 \times 10^{-8}$ at $r = +\ln 2/2$ and $1.61 \times 10^{-7}$ at $r = -\ln 2/2$, where $e^r$ is smaller (my arithmetic, in double precision). Float32's half-ulp is $5.96 \times 10^{-8}$. The README's measured maximum is 1.394e-7, below the polynomial's own worst case, so the test never landed near the negative edge of a reduction interval. I fed the kernel 76,800 inputs through the repository's own `test_math` binary, a dense grid from −87 to 88 plus random draws, and the worst relative error was 2.192e-7, at x = −36.39: the truncation plus float32 rounding. That is still under four ulps and harmless for softmax, but it is not the number in the README. A minimax polynomial of the same degree would sit near the rounding floor. For softmax over attention scores this makes no difference anyone could measure; it is still the place where the "hand-written" claim and the textbook diverge.
+
+<ExpfPoly />
+
+The test that produced 1.394e-7 is `scripts/test_math.py`, and it feeds the kernel 64 inputs: sixteen chosen points and 48 uniform draws in [−20, 15]. That is a smoke test for a function with four billion inputs, and it missed the worst case, which the dense sweep found. The same sweep put `sin` at 2.988e-8 absolute over [−4,096, 12,345] and [0, 2,048], in line with the README's 2.940e-8.
+
+`sincos` is done in double precision. `fast_sincos_f64` reduces by π/2 with a 33-bit high part, so `q · π/2_hi` is exact for any quadrant count below 2²⁰, then evaluates degree-11 and degree-10 Taylor polynomials and picks signs by quadrant. RoPE needs `sin(pos · θᵢ)` for 64 frequencies per position; `compute_rope_cs` evaluates them once per token in double and rounds to float. The frequencies themselves, `θ^(−2i/128)` with θ = 10⁶, come from a hand-written `log` and `exp` in double, accurate to 4.4e-14 per the README. For positions up to the 2,048-token context the angles never get large enough to stress the reduction.
+
+One more number falls out of the layout. Prefill in llm.asm is token by token, the same matrix-vector products as decode, but `transformer_forward` skips the LM head for every prompt token except the last. So a prefill token streams 468,185,088 bytes and a decode token 633,491,456, a ratio of 1.353. The OS's own one-core table has prefill at 31.72 tok/s and decode at 23.46, a ratio of 1.352. At one core, time per token is proportional to the weight bytes it touches, to three digits; attention and everything else are noise at this length.
+
+## A tokenizer in 236 lines
+
+`tokenizer.asm` maps each UTF-8 byte of the prompt to its byte-level token, then loops: scan every adjacent pair, look each pair up in the merge table, remember the lowest rank, apply that one merge, shift the tail left, repeat until no pair is in the table. The table is built offline by the exporter and stored in the `.asmbin`: 524,288 slots of 16 bytes (a 64-bit key, the merged token id, the rank), open addressing with linear probing.
+
+The key for a pair is `(left_id << 32) | right_id`. The slot is the top 19 bits of the key times 0x9E3779B97F4A7C15, which is 2⁶⁴ divided by the golden ratio. Multiplying by it scatters keys that differ only in their low bits, which token pairs with nearby ids do. Rebuilding the table from Qwen's 151,387 merges gives a load factor of 0.289, an average of 1.20 probes per insert and a worst case of 13. Most lookups during encoding are misses, pairs that never merge, and a miss probes until it finds an empty slot; at this load the textbook estimate for linear probing is about 1.5 probes, by my arithmetic.
+
+<BpeHash />
+
+The scan is quadratic, a full pass per merge, which costs nothing for a chat prompt. What it does not do is pre-tokenize. Qwen's `tokenizer.json` runs a regex split first (contractions, letter runs with one optional leading symbol or space, single digits, punctuation runs, newline runs, whitespace) and applies BPE inside each piece. The merges were learned inside those pieces, so for most text skipping the split changes nothing: no merge joins a letter to a space after it, and digits never merge at all. Whitespace runs are the exception. The regex leaves the last space of a run attached to the next word, so `"Hello   world"` becomes `Hello`, two spaces, `␣world`. Without the split, the three spaces merge first, because `ĠĠ` + `Ġ` (rank 6) outranks `Ġ` + `w` (rank 33), and `world` loses its leading space.
+
+I found this first in a Python re-implementation of both procedures, then ran the binary itself with `--raw --print-tokens` on 12 strings and compared it against the `tokenizers` library loading the same `tokenizer.json`. Five of 12 differ, and all five are whitespace runs before a word: `"Hello   world"`, an indented Python function, a newline followed by two spaces, leading spaces, and tabs. The token counts happen to match in every case; the ids do not. The other seven (Cyrillic, accents, an emoji, digits, contractions, punctuation) match exactly. The README's claim of *"100% token-exact match with HuggingFace"* rests on one 34-token prompt checked against Transformers, which has no such runs; on that prompt it matched in my run too. The Python Q8_0 reference in `verify_ref.py` runs the same merge loop without a split, so it agrees with the asm by construction and cannot catch this. It does not hold for a Python function. The model still runs, on a token sequence it rarely saw in training.
+
+## Deleting Linux
+
+<Figure
+  src="/articles/llm-asm/baremetal-vga.png"
+  alt="An 80 by 25 VGA text console reading asm-llm OS v2.0, CPU AMD EPYC 7642 48-Core Processor, SMP 16 of 16 cores online, RAM 2047 MiB, Arena 449 MiB, Boot 84.89 ms, Model Qwen3-0.6B Q8_0 at 0x0031F000, then a prompt about CPU caches, the model's answer, and prefill, decode and boot timing lines."
+  caption="The OS under QEMU KVM with 16 vCPUs: the weights sit at a physical address, and the timing lines come from the guest's own PIT-calibrated TSC. This capture is from an earlier build (prefill 120.47, decode 81.31 tok/s). (alesha-pro/llm.asm, assets/baremetal-vga.png.)"
+/>
+
+Phase 2 compiles the same `math.asm`, `matmul.asm`, `tokenizer.asm` and `transformer.asm` with `-DBARE_METAL` and adds about 4,100 lines of kernel. `boot.asm` takes a Multiboot 1 handoff in 32-bit protected mode, builds page tables that identity-map the first 4 GiB with 2 MiB pages (the top 32 MiB uncached, for the local APIC), turns on long mode, checks for AVX2, FMA and F16C, and sets `XCR0` so the AVX registers are usable. The model arrives as a Multiboot module, which QEMU's `-initrd` or GRUB loads into RAM; `model_init` takes its physical address as the base where the Linux build would take an `mmap` pointer. The KV cache and scratch arena come from the largest free region in the memory map.
+
+`smp.asm` finds the other cores through ACPI (RSDP, then RSDT or XSDT, then the MADT), copies a 16-to-32-to-64-bit trampoline to 0x8000, and wakes each core with the INIT-SIPI-SIPI sequence through the local APIC. Each core enables AVX, then spins on the same generation counter as the Linux pool. There is no futex to fall back to and no scheduler to yield to: a core spins, or it works. Drivers are what a chat needs: COM1 at 115,200 baud, 80x25 VGA text, a PS/2 keyboard, the PIT for calibrating the TSC, and ACPI poweroff. The ELF is 24,252 bytes.
+
+<Video
+  src="/articles/llm-asm/os-boot"
+  poster="/articles/llm-asm/os-boot-poster.jpg"
+  alt="A Proxmox VE dashboard showing VM 250, qwen3-asm-os, with 12 CPUs, 2 GiB of memory, a 0 B boot disk and CPU usage near 100%, then its noVNC console: the asm-llm OS banner for an Intel Xeon E5-2670 v3, and a chat in which the model greets the user and writes a binary search in Python."
+  caption="The second post's clip: a diskless Proxmox VM (2 GiB, 12 vCPUs, 0 B boot disk) booted from the ISO, then a multi-turn chat on its console. CPU usage sits near 100% because every core spins whether or not there is work. (@superalesha, 25 November.)"
+/>
+
+The second post's headline is the OS beating llama.cpp by 31 to 54%. What does the OS change that Linux was costing?
+
+The first is page size. The Linux build maps 643 MB of weights in 4 KiB pages, about 157,000 of them; the OS maps the same bytes in 307 pages of 2 MiB (my arithmetic). Streaming through a matrix touches a new 4 KiB page every 64 cache lines, and no TLB holds 157,000 translations, so the walk to find each one is part of the stream. A few hundred 2 MiB translations is a different problem. The second is that nothing preempts the cores: no timer ticks, no other processes, no kernel threads. The third is page faults, which the OS never takes; but the Linux build only takes them on the first token, so in steady-state decode this one is close to free.
+
+What did not change is syscalls in the hot loop. The Linux pool already makes none while tokens are flowing. Removing the kernel does not remove a cost the Linux build was paying.
+
+The comparison is also not bare metal against Linux on the same terms. The OS numbers are a QEMU KVM guest on the EPYC host: its memory goes through two levels of page tables, the guest's and the host's, and its timings come from the guest's own TSC. llama.cpp ran natively on the host.
+
+Split the headline with the README's own columns. The Linux `FAST_Q8=1` build is 18 to 36% ahead of llama.cpp across thread counts. The OS is a further 11 to 14% ahead of that Linux build at the four thread counts the post quotes (23.67 against 20.70 at one thread is +14%, 134.94 against 121.86 at 16 is +11%), and 7 to 9% at 24 and 32; my arithmetic. Multiplied, the four quoted rows give the 31 to 54%. So most of the post's headline is the kernel and the barrier count, which run on Linux, and roughly a third of it is the OS.
+
+That third is what [@fd_ripatel answered](https://x.com/fd_ripatel/status/2125715853048226155) in the replies: *"If you configure Linux correctly (1GiB huge pages, isolcpus), kernel basically never runs, and the MMU overhead is tiny."* I agree with the direction. The Linux build could `mmap` the model from `hugetlbfs`, or copy it into anonymous memory with transparent huge pages, and pin workers to cores kept free of other work. I would expect most of the OS's 11 to 14% back. The repository has no such run, so that stays an expectation.
+
+<Figure
+  src="/articles/llm-asm/proxmox-vga.png"
+  alt="The VGA console of the Proxmox VM: the end of an answer about CPU caches with prefill 87.35 and decode 55.43 tok/s on 12 cores, then a word problem about Alice's apples worked step by step to 5, with prefill 87.28 and decode 53.66 tok/s."
+  caption="The OS on a 2014 Xeon E5-2670 v3 in a diskless Proxmox VM, two multi-turn answers with 12 cores. This capture shows 55.43 tok/s decode; the second post says 78 tok/s for a later build. (alesha-pro/llm.asm, assets/proxmox-vm250-vga.png.)"
+/>
+
+"Boots in 74 to 94 ms" is measured by the guest from an `rdtsc` at kernel entry in `boot.asm` to the prompt. It does not include firmware or loading the 614 MiB module, which is why the same post says the Proxmox VM reaches the prompt *"in under 5 seconds"*. Both are true; they are different clocks.
+
+## Claim by claim
+
+| Claim | Where it stands |
+|---|---|
+| 12,120 bytes, no libc, no dynamic section | Reproduced: my build of the first release is 12,120 bytes and `readelf -d` finds no dynamic section. The current default build is 14,712 bytes. |
+| 3,688 lines | `wc -l` gives 3,698 for the first release's Linux engine with `constants.inc`. |
+| 105 tok/s on an EPYC 7642 | The first release's FP32-activation engine. The README's current table has that engine at 98.50 tok/s at 40 threads and 7.18 at one, under half of llama.cpp's 16.63. |
+| Bit-identical output from 1 to 47 threads | Follows from the design, and held in my run: identical token ids and identical logits at 1, 3, 4, 7, 8, 13, 16 and 28 threads. |
+| 64 greedy tokens match PyTorch FP32 | Reproduced for 64 tokens: with `verify_ref.py`, the `FAST_Q8=1` binary matched Transformers in FP32 on all 64 greedy tokens, at a final-logit cosine of 0.9996517, the README's number to the digit. It does not hold for long generations: over 256 greedy tokens the two agreed on the first 88 for that prompt and the first 45 for a short-story prompt. As [a reply](https://x.com/ho_bevan/status/2125565024324452706) put it, *"64 greedy tokens is a smoke test"*. |
+| expf and sincosf under 1.4e-7 | `sin` holds (2.988e-8 in my sweep). `expf` does not: the README tested 64 points, and 76,800 found 2.192e-7, consistent with the Taylor polynomial's 1.61e-7 truncation at the negative edge plus rounding. |
+| Tokenizer matches Hugging Face token for token | Not in general. The asm skips the pre-tokenizer regex, and the binary disagreed with Hugging Face on 5 of my 12 strings, all whitespace runs before a word, including indented code. The README's Hugging Face check is one prompt. |
+| 18 to 36% faster than llama.cpp on Linux | Reproduced in direction on an i7-14700: 1.29x at one thread and 1.45x at four against llama.cpp built for AVX2, on a shared machine. Decode only: llama.cpp prefills about 3x faster. Past the free cores, llm.asm collapsed. |
+| 31 to 54% faster as an OS | The Linux margin times 11 to 14% from 2 MiB pages and no preemption, measured in a KVM guest against llama.cpp on the host. |
+| Boots in 74 to 94 ms | Guest-measured, kernel entry to prompt, firmware and module load excluded. Not run: my box has no QEMU. |
+
+## Steal the layout, skip the OS
+
+This is a real piece of work, and most of the claims survive both reading the code and running it. The parts that look like stunts are the least interesting: a static ELF with no libc is a Makefile flag and some discipline, and a Multiboot kernel that sets up long mode is a well-trodden path. The parts worth stealing are ordinary. Store Q8_0 rows split and 64-byte aligned. Fuse every projection that shares an input. Unroll the dot product into four accumulators. Quantize the activation vector once per matmul. Give every row to one thread and get determinism free. Keep the barrier count per token in the low hundreds, and let a waiting thread yield when it has spun too long, which llm.asm's main thread never does. None of that needs assembly. All of it would help llama.cpp's CPU path on small models, where per-op overhead is a large share of an 8 ms token.
+
+Assembly earns its keep in two places: the binary size, which is a demo, and control over exactly which instructions the kernel issues, which a C compiler with intrinsics would give you nearly as well. The bare-metal OS is the demo I enjoyed most and would deploy least. It turns a CPU into an appliance that spins every core at 100% to serve one user, and most of its extra speed should be available from a Linux kernel told to use huge pages.
+
+The tokenizer is the one thing I would fix before anyone points this at code. A pre-tokenizer for Qwen's regex does not need a regex engine: it is a hand-written scanner over Unicode letter, digit and whitespace classes, maybe a few hundred more lines of NASM, and the binary would still be tiny.
+
+When someone in the first thread said this was the sort of artistry we would lose to language models, the author [replied](https://x.com/superalesha/status/2125661973161357678) *"Neon did this"*, and the first clip shows the build being driven from a coding-agent session. I have no more detail than that. If an agent wrote much of this assembly, the verification harness is what made it trustworthy, and it is the part of the repository I would copy first. It also shows the limit of that approach: the Python reference implements the same tokenizer the assembly does, so a tokenizer bug is exactly the kind it could never catch.
+
+<Callout type="note">
+How I checked: I read `shared/*.asm`, `01-qwen3-inference/main.asm`, `02-baremetal-os/*.asm`, the Makefile and `scripts/` at `48feccb`, and the first release at `86cca09`. I read llama.cpp's `ggml-cpu.c` (type traits, `mul_mat` chunking, the graph loop), `arch/x86/quants.c`, `llamafile/sgemm.cpp` and `repack.cpp` at b12760. I rebuilt the merge hash table and re-implemented both tokenizers in Python from Qwen3-0.6B's `tokenizer.json`. On an Intel i7-14700 shared with other work, I built llm.asm (both kernels, the first release, the OS) with NASM 2.16.03 and GNU ld 2.46, exported the weights with `scripts/export_weights.py`, built llama.cpp b12760 for the native CPU and for AVX2 only, and ran decode and prefill at 1, 4, 8, 16 and 28 threads, determinism at eight thread counts, the binary's tokenizer against `tokenizers` on 12 strings, the repository's math unit tests, a 76,800-point sweep of `expf` and `sin` through `test_math`, `verify_ref.py` for both kernels (against Transformers in FP32 for `FAST_Q8=1`), and 256-token greedy runs against PyTorch on two prompts. The EPYC throughput and the OS's boot times and tok/s are the author's. Byte counts from the README layout, barrier counts, bandwidths and ratios are my arithmetic.
+</Callout>
