@@ -1670,7 +1670,7 @@ export const REELS: Record<string, { duration: number | null; width: number | nu
     "duration": 21,
     "width": 1280,
     "height": 720,
-    "date": "2026-11-25"
+    "date": "2026-11-26"
   },
   "380": {
     "duration": 21,
