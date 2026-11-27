@@ -47,7 +47,7 @@ const KNOWN_TOP = new Set([
   "", "about", "architectures", "articles", "arxiv", "blog", "changelog",
   "colophon", "contact", "developers", "github", "health", "logs", "math", "models",
   "notes", "now", "patents", "privacy", "projects", "publications", "reading",
-  "resume", "search", "snippets", "uses",
+  "resume", "search", "snippets", "universe", "uses",
   // machine-readable documents served as routes or static files
   "ai.txt", "auth.md", "feed.xml", "humans.txt", "llms.txt", "llms-full.txt",
   "openapi.json", "resume.json", "robots.txt", "sitemap.xml",
@@ -248,7 +248,7 @@ export const config = {
     },
     {
       source:
-        "/((?!(?:_next|api|md|\\.well-known)(?:/|$)|(?:about|architectures|articles|arxiv|blog|changelog|colophon|contact|developers|github|health|logs|math|models|notes|now|patents|privacy|projects|publications|reading|resume|search|snippets|uses)(?:/[^/]+)?/?$|.*\\.[A-Za-z0-9]+$|.*(?:opengraph-image|twitter-image|icon|apple-icon|manifest|sitemap|robots)(?:-[a-z0-9]+)?$).+)",
+        "/((?!(?:_next|api|md|\\.well-known)(?:/|$)|(?:about|architectures|articles|arxiv|blog|changelog|colophon|contact|developers|github|health|logs|math|models|notes|now|patents|privacy|projects|publications|reading|resume|search|snippets|universe|uses)(?:/[^/]+)?/?$|.*\\.[A-Za-z0-9]+$|.*(?:opengraph-image|twitter-image|icon|apple-icon|manifest|sitemap|robots)(?:-[a-z0-9]+)?$).+)",
       missing: [{ type: "header", key: "accept", value: ".*(text/html|application/xhtml\\+xml).*" }],
     },
   ],

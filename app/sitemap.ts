@@ -97,6 +97,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     "/notes",
     "/colophon",
     "/lab/neuron-lab",
+    "/universe",
     "/changelog",
     "/developers",
     "/developers/versioning",

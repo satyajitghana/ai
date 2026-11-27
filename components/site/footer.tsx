@@ -27,6 +27,7 @@ const groups: { title: string; items: Item[] }[] = [
     title: "explore",
     items: [
       { href: "/lab/neuron-lab", label: "neuron lab" },
+      { href: "/universe", label: "history of everything" },
       { href: "/models", label: "models" },
       { href: "/math", label: "ai in maths" },
       { href: "/architectures", label: "architectures" },

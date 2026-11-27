@@ -1673,6 +1673,7 @@ export const WIDGETS: Record<string, () => Promise<Record<string, unknown>>> = {
   "the-last-boring-slide/one-degree": () => import("@/components/articles/the-last-boring-slide/one-degree"),
   "the-last-boring-slide/scene-breakdown": () => import("@/components/articles/the-last-boring-slide/scene-breakdown"),
   "the-last-boring-slide/sized-days": () => import("@/components/articles/the-last-boring-slide/sized-days"),
+  "the-last-boring-slide/universe-embed": () => import("@/components/articles/the-last-boring-slide/universe-embed"),
   "thomson-n7-lean/case-tree": () => import("@/components/articles/thomson-n7-lean/case-tree"),
   "thomson-n7-lean/sphere-relax": () => import("@/components/articles/thomson-n7-lean/sphere-relax"),
   "three-nanite/crate-table": () => import("@/components/articles/three-nanite/crate-table"),

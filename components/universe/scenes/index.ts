@@ -1,0 +1,33 @@
+import type { SceneModule } from "../engine/types"
+
+// One lazily loaded chunk per scene. The paths are literal so the bundler can split them.
+export const LOADERS: Record<string, () => Promise<SceneModule>> = {
+  template: () => import("./template"),
+  inflation: () => import("./inflation"),
+  forge: () => import("./forge"),
+  fog: () => import("./fog"),
+  dark: () => import("./dark"),
+  galaxy: () => import("./galaxy"),
+  impact: () => import("./impact"),
+  water: () => import("./water"),
+  strata: () => import("./strata"),
+  cambrian: () => import("./cambrian"),
+  lastday: () => import("./lastday"),
+  spark: () => import("./spark"),
+  hands: () => import("./hands"),
+  tablet: () => import("./tablet"),
+  metal: () => import("./metal"),
+  gearwork: () => import("./gearwork"),
+  press: () => import("./press"),
+  lens: () => import("./lens"),
+  engine: () => import("./engine"),
+  footprint: () => import("./footprint"),
+  die: () => import("./die"),
+  question: () => import("./question"),
+  board: () => import("./board"),
+  fold: () => import("./fold"),
+  loom: () => import("./loom"),
+  horizon: () => import("./horizon"),
+  calendar: () => import("./calendar"),
+  here: () => import("./here"),
+}
