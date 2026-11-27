@@ -9,24 +9,25 @@ import { cn } from "@/lib/utils"
 // many kilobytes of minified JavaScript sit between the end of the previous scene's definition and
 // the end of this one, so a scene's own shaders and helpers count toward it (the opening scene's
 // figure excludes the sound synthesizer that sits before it). The technique line is what the code
-// and the recording show. The note is the scene's first line of speaker notes, verbatim.
+// and the recording show. The rule is the one world or camera rule the article's "Scene by scene" section
+// gives for it, with the same numbers. The note is the scene's first line of speaker notes, verbatim.
 
-type Scene = { id: string; title: string; beats: number; enter: string; kb: number; tech: string; note: string }
+type Scene = { id: string; title: string; beats: number; enter: string; kb: number; tech: string; rule: string; note: string }
 
 const SCENES: Scene[] = [
-  { id: "office", title: "The Future of AI", beats: 3, enter: "fade", kb: 23.3, tech: "Canvas 2D text and a default-looking chart drawn into textures, retyped and restyled glyph by glyph", note: "Hello. This is a talk about the future of AI." },
-  { id: "tower", title: "The real chart", beats: 4, enter: "portal-in", kb: 44.1, tech: "METR's points on a paper tower; an analytic sky and cloud deck in GLSL", note: "METR measures how long a task AI can finish on its own, half the time." },
-  { id: "boat", title: "Anchor", beats: 3, enter: "fold", kb: 59.0, tech: "A shaded sea with caustics and foam in render targets; the chart's sheet lands on the water and becomes the paper boat", note: "This is how most of us forecast." },
-  { id: "loop", title: "The loop", beats: 4, enter: "wash", kb: 34.1, tech: "Flat poster art drawn in fragment shaders: a 26-blade fan, gears at two to one", note: "Start with the plain fact." },
-  { id: "swarm", title: "A country of them", beats: 4, enter: "portal-in", kb: 55.4, tech: "Instanced agents over a night terrain; a counter driven by elapsed time", note: "This is one of them, working alone." },
-  { id: "dominoes", title: "Thirty steps", beats: 3, enter: "flaps", kb: 52.4, tech: "Instanced city; each domino's fall time from a closed-form geometric schedule, not a physics engine", note: "Here is why people who study this expect it to be sudden." },
-  { id: "calendar", title: "2027", beats: 4, enter: "slam", kb: 37.1, tech: "A wall calendar whose day cells are resized by a Hermite spline in log space", note: "This is 2027 on the wall." },
-  { id: "lamp", title: "How far you can see", beats: 3, enter: "portal-out", kb: 49.4, tech: "Pools of lantern light on a dark field, then rock arches at sunrise", note: "Forget test scores. Intelligence is how far you can see." },
-  { id: "selectall", title: "Select all", beats: 3, enter: "daybreak", kb: 41.9, tech: "A planet from the embedded land mask, the Sun, a shell of panels closing round it", note: "Up to now it has only been editing screens." },
-  { id: "aim", title: "Aim", beats: 4, enter: "line", kb: 68.4, tech: "A practice room, a target and an arrow of light, with a scale bar", note: "Everything so far assumed one thing: that it aims where we meant it to." },
-  { id: "futures", title: "Two aims", beats: 3, enter: "tear", kb: 78.6, tech: "Two worlds rendered side by side with a divider you can drag", note: "Same bay, same power." },
-  { id: "pile", title: "You are here", beats: 2, enter: "portal-in", kb: 9.7, tech: "Every earlier slide on one curved wall; today's date from the viewer's clock", note: "That was the whole talk, on one curve." },
-  { id: "questions", title: "Any questions?", beats: 3, enter: "portal-out", kb: 3.1, tech: "The template again, a typed answer, and a one-degree rotation of the whole frame", note: "Any questions?" },
+  { id: "office", title: "The Future of AI", beats: 3, enter: "fade", kb: 23.3, tech: "Flat quads and per-glyph text; ten restyles of one word, with nine PowerPoint wipes in one shader", rule: "Every frame is a pure function of the seconds into beat 2: ten restyles from 9.1 s to 23.2 s, speeding up, then slowing", note: "Hello. This is a talk about the future of AI." },
+  { id: "tower", title: "The real chart", beats: 4, enter: "portal-in", kb: 44.1, tech: "METR's points on a paper tower; an analytic sky and cloud deck in GLSL", rule: "Altitude drives the world: sky, then space and stars, and an Earth radius that shrinks from 1.6 million units to 28,000", note: "METR measures how long a task AI can finish on its own, half the time." },
+  { id: "boat", title: "Anchor", beats: 3, enter: "fold", kb: 59.0, tech: "A shaded sea with caustics and foam in render targets; the chart's sheet lands on the water and becomes the paper boat", rule: "The chain stays 3.593 m while the sea rises from 4.15 to 5.65 m, and the CPU floats the boat on the same 28 waves the GPU draws", note: "This is how most of us forecast." },
+  { id: "loop", title: "The loop", beats: 4, enter: "wash", kb: 34.1, tech: "Flat poster art drawn in fragment shaders: a 26-blade fan, gears at two to one", rule: "Zoom toward the Droste fixed point: ×2.78 and 8° per level, cruising at 0.78 levels a second", note: "Start with the plain fact." },
+  { id: "swarm", title: "A country of them", beats: 4, enter: "portal-in", kb: 55.4, tech: "Glowing 16:9 pages being written, over a wet night plain; an odometer driven by elapsed time", rule: "One lattice function in every pass; 81,600 quad slots hand off to about 1.8 million point slots at equal brightness", note: "This is one of them, working alone." },
+  { id: "dominoes", title: "Thirty steps", beats: 3, enter: "flaps", kb: 52.4, tech: "Instanced city; each domino's fall time from a closed-form geometric schedule, not a physics engine", rule: "The world is scaled around the followed domino, 1 cm to 1.28 km (about 128,000×); each fall interval is 2.28% shorter", note: "Here is why people who study this expect it to be sudden." },
+  { id: "calendar", title: "2027", beats: 4, enter: "slam", kb: 37.1, tech: "A wall calendar whose day cells are resized by a Hermite spline in log space", rule: "A conformal fan keeps every cell roughly square through about a thousandfold growth", note: "This is 2027 on the wall." },
+  { id: "lamp", title: "How far you can see", beats: 3, enter: "portal-out", kb: 49.4, tech: "Pools of lantern light on a dark field, then rock arches at sunrise", rule: "Two scales, one camera: a 2,040× rise from 1.25 m to 2.55 km over a self-similar valley", note: "Forget test scores. Intelligence is how far you can see." },
+  { id: "selectall", title: "Select all", beats: 3, enter: "daybreak", kb: 41.9, tech: "A planet from the embedded land mask, the Sun, a shell of panels closing round it", rule: "Key the planet's pixel radius and solve for distance: about 105× smaller, then roughly 203,000 sheets (my estimate)", note: "Up to now it has only been editing screens." },
+  { id: "aim", title: "Aim", beats: 4, enter: "line", kb: 68.4, tech: "A practice room, a target and an arrow of light, with a scale bar", rule: "The camera's offset is keyed in miss distances, X·tan 1°, so one shot runs from 7.4 m to Proxima", note: "Everything so far assumed one thing: that it aims where we meant it to." },
+  { id: "futures", title: "Two aims", beats: 3, enter: "tear", kb: 78.6, tech: "Two worlds rendered side by side with a divider you can drag", rule: "One terrain, one camera, one uniform; the second world is built from the garden's own data", note: "Same bay, same power." },
+  { id: "pile", title: "You are here", beats: 2, enter: "portal-in", kb: 9.7, tech: "Every earlier slide on one curved wall; today's date from the viewer's clock", rule: "Slides on y = exp(x/6), textured with snapshots taken as you left each scene; the camera's up is the curve's tangent", note: "That was the whole talk, on one curve." },
+  { id: "questions", title: "Any questions?", beats: 3, enter: "portal-out", kb: 3.1, tech: "The template again, a typed answer, and a one-degree rotation of the whole frame", rule: "Callbacks: the office's template and typing, aim's question and its one-degree miss", note: "Any questions?" },
 ]
 const MAX = 78.6
 
@@ -37,7 +38,7 @@ export function SceneBreakdown() {
     <figure className="not-prose my-8 rounded-lg border border-border bg-card p-4 text-sm">
       <figcaption className="mb-3">
         <span className="font-medium">The 13 scenes, as the source defines them</span>
-        <span className="block text-muted-foreground">Bar length is each scene&apos;s share of the deck&apos;s own minified code, in KB. Pick a scene for its beats, transition and first speaker note.</span>
+        <span className="block text-muted-foreground">Bar length is each scene&apos;s share of the deck&apos;s own minified code, in KB. Pick a scene for its beats, transition, world rule and first speaker note.</span>
       </figcaption>
       <div className="grid gap-1">
         {SCENES.map((x, i) => (
@@ -62,6 +63,7 @@ export function SceneBreakdown() {
           {s.title} <span className="font-normal text-muted-foreground">· {s.beats} beats · enters with <code className="font-mono text-[12px]">{s.enter}</code></span>
         </p>
         <p className="mt-1">{s.tech}</p>
+        <p className="mt-1"><span className="text-muted-foreground">Rule: </span>{s.rule}</p>
         <p className="mt-1 text-muted-foreground">Notes, beat 1: &ldquo;{s.note}&rdquo;</p>
       </div>
     </figure>
